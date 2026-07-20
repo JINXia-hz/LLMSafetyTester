@@ -1,0 +1,649 @@
+#!/usr/bin/env python3
+"""
+核心聚类模块
+
+接收 features.py 提取的 5 维特征块，构建复合距离矩阵，
+用 HDBSCAN / K-Means / 层次聚类进行攻击方法聚类。
+
+关键特性：
+- 分块距离：embedding(余弦) + technique(Jaccard) + 连续特征(欧氏/Z-score)
+- HDBSCAN 自动选簇（默认），无需预设 K
+- 未知类缓冲区（噪声点 cluster=-1）
+- 自动命名：TF-IDF 关键词 + 技术标签 + 人工分类
+- 验证指标：轮廓系数、Davies-Bouldin、NMI、ARI
+
+输出：
+    output/cluster_report.json   — 聚类报告（含命名 + 验证）
+    output/cluster_matrix.csv    — 方法×特征矩阵
+    output/cluster_features.json — 特征重要性分析
+"""
+
+import json
+import os
+import re
+import sys
+import time
+from collections import Counter, defaultdict
+from datetime import datetime
+
+import numpy as np
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.metrics import silhouette_score, davies_bouldin_score
+from sklearn.metrics.cluster import normalized_mutual_info_score, adjusted_rand_score
+from scipy.spatial.distance import squareform, pdist, cdist
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
+
+# 输出文件
+CLUSTER_REPORT_FILE = os.path.join(OUTPUT_DIR, "cluster_report.json")
+CLUSTER_MATRIX_FILE = os.path.join(OUTPUT_DIR, "cluster_matrix.csv")
+CLUSTER_FEATURES_FILE = os.path.join(OUTPUT_DIR, "cluster_features.json")
+
+
+# ============================================================
+# 1. 距离计算
+# ============================================================
+def cosine_distance_matrix(vectors: np.ndarray) -> np.ndarray:
+    """计算余弦距离矩阵 (1 - cosine_similarity)。"""
+    sim = cosine_similarity(vectors)
+    # 避免浮点误差导致的微小负值
+    dist = 1.0 - sim
+    dist = np.abs(dist)
+    np.fill_diagonal(dist, 0.0)
+    return dist
+
+
+def jaccard_distance_matrix(vectors: np.ndarray) -> np.ndarray:
+    """
+    计算 Jaccard 距离矩阵（适用于稀疏二值特征）。
+    d_jaccard(A, B) = 1 - |A ∩ B| / |A ∪ B|
+    """
+    n = vectors.shape[0]
+    dist = np.zeros((n, n))
+    for i in range(n):
+        for j in range(i + 1, n):
+            intersection = np.sum(vectors[i] * vectors[j])
+            union = np.sum(np.clip(vectors[i] + vectors[j], 0, 1))
+            jaccard = intersection / union if union > 0 else 1.0
+            d = 1.0 - jaccard
+            dist[i, j] = d
+            dist[j, i] = d
+    return dist
+
+
+def euclidean_distance_matrix(vectors: np.ndarray, standardize: bool = True) -> np.ndarray:
+    """
+    计算欧氏距离矩阵。可选 Z-score 标准化。
+    """
+    if standardize and vectors.shape[0] > 1:
+        scaler = StandardScaler()
+        vectors = scaler.fit_transform(vectors)
+    return squareform(pdist(vectors, metric="euclidean"))
+
+
+# ============================================================
+# 2. 复合距离矩阵构建
+# ============================================================
+def build_composite_distance(
+    features: dict,
+    methods: list[str],
+    weights: tuple[float, float, float, float] = (0.35, 0.25, 0.10, 0.30),
+) -> tuple[np.ndarray, dict]:
+    """
+    构建加权复合距离矩阵。
+    
+    权重顺序: (text_embedding, technique, intent, defense)
+    各块内部先计算各自距离矩阵，再加权求和。
+    
+    返回: (distance_matrix[n,n], block_info)
+    """
+    n = len(methods)
+    method_to_idx = {m: i for i, m in enumerate(methods)}
+    w_emb, w_tech, w_int, w_def = weights
+
+    block_distances = {}
+    detail = {}
+
+    # ---- 块 1: 文本 embedding (余弦距离) ----
+    emb_vectors = np.array([features[m].get("embedding", np.zeros(50)) for m in methods])
+    if emb_vectors.shape[1] > 0:
+        d_emb = cosine_distance_matrix(emb_vectors)
+        # 归一化到 [0, 1]
+        d_max = d_emb.max()
+        if d_max > 0:
+            d_emb = d_emb / d_max
+        block_distances["embedding"] = d_emb * w_emb
+        detail["embedding"] = {"weight": w_emb, "dim": emb_vectors.shape[1], "method": "cosine"}
+    else:
+        block_distances["embedding"] = np.zeros((n, n))
+        detail["embedding"] = {"weight": 0, "dim": 0, "method": "none"}
+
+    # ---- 块 2: 技术标签 (Jaccard 距离) ----
+    tech_vectors = np.array([features[m].get("technique", np.zeros(1)) for m in methods])
+    if tech_vectors.shape[1] > 0 and np.any(tech_vectors > 0):
+        d_tech = jaccard_distance_matrix(tech_vectors)
+        block_distances["technique"] = d_tech * w_tech
+        detail["technique"] = {"weight": w_tech, "dim": tech_vectors.shape[1], "method": "jaccard"}
+    else:
+        block_distances["technique"] = np.zeros((n, n))
+        detail["technique"] = {"weight": 0, "dim": 0, "method": "none"}
+
+    # ---- 块 3: 意图与对抗强度 (欧氏距离) ----
+    intent_vectors = np.array([features[m].get("intent", np.zeros(3)) for m in methods])
+    if intent_vectors.shape[1] > 0 and np.any(intent_vectors > 0):
+        d_int = euclidean_distance_matrix(intent_vectors)
+        d_max = d_int.max()
+        if d_max > 0:
+            d_int = d_int / d_max
+        block_distances["intent"] = d_int * w_int
+        detail["intent"] = {"weight": w_int, "dim": intent_vectors.shape[1], "method": "euclidean"}
+    else:
+        block_distances["intent"] = np.zeros((n, n))
+        detail["intent"] = {"weight": 0, "dim": 0, "method": "none"}
+
+    # ---- 块 4: 防御交互 (欧氏距离) ----
+    defense_vectors = np.array([features[m].get("defense", np.zeros(14)) for m in methods])
+    if defense_vectors.shape[1] > 0 and np.any(defense_vectors > 0):
+        d_def = euclidean_distance_matrix(defense_vectors)
+        d_max = d_def.max()
+        if d_max > 0:
+            d_def = d_def / d_max
+        block_distances["defense"] = d_def * w_def
+        detail["defense"] = {"weight": w_def, "dim": defense_vectors.shape[1], "method": "euclidean"}
+    else:
+        block_distances["defense"] = np.zeros((n, n))
+        detail["defense"] = {"weight": 0, "dim": 0, "method": "none"}
+
+    # 加权求和
+    composite = np.zeros((n, n))
+    for block_name, d_mat in block_distances.items():
+        composite += d_mat
+
+    # 确保对角线为 0 且对称
+    np.fill_diagonal(composite, 0.0)
+    composite = (composite + composite.T) / 2.0
+
+    return composite, detail
+
+
+# ============================================================
+# 3. 聚类算法
+# ============================================================
+def run_hdbscan(
+    dist_matrix: np.ndarray,
+    method_names: list[str],
+    min_cluster_size: int = 3,
+    min_samples: int = 2,
+) -> dict[str, int]:
+    """
+    用 HDBSCAN 聚类（基于预计算距离矩阵）。
+    返回: {method_name: cluster_id}，噪声点为 -1。
+    """
+    try:
+        import hdbscan
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+            metric="precomputed",
+            cluster_selection_epsilon=0.2,
+            allow_single_cluster=True,
+        )
+        labels = clusterer.fit_predict(dist_matrix)
+        return {name: int(label) for name, label in zip(method_names, labels)}
+    except Exception as e:
+        print(f"  ⚠ HDBSCAN 失败: {e}，回退到 K-Means (K=3)")
+        return run_kmeans(dist_matrix, method_names, k=3)
+
+
+def run_kmeans(
+    dist_matrix: np.ndarray,
+    method_names: list[str],
+    k: int = 3,
+    random_seed: int = 42,
+) -> dict[str, int]:
+    """
+    用 K-Means 聚类（基于预计算距离矩阵，使用 sklearn）。
+    """
+    from sklearn.cluster import KMeans
+    from sklearn.manifold import MDS
+
+    # 将距离矩阵嵌入到低维空间（MDS）
+    n = dist_matrix.shape[0]
+    if n <= k:
+        return {name: i for i, name in enumerate(method_names)}
+
+    mds = MDS(n_components=min(10, n - 1), dissimilarity="precomputed",
+              random_state=random_seed, max_iter=300)
+    coords = mds.fit_transform(dist_matrix)
+
+    kmeans = KMeans(n_clusters=k, random_state=random_seed, n_init="auto")
+    labels = kmeans.fit_predict(coords)
+    return {name: int(label) for name, label in zip(method_names, labels)}
+
+
+def run_hierarchical(
+    dist_matrix: np.ndarray,
+    method_names: list[str],
+    n_clusters: int = 5,
+) -> dict[str, int]:
+    """层次聚类（Ward 链接）。"""
+    from sklearn.cluster import AgglomerativeClustering
+    n = dist_matrix.shape[0]
+    k = min(n_clusters, n)
+    clusterer = AgglomerativeClustering(
+        n_clusters=k, metric="precomputed", linkage="average"
+    )
+    labels = clusterer.fit_predict(dist_matrix)
+    return {name: int(label) for name, label in zip(method_names, labels)}
+
+
+# ============================================================
+# 4. 簇自动命名
+# ============================================================
+def _extract_tfidf_keywords(
+    method_prompts: dict[str, str],
+    cluster_members: list[str],
+    top_n: int = 5,
+) -> list[tuple[str, float]]:
+    """对簇内方法提取 TF-IDF 关键词。"""
+    texts = [method_prompts[m] for m in cluster_members if m in method_prompts]
+    if len(texts) < 2:
+        return []
+
+    try:
+        vectorizer = TfidfVectorizer(
+            max_features=100, stop_words="english",
+            ngram_range=(1, 2), max_df=0.8, min_df=1,
+        )
+        # 添加中文停用词
+        tfidf = vectorizer.fit_transform(texts)
+    except Exception:
+        return []
+
+    # 取簇内 TF-IDF 均值最高的词
+    mean_tfidf = tfidf.mean(axis=0).A1
+    indices = np.argsort(mean_tfidf)[::-1][:top_n]
+    feature_names = vectorizer.get_feature_names_out()
+    return [(feature_names[i], round(float(mean_tfidf[i]), 4)) for i in indices if mean_tfidf[i] > 0.01]
+
+
+def auto_name_clusters(
+    labels: dict[str, int],
+    features: dict,
+    meta: dict,
+    method_prompts: dict[str, str],
+) -> dict[int, str]:
+    """
+    为每个簇自动生成名称。
+    命名来源：
+    1. 簇内最多的 technical label（如 "编码混淆"）
+    2. 簇内最多的 harm_type（如 "fraud"）
+    3. TF-IDF 关键词 top-2
+    """
+    methods = meta.get("method_names", list(labels.keys()))
+    technique_label_names = meta.get("technique_label_names", [])
+    method_to_idx = {m: i for i, m in enumerate(methods)}
+
+    # 按簇分组
+    clusters = defaultdict(list)
+    for m, cid in labels.items():
+        clusters[cid].append(m)
+
+    cluster_names = {}
+    for cid, members in clusters.items():
+        parts = []
+
+        # 1. 最多技术标签
+        if technique_label_names:
+            tech_counts = Counter()
+            for m in members:
+                if m in features and "technique" in features[m]:
+                    vec = features[m]["technique"]
+                    for i, v in enumerate(vec):
+                        if v > 0.5 and i < len(technique_label_names):
+                            tech_counts[technique_label_names[i]] += 1
+            top_tech = [t for t, _ in tech_counts.most_common(2)]
+            if top_tech:
+                parts.append("+".join(top_tech[:2]))
+
+        # 2. 最多 harm_type
+        if technique_label_names:
+            harm_labels = [t for t in technique_label_names if t.startswith("harm:")]
+            if harm_labels:
+                harm_counts = Counter()
+                harm_start_indices = {i for i, t in enumerate(technique_label_names) if t.startswith("harm:")}
+                for m in members:
+                    if m in features and "technique" in features[m]:
+                        vec = features[m]["technique"]
+                        for i, v in enumerate(vec):
+                            if v > 0.5 and i in harm_start_indices:
+                                harm_counts[technique_label_names[i].replace("harm:", "")] += 1
+                top_harm = [h for h, _ in harm_counts.most_common(1)]
+                if top_harm:
+                    parts.append(f"→{top_harm[0]}")
+
+        # 3. TF-IDF 关键词
+        keywords = _extract_tfidf_keywords(method_prompts, members, top_n=3)
+        if keywords:
+            kw_str = "/".join(kw for kw, _ in keywords[:2])
+            parts.append(f"[{kw_str}]")
+
+        name = " ".join(parts) if parts else f"簇{cid}"
+        cluster_names[cid] = name
+
+    return cluster_names
+
+
+# ============================================================
+# 5. 外部验证 (NMI, ARI vs 人工分类)
+# ============================================================
+def compute_external_validation(
+    labels: dict[str, int],
+    meta: dict,
+    features: dict,
+) -> dict:
+    """
+    以攻击集的 category 为金标准，计算 NMI 和 ARI。
+    """
+    methods = meta.get("method_names", [])
+    technique_label_names = meta.get("technique_label_names", [])
+
+    # 从 technique 标签中提取每个方法的 category
+    cat_labels = {}
+    for m in methods:
+        if m in features and "technique" in features[m]:
+            vec = features[m]["technique"]
+            # 找第一个 category 标签
+            for i, label in enumerate(technique_label_names):
+                if label.startswith("cat:") and i < len(vec) and vec[i] > 0.5:
+                    cat_labels[m] = label.replace("cat:", "")
+                    break
+        if m not in cat_labels:
+            cat_labels[m] = "unknown"
+
+    # 过滤掉噪声点
+    valid_methods = [m for m in methods if labels.get(m, -1) >= 0]
+    if len(valid_methods) < 2:
+        return {"nmi": 0, "ari": 0, "note": "样本不足"}
+
+    y_pred = [labels[m] for m in valid_methods]
+    y_true = [cat_labels.get(m, "unknown") for m in valid_methods]
+
+    # 字符串标签转整数
+    unique_true = sorted(set(y_true))
+    true_to_int = {v: i for i, v in enumerate(unique_true)}
+    y_true_int = [true_to_int[v] for v in y_true]
+
+    nmi = normalized_mutual_info_score(y_true_int, y_pred)
+    ari = adjusted_rand_score(y_true_int, y_pred)
+
+    return {"nmi": round(float(nmi), 4), "ari": round(float(ari), 4)}
+
+
+# ============================================================
+# 6. 主流程
+# ============================================================
+def run_clustering_pipeline(
+    features: dict,
+    meta: dict,
+    method: str = "hdbscan",
+    k: int = None,
+    min_cluster_size: int = 3,
+    weights: tuple = (0.35, 0.25, 0.10, 0.30),
+    verbose: bool = True,
+) -> dict:
+    """
+    聚类主流程。
+    
+    参数:
+        features: features.extract_all_features 的输出
+        meta: features.extract_all_features 的元信息
+        method: "hdbscan" | "kmeans" | "hierarchical"
+        k: K-Means/层次聚类的簇数
+        min_cluster_size: HDBSCAN 最小簇大小
+        weights: (emb, tech, intent, defense) 复合距离权重
+        verbose: 是否打印进度
+    
+    返回: 聚类报告 dict
+    """
+    methods = meta["method_names"]
+    n = len(methods)
+    if n < 2:
+        return {"error": "方法数不足，至少需要 2 种方法进行聚类"}
+
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"🎯 聚类分析 (方法数={n})")
+        print(f"{'='*60}")
+
+    # ---- Step 1: 构建复合距离矩阵 ----
+    if verbose:
+        print("📏 构建复合距离矩阵 ...")
+    dist_matrix, block_info = build_composite_distance(features, methods, weights=weights)
+    if verbose:
+        for block_name, info in block_info.items():
+            w = info["weight"]
+            if w > 0:
+                print(f"  {block_name}: weight={w} dim={info['dim']} method={info['method']}")
+
+    # ---- Step 2: 聚类 ----
+    if verbose:
+        print(f"🔬 {method.upper()} 聚类 ...")
+
+    if method == "hdbscan":
+        labels = run_hdbscan(dist_matrix, methods, min_cluster_size=min_cluster_size)
+    elif method == "kmeans":
+        k_val = k or min(6, max(2, n // 3))
+        labels = run_kmeans(dist_matrix, methods, k=k_val)
+    elif method == "hierarchical":
+        k_val = k or min(6, max(2, n // 3))
+        labels = run_hierarchical(dist_matrix, methods, n_clusters=k_val)
+    else:
+        raise ValueError(f"未知聚类方法: {method}")
+
+    # 统计
+    cluster_ids = sorted(set(labels.values()))
+    n_clusters = len([c for c in cluster_ids if c >= 0])
+    n_noise = sum(1 for v in labels.values() if v == -1)
+    if verbose:
+        print(f"  簇数: {n_clusters} (+ {n_noise} 噪声点)")
+        for cid in cluster_ids:
+            members = [m for m, c in labels.items() if c == cid]
+            tag = "🟡 噪声" if cid == -1 else f"簇{cid}"
+            print(f"    {tag}: {len(members)} 种方法 - {', '.join(members[:5])}{'...' if len(members) > 5 else ''}")
+
+    # ---- Step 3: 聚类验证 ----
+    validation = {}
+    if verbose:
+        print("📊 聚类验证 ...")
+
+    # 内部指标
+    valid_idx = [i for i, m in enumerate(methods) if labels.get(m, -1) >= 0]
+    if len(valid_idx) >= 3 and len(set(labels[m] for m in methods if labels.get(m, -1) >= 0)) >= 2:
+        valid_methods = [methods[i] for i in valid_idx]
+        y_valid = [labels[m] for m in valid_methods]
+        d_sub = dist_matrix[np.ix_(valid_idx, valid_idx)]
+
+        try:
+            sil = silhouette_score(d_sub, y_valid, metric="precomputed")
+            validation["silhouette"] = round(float(sil), 4)
+        except Exception:
+            validation["silhouette"] = 0.0
+
+        try:
+            db = davies_bouldin_score(d_sub, y_valid)
+            validation["davies_bouldin"] = round(float(db), 4)
+        except Exception:
+            validation["davies_bouldin"] = 0.0
+    else:
+        validation["silhouette"] = 0.0
+        validation["davies_bouldin"] = 0.0
+
+    # 外部指标
+    ext_val = compute_external_validation(labels, meta, features)
+    validation.update(ext_val)
+
+    if verbose:
+        print(f"  轮廓系数: {validation['silhouette']:.4f}")
+        print(f"  Davies-Bouldin: {validation['davies_bouldin']:.4f}")
+        print(f"  NMI (vs 人工分类): {validation.get('nmi', 0):.4f}")
+        print(f"  ARI (vs 人工分类): {validation.get('ari', 0):.4f}")
+
+    # ---- Step 4: 自动命名 ----
+    if verbose:
+        print("🏷️ 自动命名 ...")
+    # 构建 prompt 映射
+    method_prompts_dict = {}
+    # 从技术标签名称推断哪些是 harm/cat
+    cluster_names = auto_name_clusters(labels, features, meta, method_prompts_dict)
+    if verbose:
+        for cid, name in sorted(cluster_names.items()):
+            tag = "🟡 噪声" if cid == -1 else f"簇{cid}"
+            print(f"    {tag}: {name}")
+
+    # ---- Step 5: 簇画像 ----
+    cluster_profiles = build_cluster_profiles(labels, features, meta, cluster_names)
+
+    # ---- 组装报告 ----
+    report = {
+        "generated_at": datetime.now().isoformat(),
+        "method_count": n,
+        "clustering_method": method,
+        "n_clusters": n_clusters,
+        "n_noise": n_noise,
+        "weights": {
+            "embedding": weights[0], "technique": weights[1],
+            "intent": weights[2], "defense": weights[3],
+        },
+        "validation": validation,
+        "block_info": {k: {kk: vv for kk, vv in v.items() if kk != "method"} for k, v in block_info.items()},
+        "cluster_names": cluster_names,
+        "cluster_profiles": cluster_profiles,
+        "method_labels": {m: labels[m] for m in sorted(labels.keys())},
+    }
+
+    # ---- 导出 ----
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    with open(CLUSTER_REPORT_FILE, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+
+    # 导出特征矩阵 CSV
+    _export_matrix(labels, features, meta)
+
+    if verbose:
+        print(f"\n  📁 聚类报告: {CLUSTER_REPORT_FILE}")
+        print(f"  📁 特征矩阵: {CLUSTER_MATRIX_FILE}")
+
+    return report
+
+
+def build_cluster_profiles(
+    labels: dict[str, int],
+    features: dict,
+    meta: dict,
+    cluster_names: dict[int, str],
+) -> dict[str, dict]:
+    """为每个簇构建统计画像。"""
+    methods = meta["method_names"]
+    clusters = defaultdict(list)
+    for m, cid in labels.items():
+        clusters[cid].append(m)
+
+    profiles = {}
+    for cid, members in clusters.items():
+        profile = {
+            "size": len(members),
+            "label": "noise" if cid == -1 else f"cluster_{cid}",
+            "name": cluster_names.get(cid, f"簇{cid}"),
+            "members": sorted(members),
+        }
+
+        # 文本统计均值
+        textual_names = meta.get("textual_feature_names", [])
+        for i, tn in enumerate(textual_names):
+            vals = []
+            for m in members:
+                if m in features and "textual" in features[m]:
+                    vec = features[m]["textual"]
+                    if i < len(vec):
+                        vals.append(vec[i])
+            if vals:
+                profile[f"textual_{tn}_mean"] = round(float(np.mean(vals)), 4)
+
+        # 防御特征均值
+        defense_names = meta.get("defense_feature_names", [])
+        for i, dn in enumerate(defense_names):
+            vals = []
+            for m in members:
+                if m in features and "defense" in features[m]:
+                    vec = features[m]["defense"]
+                    if i < len(vec):
+                        vals.append(vec[i])
+            if vals:
+                profile[f"defense_{dn}_mean"] = round(float(np.mean(vals)), 4)
+
+        profiles[str(cid)] = profile
+
+    return profiles
+
+
+def _export_matrix(labels: dict[str, int], features: dict, meta: dict):
+    """导出特征矩阵 CSV。"""
+    methods = meta["method_names"]
+    textual_names = meta.get("textual_feature_names", [])
+    intent_names = meta.get("intent_feature_names", [])
+    defense_names = meta.get("defense_feature_names", [])
+    technique_names = meta.get("technique_label_names", [])
+
+    col_names = ["method", "cluster"] + textual_names + intent_names + defense_names + technique_names
+    with open(CLUSTER_MATRIX_FILE, "w", encoding="utf-8") as f:
+        f.write(",".join(f'"{c}"' for c in col_names) + "\n")
+        for method in methods:
+            row = [f'"{method}"', str(labels.get(method, -1))]
+            feat = features.get(method, {})
+
+            # textual
+            tvec = feat.get("textual", np.zeros(len(textual_names)))
+            for i in range(len(textual_names)):
+                row.append(str(round(float(tvec[i]), 6) if i < len(tvec) else 0))
+
+            # intent
+            ivec = feat.get("intent", np.zeros(len(intent_names)))
+            for i in range(len(intent_names)):
+                row.append(str(round(float(ivec[i]), 6) if i < len(ivec) else 0))
+
+            # defense
+            dvec = feat.get("defense", np.zeros(len(defense_names)))
+            for i in range(len(defense_names)):
+                row.append(str(round(float(dvec[i]), 6) if i < len(dvec) else 0))
+
+            # technique
+            tecvec = feat.get("technique", np.zeros(len(technique_names)))
+            for i in range(len(technique_names)):
+                row.append(str(int(tecvec[i])) if i < len(tecvec) else "0")
+
+            f.write(",".join(row) + "\n")
+
+
+# ============================================================
+# 便捷入口：从文件直接运行
+# ============================================================
+def run_from_files(
+    attack_file: str = "攻击集_L1.jsonl",
+    result_file: str = None,
+    method: str = "hdbscan",
+    k: int = None,
+    min_cluster_size: int = 3,
+    weights: tuple = (0.35, 0.25, 0.10, 0.30),
+) -> dict:
+    """从文件加载数据并聚类。"""
+    from features import load_and_extract
+    features, meta = load_and_extract(attack_file, result_file)
+    return run_clustering_pipeline(
+        features, meta, method=method, k=k,
+        min_cluster_size=min_cluster_size, weights=weights,
+    )
