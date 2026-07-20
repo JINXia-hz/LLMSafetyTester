@@ -100,7 +100,9 @@ def load_prompt_metadata() -> dict[str, dict]:
                     if line:
                         try:
                             r = json.loads(line)
-                            metadata[r["id"]] = r
+                            rid = r.get("id") or r.get("original_id")
+                            if rid:
+                                metadata[rid] = r
                         except json.JSONDecodeError:
                             pass
     return metadata
