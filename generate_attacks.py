@@ -28,9 +28,9 @@ if sys.platform == "win32":
 # ============================================================
 # 配置
 # ============================================================
-API_KEY = os.getenv("GENERATOR_API_KEY", "sk-a8ae977a80064f049b932eb4891292e5")
-BASE_URL = os.getenv("GENERATOR_BASE_URL", "https://api.deepseek.com/v1")
-MODEL = os.getenv("GENERATOR_MODEL", "deepseek-v4-flash")
+API_KEY = os.getenv("GENERATOR_API_KEY")
+BASE_URL = os.getenv("GENERATOR_BASE_URL")
+MODEL = os.getenv("GENERATOR_MODEL")
 
 # 文件路径 (脚本位于 LLM攻击测试/ 目录下，md文件在上级桌面)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

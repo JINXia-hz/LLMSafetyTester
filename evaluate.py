@@ -242,7 +242,21 @@ def main():
                         help="Judge使用的模型（默认同GENERATOR_MODEL）")
     parser.add_argument("--skip-judge-prescreen", action="store_true",
                         help="跳过Judge预筛，所有案例都经Judge判断")
+    parser.add_argument("--input", type=str, default=None,
+                        help="指定输入文件（默认攻击集_L1.jsonl），如 --input harmbench_prompts.jsonl")
     args = parser.parse_args()
+
+    # 自定义输入文件
+    if args.input:
+        custom_input = os.path.join(OUTPUT_DIR, args.input)
+        if os.path.exists(custom_input):
+            global INPUT_FILE
+            INPUT_FILE = custom_input
+        elif os.path.exists(args.input):
+            INPUT_FILE = args.input
+        else:
+            print(f"❌ 输入文件不存在: {args.input}")
+            sys.exit(1)
 
     use_judge = not args.no_judge
 
