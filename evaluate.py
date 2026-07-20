@@ -180,7 +180,7 @@ def compute_eval_score_legacy(math_score: int, is_harmful: bool, is_refusal: boo
 
 
 # ============================================================
-# API调用
+# API调用 + 单条评估（可被 runner.py 复用）
 # ============================================================
 def call_target(client: OpenAI, prompt: str) -> dict:
     """
@@ -219,6 +219,83 @@ def call_target(client: OpenAI, prompt: str) -> dict:
                     "tokens_completion": 0,
                     "error": str(e),
                 }
+
+
+def evaluate_single(prompt_text: str, expected_answer: int, target_client: OpenAI,
+                    judge: Judge, use_judge: bool = True) -> dict:
+    """
+    对单条prompt执行完整评估：发送 → 评分 → 返回结果。
+    供 evaluate.py 主循环和 runner.py 自适应循环共用。
+
+    返回:
+    {
+        "content": str, "math_score": int, "actual_answer": int|None,
+        "is_refusal": bool, "is_harmful": bool, "eval_score": float,
+        "jailbreak_tax": float|None, "status": str, "compliance_level": str|None,
+        "latency_ms": float, "tokens_prompt": int, "tokens_completion": int,
+        "judge_harmfulness" (optional), "judge_specificity" (optional), ...
+    }
+    """
+    api_result = call_target(target_client, prompt_text)
+    content = api_result["content"]
+
+    if api_result["error"]:
+        return {
+            "content": "", "math_score": 0, "actual_answer": None,
+            "is_refusal": False, "is_harmful": False, "eval_score": -99,
+            "jailbreak_tax": None, "status": "api_error",
+            "compliance_level": None,
+            "latency_ms": 0, "tokens_prompt": 0, "tokens_completion": 0,
+            "error": api_result["error"],
+        }
+
+    math_score, actual_answer = compute_math_score(content, expected_answer)
+
+    if use_judge and judge is not None:
+        judge_result = judge.evaluate(prompt_text, content)
+        is_refusal = judge_result["is_refusal"]
+        is_harmful = judge_result["is_harmful"]
+        eval_info = compute_eval_score_v2(judge_result, math_score, True)
+        result = {
+            "content": content,
+            "math_score": math_score,
+            "actual_answer": actual_answer,
+            "is_refusal": is_refusal,
+            "is_harmful": is_harmful,
+            "eval_score": eval_info["eval_score"],
+            "jailbreak_tax": eval_info["jailbreak_tax"],
+            "status": eval_info["status"],
+            "compliance_level": eval_info.get("compliance_level"),
+            "latency_ms": api_result["latency_ms"],
+            "tokens_prompt": api_result["tokens_prompt"],
+            "tokens_completion": api_result["tokens_completion"],
+            "judge_harmfulness": judge_result["harmfulness"],
+            "judge_specificity": judge_result["specificity"],
+            "judge_dangerousness": judge_result["dangerousness"],
+            "judge_calls": judge_result["judge_calls"],
+            "prescreen_result": judge_result["prescreen_result"],
+            "error": None,
+        }
+    else:
+        is_refusal = detect_refusal_legacy(content)
+        is_harmful = detect_harmful_legacy(content)
+        eval_info = compute_eval_score_legacy(math_score, is_harmful, is_refusal)
+        result = {
+            "content": content,
+            "math_score": math_score,
+            "actual_answer": actual_answer,
+            "is_refusal": is_refusal,
+            "is_harmful": is_harmful,
+            "eval_score": eval_info["eval_score"],
+            "jailbreak_tax": eval_info["jailbreak_tax"],
+            "status": eval_info["status"],
+            "compliance_level": eval_info.get("compliance_level"),
+            "latency_ms": api_result["latency_ms"],
+            "tokens_prompt": api_result["tokens_prompt"],
+            "tokens_completion": api_result["tokens_completion"],
+            "error": None,
+        }
+    return result
 
 
 # ============================================================
