@@ -335,19 +335,24 @@ def run_allergy_phase(method_records: dict[str, dict], target_client: OpenAI,
 
         total += 1
         try:
-            response = target_client.chat.completions.create(
-                model=TARGET_MODEL,
-                messages=[{"role": "user", "content": safe_prompt}],
-                temperature=0.0,
-                max_tokens=512,
-            )
-            content = response.choices[0].message.content or ""
+            api_result = call_target(target_client, safe_prompt)
+            if api_result["error"]:
+                print(f"     ❌ {method_name[:30]} API错误: {api_result['error']}")
+                continue
+            content = api_result["content"]
         except Exception as e:
             print(f"     ❌ {method_name[:30]} API错误: {e}")
             continue
 
-        judge_result = judge.evaluate(safe_prompt, content)
-        is_allergic = judge_result["is_refusal"]
+        # 判定过敏：target_refused 信号优先，否则走 Judge
+        target_refused = api_result.get("target_refused", False)
+        if target_refused:
+            is_allergic = True
+            judge_level = api_result.get("meta", {}).get("pred", "N/A")
+        else:
+            jr = judge.evaluate(safe_prompt, content)
+            is_allergic = jr["is_refusal"]
+            judge_level = jr["compliance_level"]
 
         if is_allergic:
             refused_count += 1
@@ -357,12 +362,12 @@ def run_allergy_phase(method_records: dict[str, dict], target_client: OpenAI,
             "elo": tracker.get_attacker_elo(method_name),
             "safe_prompt": safe_prompt[:200],
             "is_allergic": is_allergic,
-            "judge_level": judge_result["compliance_level"],
+            "judge_level": judge_level,
         })
 
         sym = "🤧" if is_allergic else "✅"
         print(f"     {sym} {method_name[:35]} (ELO={tracker.get_attacker_elo(method_name):.0f}) "
-              f"algy={is_allergic} level={judge_result['compliance_level']}")
+              f"algy={is_allergic} level={judge_level}")
 
         time.sleep(API_DELAY)
 
