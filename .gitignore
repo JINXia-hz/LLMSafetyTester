@@ -1,0 +1,16 @@
+# 环境变量（含API密钥）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 输出目录（生成的JSONL/JSON等数据文件）
+output/*.jsonl
+output/*.json
+output/*.log
+output/*.txt
+
+# IDE
+.vscode/
+.idea/
