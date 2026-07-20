@@ -8,11 +8,8 @@ __pycache__/
 # HarmBench（不上传）
 HarmBench/
 
-# 输出目录（生成的JSONL/JSON等数据文件）
-output/*.jsonl
-output/*.json
-output/*.log
-output/*.txt
+# output
+output/
 
 # IDE
 .vscode/
