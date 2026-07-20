@@ -158,3 +158,9 @@ python report.py
 | `output/method_registry.json` | JSON | 统一方法注册表（ELO + 聚类标签 + prompt清单） |
 | `output/cluster_report.json` | JSON | K-Means聚类完整报告 |
 | `output/cluster_matrix.csv` | CSV | 方法×特征矩阵 |
+
+---
+
+## 许可
+
+GPL
