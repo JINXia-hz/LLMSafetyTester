@@ -40,13 +40,11 @@ TARGET_BASE_URL = os.getenv("TARGET_BASE_URL", "https://api.deepseek.com/v1")
 TARGET_MODEL = os.getenv("TARGET_MODEL", "deepseek-v4-flash")
 
 # ============================================================
-# 路径
+# 路径（默认值，可被 --input 覆盖）
 # ============================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
-INPUT_FILE = os.path.join(OUTPUT_DIR, "攻击集_L1.jsonl")
-RESULT_FILE = os.path.join(OUTPUT_DIR, "评估结果.jsonl")
-SUMMARY_FILE = os.path.join(OUTPUT_DIR, "评估汇总.json")
+DEFAULT_INPUT_FILE = os.path.join(OUTPUT_DIR, "攻击集_L1.jsonl")
 
 # ============================================================
 # API参数
@@ -246,28 +244,30 @@ def main():
                         help="指定输入文件（默认攻击集_L1.jsonl），如 --input harmbench_prompts.jsonl")
     args = parser.parse_args()
 
-    # 自定义输入文件
+    # 确定输入文件，并据此派生结果文件（不同数据集不同输出，避免覆盖）
     if args.input:
-        custom_input = os.path.join(OUTPUT_DIR, args.input)
-        if os.path.exists(custom_input):
-            global INPUT_FILE
-            INPUT_FILE = custom_input
-        elif os.path.exists(args.input):
-            INPUT_FILE = args.input
-        else:
-            print(f"❌ 输入文件不存在: {args.input}")
-            sys.exit(1)
+        input_file = os.path.join(OUTPUT_DIR, args.input) if not os.path.isabs(args.input) else args.input
+    else:
+        input_file = DEFAULT_INPUT_FILE
 
-    use_judge = not args.no_judge
-
-    # ---- 加载攻击集 ----
-    if not os.path.exists(INPUT_FILE):
-        print(f"❌ 攻击集不存在: {INPUT_FILE}")
-        print("   请先运行 generate_attacks.py")
+    if not os.path.exists(input_file):
+        print(f"❌ 输入文件不存在: {input_file}")
+        print("   提示: python import_harmbench.py 或 python generate_attacks.py")
         sys.exit(1)
 
+    # 根据输入文件名派生结果文件名
+    base_name = os.path.splitext(os.path.basename(input_file))[0]  # e.g. "攻击集_L1" or "harmbench_prompts"
+    result_file = os.path.join(OUTPUT_DIR, f"{base_name}_结果.jsonl")
+    summary_file = os.path.join(OUTPUT_DIR, f"{base_name}_汇总.json")
+
+    use_judge = not args.no_judge
+    print(f"📂 输入: {os.path.basename(input_file)}")
+    print(f"📂 输出: {os.path.basename(result_file)} / {os.path.basename(summary_file)}")
+    print()
+
+    # ---- 加载攻击集 ----
     records = []
-    with open(INPUT_FILE, "r", encoding="utf-8") as f:
+    with open(input_file, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -293,8 +293,8 @@ def main():
 
     # ---- 加载已有结果（断点续传） ----
     done_ids = set()
-    if os.path.exists(RESULT_FILE):
-        with open(RESULT_FILE, "r", encoding="utf-8") as f:
+    if os.path.exists(result_file):
+        with open(result_file, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
@@ -325,7 +325,7 @@ def main():
     fail_count = 0
     skipped_count = 0
 
-    with open(RESULT_FILE, "a", encoding="utf-8") as out_f:
+    with open(result_file, "a", encoding="utf-8") as out_f:
         for rec in records:
             mid = rec["id"]
             prompt_text = rec["prompt"]
@@ -430,8 +430,8 @@ def main():
     print("\n📊 生成汇总报告...")
 
     all_results = []
-    if os.path.exists(RESULT_FILE):
-        with open(RESULT_FILE, "r", encoding="utf-8") as f:
+    if os.path.exists(result_file):
+        with open(result_file, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
@@ -576,11 +576,11 @@ def main():
         },
     }
 
-    with open(SUMMARY_FILE, "w", encoding="utf-8") as f:
+    with open(summary_file, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
     # ---- ELO更新 ----
-    if use_judge or True:  # 无论Judge模式还是旧版都更新ELO
+    if True:  # 始终更新ELO
         elo_file = os.path.join(OUTPUT_DIR, "elo.json")
         tracker = ELOTracker()
         tracker.load(elo_file)
@@ -639,8 +639,8 @@ def main():
             print(f"    安全边界: {elo_b['boundary_elo']} (置信度 {elo_b['confidence']*100:.0f}%)")
             print(f"    边界以下威胁: {elo_b['methods_below']} 种")
 
-    print(f"\n  📁 详细结果: {RESULT_FILE}")
-    print(f"  📁 汇总报告: {SUMMARY_FILE}")
+    print(f"\n  📁 详细结果: {result_file}")
+    print(f"  📁 汇总报告: {summary_file}")
     print(f"  📁 ELO状态: {os.path.join(OUTPUT_DIR, 'elo.json')}")
     print(f"{'='*60}")
 
