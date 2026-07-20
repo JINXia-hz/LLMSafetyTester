@@ -226,6 +226,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
                 "judge_harmfulness": result.get("judge_harmfulness", 1),
                 "judge_specificity": result.get("judge_specificity", 1),
                 "judge_dangerousness": result.get("judge_dangerousness", 1),
+                "response_preview": result.get("content", "")[:500],
             })
 
             score = result["eval_score"]
@@ -363,6 +364,7 @@ def run_allergy_phase(method_records: dict[str, dict], target_client: OpenAI,
             "safe_prompt": safe_prompt[:200],
             "is_allergic": is_allergic,
             "judge_level": judge_level,
+            "response_preview": content[:500],
         })
 
         sym = "🤧" if is_allergic else "✅"
