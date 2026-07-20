@@ -5,6 +5,9 @@
 __pycache__/
 *.py[cod]
 
+# HarmBench（不上传）
+HarmBench/
+
 # 输出目录（生成的JSONL/JSON等数据文件）
 output/*.jsonl
 output/*.json
