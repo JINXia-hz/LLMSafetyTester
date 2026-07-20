@@ -565,8 +565,6 @@ def main():
         json.dump(report, f, ensure_ascii=False, indent=2)
 
     # ---- 生成树形 + 叙事报告（仅使用 runner 自己的数据） ----
-    print()
-
     # 加载 runner 自身的攻击结果（避免混入 evaluate.py 的旧数据）
     results = []
     if os.path.exists(RUNNER_ATTACK_FILE):
@@ -589,6 +587,8 @@ def main():
 
     metadata = load_prompt_metadata()
 
+    generated_files = [RUNNER_REPORT_FILE, ELO_FILE]  # 必定生成
+
     if results:
         print("🌳 生成层级安全报告...")
         ms = build_method_stats(results, elo_data, metadata)
@@ -598,16 +598,60 @@ def main():
         tree_path = os.path.join(OUTPUT_DIR, "security_tree.json")
         with open(tree_path, "w", encoding="utf-8") as f:
             json.dump(tree, f, ensure_ascii=False, indent=2)
+        generated_files.append(tree_path)
 
         # 生成LLM叙事报告
         markdown = generate_narrative(tree, OUTPUT_DIR)
         md_path = os.path.join(OUTPUT_DIR, "security_report.md")
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(markdown)
-        print(f"📁 树形数据: {tree_path}")
-        print(f"📁 叙事报告: {md_path}")
+        generated_files.append(md_path)
 
-    print(f"\n✅ 全部完成! 报告已保存: {RUNNER_REPORT_FILE}")
+    if os.path.exists(RUNNER_ATTACK_FILE):
+        generated_files.append(RUNNER_ATTACK_FILE)
+    if os.path.exists(RUNNER_ALLERGY_FILE):
+        generated_files.append(RUNNER_ALLERGY_FILE)
+
+    # ---- 清晰的文件清单 ----
+    print()
+    print("=" * 60)
+    print("  📋 输出文件")
+    print("=" * 60)
+    # 按类别分组
+    reports = [f for f in generated_files if f.endswith(".md")]
+    data = [f for f in generated_files if f.endswith(".json") and "elo" not in f.lower() and "allergy" not in f.lower()]
+    allergy = [f for f in generated_files if "allergy" in f.lower()]
+    state = [f for f in generated_files if "elo" in f.lower()]
+    tree_files = [f for f in generated_files if "tree" in f.lower()]
+    detail = [f for f in generated_files if "攻击结果" in f]
+
+    if reports:
+        print("  人类可读报告:")
+        for f in reports:
+            print(f"    📄 {os.path.basename(f)}")
+    if data:
+        print("  结构数据:")
+        for f in data:
+            print(f"    📊 {os.path.basename(f)}")
+    if detail:
+        print("  攻击详情（含响应原文，可人工复核）:")
+        for f in detail:
+            print(f"    🗡️  {os.path.basename(f)}")
+    if allergy:
+        print("  过敏检测详情:")
+        for f in allergy:
+            print(f"    🤧 {os.path.basename(f)}")
+    if state:
+        print("  运行状态:")
+        for f in state:
+            print(f"    📁 {os.path.basename(f)}")
+    if tree_files:
+        print("  树形数据:")
+        for f in tree_files:
+            print(f"    🌳 {os.path.basename(f)}")
+    print(f"\n  💡 想快速看结论 → 打开 security_report.md")
+    print(f"  💡 想看原始数据 → 打开 runner_report.json")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
