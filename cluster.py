@@ -424,6 +424,14 @@ def run_clustering(k: int = None, auto_k: bool = True):
     if k is None:
         k = 3
 
+    # TODO: TF-IDF 语义特征提取（等有评估数据后启用）
+    # 对每个攻击方法的 prompt 文本做 TF-IDF，与数值特征拼接后聚类
+    # 聚类结果中的 top keywords 可作为簇的"自动命名"
+    # 用法: from sklearn.feature_extraction.text import TfidfVectorizer
+    #       tfidf = TfidfVectorizer(max_features=50)
+    #       text_features = tfidf.fit_transform(method_texts).toarray()
+    #       combined_features = np.hstack([numeric_features, text_features])
+
     # K-Means聚类
     print(f"\n🎯 K-Means聚类 (K={k})...")
     labels = kmeans_cluster(normalized, k)

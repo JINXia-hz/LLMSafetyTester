@@ -109,6 +109,42 @@ def load_prompt_metadata() -> dict[str, dict]:
 # ============================================================
 # 树形结构构建
 # ============================================================
+# ============================================================
+# 方法注册表 — 统一索引
+# ============================================================
+def build_method_registry(method_stats: dict[str, dict], elo_ratings: dict,
+                          results: list[dict], metadata: dict) -> dict:
+    """构建统一方法注册表，method名 → {elo, prompt_ids, category, ...}"""
+    registry = {}
+    method_prompts = defaultdict(list)
+    for r in results:
+        m = r.get("method", "unknown")
+        oid = r.get("original_id", r.get("id", ""))
+        if oid and oid not in method_prompts[m]:
+            method_prompts[m].append(oid)
+
+    for method, stats in method_stats.items():
+        entry = {
+            "method": method,
+            "elo": round(elo_ratings.get(method, 1500), 1),
+            "asr": stats["asr"],
+            "total_tests": stats["total"],
+            "harmful_count": stats["harmful"],
+            "mean_jailbreak_tax": stats["mean_jailbreak_tax"],
+            "harm_types": stats["harm_types"],
+            "categories": stats["categories"],
+            "functional_categories": stats["functional_categories"],
+            "sources": stats["sources"],
+            "prompt_ids": method_prompts.get(method, []),
+            "prompt_count": len(method_prompts.get(method, [])),
+        }
+        registry[method] = entry
+    return registry
+
+
+# ============================================================
+# 树形结构构建
+# ============================================================
 def build_method_stats(results: list[dict], elo_ratings: dict,
                        metadata: dict) -> dict[str, dict]:
     """
@@ -530,9 +566,17 @@ def main():
     tree = build_tree(method_stats, allergy_data, elo_ratings)
 
     # 保存树数据
-    with open(os.path.join(output_dir, "security_tree.json"), "w", encoding="utf-8") as f:
+    tree_path = os.path.join(output_dir, "security_tree.json")
+    with open(tree_path, "w", encoding="utf-8") as f:
         json.dump(tree, f, ensure_ascii=False, indent=2)
-    print(f"📁 树形数据: {os.path.join(output_dir, 'security_tree.json')}")
+    print(f"📁 树形数据: {tree_path}")
+
+    # 生成方法注册表
+    registry = build_method_registry(method_stats, elo_ratings, results, metadata)
+    registry_path = os.path.join(output_dir, "method_registry.json")
+    with open(registry_path, "w", encoding="utf-8") as f:
+        json.dump(registry, f, ensure_ascii=False, indent=2)
+    print(f"📁 方法注册表: {registry_path}")
 
     # 生成叙事报告
     markdown = generate_narrative(tree, output_dir)
