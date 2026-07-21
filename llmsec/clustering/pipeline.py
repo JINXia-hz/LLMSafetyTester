@@ -19,6 +19,7 @@
 """
 
 import json
+import re
 from collections import Counter, defaultdict
 from datetime import datetime
 
@@ -240,12 +241,28 @@ def run_hierarchical(
 # ============================================================
 # 4. 簇自动命名
 # ============================================================
+def _is_garbage_token(token: str) -> bool:
+    """过滤 base64/rot13 等编码残留、乱码或无意义长串。"""
+    if len(token) > 20:
+        return True
+    # 无元音且长度 >=4 的大概率是缩写/编码残留（保留短停用词）
+    if len(token) >= 4 and not re.search(r"[aeiouAEIOU]", token):
+        return True
+    digits = sum(c.isdigit() for c in token)
+    if len(token) >= 5 and digits / len(token) > 0.25:
+        return True
+    # 纯大小写+数字且长度超过 15 的大概率是编码块
+    if len(token) > 15 and re.fullmatch(r"[A-Za-z0-9+/=]+", token):
+        return True
+    return False
+
+
 def _extract_tfidf_keywords(
     method_prompts: dict[str, str],
     cluster_members: list[str],
     top_n: int = 5,
 ) -> list[tuple[str, float]]:
-    """对簇内方法提取 TF-IDF 关键词。"""
+    """对簇内方法提取 TF-IDF 关键词，并剔除编码残留。"""
     texts = [method_prompts[m] for m in cluster_members if m in method_prompts]
     if len(texts) < 2:
         return []
@@ -255,16 +272,25 @@ def _extract_tfidf_keywords(
             max_features=100, stop_words="english",
             ngram_range=(1, 2), max_df=0.8, min_df=1,
         )
-        # 添加中文停用词
         tfidf = vectorizer.fit_transform(texts)
     except Exception:
         return []
 
-    # 取簇内 TF-IDF 均值最高的词
+    # 取簇内 TF-IDF 均值最高的词，过滤编码残留
     mean_tfidf = tfidf.mean(axis=0).A1
-    indices = np.argsort(mean_tfidf)[::-1][:top_n]
+    indices = np.argsort(mean_tfidf)[::-1]
     feature_names = vectorizer.get_feature_names_out()
-    return [(feature_names[i], round(float(mean_tfidf[i]), 4)) for i in indices if mean_tfidf[i] > 0.01]
+    keywords = []
+    for i in indices:
+        kw = feature_names[i]
+        if mean_tfidf[i] <= 0.01:
+            continue
+        if _is_garbage_token(kw):
+            continue
+        keywords.append((kw, round(float(mean_tfidf[i]), 4)))
+        if len(keywords) >= top_n:
+            break
+    return keywords
 
 
 def auto_name_clusters(

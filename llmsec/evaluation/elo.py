@@ -246,12 +246,23 @@ class ELOTracker:
         }
 
         if att_elos:
+            top_threats = self.get_attacker_ranking()[:5]
             summary["attackers"] = {
                 "min_elo": round(min(att_elos), 1),
                 "max_elo": round(max(att_elos), 1),
                 "mean_elo": round(sum(att_elos) / len(att_elos), 1),
-                "top_threats": self.get_attacker_ranking()[:5],
+                "top_threats": top_threats,
             }
+            # 兼容 evaluator.py 终端汇总的旧键名
+            summary["total_methods"] = summary["total_attackers"]
+            summary["min_elo"] = summary["attackers"]["min_elo"]
+            summary["max_elo"] = summary["attackers"]["max_elo"]
+            summary["top_threats"] = top_threats
+        else:
+            summary["total_methods"] = 0
+            summary["min_elo"] = INITIAL_ELO
+            summary["max_elo"] = INITIAL_ELO
+            summary["top_threats"] = []
 
         if def_elos:
             summary["defenders"] = {
