@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-攻击聚类分析 CLI 入口
+攻击聚类分析 CLI 入口（原根目录 cluster.py 的 CLI 逻辑）
 
-调用 features.py 提取 5 维特征 + clustering.py 进行复合距离聚类。
+调用 llmsec.clustering.features 提取 5 维特征 + llmsec.clustering.pipeline 进行复合距离聚类。
 
 聚类维度：
   维1: 文本结构与语义 (Textual + Embedding) → 余弦距离
@@ -29,14 +29,16 @@ import json
 import os
 import sys
 
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+from llmsec.core.config import OUTPUT_DIR
+from llmsec.core.logging import setup_console
+from llmsec.clustering import (
+    CLUSTER_MATRIX_FILE,
+    CLUSTER_REPORT_FILE,
+    load_and_extract,
+    run_clustering_pipeline,
+)
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
-
-from features import load_and_extract
-from clustering import run_clustering_pipeline, CLUSTER_REPORT_FILE, CLUSTER_MATRIX_FILE
+setup_console()
 
 
 def parse_weights(s: str) -> tuple[float, float, float, float]:
@@ -139,7 +141,7 @@ def main():
     print(f"{'='*60}")
     print(f"  方法: {args.method.upper()}")
     print(f"  簇数: {report['n_clusters']} (+ {report['n_noise']} 噪声)")
-    
+
     val = report.get("validation", {})
     print(f"  轮廓系数: {val.get('silhouette', 0):.4f}")
     print(f"  Davies-Bouldin: {val.get('davies_bouldin', 0):.4f}")

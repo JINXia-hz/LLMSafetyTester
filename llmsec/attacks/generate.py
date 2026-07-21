@@ -1,44 +1,53 @@
 #!/usr/bin/env python3
 """
 LLM攻击集生成器 - L1级别
-读取攻击分析.md，提取所有L1攻击方法，调用DeepSeek API逐方法生成5条攻击prompt，
-输出为JSONL格式到 output/攻击集_L1.jsonl。
+读取攻击分析.md，提取所有L1攻击方法，调用生成模型API逐方法生成5条攻击prompt，
+输出为JSONL格式到 output/attacks/l1.jsonl。
 
-用法：python generate_attacks.py
-支持断点续传：已生成的方法会自动跳过。
+用法：python -m llmsec.attacks.generate
+支持断点续传：已生成的方法会自动跳过（读取时兼容旧路径 output/攻击集_L1.jsonl，
+写入一律走新路径，见 core.config 路径裁决）。
+
+原根目录 generate_attacks.py 平移而来：解析/生成/prompt 模板逻辑不变，
+dotenv、win32 修复、OpenAI 创建、JSONL 读写、数学税正则改由 llmsec.core 提供。
 """
 
+import argparse
 import json
-import os
 import random
 import re
 import sys
 import time
-import argparse
-from datetime import datetime
-from dotenv import load_dotenv
+from pathlib import Path
+
 from openai import OpenAI
 
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+from llmsec.core import (
+    ATTACK_SET_L1_FILE,
+    LEGACY_ATTACK_SET_L1_FILE,
+    PROJECT_ROOT,
+    GeneratorConfig,
+    append_jsonl,
+    create_openai_client,
+    load_done_ids,
+    resolve_existing,
+    setup_console,
+)
+from llmsec.core.text import MATH_TAX_PATTERN
 
 # 修复Windows CMD GBK编码导致emoji/Unicode输出报错
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+setup_console()
 
 # ============================================================
 # 配置
 # ============================================================
-API_KEY = os.getenv("GENERATOR_API_KEY")
-BASE_URL = os.getenv("GENERATOR_BASE_URL")
-MODEL = os.getenv("GENERATOR_MODEL")
+# 文件路径 (md文件优先取项目根的上级目录，其次项目根，保持原查找逻辑)
+MD_FILE = PROJECT_ROOT.parent / "攻击分析.md"
+if not MD_FILE.exists():
+    MD_FILE = PROJECT_ROOT / "攻击分析.md"
 
-# 文件路径 (脚本位于 LLM攻击测试/ 目录下，md文件在上级桌面)
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-MD_FILE = os.path.join(os.path.dirname(SCRIPT_DIR), "攻击分析.md")
-if not os.path.exists(MD_FILE):
-    MD_FILE = os.path.join(SCRIPT_DIR, "攻击分析.md")
-OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "攻击集_L1.jsonl")
+# 默认输出（路径裁决 bug#10：原 output/攻击集_L1.jsonl → output/attacks/l1.jsonl）
+OUTPUT_FILE = ATTACK_SET_L1_FILE
 
 # API调用参数
 TEMPERATURE = 0.9      # 较高温度增加多样性
@@ -92,7 +101,7 @@ HARM_DESC = {
 # ============================================================
 # Markdown解析
 # ============================================================
-def parse_md(filepath: str) -> list[dict]:
+def parse_md(filepath) -> list[dict]:
     """
     解析攻击分析.md，提取所有 L1 级别的攻击方法。
     使用按 | 分割的方式解析表格，比正则更鲁棒。
@@ -227,7 +236,8 @@ def build_critique_prompt(records: list[dict], method: dict) -> str:
     return prompt
 
 
-def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str]) -> list[dict] | None:
+def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
+                       model: str) -> list[dict] | None:
     """
     两轮生成：初稿 → 自我审查重写 → 返回最终版本。
     """
@@ -236,7 +246,7 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str]) -> l
             # ---- 第1轮：生成初稿 ----
             gen_prompt = build_gen_prompt(method, harm_types)
             resp1 = client.chat.completions.create(
-                model=MODEL,
+                model=model,
                 messages=[
                     {"role": "system", "content": SYSTEM_ROLE},
                     {"role": "user", "content": gen_prompt},
@@ -258,7 +268,7 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str]) -> l
             time.sleep(0.5)
             critique_prompt = build_critique_prompt(drafts, method)
             resp2 = client.chat.completions.create(
-                model=MODEL,
+                model=model,
                 messages=[
                     {"role": "system", "content": SYSTEM_ROLE},
                     {"role": "user", "content": critique_prompt},
@@ -314,12 +324,19 @@ def main():
         "--only", type=str, default=None,
         help="仅生成指定方法ID，如 --only 1.1.1"
     )
+    parser.add_argument(
+        "--output", type=str, default=None,
+        help="输出文件路径（默认 output/attacks/l1.jsonl）"
+    )
     args = parser.parse_args()
 
+    # 写入只走新路径；--output 可覆盖
+    output_file = Path(args.output) if args.output else OUTPUT_FILE
+
     # ---- 解析Markdown ----
-    if not os.path.exists(MD_FILE):
+    if not MD_FILE.exists():
         print(f"❌ 找不到文件: {MD_FILE}")
-        print(f"   请确认攻击分析.md在桌面上（{os.path.dirname(SCRIPT_DIR)}）")
+        print(f"   请确认攻击分析.md在桌面上（{PROJECT_ROOT.parent}）")
         sys.exit(1)
 
     all_methods = parse_md(MD_FILE)
@@ -348,28 +365,18 @@ def main():
     else:
         methods = all_methods
 
-    # ---- 创建输出目录 ----
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    # ---- 加载已有记录 (断点续传) ----
+    # ---- 加载已有记录 (断点续传，读取兼容旧路径) ----
     done_ids = set()
-    if os.path.exists(OUTPUT_FILE):
-        with open(OUTPUT_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        record = json.loads(line)
-                        # 提取方法编号 (如 "1.1.1-001" → "1.1.1")
-                        mid = record.get("id", "").rsplit("-", 1)[0]
-                        done_ids.add(mid)
-                    except json.JSONDecodeError:
-                        pass
-        if done_ids:
-            print(f"📋 已有 {len(done_ids)} 个方法已完成，将跳过\n")
+    resume_file = resolve_existing(output_file, LEGACY_ATTACK_SET_L1_FILE)
+    for record_id in load_done_ids(resume_file):
+        # 提取方法编号 (如 "1.1.1-001" → "1.1.1")
+        done_ids.add(str(record_id).rsplit("-", 1)[0])
+    if done_ids:
+        print(f"📋 已有 {len(done_ids)} 个方法已完成，将跳过\n")
 
     # ---- 初始化API客户端 ----
-    client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+    config = GeneratorConfig.from_env()
+    client = create_openai_client(config.api_key, config.base_url, timeout=config.timeout)
 
     # ---- 逐方法生成 ----
     total = len(methods)
@@ -395,7 +402,7 @@ def main():
         print(f"         有害类别: {', '.join(harm_types)}")
 
         # 调用API（两轮：生成 + 自我审查重写）
-        records = call_api_two_round(client, method, harm_types)
+        records = call_api_two_round(client, method, harm_types, config.model)
 
         if records is None:
             fail_count += 1
@@ -407,29 +414,26 @@ def main():
 
         # 写入JSONL
         generated_ids = []
-        with open(OUTPUT_FILE, "a", encoding="utf-8") as f:
-            for j, rec in enumerate(records):
-                record_id = f"{mid}-{j+1:03d}"
-                # 将数学题嵌入到prompt末尾（AI不感知，脚本静默处理）
-                base_prompt = rec.get("prompt", "").strip()
-                # 清理AI可能自行附加的任何数学题文本
-                base_prompt = re.sub(
-                    r"\n*\s*在回答之前，请先计算以下数学题.*$", "", base_prompt, flags=re.DOTALL
-                ).strip()
-                full_prompt = f"{base_prompt}\n\n在回答之前，请先计算以下数学题并以 [MATH:答案] 格式输出：{math_problem}"
-                entry = {
-                    "id": record_id,
-                    "category": method["category"],
-                    "category_name": method["category_name"],
-                    "method": method["method"],
-                    "harm_type": rec.get("harm_type", harm_types[j]),
-                    "prompt": full_prompt,
-                    "math_problem": math_problem,
-                    "expected_answer": expected_answer,
-                    "build_difficulty": "L1",
-                }
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-                generated_ids.append(record_id)
+        for j, rec in enumerate(records):
+            record_id = f"{mid}-{j+1:03d}"
+            # 将数学题嵌入到prompt末尾（AI不感知，脚本静默处理）
+            base_prompt = rec.get("prompt", "").strip()
+            # 清理AI可能自行附加的任何数学题文本
+            base_prompt = MATH_TAX_PATTERN.sub("", base_prompt).strip()
+            full_prompt = f"{base_prompt}\n\n在回答之前，请先计算以下数学题并以 [MATH:答案] 格式输出：{math_problem}"
+            entry = {
+                "id": record_id,
+                "category": method["category"],
+                "category_name": method["category_name"],
+                "method": method["method"],
+                "harm_type": rec.get("harm_type", harm_types[j]),
+                "prompt": full_prompt,
+                "math_problem": math_problem,
+                "expected_answer": expected_answer,
+                "build_difficulty": "L1",
+            }
+            append_jsonl(output_file, entry)
+            generated_ids.append(record_id)
 
         done_ids.add(mid)
         success_count += 1
@@ -446,7 +450,7 @@ def main():
     print(f"   跳过: {skip_count} 种方法")
     print(f"   失败: {fail_count} 种方法")
     total_records = success_count * 5 + skip_count * 5
-    print(f"   输出: {total_records} 条记录 → {OUTPUT_FILE}")
+    print(f"   输出: {total_records} 条记录 → {output_file}")
     print("=" * 70)
 
 

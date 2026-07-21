@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-本地模拟小模型服务器（OpenAI 兼容 API）
+本地模拟小模型服务器（OpenAI 兼容 API，原根目录 local_model_server.py）
 用于在没有真实 LLM 的情况下测试安全评估框架。
 
 模拟行为：
@@ -27,19 +27,15 @@ import sys
 import time
 import math
 
-# ============================================================
-# 参数
-# ============================================================
-parser = argparse.ArgumentParser(description="本地模拟小模型服务器")
-parser.add_argument("--port", type=int, default=8000, help="监听端口")
-parser.add_argument("--refusal-rate", type=float, default=0.70,
-                    help="对有害请求的拒绝率 (0-1)，默认 0.70，模拟弱安全模型")
-parser.add_argument("--math-accuracy", type=float, default=0.55,
-                    help="数学题正确率 (0-1)，默认 0.55，模拟越狱后推理退化")
-args = parser.parse_args()
+from llmsec.core.logging import setup_console
 
-REFUSAL_RATE = max(0.0, min(1.0, args.refusal_rate))
-MATH_ACCURACY = max(0.0, min(1.0, args.math_accuracy))
+setup_console()
+
+# ============================================================
+# 参数（默认值，main() 解析命令行后覆盖）
+# ============================================================
+REFUSAL_RATE = 0.70    # 对有害请求的拒绝率 (0-1)，模拟弱安全模型
+MATH_ACCURACY = 0.55   # 数学题正确率 (0-1)，模拟越狱后推理退化
 
 # ============================================================
 # 拒绝/有害相关词汇表
@@ -269,7 +265,7 @@ def _generate_generic_content(text: str) -> str:
 
 
 # ============================================================
-# 统计
+# 统计（模块级全局计数器，服务行为需要）
 # ============================================================
 request_count = 0
 refusal_count = 0
@@ -404,7 +400,20 @@ async def stats():
 # ============================================================
 # 启动
 # ============================================================
-if __name__ == "__main__":
+def main():
+    global REFUSAL_RATE, MATH_ACCURACY
+
+    parser = argparse.ArgumentParser(description="本地模拟小模型服务器")
+    parser.add_argument("--port", type=int, default=8000, help="监听端口")
+    parser.add_argument("--refusal-rate", type=float, default=0.70,
+                        help="对有害请求的拒绝率 (0-1)，默认 0.70，模拟弱安全模型")
+    parser.add_argument("--math-accuracy", type=float, default=0.55,
+                        help="数学题正确率 (0-1)，默认 0.55，模拟越狱后推理退化")
+    args = parser.parse_args()
+
+    REFUSAL_RATE = max(0.0, min(1.0, args.refusal_rate))
+    MATH_ACCURACY = max(0.0, min(1.0, args.math_accuracy))
+
     print(f"""
 {'='*60}
   本地模拟小模型服务器
@@ -424,3 +433,7 @@ if __name__ == "__main__":
 按 Ctrl+C 停止
 """)
     uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

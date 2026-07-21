@@ -17,72 +17,87 @@
   output/security_tree.json   — 完整树形数据（供程序读取）
 
 用法:
-    python report.py                        # 读取所有已有数据生成报告
-    python report.py --input 攻击集_L1_汇总.json  # 指定汇总数据
+    python -m llmsec.reporting.report                        # 读取所有已有数据生成报告
+    python -m llmsec.reporting.report --output-dir output    # 指定数据目录
 """
 
+import argparse
 import json
 import os
 import re
-import sys
 import time
-from datetime import datetime
 from collections import defaultdict
-from dotenv import load_dotenv
-from openai import OpenAI
+from datetime import datetime
+from pathlib import Path
 
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+from llmsec.core.config import (
+    DEFAULT_BASE_URL,
+    DEFAULT_MODEL,
+    ELO_FILE,
+    LEGACY_ELO_FILE,
+    OUTPUT_DIR,
+    GeneratorConfig,
+    resolve_existing,
+)
+from llmsec.core.io import iter_jsonl, read_jsonl
+from llmsec.core.llm import chat_with_retry, create_openai_client
+from llmsec.core.logging import setup_console
+from llmsec.evaluation.elo import ELOTracker
 
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+setup_console()
 
 # ============================================================
 # 配置
 # ============================================================
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
+TREE_FILE = OUTPUT_DIR / "security_tree.json"
+REPORT_FILE = OUTPUT_DIR / "security_report.md"
 
-REPORT_MODEL = os.getenv("GENERATOR_MODEL", "deepseek-v4-flash")
-REPORT_API_KEY = os.getenv("GENERATOR_API_KEY", "")
-REPORT_BASE_URL = os.getenv("GENERATOR_BASE_URL", "https://api.deepseek.com/v1")
 
-TREE_FILE = os.path.join(OUTPUT_DIR, "security_tree.json")
-REPORT_FILE = os.path.join(OUTPUT_DIR, "security_report.md")
+def _report_config() -> GeneratorConfig:
+    """报告生成模型配置（沿用 GENERATOR_* 环境变量，缺省回退默认模型/地址）。"""
+    cfg = GeneratorConfig.from_env()
+    return GeneratorConfig(
+        api_key=cfg.api_key or "",
+        base_url=cfg.base_url or DEFAULT_BASE_URL,
+        model=cfg.model or DEFAULT_MODEL,
+    )
 
 
 # ============================================================
 # 数据加载
 # ============================================================
-def load_all_results(output_dir: str) -> list[dict]:
+def load_all_results(output_dir) -> list[dict]:
     """加载所有 *_结果.jsonl 文件，聚合为统一结果列表。"""
     all_results = []
     for fname in os.listdir(output_dir):
         if fname.endswith("_结果.jsonl"):
-            filepath = os.path.join(output_dir, fname)
-            with open(filepath, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        try:
-                            all_results.append(json.loads(line))
-                        except json.JSONDecodeError:
-                            pass
+            all_results.extend(read_jsonl(Path(output_dir) / fname))
     return all_results
 
 
-def load_elo(output_dir: str) -> dict:
-    """加载 ELO 评分。"""
-    elo_file = os.path.join(output_dir, "state", "elo.json")
-    if not os.path.exists(elo_file):
+def load_elo(output_dir) -> dict:
+    """
+    加载 ELO 攻击方评分（method → elo）。
+
+    按 ELOTracker.save 的实际落盘格式读取 attacker_ratings
+    （旧代码读不存在的 "ratings" 键，永远拿不到评分——bug#1 修复）；
+    兼容回退：新约定 output/state/elo.json，旧路径 output/elo.json。
+    """
+    elo_file = resolve_existing(
+        Path(output_dir) / "state" / "elo.json",
+        Path(output_dir) / "elo.json",
+    )
+    if not elo_file.exists():
         return {}
     with open(elo_file, "r", encoding="utf-8") as f:
-        return json.load(f).get("ratings", {})
+        data = json.load(f)
+    return data.get("attacker_ratings") or data.get("ratings", {})
 
 
-def load_allergy(output_dir: str) -> dict:
+def load_allergy(output_dir) -> dict:
     """加载过敏报告。"""
-    allergy_file = os.path.join(output_dir, "allergy_report.json")
-    if not os.path.exists(allergy_file):
+    allergy_file = Path(output_dir) / "allergy_report.json"
+    if not allergy_file.exists():
         return {}
     with open(allergy_file, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -91,30 +106,19 @@ def load_allergy(output_dir: str) -> dict:
 def load_prompt_metadata() -> dict[str, dict]:
     """加载所有prompt JSONL，建立 id→metadata 映射。"""
     metadata = {}
-    search_dirs = [OUTPUT_DIR, os.path.join(OUTPUT_DIR, "attacks")]
+    search_dirs = [OUTPUT_DIR, OUTPUT_DIR / "attacks"]
     for search_dir in search_dirs:
-        if not os.path.exists(search_dir):
+        if not search_dir.exists():
             continue
         for fname in os.listdir(search_dir):
             if fname.endswith(".jsonl") and "_结果" not in fname and "allergy" not in fname and "elos" not in fname:
-                filepath = os.path.join(search_dir, fname)
-                with open(filepath, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line:
-                            try:
-                                r = json.loads(line)
-                                rid = r.get("id") or r.get("original_id")
-                                if rid:
-                                    metadata[rid] = r
-                            except json.JSONDecodeError:
-                                pass
+                for r in iter_jsonl(search_dir / fname):
+                    rid = r.get("id") or r.get("original_id")
+                    if rid:
+                        metadata[rid] = r
     return metadata
 
 
-# ============================================================
-# 树形结构构建
-# ============================================================
 # ============================================================
 # 方法注册表 — 统一索引
 # ============================================================
@@ -192,6 +196,16 @@ def build_method_stats(results: list[dict], elo_ratings: dict,
     return method_stats
 
 
+def _load_elo_tracker() -> ELOTracker | None:
+    """加载完整 ELO 状态（攻击方+防御方），文件不存在返回 None。"""
+    elo_file = resolve_existing(ELO_FILE, LEGACY_ELO_FILE)
+    if not elo_file.exists():
+        return None
+    tracker = ELOTracker()
+    tracker.load(elo_file)
+    return tracker
+
+
 def build_tree(method_stats: dict[str, dict], allergy_data: dict,
                elo_ratings: dict) -> dict:
     """
@@ -218,15 +232,13 @@ def build_tree(method_stats: dict[str, dict], allergy_data: dict,
     total_harmful = sum(m["harmful"] for m in methods)
     overall_asr = total_harmful / total_tests if total_tests > 0 else 0
 
-    # ELO 边界
-    from elo import ELOTracker
-    tracker = ELOTracker()
-    for m, elo in elo_ratings.items():
-        tracker.ratings[m] = elo
-        for ms in methods:
-            if ms["method"] == m:
-                tracker.history[m] = [{"eval_score": 1 if ms["asr"] > 0 else -1}] * ms["total"]
-    boundary = tracker.compute_security_boundary() if elo_ratings else {}
+    # ELO 边界：直接加载 ELO 状态文件，用 ELOTracker 真实 API 计算
+    # （旧代码在此试图手工重建 tracker.ratings/history，访问的是不存在的属性，
+    #   属无效死代码——即使能跑，没有防御方评分也算不出边界）
+    boundary = {}
+    tracker = _load_elo_tracker()
+    if tracker is not None and (tracker.attacker_ratings or tracker.defender_ratings):
+        boundary = tracker.compute_security_boundary()
 
     # 过敏数据
     allergy_summary = allergy_data.get("summary", {})
@@ -427,7 +439,7 @@ REPORT_PROMPT = """请根据以下安全测试数据，生成一份完整的安�
 请直接输出Markdown，不要有"以下是报告"之类的元说明。"""
 
 
-def generate_narrative(tree: dict, output_dir: str) -> str:
+def generate_narrative(tree: dict, output_dir) -> str:
     """
     调用LLM将树形数据转为人类可读Markdown报告。
     """
@@ -476,28 +488,30 @@ def generate_narrative(tree: dict, output_dir: str) -> str:
 
     tree_json = json.dumps(compact_tree, ensure_ascii=False, indent=2)
 
-    client = OpenAI(api_key=REPORT_API_KEY, base_url=REPORT_BASE_URL)
+    cfg = _report_config()
+    client = create_openai_client(cfg.api_key, cfg.base_url)
 
     print("🧠 调用LLM生成叙事报告...")
-    for attempt in range(1, 4):
-        try:
-            response = client.chat.completions.create(
-                model=REPORT_MODEL,
-                messages=[
-                    {"role": "system", "content": REPORT_SYSTEM},
-                    {"role": "user", "content": REPORT_PROMPT.format(tree_json=tree_json[:15000])},
-                ],
-                temperature=0.5,
-                max_tokens=4096,
-            )
-            markdown = response.choices[0].message.content.strip()
-            # 去除可能的markdown代码包裹
-            markdown = re.sub(r"^```markdown\s*", "", markdown)
-            markdown = re.sub(r"\s*```$", "", markdown)
-            return markdown
-        except Exception as e:
-            print(f"  ⚠ LLM调用失败 (第{attempt}次): {e}")
-            time.sleep(3)
+    try:
+        response = chat_with_retry(
+            client,
+            model=cfg.model,
+            messages=[
+                {"role": "system", "content": REPORT_SYSTEM},
+                {"role": "user", "content": REPORT_PROMPT.format(tree_json=tree_json[:15000])},
+            ],
+            max_retries=3,
+            delay=3,
+            temperature=0.5,
+            max_tokens=4096,
+        )
+        markdown = response.choices[0].message.content.strip()
+        # 去除可能的markdown代码包裹
+        markdown = re.sub(r"^```markdown\s*", "", markdown)
+        markdown = re.sub(r"\s*```$", "", markdown)
+        return markdown
+    except Exception as e:
+        print(f"  ⚠ LLM调用失败（已重试3次）: {e}")
 
     # Fallback: 基本文本报告
     return generate_fallback_report(tree)
@@ -539,12 +553,15 @@ def generate_fallback_report(tree: dict) -> str:
 # ============================================================
 # 主流程
 # ============================================================
-def main():
-    import argparse
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="层级报告生成器")
-    parser.add_argument("--output-dir", type=str, default=OUTPUT_DIR,
+    parser.add_argument("--output-dir", type=str, default=str(OUTPUT_DIR),
                         help="输出目录")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def main():
+    args = parse_args()
 
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)

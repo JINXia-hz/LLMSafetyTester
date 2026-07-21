@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-LLM 安全评估交互启动器
+LLM 安全评估交互启动器（原根目录 launcher.py）
 
 启动后交互式选择攻击集、模式、是否重置ELO等，
-自动调用 runner.py 执行评估。
+自动调用根目录 runner.py 薄壳执行评估。
 
 用法：
     python launcher.py
@@ -11,40 +11,26 @@ LLM 安全评估交互启动器
 
 import json
 import os
-import sys
 import subprocess
+import sys
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
+from llmsec.core.config import ATTACKS_DIR, ELO_FILE, PROJECT_ROOT, load_env
+from llmsec.core.logging import setup_console
 
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
-
-def read_env(key: str, default: str = "") -> str:
-    """从 .env 文件读取配置值。"""
-    env_file = os.path.join(SCRIPT_DIR, ".env")
-    if not os.path.exists(env_file):
-        return default
-    with open(env_file, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith(f"{key}="):
-                return line.split("=", 1)[1].strip()
-    return default
+setup_console()
+load_env()
 
 
 def list_attack_sets() -> dict[str, str]:
     """扫描 output/attacks/ 目录，返回 {显示名: 相对路径}。"""
     sets = {}
-    attacks_dir = os.path.join(OUTPUT_DIR, "attacks")
-    if not os.path.exists(attacks_dir):
+    if not os.path.exists(ATTACKS_DIR):
         return sets
 
-    for fname in sorted(os.listdir(attacks_dir)):
+    for fname in sorted(os.listdir(ATTACKS_DIR)):
         if not fname.endswith(".jsonl"):
             continue
-        fpath = os.path.join(attacks_dir, fname)
+        fpath = os.path.join(ATTACKS_DIR, fname)
         rel_path = os.path.join("attacks", fname)
         try:
             with open(fpath, "r", encoding="utf-8") as f:
@@ -100,12 +86,12 @@ def main():
     print("=" * 60)
     print()
 
-    # ---- 显示当前配置 ----
-    target_type = read_env("TARGET_TYPE", "openai")
-    target_model = read_env("TARGET_MODEL", "unknown")
+    # ---- 显示当前配置（.env 已由 core.config.load_env 加载） ----
+    target_type = os.getenv("TARGET_TYPE", "openai")
+    target_model = os.getenv("TARGET_MODEL", "unknown")
 
     mode_desc = {
-        "pcap_judge": f"PCAP Judge (模型: {read_env('PCAP_MODEL_VERSION', '?')})",
+        "pcap_judge": f"PCAP Judge (模型: {os.getenv('PCAP_MODEL_VERSION', '?')})",
         "local_sim": "本地模拟模型",
         "openai": f"OpenAI API (模型: {target_model})",
     }.get(target_type, target_type)
@@ -127,16 +113,15 @@ def main():
     print(f"  已选择: {selected_file}")
     print()
 
-    # ---- ELO 重置 ----
-    elo_file = os.path.join(OUTPUT_DIR, "elo.json")
+    # ---- ELO 重置（路径统一为 output/state/elo.json） ----
     elo_reset = False
-    if os.path.exists(elo_file):
-        elo_size = os.path.getsize(elo_file)
+    if os.path.exists(ELO_FILE):
+        elo_size = os.path.getsize(ELO_FILE)
         if elo_size > 100:
             print(f"  检测到已有 ELO 数据 ({elo_size} 字节)")
             elo_reset = prompt_yn("是否清空 ELO 重新开始？", default=True)
             if elo_reset:
-                os.remove(elo_file)
+                os.remove(ELO_FILE)
                 print("  ELO 已重置")
             print()
     else:
@@ -169,13 +154,13 @@ def main():
 
     cmd = [
         sys.executable,
-        os.path.join(SCRIPT_DIR, "runner.py"),
+        str(PROJECT_ROOT / "runner.py"),
         "--input", selected_file,
         "--batch-size", str(batch),
         "--max-rounds", str(rounds),
     ]
 
-    result = subprocess.run(cmd, cwd=SCRIPT_DIR)
+    result = subprocess.run(cmd, cwd=PROJECT_ROOT)
     sys.exit(result.returncode)
 
 

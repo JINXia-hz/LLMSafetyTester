@@ -19,28 +19,26 @@
 """
 
 import json
-import os
-import re
-import sys
-import time
 from collections import Counter, defaultdict
 from datetime import datetime
 
 import numpy as np
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from scipy.spatial.distance import squareform, pdist
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.metrics import silhouette_score, davies_bouldin_score
 from sklearn.metrics.cluster import normalized_mutual_info_score, adjusted_rand_score
-from scipy.spatial.distance import squareform, pdist, cdist
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.preprocessing import StandardScaler
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
+from llmsec.core import (
+    CLUSTER_FEATURES_FILE,
+    CLUSTER_MATRIX_FILE,
+    CLUSTER_REPORT_FILE,
+    OUTPUT_DIR,
+    get_logger,
+)
 
-# 输出文件
-CLUSTER_REPORT_FILE = os.path.join(OUTPUT_DIR, "cluster_report.json")
-CLUSTER_MATRIX_FILE = os.path.join(OUTPUT_DIR, "cluster_matrix.csv")
-CLUSTER_FEATURES_FILE = os.path.join(OUTPUT_DIR, "cluster_features.json")
+logger = get_logger(__name__)
 
 
 # ============================================================
@@ -94,14 +92,13 @@ def build_composite_distance(
 ) -> tuple[np.ndarray, dict]:
     """
     构建加权复合距离矩阵。
-    
+
     权重顺序: (text_embedding, technique, intent, defense)
     各块内部先计算各自距离矩阵，再加权求和。
-    
+
     返回: (distance_matrix[n,n], block_info)
     """
     n = len(methods)
-    method_to_idx = {m: i for i, m in enumerate(methods)}
     w_emb, w_tech, w_int, w_def = weights
 
     block_distances = {}
@@ -194,7 +191,7 @@ def run_hdbscan(
         labels = clusterer.fit_predict(dist_matrix)
         return {name: int(label) for name, label in zip(method_names, labels)}
     except Exception as e:
-        print(f"  ⚠ HDBSCAN 失败: {e}，回退到 K-Means (K=3)")
+        logger.warning("HDBSCAN 失败: %s，回退到 K-Means (K=3)", e)
         return run_kmeans(dist_matrix, method_names, k=3)
 
 
@@ -285,7 +282,6 @@ def auto_name_clusters(
     """
     methods = meta.get("method_names", list(labels.keys()))
     technique_label_names = meta.get("technique_label_names", [])
-    method_to_idx = {m: i for i, m in enumerate(methods)}
 
     # 按簇分组
     clusters = defaultdict(list)
@@ -397,7 +393,7 @@ def run_clustering_pipeline(
 ) -> dict:
     """
     聚类主流程。
-    
+
     参数:
         features: features.extract_all_features 的输出
         meta: features.extract_all_features 的元信息
@@ -406,7 +402,7 @@ def run_clustering_pipeline(
         min_cluster_size: HDBSCAN 最小簇大小
         weights: (emb, tech, intent, defense) 复合距离权重
         verbose: 是否打印进度
-    
+
     返回: 聚类报告 dict
     """
     methods = meta["method_names"]
@@ -495,9 +491,9 @@ def run_clustering_pipeline(
     # ---- Step 4: 自动命名 ----
     if verbose:
         print("🏷️ 自动命名 ...")
-    # 构建 prompt 映射
-    method_prompts_dict = {}
-    # 从技术标签名称推断哪些是 harm/cat
+    # 构建 prompt 映射：meta["method_prompts"] 由 features.extract_all_features 提供
+    # （每个方法的代表 prompt），供 TF-IDF 关键词命名使用
+    method_prompts_dict = meta.get("method_prompts", {})
     cluster_names = auto_name_clusters(labels, features, meta, method_prompts_dict)
     if verbose:
         for cid, name in sorted(cluster_names.items()):
@@ -526,7 +522,7 @@ def run_clustering_pipeline(
     }
 
     # ---- 导出 ----
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     with open(CLUSTER_REPORT_FILE, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
@@ -627,23 +623,3 @@ def _export_matrix(labels: dict[str, int], features: dict, meta: dict):
                 row.append(str(int(tecvec[i])) if i < len(tecvec) else "0")
 
             f.write(",".join(row) + "\n")
-
-
-# ============================================================
-# 便捷入口：从文件直接运行
-# ============================================================
-def run_from_files(
-    attack_file: str = "攻击集_L1.jsonl",
-    result_file: str = None,
-    method: str = "hdbscan",
-    k: int = None,
-    min_cluster_size: int = 3,
-    weights: tuple = (0.35, 0.25, 0.10, 0.30),
-) -> dict:
-    """从文件加载数据并聚类。"""
-    from features import load_and_extract
-    features, meta = load_and_extract(attack_file, result_file)
-    return run_clustering_pipeline(
-        features, meta, method=method, k=k,
-        min_cluster_size=min_cluster_size, weights=weights,
-    )

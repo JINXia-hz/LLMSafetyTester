@@ -12,7 +12,7 @@ ELO 评分模块 — 标准双边 ELO + 自适应配对
   收敛判断：防御方最近 N 次 ELO 滑动标准差 < 阈值
 
 用法：
-    from elo import ELOTracker
+    from llmsec.evaluation.elo import ELOTracker
     tracker = ELOTracker()
     tracker.update("DAN", "local-model", eval_score=3.5)   # 攻击赢
     tracker.update("奶奶漏洞", "local-model", eval_score=-1.0) # 攻击输
@@ -27,15 +27,15 @@ ELO 评分模块 — 标准双边 ELO + 自适应配对
 
 import json
 import os
-import sys
 from collections import defaultdict
 
 import numpy as np
 
-# Windows CMD UTF-8
-if sys.platform == "win32":
-    import io
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+from llmsec.core.config import ELO_FILE, LEGACY_ELO_FILE, resolve_existing
+from llmsec.core.io import iter_jsonl
+from llmsec.core.logging import setup_console
+
+setup_console()
 
 # ============================================================
 # ELO 配置
@@ -342,7 +342,8 @@ class ELOTracker:
     # ============================================================
     # 持久化
     # ============================================================
-    def save(self, filepath: str):
+    def save(self, filepath):
+        filepath = str(filepath)
         data = {
             "attacker_ratings": self.attacker_ratings,
             "defender_ratings": self.defender_ratings,
@@ -357,7 +358,8 @@ class ELOTracker:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def load(self, filepath: str):
+    def load(self, filepath):
+        filepath = str(filepath)
         if not os.path.exists(filepath):
             return
         with open(filepath, "r", encoding="utf-8") as f:
@@ -386,29 +388,25 @@ def update_elo_from_results(
     读取评估结果 .jsonl，批量更新 ELO。
 
     results_file: 评估结果 .jsonl 文件路径
-    elo_file: ELO 状态保存路径
+    elo_file: ELO 状态保存路径；缺省为 core.config.ELO_FILE（output/state/elo.json），
+              读取时经 resolve_existing 回退兼容旧路径 output/elo.json，写入只写新路径
     defender_name: 防御方模型名
     """
     if elo_file is None:
-        elo_file = os.path.join(os.path.dirname(results_file), "elo.json")
+        load_path = resolve_existing(ELO_FILE, LEGACY_ELO_FILE)
+        save_path = ELO_FILE
+    else:
+        load_path = save_path = elo_file
 
     tracker = ELOTracker()
-    tracker.load(elo_file)
+    tracker.load(load_path)
 
-    with open(results_file, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                r = json.loads(line)
-                method = r.get("method", "unknown")
-                score = r.get("eval_score", 0)
-                tracker.update(method, defender_name, score)
-            except json.JSONDecodeError:
-                continue
+    for r in iter_jsonl(results_file):
+        method = r.get("method", "unknown")
+        score = r.get("eval_score", 0)
+        tracker.update(method, defender_name, score)
 
-    tracker.save(elo_file)
+    tracker.save(save_path)
     return tracker
 
 

@@ -4,47 +4,40 @@
 
 从攻击集 + 评估结果中提取 5 维特征向量：
 
-  维1: 文本结构与语义特征 (Textual Features)  
-  维2: 攻击技术多标签 (Attack Techniques)  
-  维3: 意图与对抗强度 (Intent & Adversarial Intensity)  
-  维4: 防御交互细粒度行为 (Defense Interaction)  
+  维1: 文本结构与语义特征 (Textual Features)
+  维2: 攻击技术多标签 (Attack Techniques)
+  维3: 意图与对抗强度 (Intent & Adversarial Intensity)
+  维4: 防御交互细粒度行为 (Defense Interaction)
   维5: 跨模型指纹 (Cross-Model Fingerprint, 占位)
 
 用法:
-    from features import extract_all_features
-    features = extract_all_features(attack_records, eval_results)
+    from llmsec.clustering.features import extract_all_features
+    features, meta = extract_all_features(attack_records, eval_results)
     # features: {method_name: {"textual": {...}, "technique": {...}, ...}}
 """
 
-import json
-import math
 import os
 import re
-import sys
 import time
 from collections import Counter, defaultdict
+from pathlib import Path
 
 import numpy as np
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
+from llmsec.core import (
+    ATTACK_SET_L1_FILE,
+    LEGACY_ATTACK_SET_L1_FILE,
+    OUTPUT_DIR,
+    estimate_tokens,
+    read_jsonl,
+    resolve_existing,
+    strip_math_tax,
+)
 
 # ============================================================
 # 工具函数
 # ============================================================
-def _strip_math(text: str) -> str:
-    """移除 prompt 末尾的数学题部分，提取纯攻击文本。"""
-    cleaned = re.sub(
-        r"\n*\s*在回答之前，请先计算以下数学题.*$",
-        "", text, flags=re.DOTALL
-    ).strip()
-    # 也移除 [MATH:xxx] 标记
-    cleaned = re.sub(r"\[MATH:\s*-?\d+\s*\]", "", cleaned, flags=re.IGNORECASE).strip()
-    return cleaned
-
-
 def _count_tokens(text: str) -> int:
     """用 tiktoken 估算 token 数（cl100k_base / gpt-3.5/4 编码）。"""
     try:
@@ -53,7 +46,7 @@ def _count_tokens(text: str) -> int:
         return len(enc.encode(text))
     except Exception:
         # fallback: 简单估算
-        return len(text) // 2
+        return estimate_tokens(text)
 
 
 # ============================================================
@@ -69,7 +62,7 @@ TEXTUAL_RULES = {
     "non_latin_ratio": lambda s: len(re.findall(r"[^\x00-\x7F]", s)) / max(1, len(s)),
     "has_base64": lambda s: 1.0 if re.search(r"[A-Za-z0-9+/]{20,}={0,2}", s) else 0.0,
     "has_hex": lambda s: 1.0 if re.search(r"(?:\\x[0-9a-fA-F]{2}|0x[0-9a-fA-F]+)", s) else 0.0,
-    "has_multilingual": lambda s: 1.0 if re.search(r"[\u4e00-\u9fff].*[a-zA-Z]{10,}|[a-zA-Z]{10,}.*[\u4e00-\u9fff]", s) else 0.0,
+    "has_multilingual": lambda s: 1.0 if re.search(r"[一-鿿].*[a-zA-Z]{10,}|[a-zA-Z]{10,}.*[一-鿿]", s) else 0.0,
     "has_roleplay": lambda s: 1.0 if re.search(
         r"(角色扮演|扮演|你是一个|你现在是|你作为|从现在起你是|act as|you are a|you are now|pretend)",
         s, re.IGNORECASE
@@ -85,7 +78,7 @@ TEXTUAL_FEATURE_NAMES = list(TEXTUAL_RULES.keys())
 
 def extract_textual_features(prompt: str) -> dict[str, float]:
     """从单条 prompt 提取文本结构特征。"""
-    cleaned = _strip_math(prompt)
+    cleaned = strip_math_tax(prompt)
     feats = {}
     for name, func in TEXTUAL_RULES.items():
         try:
@@ -107,9 +100,6 @@ def _batch_textual_to_array(textual_feats: list[dict]) -> np.ndarray:
 # Embedding 缓存与提取
 # ============================================================
 _embedding_model = None
-
-
-_embedding_model = None
 _embedding_available = True  # 尝试加载，失败则回退
 
 
@@ -120,7 +110,6 @@ def _get_embedding_model():
 
     # 快速网络预检：3 秒内检查 HF 是否可达
     import socket
-    import urllib.request
     hf_host = os.environ.get("HF_ENDPOINT", "https://huggingface.co").replace("https://", "").replace("http://", "").rstrip("/")
     hf_host = hf_host.split("/")[0]  # 只取主机名
     try:
@@ -175,7 +164,7 @@ def extract_text_embeddings(prompts: list[str], pca_dim: int = 50) -> np.ndarray
     from sklearn.feature_extraction.text import TfidfVectorizer
 
     # 清洗 prompt
-    cleaned_prompts = [_strip_math(p) for p in prompts]
+    cleaned_prompts = [strip_math_tax(p) for p in prompts]
 
     vectorizer = TfidfVectorizer(
         max_features=200,
@@ -240,12 +229,14 @@ TECHNIQUE_LABELS = {
 }
 
 
-def extract_technique_labels(records: list[dict]) -> dict[str, np.ndarray]:
+def extract_technique_labels(records: list[dict]) -> tuple[dict[str, np.ndarray], list[str]]:
     """
     从攻击集记录中提取技术多标签向量。
-    
+
     输入: 攻击集 records (list of dict, 每条含 prompt, method, category, harm_type)
-    返回: {method_name: np.ndarray (n_labels,)}, n_labels = len(TECHNIQUE_LABELS) + len(HARM_TYPES) + len(CATEGORIES)
+    返回: (labels, label_names)
+          labels: {method_name: np.ndarray (n_labels,)}
+          label_names: 标签名列表，n_labels = len(TECHNIQUE_LABELS) + len(HARM_TYPES) + len(CATEGORIES)
     """
 
     # 收集所有 harm_type 和 category
@@ -328,7 +319,7 @@ def extract_intent_features(
             drift = 0.0
             if len(prompts) > 1:
                 # 用每条 prompt 的字符级特征方差作为 drift 代理
-                cleaned = [_strip_math(p) for p in prompts]
+                cleaned = [strip_math_tax(p) for p in prompts]
                 lengths = [len(c) for c in cleaned]
                 if max(lengths) > 0:
                     drift = np.std(lengths) / max(lengths)
@@ -337,8 +328,8 @@ def extract_intent_features(
             feats.append(0.0)
 
         # 对抗性扰动: typo 比例
-        combined = "\n".join(_strip_math(p) for p in prompts)
-        non_ascii_typo = len(re.findall(r"[^\x00-\x7F\u4e00-\u9fff\u3000-\u303f\uff00-\uffef\w\s]", combined))
+        combined = "\n".join(strip_math_tax(p) for p in prompts)
+        non_ascii_typo = len(re.findall(r"[^\x00-\x7F一-鿿　-〿＀-￯\w\s]", combined))
         typo_ratio = non_ascii_typo / max(1, len(combined))
         feats.append(min(typo_ratio, 1.0))
 
@@ -438,24 +429,6 @@ def extract_defense_features(
 CROSS_MODEL_FEATURE_NAMES: list[str] = []
 
 
-def extract_cross_model_features(
-    methods: list[str],
-    multi_model_results: dict[str, list[dict]] | None = None,
-) -> dict[str, np.ndarray]:
-    """
-    跨模型行为指纹。当前为占位，未来有多个目标模型评估数据后启用。
-    multi_model_results: {model_name: [eval_records]}
-    返回: {method_name: np.ndarray}，当前全零。
-    """
-    if multi_model_results is None:
-        return {m: np.array([], dtype=np.float64) for m in methods}
-
-    # 未来实现：对每个 model 提取 ASR，组成向量
-    result = {}
-    # 暂不实现
-    return {m: np.array([], dtype=np.float64) for m in methods}
-
-
 # ============================================================
 # 主入口：提取全部特征
 # ============================================================
@@ -466,12 +439,12 @@ def extract_all_features(
 ) -> tuple[dict, dict]:
     """
     从攻击集和评估结果中提取 5 维特征。
-    
+
     参数:
         attack_records: 攻击集 JSONL 记录列表
         eval_results: 评估结果列表 (可为空)
         embedding_pca_dim: embedding PCA 降维目标维度
-    
+
     返回:
         features: {method_name: {
             "textual": np.ndarray (15,),               # 文本统计
@@ -481,7 +454,8 @@ def extract_all_features(
             "defense": np.ndarray (14,),                # 防御交互
             "cross_model": np.ndarray (0,),             # 跨模型 (占位)
         }}
-        meta: {"method_names": [...], "method_to_idx": {...}, ...}
+        meta: {"method_names": [...], "method_to_idx": {...},
+               "method_prompts": {method: 代表prompt}, ...}
     """
 
     # 按方法分组
@@ -526,8 +500,8 @@ def extract_all_features(
     print("  维4: 防御交互 ...")
     defense_feats = extract_defense_features(methods, eval_results)
 
-    # ---- 维 5: 跨模型 (占位) ----
-    cross_model_feats = extract_cross_model_features(methods)
+    # ---- 维 5: 跨模型 (占位，未来有多模型评估数据后启用) ----
+    cross_model_feats = {m: np.array([], dtype=np.float64) for m in methods}
 
     # ---- 组装 ----
     features = {}
@@ -544,6 +518,8 @@ def extract_all_features(
     meta = {
         "method_names": methods,
         "method_to_idx": method_to_idx,
+        # 每个方法的代表 prompt，供聚类自动命名 (TF-IDF 关键词) 使用
+        "method_prompts": {m: method_prompts_text[method_to_idx[m]] for m in methods},
         "textual_feature_names": TEXTUAL_FEATURE_NAMES,
         "technique_label_names": technique_label_names,
         "intent_feature_names": INTENT_FEATURE_NAMES,
@@ -566,48 +542,47 @@ def load_and_extract(
 ) -> tuple[dict, dict]:
     """
     从文件加载攻击集和评估结果，提取特征。
-    
+
     参数:
         attack_file: 攻击集 JSONL 文件名 (相对于 output/)
         result_file: 评估结果文件名 (相对于 output/)，None 则自动查找
-    
+
     返回: (features, meta)
     """
     # 加载攻击集
-    attack_path = os.path.join(OUTPUT_DIR, attack_file) if not os.path.isabs(attack_file) else attack_file
-    if not os.path.exists(attack_path):
+    attack_path = Path(attack_file)
+    if not attack_path.is_absolute():
+        if attack_file == "攻击集_L1.jsonl":
+            # 默认攻击集：优先新路径 output/attacks/l1.jsonl，回退旧路径 output/攻击集_L1.jsonl
+            attack_path = resolve_existing(ATTACK_SET_L1_FILE, LEGACY_ATTACK_SET_L1_FILE)
+        else:
+            attack_path = OUTPUT_DIR / attack_file
+    if not attack_path.exists():
         raise FileNotFoundError(f"攻击集不存在: {attack_path}")
 
-    records = []
-    with open(attack_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
+    records = read_jsonl(attack_path)
     print(f"[加载] {len(records)} 条攻击记录")
 
     # 加载评估结果
     eval_results = []
     if result_file:
-        result_path = os.path.join(OUTPUT_DIR, result_file) if not os.path.isabs(result_file) else result_file
+        result_path = Path(result_file)
+        if not result_path.is_absolute():
+            result_path = OUTPUT_DIR / result_file
     else:
         # 自动查找：优先 runner_攻击结果.jsonl，否则 攻击集_L1_结果.jsonl
         candidates = [
-            os.path.join(OUTPUT_DIR, "runner_攻击结果.jsonl"),
-            os.path.join(OUTPUT_DIR, "攻击集_L1_结果.jsonl"),
+            OUTPUT_DIR / "runner_攻击结果.jsonl",
+            OUTPUT_DIR / "攻击集_L1_结果.jsonl",
         ]
         result_path = None
         for c in candidates:
-            if os.path.exists(c):
+            if c.exists():
                 result_path = c
                 break
 
-    if result_path and os.path.exists(result_path):
-        with open(result_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    eval_results.append(json.loads(line))
+    if result_path and result_path.exists():
+        eval_results = read_jsonl(result_path)
         print(f"[加载] {len(eval_results)} 条评估结果")
     else:
         print("[加载] 无评估结果 — 防御交互特征将为零向量")
