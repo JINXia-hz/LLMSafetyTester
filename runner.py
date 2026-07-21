@@ -227,6 +227,8 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
                 "judge_harmfulness": result.get("judge_harmfulness", 1),
                 "judge_specificity": result.get("judge_specificity", 1),
                 "judge_dangerousness": result.get("judge_dangerousness", 1),
+                "is_harmful": result.get("is_harmful", False),
+                "is_refusal": result.get("is_refusal", False),
                 "response_preview": result.get("content", "")[:500],
             })
 
@@ -242,14 +244,16 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
         # 检查收敛：防御方 ELO 滑动标准差
         conv = tracker.check_convergence(DEFENDER_NAME)
         boundary_info = tracker.compute_security_boundary(DEFENDER_NAME)
-        if conv["converged"]:
+        confidence = boundary_info.get("confidence", 0)
+        if confidence >= CONFIDENCE_TARGET:
             print(f"\n  🎯 防御方 {DEFENDER_NAME} ELO 已收敛 "
-                  f"(σ={conv['std']:.1f} < {10.0}, ELO≈{conv['current_elo']:.0f}, "
+                  f"(置信度={confidence*100:.0f}% ≥ {CONFIDENCE_TARGET*100:.0f}%, "
+                  f"σ={conv['std']:.1f}, ELO≈{conv['current_elo']:.0f}, "
                   f"已测{len(tested)}/{len(all_methods)}方法)")
             break
         else:
             print(f"     📊 防御={DEFENDER_NAME} ELO≈{conv['current_elo']:.0f} "
-                  f"σ={conv['std']} n={conv['n_updates']} "
+                  f"σ={conv['std']} 置信度={confidence*100:.0f}% "
                   f"(已测{len(tested)}/{len(all_methods)}方法)")
 
     tracker.save(ELO_FILE)
