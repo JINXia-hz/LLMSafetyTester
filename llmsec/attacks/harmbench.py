@@ -106,6 +106,33 @@ def _fallback_jailbreaks() -> list[str]:
     ]
 
 
+def _derive_template_name(template: str, idx: int, max_words: int = 5) -> str:
+    """
+    从越狱模板文本提取一个可读、稳定的短名称。
+
+    - 去掉 {0}/{behavior} 占位符
+    - 取前 max_words 个英文/中文词
+    - 转小写、空格变下划线、限制长度
+    """
+    # 去掉占位符和常见前缀填充词
+    cleaned = re.sub(r"\{\d+\}|\{behavior\}", "", template)
+    cleaned = re.sub(r"[^\w\s一-鿿]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    # 取前 N 个词
+    words = cleaned.split()
+    words = [w for w in words if w.lower() not in {"the", "a", "an", "to", "and", "or", "as", "you", "are", "is", "请"}]
+    slug_words = words[:max_words]
+    if not slug_words:
+        return f"tpl_{idx:03d}"
+
+    slug = "_".join(slug_words).lower()
+    # 限制长度，避免方法名过长
+    if len(slug) > 60:
+        slug = slug[:60].rsplit("_", 1)[0]
+    return slug
+
+
 # ============================================================
 # 生成攻击集
 # ============================================================
@@ -148,6 +175,8 @@ def generate(
         rows = rows[:max_rows]
 
     n_jailbreaks = len(jailbreaks)
+    # 为每个越狱模板预先生成可读名称
+    template_names = [_derive_template_name(t, i) for i, t in enumerate(jailbreaks)]
     entries = []
 
     for idx, row in enumerate(rows):
@@ -184,7 +213,8 @@ def generate(
                 attack_prompt = apply_obfuscation(attack_prompt, obf_method)
 
             record_id = f"hb-{behavior_id}-{v:02d}"
-            method = f"JB_{template_idx + 1:03d}_{obf_method}"
+            template_label = template_names[template_idx]
+            method = f"{template_label}_{obf_method}"
 
             entry = {
                 "id": record_id,
@@ -197,6 +227,7 @@ def generate(
                 "source": "harmbench",
                 "behavior_id": behavior_id,
                 "jailbreak_template_idx": template_idx,
+                "jailbreak_template_name": template_label,
                 "obfuscation": obf_method,
                 "variant": v,
                 "jailbreak_template_hash": abs(hash(jb_template)) % 10000,
