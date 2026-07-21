@@ -160,7 +160,8 @@ def main():
         "--max-rounds", str(rounds),
     ]
 
-    result = subprocess.run(cmd, cwd=PROJECT_ROOT)
+    # cwd 设为仓库根目录（llmsec 的上一级），python -m llmsec.xxx 才能正确定位包
+    result = subprocess.run(cmd, cwd=PROJECT_ROOT.parent)
     sys.exit(result.returncode)
 
 
