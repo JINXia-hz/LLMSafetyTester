@@ -149,12 +149,12 @@ def main():
         return
 
     print()
-    print("  启动 runner.py ...")
+    print("  启动 runner ...")
     print()
 
     cmd = [
         sys.executable,
-        str(PROJECT_ROOT / "runner.py"),
+        "-m", "llmsec.pipeline.runner",
         "--input", selected_file,
         "--batch-size", str(batch),
         "--max-rounds", str(rounds),

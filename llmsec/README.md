@@ -19,7 +19,7 @@
 
 ## 目录结构
 
-`llmsec/` 是仓库唯一顶层目录，业务代码全部位于 `llmsec/` 包内；`llmsec/*.py` 为薄壳入口（`from llmsec.xxx import main`），从仓库根目录执行时加 `llmsec/` 前缀。
+`llmsec/` 是仓库唯一顶层目录，业务代码全部位于 `llmsec/` 包内；所有入口统一通过 `python -m llmsec.<子包>.<模块>` 执行。
 
 ```
 llmsec/
@@ -72,46 +72,46 @@ PCAP_MODEL_VERSION=Qwen3.6-35B-A3B
 PCAP_PROMPT_KEY=custom:dev
 ```
 
-**本地无外部 API 测试**：`TARGET_TYPE=local_sim`，配合 `python llmsec/local_model_server.py` 即可离线跑通 evaluate 链路。
+**本地无外部 API 测试**：`TARGET_TYPE=local_sim`，配合 `python -m llmsec.server.local_model_server` 即可离线跑通 evaluate 链路。
 
 ## 用法
 
 ```bash
-python llmsec/generate_attacks.py [--dry-run] [--only 1.1.1] [--output PATH]
+python -m llmsec.attacks.generate [--dry-run] [--only 1.1.1] [--output PATH]
     # 解析 攻击分析.md 中的 L1 方法，生成攻击集（默认 output/attacks/l1.jsonl）
 
-python llmsec/generate_harmbench_attacks.py [--max N] [--seed N]
+python -m llmsec.attacks.harmbench [--max N] [--seed N]
     # 生成 HarmBench 攻击集（默认 output/attacks/harmbench_jailbreak.jsonl）
 
-python llmsec/evaluate.py [--input attacks/l1.jsonl] [--max-samples N] [--repeat N]
-                          [--only ID] [--start-from ID] [--no-judge] [--judge-model M]
+python -m llmsec.evaluation.evaluator [--input attacks/l1.jsonl] [--max-samples N] [--repeat N]
+                                      [--only ID] [--start-from ID] [--no-judge] [--judge-model M]
     # 全量评估：逐条发送目标 → Judge 评分 → 更新 ELO。--input 相对 output/ 目录。
     # --no-judge 跳过 Judge（不打外部 API），回退关键词检测。
 
-python llmsec/runner.py [--phase {all,1,2}] [--input FILE] [--batch-size N]
-                        [--max-rounds N] [--twin-window N]
+python -m llmsec.pipeline.runner [--phase {all,1,2}] [--input FILE] [--batch-size N]
+                                 [--max-rounds N] [--twin-window N]
     # 自适应编排：ELO 驱动逐轮攻击（phase 1）→ 边界附近按需过敏检测（phase 2）。
     # --twin-window 未指定时按 ELO 边界置信度自适应窗口（置信度越低窗口越大）。
 
-python llmsec/safe_twin.py [--generate|--evaluate|--all]
+python -m llmsec.evaluation.safe_twin [--generate|--evaluate|--all]
     # 安全孪生生成与过敏（FPR）检测。
 
-python llmsec/cluster.py [--method {hdbscan,kmeans,hierarchical}] [--k N]
-                         [--min-cluster-size N] [--weights emb,tech,intent,defense]
-                         [--dump-features]
+python -m llmsec.clustering.cli [--method {hdbscan,kmeans,hierarchical}] [--k N]
+                                [--min-cluster-size N] [--weights emb,tech,intent,defense]
+                                [--dump-features]
     # 攻击方法聚类分析（默认 hdbscan 自动选簇）。
 
-python llmsec/report.py [--output-dir DIR]
+python -m llmsec.reporting.report [--output-dir DIR]
     # 扫描 DIR 下 *_结果.jsonl，生成五维树形画像 + 方法注册表 + LLM 叙事报告
     #（LLM 不可用时自动回退纯文本报告）。
 
-python llmsec/launcher.py
+python -m llmsec.pipeline.launcher
     # 交互式启动器：选择攻击集与模式后引导执行。
 
-python llmsec/probe_victim.py [--text "测试文本"]
+python -m llmsec.pipeline.probe [--text "测试文本"]
     # 目标 API 连通性探测。
 
-python llmsec/local_model_server.py [--port 8000] [--refusal-rate 0.7] [--math-accuracy 0.55]
+python -m llmsec.server.local_model_server [--port 8000] [--refusal-rate 0.7] [--math-accuracy 0.55]
     # 本地模拟小模型服务器（OpenAI 兼容），用于无真实 LLM 的离线测试。
 ```
 
