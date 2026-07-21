@@ -321,9 +321,13 @@ class ELOTracker:
             if elo > def_elo
         )
 
-        # 置信度 = 收敛程度
+        # 置信度 = 基于滑动标准差：σ=0 → 100%，σ≥threshold → 0%
         conv = self.check_convergence(defender_name)
-        confidence = min(1.0, (conv.get("n_updates", 0) / 10.0))
+        std = conv.get("std")
+        if std is not None and std > 0:
+            confidence = max(0.0, 1.0 - std / CONVERGENCE_THRESHOLD)
+        else:
+            confidence = 0.0
 
         return {
             "boundary_elo": round(def_elo, 1),

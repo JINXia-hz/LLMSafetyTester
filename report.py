@@ -72,7 +72,7 @@ def load_all_results(output_dir: str) -> list[dict]:
 
 def load_elo(output_dir: str) -> dict:
     """加载 ELO 评分。"""
-    elo_file = os.path.join(output_dir, "elo.json")
+    elo_file = os.path.join(output_dir, "state", "elo.json")
     if not os.path.exists(elo_file):
         return {}
     with open(elo_file, "r", encoding="utf-8") as f:
@@ -91,20 +91,24 @@ def load_allergy(output_dir: str) -> dict:
 def load_prompt_metadata() -> dict[str, dict]:
     """加载所有prompt JSONL，建立 id→metadata 映射。"""
     metadata = {}
-    for fname in os.listdir(OUTPUT_DIR):
-        if fname.endswith(".jsonl") and "_结果" not in fname and "allergy" not in fname and "elos" not in fname:
-            filepath = os.path.join(OUTPUT_DIR, fname)
-            with open(filepath, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        try:
-                            r = json.loads(line)
-                            rid = r.get("id") or r.get("original_id")
-                            if rid:
-                                metadata[rid] = r
-                        except json.JSONDecodeError:
-                            pass
+    search_dirs = [OUTPUT_DIR, os.path.join(OUTPUT_DIR, "attacks")]
+    for search_dir in search_dirs:
+        if not os.path.exists(search_dir):
+            continue
+        for fname in os.listdir(search_dir):
+            if fname.endswith(".jsonl") and "_结果" not in fname and "allergy" not in fname and "elos" not in fname:
+                filepath = os.path.join(search_dir, fname)
+                with open(filepath, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                r = json.loads(line)
+                                rid = r.get("id") or r.get("original_id")
+                                if rid:
+                                    metadata[rid] = r
+                            except json.JSONDecodeError:
+                                pass
     return metadata
 
 
