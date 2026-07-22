@@ -9,10 +9,22 @@ LLM 安全评估交互启动器（原根目录 launcher.py）
     python launcher.py
 """
 
-import json
-import os
+from pathlib import Path
 import subprocess
 import sys
+
+# 优先使用项目根目录下的 .venv，避免系统 Python 缺少依赖
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_VENV_PYTHON = _PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
+if _VENV_PYTHON.exists() and sys.executable != str(_VENV_PYTHON):
+    subprocess.run(
+        [str(_VENV_PYTHON), "-m", "llmsec.pipeline.launcher"] + sys.argv[1:],
+        cwd=_PROJECT_ROOT,
+    )
+    sys.exit(0)
+
+import json
+import os
 
 from llmsec.core.config import ATTACKS_DIR, ELO_FILE, PROJECT_ROOT, load_env
 from llmsec.core.logging import setup_console

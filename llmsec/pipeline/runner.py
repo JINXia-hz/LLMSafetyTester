@@ -27,6 +27,20 @@ Phase 3: 综合评判
     python runner.py --max-rounds 3 --batch-size 10     # 自定义参数
 """
 
+from pathlib import Path
+import subprocess
+import sys
+
+# 优先使用项目根目录下的 .venv，避免系统 Python 缺少依赖
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_VENV_PYTHON = _PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
+if _VENV_PYTHON.exists() and sys.executable != str(_VENV_PYTHON):
+    subprocess.run(
+        [str(_VENV_PYTHON), "-m", "llmsec.pipeline.runner"] + sys.argv[1:],
+        cwd=_PROJECT_ROOT,
+    )
+    sys.exit(0)
+
 import argparse
 import json
 import os
