@@ -178,7 +178,8 @@ def knee_eps(dist_matrix: np.ndarray, k_candidates: list[int] | None = None) -> 
     用 k-distance 图找 HDBSCAN 的推荐 min_samples 与 cluster_selection_epsilon。
 
     对多个 k 候选，计算每个点到第 k 近邻的距离并排序，
-    取斜率变化最大（knee）的点作为 eps；选择使 knee 最显著的 k。
+    使用 Kneedle 算法找 k-distance 曲线的“肩部”（距离对角线最远的点）。
+    该点通常比二阶差分 knee 更大，能让 HDBSCAN 捕获更多簇。
 
     返回: (recommended_min_samples, recommended_eps)
     """
@@ -201,20 +202,21 @@ def knee_eps(dist_matrix: np.ndarray, k_candidates: list[int] | None = None) -> 
         k_dists = sorted_dists[:, k]
         k_dists = np.sort(k_dists)
 
-        # 找最大曲率点作为 knee
         if len(k_dists) < 3:
             continue
-        x = np.arange(len(k_dists))
-        # 用一阶差分再差分近似曲率；选最大二阶差分点
-        first = np.diff(k_dists)
-        second = np.diff(first)
-        if len(second) == 0:
+
+        # Kneedle：归一化后找离对角线 y=x 最远的点
+        x = np.linspace(0.0, 1.0, len(k_dists))
+        y_min, y_max = k_dists[0], k_dists[-1]
+        if y_max - y_min < 1e-9:
             continue
-        # 二阶差分越大，说明该点之后 eps 急剧增加，是 knee
-        knee_idx = int(np.argmax(second)) + 1
+        y = (k_dists - y_min) / (y_max - y_min)
+        # 距离对角线 y=x 的垂直距离
+        distances = np.abs(y - x)
+        knee_idx = int(np.argmax(distances))
         eps = float(k_dists[knee_idx])
-        # 评分：二阶差分 / eps，避免 eps 过小导致所有点成噪声
-        score = second[knee_idx - 1] / max(eps, 1e-6)
+        score = float(distances[knee_idx])
+
         if score > best_score and eps > 1e-6:
             best_score = score
             best_k = k
@@ -229,6 +231,7 @@ def _hdbscan_once(
     min_cluster_size: int,
     min_samples: int,
     eps: float,
+    selection_method: str = "leaf",
 ) -> tuple[dict[str, int], int, int]:
     """执行一次 HDBSCAN，返回 (labels, n_clusters, n_noise)。"""
     import hdbscan
@@ -238,7 +241,7 @@ def _hdbscan_once(
         metric="precomputed",
         cluster_selection_epsilon=eps,
         allow_single_cluster=False,
-        cluster_selection_method="eom",
+        cluster_selection_method=selection_method,
     )
     labels = clusterer.fit_predict(dist_matrix)
     n_clusters = len(set(labels) - {-1})
@@ -255,14 +258,16 @@ def run_hdbscan(
     """
     用 HDBSCAN 聚类（基于预计算距离矩阵）。
     自动用 k-distance 选择 min_samples 与 cluster_selection_epsilon。
-    若结果不理想，依次降低 eps、降低 min_samples 重试，直到分出可用簇。
+    若结果不理想，依次降低 eps、降低 min_samples 重试；
+    仍不足时 fallback 到层次聚类，确保簇数足够。
     返回: {method_name: cluster_id}，噪声点为 -1。
     """
     try:
         import hdbscan
         n = dist_matrix.shape[0]
-        # 动态 min_cluster_size：至少 3，最多不超过 n//3
-        effective_min_cluster_size = max(3, min(min_cluster_size, n // 3))
+        # 动态 min_cluster_size：小样本至少 3，大样本允许 2 以捕获小类
+        min_cluster_size_lower = 2 if n >= 30 else 3
+        effective_min_cluster_size = max(min_cluster_size_lower, min(min_cluster_size, n // 3))
         # 自动选参
         auto_min_samples, eps = knee_eps(dist_matrix)
         effective_min_samples = min_samples if min_samples is not None else auto_min_samples
@@ -286,7 +291,12 @@ def run_hdbscan(
             if ms >= 2 and ms not in min_samples_candidates:
                 min_samples_candidates.append(ms)
 
+        # 目标簇数：HDBSCAN 必须达到该簇数且噪声不过半才被接受，否则 fallback 到层次聚类
+        target_clusters = max(5, int(n ** 0.5))
+
         last_labels = None
+        best_labels = None
+        best_n_clusters = 0
         for try_ms in min_samples_candidates:
             for try_eps in eps_candidates:
                 logger.info(
@@ -299,13 +309,25 @@ def run_hdbscan(
                     dist_matrix, method_names, effective_min_cluster_size, try_ms, try_eps
                 )
                 last_labels = labels
-                # 只要分出至少 2 个簇且噪声不过半，就接受
-                if n_clusters >= 2 and n_noise < n / 2:
+                # 记录簇数最多的结果，用于后续 fallback 比较
+                if n_clusters > best_n_clusters:
+                    best_labels = labels
+                    best_n_clusters = n_clusters
+                # 要求达到目标簇数且噪声不过半才接受；否则继续尝试或 fallback
+                if n_clusters >= target_clusters and n_noise < n / 2:
                     return labels
                 logger.info(
                     "HDBSCAN eps=%.4f, min_samples=%d 结果不理想 (簇=%d, 噪声=%d)",
                     try_eps, try_ms, n_clusters, n_noise,
                 )
+
+        # 若 HDBSCAN 无论如何都太少簇，fallback 到层次聚类
+        if best_n_clusters < target_clusters:
+            logger.warning(
+                "HDBSCAN 最多只分出 %d 簇，fallback 到层次聚类 (target=%d)",
+                best_n_clusters, target_clusters,
+            )
+            return run_hierarchical(dist_matrix, method_names, n_clusters=target_clusters)
 
         # 全部候选都不行，用最后一个结果
         return last_labels if last_labels is not None else {name: -1 for name in method_names}
