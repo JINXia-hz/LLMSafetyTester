@@ -300,9 +300,48 @@ class ELOTracker:
                     "def_elo": round(def_elo, 1),
                     "elo_gap": round(gap, 1),
                     "eval_score": h["eval_score"],
+                    "surprise": round(gap, 1),
                 })
         upsets.sort(key=lambda x: x["elo_gap"], reverse=True)
         return upsets
+
+    def find_surprises(self, min_elo_gap: float = 50.0) -> dict[str, list[dict]]:
+        """
+        双向"意外"事件：
+        - weakness: 低 ELO 攻击成功 → 模型防御短板（真正需要关注）
+        - strength: 高 ELO 攻击失败 → 模型防御强项
+
+        返回: {"weakness": [...], "strength": [...]}
+        """
+        weakness = []
+        strength = []
+        for h in self.history:
+            att_elo = h["attacker_old_elo"]
+            def_elo = h["defender_old_elo"]
+            gap = def_elo - att_elo
+            if h["attacker_won"] and gap >= min_elo_gap:
+                weakness.append({
+                    "attacker": h["attacker"],
+                    "defender": h["defender"],
+                    "att_elo": round(att_elo, 1),
+                    "def_elo": round(def_elo, 1),
+                    "elo_gap": round(gap, 1),
+                    "eval_score": h["eval_score"],
+                    "type": "weakness",
+                })
+            elif not h["attacker_won"] and -gap >= min_elo_gap:
+                strength.append({
+                    "attacker": h["attacker"],
+                    "defender": h["defender"],
+                    "att_elo": round(att_elo, 1),
+                    "def_elo": round(def_elo, 1),
+                    "elo_gap": round(-gap, 1),
+                    "eval_score": h["eval_score"],
+                    "type": "strength",
+                })
+        weakness.sort(key=lambda x: x["elo_gap"], reverse=True)
+        strength.sort(key=lambda x: x["elo_gap"], reverse=True)
+        return {"weakness": weakness, "strength": strength}
 
     # ============================================================
     # 安全边界（兼容旧接口）

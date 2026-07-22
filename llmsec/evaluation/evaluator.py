@@ -672,13 +672,18 @@ def print_summary(summary: dict, judge_stats: dict | None,
     if "elo" in summary:
         elo_s = summary["elo"]["summary"]
         elo_b = summary["elo"]["security_boundary"]
+        upsets = summary["elo"].get("upsets", [])
         print(f"\n  🎯 ELO 评分:")
         print(f"    方法数: {elo_s.get('total_methods', 0)}")
         print(f"    ELO范围: {elo_s.get('min_elo', 0)} ~ {elo_s.get('max_elo', 0)}")
-        print(f"    TOP5威胁: {', '.join(t['method'] for t in elo_s.get('top_threats', []))}")
+        print(f"    TOP5攻击方: {', '.join(t['method'] for t in elo_s.get('top_threats', []))}")
         if elo_b.get("boundary_elo") is not None:
             print(f"    安全边界: {elo_b['boundary_elo']} (置信度 {elo_b['confidence']*100:.0f}%)")
             print(f"    边界以上威胁: {elo_b.get('methods_above_boundary', 0)} 种")
+        if upsets:
+            print(f"\n  ⚠️ 意外盲区（低 ELO 成功）TOP5:")
+            for u in upsets[:5]:
+                print(f"      {u['attacker']} (ELO={u['att_elo']}) 击败 {u['defender']} (ELO={u['def_elo']}) gap={u['elo_gap']}")
 
     print(f"\n  📁 详细结果: {result_file}")
     print(f"  📁 汇总报告: {summary_file}")
