@@ -157,9 +157,9 @@ def extract_text_embeddings(
         embeddings = model.encode(prompts, show_progress_bar=False, batch_size=32)
         print(f"  [*] 编码完成 ({time.time() - t0:.1f}s), 原始维度 {embeddings.shape[1]}")
 
-        # PCA 降维
+        # PCA 降维：避免 n-1 过拟合，target_dim 上限固定且随样本数缓慢增长
         n = embeddings.shape[0]
-        target_dim = min(pca_dim, n - 1, embeddings.shape[1])
+        target_dim = min(pca_dim, max(1, n // 3), n - 1, embeddings.shape[1])
         if target_dim < embeddings.shape[1]:
             fit_pca = pca if pca is not None else PCA(n_components=target_dim, random_state=42)
             reduced = fit_pca.fit_transform(embeddings) if pca is None else fit_pca.transform(embeddings)
@@ -188,9 +188,9 @@ def extract_text_embeddings(
         tfidf_matrix = fit_vectorizer.transform(cleaned_prompts)
     dense = tfidf_matrix.toarray()
 
-    # PCA 降维到目标维度
+    # PCA 降维到目标维度：避免 n-1 过拟合
     n = dense.shape[0]
-    target_dim = min(pca_dim, n - 1, dense.shape[1])
+    target_dim = min(pca_dim, max(1, n // 3), n - 1, dense.shape[1])
     if dense.shape[1] > target_dim:
         fit_pca = pca if pca is not None else PCA(n_components=target_dim, random_state=42)
         reduced = fit_pca.fit_transform(dense) if pca is None else fit_pca.transform(dense)

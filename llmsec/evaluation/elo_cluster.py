@@ -185,6 +185,11 @@ class ClusterEloPredictor:
         """
         基于 ground truth 方法重新训练聚类模型。
 
+        关键设计：
+        - 特征空间用全部 attack_records 构建，保证未测方法与已测方法在同一空间。
+        - HDBSCAN 只在 ground truth 方法上训练，避免未测数据污染簇定义。
+        - 对仍被标为噪声的 ground truth 方法，用 kNN 挂回最近簇，确保锚点完整。
+
         参数:
             attack_records: 全部攻击记录
             eval_results: 全部评估结果
@@ -206,47 +211,164 @@ class ClusterEloPredictor:
             )
             return None
 
-        # 过滤出 ground truth 方法的 records / eval_results
-        gt_records = [r for r in attack_records if r.get("method") in gt_methods]
-        gt_eval_results = [r for r in eval_results if r.get("method") in gt_methods]
-
-        if len(gt_records) < self.min_cluster_size:
-            logger.warning("ground truth records 不足，跳过聚类")
+        if len(attack_records) < self.min_cluster_size:
+            logger.warning("攻击记录不足，跳过聚类")
             return None
 
         logger.info(
-            "🔄 重新训练聚类模型: ground truth %d 种方法",
+            "🔄 重新训练聚类模型: ground truth %d 种方法，总方法记录 %d 条",
             len(gt_methods),
+            len(attack_records),
         )
 
-        # 提取特征并聚类
-        features, meta = extract_all_features(gt_records, gt_eval_results)
+        # 1. 对全部方法构建统一特征空间（含未测方法）
+        all_features, meta = extract_all_features(attack_records, eval_results)
+        all_methods = sorted(all_features.keys())
+        method_to_idx = {m: i for i, m in enumerate(all_methods)}
+
+        # 2. 提取 ground truth 子集，在其上训练 HDBSCAN
+        gt_records = [r for r in attack_records if r.get("method") in gt_methods]
+        gt_eval_results = [r for r in eval_results if r.get("method") in gt_methods]
+        gt_features, gt_meta = extract_all_features(gt_records, gt_eval_results)
+        gt_method_list = sorted(gt_features.keys())
+
         report = run_clustering_pipeline(
-            features,
-            meta,
+            gt_features,
+            gt_meta,
             method="hdbscan",
-            min_cluster_size=min(self.min_cluster_size, len(gt_methods)),
+            min_cluster_size=min(self.min_cluster_size, len(gt_method_list)),
             weights=self.weights,
             verbose=False,
         )
 
-        # 重新加载 artifacts（包含最新 labels / dist_matrix 等）
+        # 3. 重新加载 artifacts 并扩展为“全部方法”版本
         self.artifacts = joblib.load(CLUSTER_ARTIFACTS_FILE)
+        gt_labels = self.artifacts["labels"]  # {gt_method: cluster_id}
+
+        # 4. 为 ground truth 中的噪声点挂回最近簇
+        gt_labels = self._assign_noise_to_nearest_cluster(
+            gt_labels, self.artifacts["dist_matrix"], gt_method_list
+        )
+
+        # 5. 计算诊断指标
+        diagnostics = self._compute_diagnostics(
+            gt_labels, self.artifacts["dist_matrix"], gt_method_list
+        )
+        diagnostics["k_distance_eps"] = self.artifacts.get("hdbscan_params", {}).get(
+            "k_distance_eps", 0.0
+        )
+
+        # 6. 组装新的 artifacts：包含全部方法特征、gt labels、gt dist_matrix
+        self.artifacts["features"] = all_features
+        self.artifacts["meta"] = meta
+        self.artifacts["labels"] = gt_labels
         self.artifacts["ground_truth_count"] = current_gt_count
         self.artifacts["ground_truth_methods"] = sorted(gt_methods)
+        self.artifacts["all_methods"] = all_methods
+        self.artifacts["method_to_idx"] = method_to_idx
+        self.artifacts["diagnostics"] = diagnostics
         self.last_fit_gt_count = current_gt_count
         self.last_fit_at = datetime.now().isoformat()
 
-        # 写回 artifacts，便于外部查看
+        # 写回 artifacts
         joblib.dump(self.artifacts, CLUSTER_ARTIFACTS_FILE)
 
         logger.info(
-            "✅ 聚类完成: %d 簇, %d 噪声点, 上次训练时间 %s",
-            report.get("n_clusters", 0),
-            report.get("n_noise", 0),
+            "✅ 聚类完成: %d 簇, %d 原始噪声点, %d 挂回噪声点, "
+            "noise_ratio=%.2f%%, silhouette=%.4f, k-distance_eps=%.4f, 上次训练时间 %s",
+            diagnostics["n_clusters"],
+            diagnostics["n_raw_noise"],
+            diagnostics["n_reassigned_noise"],
+            diagnostics["noise_ratio"] * 100,
+            diagnostics["silhouette"],
+            diagnostics.get("k_distance_eps", 0.0),
             self.last_fit_at,
         )
         return report
+
+    def _assign_noise_to_nearest_cluster(
+        self,
+        labels: dict[str, int],
+        dist_matrix: np.ndarray,
+        methods: list[str],
+    ) -> dict[str, int]:
+        """
+        对 labels 中为 -1 的 ground truth 方法，找到最近非噪声邻居所属簇并挂回。
+        保证所有 ground truth 方法都有有效簇归属。
+        """
+        method_to_idx = {m: i for i, m in enumerate(methods)}
+        new_labels = dict(labels)
+        n_reassigned = 0
+
+        for method in methods:
+            if new_labels[method] != -1:
+                continue
+            idx = method_to_idx[method]
+            distances = dist_matrix[idx].copy()
+            distances[idx] = np.inf
+
+            # 按距离排序找第一个非噪声邻居
+            sorted_idx = np.argsort(distances)
+            for neighbor_idx in sorted_idx:
+                neighbor = methods[neighbor_idx]
+                neighbor_label = new_labels[neighbor]
+                if neighbor_label != -1:
+                    new_labels[method] = neighbor_label
+                    n_reassigned += 1
+                    break
+
+        return new_labels
+
+    def _compute_diagnostics(
+        self,
+        labels: dict[str, int],
+        dist_matrix: np.ndarray,
+        methods: list[str],
+    ) -> dict:
+        """计算聚类诊断指标。"""
+        from sklearn.metrics import silhouette_score
+
+        n = len(methods)
+        n_noise_raw = sum(1 for v in labels.values() if v == -1)
+        # 挂回后不应再出现 -1
+        n_noise_final = sum(1 for v in labels.values() if v == -1)
+        cluster_ids = sorted(set(labels.values()) - {-1})
+        n_clusters = len(cluster_ids)
+
+        silhouette = 0.0
+        valid_idx = [i for i, m in enumerate(methods) if labels[m] != -1]
+        if len(valid_idx) >= 3 and len(cluster_ids) >= 2:
+            try:
+                y_valid = [labels[methods[i]] for i in valid_idx]
+                d_sub = dist_matrix[np.ix_(valid_idx, valid_idx)]
+                silhouette = float(silhouette_score(d_sub, y_valid, metric="precomputed"))
+            except Exception:
+                pass
+
+        return {
+            "n_clusters": n_clusters,
+            "n_raw_noise": n_noise_raw,
+            "n_reassigned_noise": n_noise_raw - n_noise_final,
+            "n_noise_final": n_noise_final,
+            "noise_ratio": n_noise_raw / max(1, n),
+            "silhouette": round(silhouette, 4),
+            "cluster_size_entropy": self._cluster_entropy(labels, cluster_ids),
+        }
+
+    def _cluster_entropy(self, labels: dict[str, int], cluster_ids: list[int]) -> float:
+        """簇大小分布的香农熵，值越大分布越均匀。"""
+        from math import log
+
+        sizes = [sum(1 for v in labels.values() if v == cid) for cid in cluster_ids]
+        total = sum(sizes)
+        if total == 0:
+            return 0.0
+        entropy = 0.0
+        for s in sizes:
+            if s > 0:
+                p = s / total
+                entropy -= p * log(p)
+        return round(entropy, 4)
 
     # ============================================================
     # 特征提取（预测用）
@@ -378,6 +500,11 @@ class ClusterEloPredictor:
         """
         预测单个方法的初始 Elo。
 
+        核心逻辑：
+        - 已测方法直接返回 ground truth Elo。
+        - 未测方法在统一特征空间中找到最近 ground truth 锚点，强制归入其所在簇。
+        - 簇内 Elo 按与目标方法的距离倒数加权，已测方法天然权重最高（未测方法不参与）。
+
         参数:
             method: 攻击方法名
             record: 该方法的攻击记录（含 prompt / category / harm_type）
@@ -444,53 +571,57 @@ class ClusterEloPredictor:
         # 第一行是新方法到所有 gt 方法的距离
         distances_to_gt = dist_matrix[0, 1:]
 
-        # 5. 找最近邻（跳过噪声 -1，必要时扩大 k 近邻）
+        # 5. 找最近 ground truth 锚点（labels 已被 fit 处理，理论上无 -1）
         sorted_indices = np.argsort(distances_to_gt)
-        chosen_cluster = None
-        min_dist = None
-        for rank, idx in enumerate(sorted_indices[: self.k_neighbors]):
-            candidate = gt_methods[idx]
-            cid = labels[candidate]
-            if cid != -1:
-                chosen_cluster = cid
-                min_dist = float(distances_to_gt[idx])
-                break
+        nearest_idx = sorted_indices[0]
+        nearest_method = gt_methods[nearest_idx]
+        nearest_cluster = labels[nearest_method]
+        nearest_dist = float(distances_to_gt[nearest_idx])
 
-        # 6. 若全是噪声，回退到全局平均真实 Elo
-        if chosen_cluster is None:
-            avg_elo = sum(v["elo"] for v in self.ground_truth.values()) / len(
-                self.ground_truth
-            )
-            return {
-                "elo": round(avg_elo, 2),
+        # 6. 取该簇内所有 ground truth 方法，按距离倒数加权求 Elo
+        cluster_members = [m for m, cid in labels.items() if cid == nearest_cluster]
+        if not cluster_members:
+            # 兜底：最近锚点单独预测
+            predicted_elo = self.ground_truth[nearest_method]["elo"]
+            confidence = 1.0 / (1.0 + nearest_dist)
+            result = {
+                "elo": round(predicted_elo, 2),
                 "source": "predicted",
-                "cluster_id": -1,
-                "confidence": 0.0,
+                "cluster_id": int(nearest_cluster),
+                "confidence": round(confidence, 4),
                 "based_on_gt_count": self.ground_truth_count(),
             }
+            self.predicted[method] = {**result, "predicted_at": datetime.now().isoformat()}
+            return result
 
-        # 7. 取该簇内 ground truth 方法的平均 Elo
-        cluster_members = [
-            m for m, cid in labels.items() if cid == chosen_cluster
-        ]
-        cluster_elos = [self.ground_truth[m]["elo"] for m in cluster_members]
-        predicted_elo = sum(cluster_elos) / len(cluster_elos)
+        # 加权平均：同一簇内 ground truth 方法按与目标方法距离倒数加权
+        weights_list = []
+        elos_list = []
+        for member in cluster_members:
+            member_idx = gt_methods.index(member)
+            d = float(distances_to_gt[member_idx])
+            w = 1.0 / (1.0 + d)
+            weights_list.append(w)
+            elos_list.append(self.ground_truth[member]["elo"])
+
+        weights_arr = np.array(weights_list)
+        predicted_elo = float(np.dot(weights_arr, elos_list) / weights_arr.sum())
 
         # 置信度：距离越近越可信；簇越大越可信
         cluster_size = len(cluster_members)
-        distance_conf = 1.0 / (1.0 + min_dist)
+        distance_conf = 1.0 / (1.0 + nearest_dist)
         size_conf = min(cluster_size / self.min_cluster_size, 1.0)
         confidence = round(distance_conf * size_conf, 4)
 
         result = {
             "elo": round(predicted_elo, 2),
             "source": "predicted",
-            "cluster_id": int(chosen_cluster),
+            "cluster_id": int(nearest_cluster),
             "confidence": confidence,
             "based_on_gt_count": self.ground_truth_count(),
         }
 
-        # 8. 缓存预测结果
+        # 7. 缓存预测结果
         self.predicted[method] = {
             **result,
             "predicted_at": datetime.now().isoformat(),

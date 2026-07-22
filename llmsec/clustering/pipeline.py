@@ -173,26 +173,117 @@ def build_composite_distance(
 # ============================================================
 # 3. 聚类算法
 # ============================================================
+def knee_eps(dist_matrix: np.ndarray, k_candidates: list[int] | None = None) -> tuple[int, float]:
+    """
+    用 k-distance 图找 HDBSCAN 的推荐 min_samples 与 cluster_selection_epsilon。
+
+    对多个 k 候选，计算每个点到第 k 近邻的距离并排序，
+    取斜率变化最大（knee）的点作为 eps；选择使 knee 最显著的 k。
+
+    返回: (recommended_min_samples, recommended_eps)
+    """
+    if k_candidates is None:
+        k_candidates = [2, 3, 4]
+
+    n = dist_matrix.shape[0]
+    if n <= max(k_candidates) + 1:
+        return 2, 0.2
+
+    best_score = -np.inf
+    best_k = 2
+    best_eps = 0.2
+
+    for k in k_candidates:
+        if k >= n - 1:
+            continue
+        # 每个点到第 k 近邻的距离（跳过自己，取第 k 小）
+        sorted_dists = np.sort(dist_matrix, axis=1)
+        k_dists = sorted_dists[:, k]
+        k_dists = np.sort(k_dists)
+
+        # 找最大曲率点作为 knee
+        if len(k_dists) < 3:
+            continue
+        x = np.arange(len(k_dists))
+        # 用一阶差分再差分近似曲率；选最大二阶差分点
+        first = np.diff(k_dists)
+        second = np.diff(first)
+        if len(second) == 0:
+            continue
+        # 二阶差分越大，说明该点之后 eps 急剧增加，是 knee
+        knee_idx = int(np.argmax(second)) + 1
+        eps = float(k_dists[knee_idx])
+        # 评分：二阶差分 / eps，避免 eps 过小导致所有点成噪声
+        score = second[knee_idx - 1] / max(eps, 1e-6)
+        if score > best_score and eps > 1e-6:
+            best_score = score
+            best_k = k
+            best_eps = eps
+
+    return int(best_k), float(best_eps)
+
+
 def run_hdbscan(
     dist_matrix: np.ndarray,
     method_names: list[str],
     min_cluster_size: int = 3,
-    min_samples: int = 2,
+    min_samples: int | None = None,
 ) -> dict[str, int]:
     """
     用 HDBSCAN 聚类（基于预计算距离矩阵）。
+    自动用 k-distance 选择 min_samples 与 cluster_selection_epsilon。
+    若全部样本被标为噪声，则逐步降低 eps 重试。
     返回: {method_name: cluster_id}，噪声点为 -1。
     """
     try:
         import hdbscan
-        clusterer = hdbscan.HDBSCAN(
-            min_cluster_size=min_cluster_size,
-            min_samples=min_samples,
-            metric="precomputed",
-            cluster_selection_epsilon=0.2,
-            allow_single_cluster=True,
-        )
-        labels = clusterer.fit_predict(dist_matrix)
+        n = dist_matrix.shape[0]
+        # 动态 min_cluster_size：至少 3，最多不超过 n//3
+        effective_min_cluster_size = max(3, min(min_cluster_size, n // 3))
+        # 自动选参
+        auto_min_samples, eps = knee_eps(dist_matrix)
+        effective_min_samples = min_samples if min_samples is not None else auto_min_samples
+        # 小样本时限制 min_samples，避免所有点都因邻居不足被判为噪声
+        effective_min_samples = min(effective_min_samples, max(2, n // 5))
+        effective_min_samples = min(effective_min_samples, n - 1)
+        eps = min(eps, dist_matrix.max())
+
+        # 候选 eps：从 knee_eps 开始，逐步下降到最小非零距离的 50%
+        sorted_distances = np.sort(dist_matrix[np.triu_indices_from(dist_matrix, k=1)])
+        min_positive_dist = float(sorted_distances[sorted_distances > 0].min()) if np.any(sorted_distances > 0) else 1e-6
+        eps_candidates = [eps]
+        for factor in [0.75, 0.5, 0.33, 0.25]:
+            candidate = max(eps * factor, min_positive_dist * 1.05)
+            if candidate < eps_candidates[-1]:
+                eps_candidates.append(candidate)
+
+        for try_eps in eps_candidates:
+            logger.info(
+                "HDBSCAN 参数: min_cluster_size=%d, min_samples=%d, cluster_selection_epsilon=%.4f",
+                effective_min_cluster_size,
+                effective_min_samples,
+                try_eps,
+            )
+            clusterer = hdbscan.HDBSCAN(
+                min_cluster_size=effective_min_cluster_size,
+                min_samples=effective_min_samples,
+                metric="precomputed",
+                cluster_selection_epsilon=try_eps,
+                allow_single_cluster=False,
+                cluster_selection_method="eom",
+            )
+            labels = clusterer.fit_predict(dist_matrix)
+            n_clusters = len(set(labels) - {-1})
+            n_noise = sum(1 for v in labels if v == -1)
+            # 只要分出至少 2 个簇且噪声不过半，就接受
+            if n_clusters >= 2 and n_noise < n / 2:
+                return {name: int(label) for name, label in zip(method_names, labels)}
+            logger.info(
+                "HDBSCAN eps=%.4f 结果不理想 (簇=%d, 噪声=%d)，尝试更小 eps",
+                try_eps, n_clusters, n_noise,
+            )
+
+        # 全部候选都不行，用最后一个结果
         return {name: int(label) for name, label in zip(method_names, labels)}
     except Exception as e:
         logger.warning("HDBSCAN 失败: %s，回退到 K-Means (K=3)", e)
@@ -458,8 +549,15 @@ def run_clustering_pipeline(
     if verbose:
         print(f"🔬 {method.upper()} 聚类 ...")
 
+    hdbscan_params = {}
     if method == "hdbscan":
         labels = run_hdbscan(dist_matrix, methods, min_cluster_size=min_cluster_size)
+        # 记录实际使用的 k-distance 参数
+        try:
+            _, eps = knee_eps(dist_matrix)
+            hdbscan_params["k_distance_eps"] = round(float(eps), 4)
+        except Exception:
+            hdbscan_params["k_distance_eps"] = 0.0
     elif method == "kmeans":
         k_val = k or min(6, max(2, n // 3))
         labels = run_kmeans(dist_matrix, methods, k=k_val)
@@ -539,6 +637,7 @@ def run_clustering_pipeline(
         "clustering_method": method,
         "n_clusters": n_clusters,
         "n_noise": n_noise,
+        "hdbscan_params": hdbscan_params,
         "weights": {
             "embedding": weights[0], "technique": weights[1],
             "intent": weights[2], "defense": weights[3],
@@ -569,6 +668,7 @@ def run_clustering_pipeline(
         "dist_matrix": dist_matrix,
         "cluster_names": cluster_names,
         "cluster_profiles": cluster_profiles,
+        "hdbscan_params": hdbscan_params,
         "generated_at": report["generated_at"],
     }
     os.makedirs(os.path.dirname(CLUSTER_ARTIFACTS_FILE) or ".", exist_ok=True)

@@ -16,8 +16,8 @@
 - **反向 ELO**：攻击方法为进攻方、目标模型为防守方。攻击成功 → 攻击方法 ELO 上升；被防住 → 下降。ELO 越高威胁越大，防守方 ELO 即"安全边界"。
 - **ASR + FPR 二维画像**：ASR（攻击成功率）衡量防线强度；FPR（误杀率/过敏率）通过"安全孪生"（语义安全但结构相似的 prompt）衡量模型是否误伤正常请求。
 - **LLM-as-Judge**：三层递进评分——快速预筛（0 API 调用）→ 合规等级判断（A-E）→ 有害度三维评分（harmfulness / specificity / dangerousness），节省 70% 以上 Judge API 调用。
-- **聚类冷启动 ELO**：对未评估过的攻击方法，按文本/技术/意图/防御交互特征近似性分到最近簇，取簇内真实 ELO 均值作为初始值。首次运行无真实数据时自动采样少量种子方法做真实评估，再预测其余方法，实现海量攻击数据的免预热接入。
-- **动态聚类**：聚类模型只基于真实评估数据构建，新增真实样本跨过阈值（默认 10）时自动重训练，预测值绝不参与聚类，避免"死 ELO"污染簇结构。
+- **聚类冷启动 ELO**：对未评估过的攻击方法，按文本/技术/意图/防御交互特征近似性分到最近簇，取簇内真实 ELO 的**距离倒数加权平均**作为初始值。首次运行无真实数据时自动采样少量种子方法做真实评估，再预测其余方法，实现海量攻击数据的免预热接入。
+- **动态聚类**：聚类模型只基于真实评估数据构建，新增真实样本跨过阈值（默认 10）时自动重训练，预测值绝不参与聚类，避免"死 ELO"污染簇结构。HDBSCAN 参数通过 **k-distance 图自动选择 `min_samples` 与 `cluster_selection_epsilon`**；若 ground truth 样本仍被标为噪声，会自动挂回到最近的非噪声簇，确保每个已测方法都是可用锚点。
 
 ## 目录结构
 
@@ -107,6 +107,9 @@ python -m llmsec.pipeline.runner [--phase {all,1,2}] [--input FILE] [--batch-siz
 
 python -m llmsec.evaluation.cluster_analysis [--defender NAME] [--output PATH]
     # 基于当前 ELO 与聚类结果输出簇级安全分析（高风险/盲区/稳定簇）。
+
+python -m tests.clustering_kdistance
+    # 离线验证聚类效果：构造 base64/rot13/code 三类攻击，断言簇数 ≥3 且噪声比 <30%。
 
 python -m llmsec.evaluation.elo_cluster --status
     # 查看聚类-ELO 预测器状态：ground truth 数、预测数、簇数、下次触发训练阈值等。
