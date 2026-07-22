@@ -35,6 +35,8 @@ from llmsec.clustering import (
     extract_text_embeddings,
     extract_textual_features,
     run_clustering_pipeline,
+    run_final_clustering,
+    run_pre_clustering,
 )
 from llmsec.clustering.features import (
     DEFENSE_FEATURE_NAMES,
@@ -194,9 +196,137 @@ class ClusterEloPredictor:
         return (current_gt_count - self.last_fit_gt_count) >= self.threshold
 
     # ============================================================
-    # 聚类训练
+    # 预聚类 / 固定簇预测 / 最终聚类
     # ============================================================
-    def fit(
+    def pre_fit(self, attack_records: list[dict]) -> dict | None:
+        """
+        攻击前预聚类：只用攻击本身特征，把方法压到 5~10 个固定簇。
+        不依赖 ground truth，用于种子选择与固定簇采样。
+
+        返回: 预聚类报告 dict；未触发时返回 None。
+        """
+        if len(attack_records) < 2:
+            logger.warning("攻击记录不足，跳过预聚类")
+            return None
+
+        logger.info("🧊 预聚类: 总方法记录 %d 条", len(attack_records))
+        features, meta = extract_all_features(attack_records, eval_results=[])
+        report = run_pre_clustering(features, meta, weights=self.weights)
+
+        self.artifacts = joblib.load(CLUSTER_ARTIFACTS_FILE)
+        self.artifacts["is_pre_cluster"] = True
+        self.last_fit_at = datetime.now().isoformat()
+        joblib.dump(self.artifacts, CLUSTER_ARTIFACTS_FILE)
+
+        logger.info(
+            "✅ 预聚类完成: %d 簇, target_k=%d, silhouette=%.4f",
+            report.get("n_clusters", 0),
+            report.get("target_k", 0),
+            report.get("validation", {}).get("silhouette", 0.0),
+        )
+        return report
+
+    def predict_fixed(
+        self,
+        method: str,
+        record: dict | None = None,
+    ) -> dict:
+        """
+        基于固定簇（预聚类结果）内 ground truth 平均 Elo 预测。
+        攻击阶段不再改变簇归属，只更新簇内 ground truth 统计。
+        """
+        if method in self.ground_truth:
+            return {
+                "elo": self.ground_truth[method]["elo"],
+                "source": "ground_truth",
+                "cluster_id": None,
+                "confidence": 1.0,
+                "based_on_gt_count": self.ground_truth_count(),
+            }
+
+        if self.artifacts is None or "labels" not in self.artifacts:
+            return {
+                "elo": float(INITIAL_ELO),
+                "source": "predicted",
+                "cluster_id": None,
+                "confidence": 0.0,
+                "based_on_gt_count": self.ground_truth_count(),
+            }
+
+        labels = self.artifacts["labels"]
+        if method not in labels:
+            logger.warning("方法 %s 不在预聚类结果中，回退到全局平均", method)
+            avg = sum(v["elo"] for v in self.ground_truth.values()) / max(1, len(self.ground_truth))
+            return {
+                "elo": round(avg, 2),
+                "source": "predicted",
+                "cluster_id": -1,
+                "confidence": 0.0,
+                "based_on_gt_count": self.ground_truth_count(),
+            }
+
+        cluster_id = labels[method]
+        cluster_members = [m for m, cid in labels.items() if cid == cluster_id]
+        gt_members = [m for m in cluster_members if m in self.ground_truth]
+
+        if not gt_members:
+            # 簇内无 ground truth，用全局平均
+            avg = sum(v["elo"] for v in self.ground_truth.values()) / max(1, len(self.ground_truth))
+            confidence = 0.0
+            source = "predicted_global"
+        else:
+            avg = sum(self.ground_truth[m]["elo"] for m in gt_members) / len(gt_members)
+            confidence = min(len(gt_members) / self.min_cluster_size, 1.0)
+            source = "predicted"
+
+        return {
+            "elo": round(avg, 2),
+            "source": source,
+            "cluster_id": int(cluster_id),
+            "confidence": round(confidence, 4),
+            "based_on_gt_count": self.ground_truth_count(),
+        }
+
+    def final_fit(
+        self,
+        attack_records: list[dict],
+        eval_results: list[dict],
+    ) -> dict | None:
+        """
+        攻击完成后最终聚类：DBSCAN + Agglomerative 两步。
+        用全部真实评估数据重新构建特征空间，产出最终簇结构。
+
+        返回: 最终聚类报告 dict。
+        """
+        if len(attack_records) < 2:
+            logger.warning("攻击记录不足，跳过最终聚类")
+            return None
+
+        logger.info("🏁 最终聚类: 总方法记录 %d 条，评估结果 %d 条", len(attack_records), len(eval_results))
+        features, meta = extract_all_features(attack_records, eval_results)
+        report = run_final_clustering(features, meta, weights=self.weights)
+
+        self.artifacts = joblib.load(CLUSTER_ARTIFACTS_FILE)
+        self.artifacts["is_final_cluster"] = True
+        self.artifacts["ground_truth_count"] = self.ground_truth_count()
+        self.artifacts["ground_truth_methods"] = sorted(self.ground_truth.keys())
+        self.last_fit_gt_count = self.ground_truth_count()
+        self.last_fit_at = datetime.now().isoformat()
+        joblib.dump(self.artifacts, CLUSTER_ARTIFACTS_FILE)
+
+        logger.info(
+            "✅ 最终聚类完成: %d 簇, DBSCAN核心簇=%d, 噪声=%d, silhouette=%.4f",
+            report.get("n_clusters", 0),
+            report.get("dbscan_core_clusters", 0),
+            report.get("dbscan_noise", 0),
+            report.get("validation", {}).get("silhouette", 0.0),
+        )
+        return report
+
+    # ============================================================
+    # 聚类训练（动态模式，已不在攻击阶段使用）
+    # ============================================================
+    def fit_dynamic(
         self,
         attack_records: list[dict],
         eval_results: list[dict],

@@ -35,9 +35,12 @@ from llmsec.clustering.pipeline import (
     euclidean_distance_matrix,
     jaccard_distance_matrix,
     run_clustering_pipeline,
+    run_dbscan,
+    run_final_clustering,
     run_hdbscan,
     run_hierarchical,
     run_kmeans,
+    run_pre_clustering,
 )
 
 __all__ = [
@@ -50,6 +53,7 @@ __all__ = [
     "DEFENSE_FEATURE_NAMES", "CROSS_MODEL_FEATURE_NAMES",
     # pipeline
     "run_clustering_pipeline", "run_hdbscan", "run_kmeans", "run_hierarchical",
+    "run_dbscan", "run_pre_clustering", "run_final_clustering",
     "build_composite_distance", "build_cluster_profiles",
     "auto_name_clusters", "compute_external_validation",
     "cosine_distance_matrix", "jaccard_distance_matrix",

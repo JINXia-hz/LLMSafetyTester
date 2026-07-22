@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-离线验证：k-distance 自动选参的 HDBSCAN 聚类效果。
+离线验证：预聚类（Agglomerative）与最终聚类（DBSCAN + Agglomerative）。
 
 构造 3 类已知攻击（base64 编码 / rot13 编码 / 代码伪装），
-验证 HDBSCAN 能自动分出 ≥3 簇且噪声比 < 30%。
+验证：
+1. 预聚类在无 defense 特征时仍能分出 ≥3 簇且噪声比 <30%
+2. 最终聚类能分出 ≥3 簇
 """
 
 import sys
 from pathlib import Path
 
-# 把项目根目录加入路径
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from llmsec.clustering import extract_all_features, run_clustering_pipeline
+from llmsec.clustering import extract_all_features, run_final_clustering, run_pre_clustering
 
 
 SAMPLES = {
@@ -37,45 +38,71 @@ def main() -> int:
     for cat, items in SAMPLES.items():
         records.extend(items)
 
-    features, meta = extract_all_features(records, eval_results=[])
-    report = run_clustering_pipeline(
-        features,
-        meta,
-        method="hdbscan",
-        min_cluster_size=3,
-        weights=(0.35, 0.25, 0.10, 0.30),
-        verbose=True,
-    )
-
-    n_clusters = report["n_clusters"]
-    n_noise = report["n_noise"]
-    n_total = report["method_count"]
-    noise_ratio = n_noise / max(1, n_total)
-    silhouette = report.get("validation", {}).get("silhouette", 0.0)
-    eps = report.get("hdbscan_params", {}).get("k_distance_eps", 0.0)
-
+    # ---- 预聚类（无 eval 数据）----
     print("\n" + "=" * 60)
-    print("📊 验证结果")
+    print("🧊 预聚类（Agglomerative，无 defense 特征）")
     print("=" * 60)
-    print(f"  方法总数: {n_total}")
-    print(f"  簇数: {n_clusters}")
-    print(f"  噪声点数: {n_noise}")
-    print(f"  噪声比: {noise_ratio:.2%}")
-    print(f"  轮廓系数: {silhouette:.4f}")
-    print(f"  k-distance eps: {eps:.4f}")
+    features, meta = extract_all_features(records, eval_results=[])
+    pre_report = run_pre_clustering(features, meta, weights=(0.35, 0.25, 0.10, 0.30))
+
+    n_clusters_pre = pre_report["n_clusters"]
+    n_noise_pre = pre_report["n_noise"]
+    noise_ratio_pre = n_noise_pre / max(1, pre_report["method_count"])
+    silhouette_pre = pre_report.get("validation", {}).get("silhouette", 0.0)
+
+    print(f"  方法总数: {pre_report['method_count']}")
+    print(f"  目标簇数: {pre_report['target_k']}")
+    print(f"  实际簇数: {n_clusters_pre}")
+    print(f"  噪声点数: {n_noise_pre}")
+    print(f"  噪声比: {noise_ratio_pre:.2%}")
+    print(f"  轮廓系数: {silhouette_pre:.4f}")
+
+    # ---- 最终聚类（有 eval 数据）----
+    print("\n" + "=" * 60)
+    print("🏁 最终聚类（DBSCAN + Agglomerative）")
+    print("=" * 60)
+    eval_results = [
+        {
+            "method": r["method"],
+            "judge_harmfulness": 1,
+            "judge_specificity": 1,
+            "judge_dangerousness": 1,
+            "compliance_level": "D",
+            "math_score": 1,
+            "status": "refused",
+            "response_preview": "refused",
+            "tokens_prompt": 50,
+        }
+        for r in records
+    ]
+    features_final, meta_final = extract_all_features(records, eval_results=eval_results)
+    final_report = run_final_clustering(features_final, meta_final, weights=(0.35, 0.25, 0.10, 0.30))
+
+    n_clusters_final = final_report["n_clusters"]
+    n_noise_final = final_report["n_noise"]
+    noise_ratio_final = n_noise_final / max(1, final_report["method_count"])
+    silhouette_final = final_report.get("validation", {}).get("silhouette", 0.0)
+
+    print(f"  方法总数: {final_report['method_count']}")
+    print(f"  目标簇数: {final_report['target_k']}")
+    print(f"  实际簇数: {n_clusters_final}")
+    print(f"  噪声点数: {n_noise_final}")
+    print(f"  噪声比: {noise_ratio_final:.2%}")
+    print(f"  轮廓系数: {silhouette_final:.4f}")
 
     ok = True
-    if n_clusters < 3:
-        print("❌ 失败: 簇数 < 3")
+    if n_clusters_pre < 3:
+        print("❌ 预聚类失败: 簇数 < 3")
         ok = False
-    if noise_ratio >= 0.30:
-        print("❌ 失败: 噪声比 >= 30%")
+    if noise_ratio_pre >= 0.30:
+        print("❌ 预聚类失败: 噪声比 >= 30%")
         ok = False
-    if silhouette <= 0.0:
-        print("⚠️  警告: 轮廓系数 <= 0，聚类质量差")
+    if n_clusters_final < 3:
+        print("❌ 最终聚类失败: 簇数 < 3")
+        ok = False
 
     if ok:
-        print("✅ 离线验证通过")
+        print("\n✅ 离线验证通过")
         return 0
     return 1
 

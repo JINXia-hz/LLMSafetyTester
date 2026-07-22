@@ -260,6 +260,48 @@ def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict])
         tracker.attacker_ratings[method] = pred["elo"]
 
 
+def _inject_predicted_elos_fixed(tracker: ELOTracker, method_records: dict[str, dict]):
+    """
+    为所有尚未真实评估的方法注入固定簇预测的初始 Elo。
+    已真实评估的方法保持其当前 Elo 不变。
+    """
+    predictor = tracker.predictor
+    for method, record in method_records.items():
+        if method in tracker.ground_truth_methods:
+            continue
+        pred = predictor.predict_fixed(method, record)
+        tracker.attacker_ratings[method] = pred["elo"]
+
+
+def _sample_seed_methods_from_pre_cluster(
+    tracker: ELOTracker, method_records: dict[str, dict]
+) -> list[str]:
+    """
+    从预聚类结果中，每个簇随机选 1 个方法作为种子。
+    """
+    import random
+
+    labels = tracker.predictor.artifacts.get("labels", {}) if tracker.predictor.artifacts else {}
+    if not labels:
+        # 无预聚类结果，回退到随机选 5 个
+        available = [m for m in method_records if m not in tracker.ground_truth_methods]
+        random.shuffle(available)
+        return available[:5]
+
+    # 按簇分组
+    clusters = defaultdict(list)
+    for method, cid in labels.items():
+        if method in method_records and method not in tracker.ground_truth_methods:
+            clusters[cid].append(method)
+
+    seed_methods = []
+    for cid, members in sorted(clusters.items()):
+        random.shuffle(members)
+        seed_methods.append(members[0])
+
+    return seed_methods
+
+
 def _sample_seed_methods(
     method_records: dict[str, dict],
     needed: int,
@@ -329,12 +371,17 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
     all_results = []
     recent_results = {}
 
-    # ---- 冷启动：用聚类预测为所有未测方法赋予初始 Elo ----
-    _inject_predicted_elos(tracker, method_records)
-    print(f"  🧊 聚类冷启动: 已为 {len(all_methods)} 种方法注入初始 Elo "
+    # ---- 预聚类：无 ground truth 时先固定簇 ----
+    if len(tracker.ground_truth_methods) == 0:
+        pre_report = tracker.predictor.pre_fit(records)
+        print(f"  🧊 预聚类: {pre_report.get('n_clusters', 0)} 簇 (target_k={pre_report.get('target_k', 0)})")
+
+    # ---- 固定簇冷启动：为所有未测方法注入预聚类预测 Elo ----
+    _inject_predicted_elos_fixed(tracker, method_records)
+    print(f"  🧊 固定簇冷启动: 已为 {len(all_methods)} 种方法注入初始 Elo "
           f"(ground truth {len(tracker.ground_truth_methods)} 种)")
 
-    # ---- 构造采样器 ----
+    # ---- 构造采样器（使用预聚类固定簇） ----
     cluster_report = load_cluster_report()
     sampler_obj = build_sampler(
         sampler,
@@ -351,12 +398,10 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
     # 采样日志
     sampler_log: list[dict] = []
 
-    # ---- 种子采样：若 ground truth 不足，先真实评估少量种子 ----
-    seed_count = tracker.predictor.seed_count
-    if len(tracker.ground_truth_methods) < seed_count and len(all_methods) > 0:
-        needed = min(seed_count - len(tracker.ground_truth_methods), len(all_methods))
-        seed_methods = _sample_seed_methods(method_records, needed, tested)
-        print(f"\n  🌱 种子采样: 先真实评估 {len(seed_methods)} 种方法以建立 ground truth")
+    # ---- 种子采样：每个预簇随机选 1 个方法做真实评估 ----
+    if len(tracker.ground_truth_methods) == 0 and len(all_methods) > 0:
+        seed_methods = _sample_seed_methods_from_pre_cluster(tracker, method_records)
+        print(f"\n  🌱 种子采样: 每个预簇随机选 1 种方法，共 {len(seed_methods)} 种")
         print(f"     方法: {', '.join(m[:25] for m in seed_methods)}")
 
         for method_name in seed_methods:
@@ -399,13 +444,12 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
 
             time.sleep(API_DELAY)
 
-        # 用种子 ground truth 强制重训练聚类，并重新预测剩余方法
-        tracker.predictor.fit(records, all_results, force=True)
+        # 用固定簇重新预测剩余方法
         remaining_records = {m: r for m, r in method_records.items() if m not in tested}
-        _inject_predicted_elos(tracker, remaining_records)
+        _inject_predicted_elos_fixed(tracker, remaining_records)
         tracker.save(ELO_FILE)
         print(f"  ✅ 种子阶段完成: 已建立 ground truth {len(tracker.ground_truth_methods)} 种，"
-              f"剩余 {len(remaining_records)} 种使用新聚类模型预测 Elo")
+              f"剩余 {len(remaining_records)} 种使用固定簇预测 Elo")
 
     for round_idx in range(1, max_rounds + 1):
         untested = [m for m in all_methods if m not in tested]
@@ -467,14 +511,11 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
         # 保存ELO进度
         tracker.save(ELO_FILE)
 
-        # 动态重训练聚类：若新增 ground truth 跨过阈值，则重预测剩余未测方法
-        fit_report = tracker.predictor.fit(records, all_results)
-        if fit_report is not None:
-            remaining_records = {m: r for m, r in method_records.items() if m not in tested}
-            _inject_predicted_elos(tracker, remaining_records)
-            tracker.save(ELO_FILE)
-            print(f"     🔄 聚类已动态重训练: {fit_report.get('n_clusters', 0)} 簇，"
-                  f"已更新 {len(remaining_records)} 个未测方法的预测 Elo")
+        # 固定簇更新：不再重训练聚类，只基于新增 ground truth 更新未测方法 Elo
+        remaining_records = {m: r for m, r in method_records.items() if m not in tested}
+        _inject_predicted_elos_fixed(tracker, remaining_records)
+        tracker.save(ELO_FILE)
+        print(f"     🔄 固定簇已更新: {len(remaining_records)} 个未测方法的预测 Elo")
 
         # 聚类级安全分析
         try:
@@ -494,7 +535,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
             "sub_sampler": getattr(sampler_obj, "last_sub_sampler", None),
             "defender_elo": tracker.get_defender_elo(DEFENDER_NAME),
             "tested_count": len(tested),
-            "n_clusters": fit_report.get("n_clusters", 0) if fit_report else 0,
+            "n_clusters": len(set(tracker.predictor.artifacts.get("labels", {}).values()) - {-1}) if tracker.predictor.artifacts else 0,
         })
 
         # 检查收敛：防御方 ELO 滑动标准差
@@ -511,6 +552,12 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
             print(f"     📊 防御={DEFENDER_NAME} ELO≈{conv['current_elo']:.0f} "
                   f"σ={conv['std']} 置信度={confidence*100:.0f}% "
                   f"(已测{len(tested)}/{len(all_methods)}方法)")
+
+    # ---- 攻击完成后最终聚类 ----
+    final_report = tracker.predictor.final_fit(records, all_results)
+    print(f"\n  🏁 最终聚类: {final_report.get('n_clusters', 0)} 簇 "
+          f"(DBSCAN核心={final_report.get('dbscan_core_clusters', 0)}, "
+          f"silhouette={final_report.get('validation', {}).get('silhouette', 0):.4f})")
 
     tracker.save(ELO_FILE)
     tracker.predictor.save()

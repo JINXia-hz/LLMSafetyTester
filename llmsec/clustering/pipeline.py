@@ -814,3 +814,266 @@ def _export_matrix(labels: dict[str, int], features: dict, meta: dict):
                 row.append(str(int(tecvec[i])) if i < len(tecvec) else "0")
 
             f.write(",".join(row) + "\n")
+
+
+# ============================================================
+# 7. 预聚类（攻击前）与最终聚类（攻击后）
+# ============================================================
+def run_pre_clustering(
+    features: dict,
+    meta: dict,
+    target_min_clusters: int = 5,
+    target_max_clusters: int = 10,
+    weights: tuple = (0.35, 0.25, 0.10, 0.30),
+) -> dict:
+    """
+    攻击前预聚类：只用攻击本身特征，把方法压到 5~10 个簇。
+    用于固定簇采样与种子选择。
+
+    参数:
+        features: extract_all_features 输出
+        meta: extract_all_features 元信息
+        target_min_clusters: 最小簇数
+        target_max_clusters: 最大簇数
+        weights: 复合距离权重（只用攻击特征，defense 权重会被置 0）
+
+    返回: 预聚类报告 dict
+    """
+    methods = meta["method_names"]
+    n = len(methods)
+    if n < 2:
+        return {"error": "方法数不足", "labels": {m: 0 for m in methods}}
+
+    # 只用攻击特征，防御特征权重置 0
+    pre_weights = (weights[0], weights[1], weights[2], 0.0)
+    dist_matrix, block_info = build_composite_distance(features, methods, weights=pre_weights)
+
+    # 目标簇数：5~10 之间，且不超过 n
+    if n <= target_min_clusters:
+        target_k = n
+    else:
+        target_k = max(target_min_clusters, min(target_max_clusters, n // 10))
+
+    labels = run_hierarchical(dist_matrix, methods, n_clusters=target_k)
+
+    # 统计
+    cluster_ids = sorted(set(labels.values()))
+    n_clusters = len([c for c in cluster_ids if c >= 0])
+    n_noise = sum(1 for v in labels.values() if v == -1)
+
+    # 验证指标
+    validation = {}
+    valid_idx = [i for i, m in enumerate(methods) if labels.get(m, -1) >= 0]
+    if len(valid_idx) >= 3 and len(set(labels[m] for m in methods if labels.get(m, -1) >= 0)) >= 2:
+        valid_methods = [methods[i] for i in valid_idx]
+        y_valid = [labels[m] for m in valid_methods]
+        d_sub = dist_matrix[np.ix_(valid_idx, valid_idx)]
+        try:
+            validation["silhouette"] = round(float(silhouette_score(d_sub, y_valid, metric="precomputed")), 4)
+        except Exception:
+            validation["silhouette"] = 0.0
+        try:
+            validation["davies_bouldin"] = round(float(davies_bouldin_score(d_sub, y_valid)), 4)
+        except Exception:
+            validation["davies_bouldin"] = 0.0
+    else:
+        validation["silhouette"] = 0.0
+        validation["davies_bouldin"] = 0.0
+
+    cluster_names = auto_name_clusters(labels, features, meta, meta.get("method_prompts", {}))
+    cluster_profiles = build_cluster_profiles(labels, features, meta, cluster_names)
+
+    report = {
+        "generated_at": datetime.now().isoformat(),
+        "method_count": n,
+        "clustering_method": "pre_agglomerative",
+        "n_clusters": n_clusters,
+        "n_noise": n_noise,
+        "target_k": target_k,
+        "validation": validation,
+        "block_info": {k: {kk: vv for kk, vv in v.items() if kk != "method"} for k, v in block_info.items()},
+        "cluster_names": cluster_names,
+        "cluster_profiles": cluster_profiles,
+        "method_labels": {m: labels[m] for m in sorted(labels.keys())},
+    }
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CLUSTER_REPORT_FILE, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    artifacts = {
+        "features": features,
+        "meta": meta,
+        "labels": labels,
+        "weights": pre_weights,
+        "block_info": block_info,
+        "dist_matrix": dist_matrix,
+        "cluster_names": cluster_names,
+        "cluster_profiles": cluster_profiles,
+        "pre_cluster_report": report,
+        "generated_at": report["generated_at"],
+    }
+    joblib.dump(artifacts, CLUSTER_ARTIFACTS_FILE)
+
+    return report
+
+
+def run_final_clustering(
+    features: dict,
+    meta: dict,
+    weights: tuple = (0.35, 0.25, 0.10, 0.30),
+) -> dict:
+    """
+    攻击后最终聚类：DBSCAN + Agglomerative 两步。
+
+    第一步 DBSCAN 用全部特征找密度核心簇；
+    第二步 Agglomerative 把噪声点并入最近核心簇，或当核心簇不足时补足到 target_k。
+
+    参数:
+        features: extract_all_features 输出
+        meta: extract_all_features 元信息
+        weights: 复合距离权重
+
+    返回: 最终聚类报告 dict
+    """
+    methods = meta["method_names"]
+    n = len(methods)
+    if n < 2:
+        return {"error": "方法数不足", "labels": {m: 0 for m in methods}}
+
+    dist_matrix, block_info = build_composite_distance(features, methods, weights=weights)
+
+    # ---- Step 1: DBSCAN ----
+    labels_dbscan = run_dbscan(dist_matrix, methods)
+    core_ids = sorted(set(labels_dbscan.values()) - {-1})
+    n_core = len(core_ids)
+    n_noise_dbscan = sum(1 for v in labels_dbscan.values() if v == -1)
+
+    # ---- Step 2: Agglomerative ----
+    target_k = max(5, n // 10)
+    if n_core >= target_k:
+        # 核心簇已足够，只把噪声点并入最近核心簇
+        labels = dict(labels_dbscan)
+        method_to_idx = {m: i for i, m in enumerate(methods)}
+        for m, cid in labels.items():
+            if cid != -1:
+                continue
+            idx = method_to_idx[m]
+            distances = dist_matrix[idx].copy()
+            distances[idx] = np.inf
+            sorted_idx = np.argsort(distances)
+            for neighbor_idx in sorted_idx:
+                neighbor = methods[neighbor_idx]
+                if labels[neighbor] != -1:
+                    labels[m] = labels[neighbor]
+                    break
+    else:
+        # 核心簇不足，直接用 Agglomerative 补足到 target_k
+        labels = run_hierarchical(dist_matrix, methods, n_clusters=target_k)
+
+    # 统计
+    cluster_ids = sorted(set(labels.values()))
+    n_clusters = len([c for c in cluster_ids if c >= 0])
+    n_noise = sum(1 for v in labels.values() if v == -1)
+
+    # 验证指标
+    validation = {}
+    valid_idx = [i for i, m in enumerate(methods) if labels.get(m, -1) >= 0]
+    if len(valid_idx) >= 3 and len(set(labels[m] for m in methods if labels.get(m, -1) >= 0)) >= 2:
+        valid_methods = [methods[i] for i in valid_idx]
+        y_valid = [labels[m] for m in valid_methods]
+        d_sub = dist_matrix[np.ix_(valid_idx, valid_idx)]
+        try:
+            validation["silhouette"] = round(float(silhouette_score(d_sub, y_valid, metric="precomputed")), 4)
+        except Exception:
+            validation["silhouette"] = 0.0
+        try:
+            validation["davies_bouldin"] = round(float(davies_bouldin_score(d_sub, y_valid)), 4)
+        except Exception:
+            validation["davies_bouldin"] = 0.0
+    else:
+        validation["silhouette"] = 0.0
+        validation["davies_bouldin"] = 0.0
+
+    cluster_names = auto_name_clusters(labels, features, meta, meta.get("method_prompts", {}))
+    cluster_profiles = build_cluster_profiles(labels, features, meta, cluster_names)
+
+    report = {
+        "generated_at": datetime.now().isoformat(),
+        "method_count": n,
+        "clustering_method": "final_dbscan_agglomerative",
+        "n_clusters": n_clusters,
+        "n_noise": n_noise,
+        "dbscan_core_clusters": n_core,
+        "dbscan_noise": n_noise_dbscan,
+        "target_k": target_k,
+        "validation": validation,
+        "block_info": {k: {kk: vv for kk, vv in v.items() if kk != "method"} for k, v in block_info.items()},
+        "cluster_names": cluster_names,
+        "cluster_profiles": cluster_profiles,
+        "method_labels": {m: labels[m] for m in sorted(labels.keys())},
+    }
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CLUSTER_REPORT_FILE, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    _export_matrix(labels, features, meta)
+
+    artifacts = {
+        "features": features,
+        "meta": meta,
+        "labels": labels,
+        "weights": weights,
+        "block_info": block_info,
+        "dist_matrix": dist_matrix,
+        "cluster_names": cluster_names,
+        "cluster_profiles": cluster_profiles,
+        "final_cluster_report": report,
+        "generated_at": report["generated_at"],
+    }
+    joblib.dump(artifacts, CLUSTER_ARTIFACTS_FILE)
+
+    return report
+
+
+def run_dbscan(
+    dist_matrix: np.ndarray,
+    method_names: list[str],
+) -> dict[str, int]:
+    """
+    用 DBSCAN 聚类（基于预计算距离矩阵）。
+    用 knee_eps 自动选 eps 和 min_samples。
+    返回: {method_name: cluster_id}，噪声点为 -1。
+    """
+    from sklearn.cluster import DBSCAN
+
+    n = dist_matrix.shape[0]
+    if n < 2:
+        return {name: 0 for name in method_names}
+
+    auto_min_samples, eps = knee_eps(dist_matrix)
+    min_samples = min(auto_min_samples, max(2, n // 5))
+    min_samples = min(min_samples, n - 1)
+    eps = min(eps, dist_matrix.max())
+
+    sorted_distances = np.sort(dist_matrix[np.triu_indices_from(dist_matrix, k=1)])
+    min_positive_dist = float(sorted_distances[sorted_distances > 0].min()) if np.any(sorted_distances > 0) else 1e-6
+
+    eps_candidates = [eps]
+    for factor in [0.75, 0.5, 0.33, 0.25]:
+        candidate = max(eps * factor, min_positive_dist * 1.05)
+        if candidate < eps_candidates[-1]:
+            eps_candidates.append(candidate)
+
+    last_labels = None
+    for try_eps in eps_candidates:
+        logger.info("DBSCAN 参数: min_samples=%d, eps=%.4f", min_samples, try_eps)
+        clusterer = DBSCAN(eps=try_eps, min_samples=min_samples, metric="precomputed")
+        labels = clusterer.fit_predict(dist_matrix)
+        n_clusters = len(set(labels) - {-1})
+        n_noise = sum(1 for v in labels if v == -1)
+        last_labels = {name: int(label) for name, label in zip(method_names, labels)}
+        if n_clusters >= 2 and n_noise < n / 2:
+            return last_labels
+        logger.info("DBSCAN eps=%.4f 结果不理想 (簇=%d, 噪声=%d)，尝试更小 eps", try_eps, n_clusters, n_noise)
+
+    return last_labels if last_labels is not None else {name: -1 for name in method_names}
