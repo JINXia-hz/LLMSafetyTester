@@ -16,6 +16,8 @@
 - **反向 ELO**：攻击方法为进攻方、目标模型为防守方。攻击成功 → 攻击方法 ELO 上升；被防住 → 下降。ELO 越高威胁越大，防守方 ELO 即"安全边界"。
 - **ASR + FPR 二维画像**：ASR（攻击成功率）衡量防线强度；FPR（误杀率/过敏率）通过"安全孪生"（语义安全但结构相似的 prompt）衡量模型是否误伤正常请求。
 - **LLM-as-Judge**：三层递进评分——快速预筛（0 API 调用）→ 合规等级判断（A-E）→ 有害度三维评分（harmfulness / specificity / dangerousness），节省 70% 以上 Judge API 调用。
+- **聚类冷启动 ELO**：对未评估过的攻击方法，按文本/技术/意图/防御交互特征近似性分到最近簇，取簇内真实 ELO 均值作为初始值。首次运行无真实数据时自动采样少量种子方法做真实评估，再预测其余方法，实现海量攻击数据的免预热接入。
+- **动态聚类**：聚类模型只基于真实评估数据构建，新增真实样本跨过阈值（默认 10）时自动重训练，预测值绝不参与聚类，避免"死 ELO"污染簇结构。
 
 ## 目录结构
 
@@ -90,8 +92,15 @@ python -m llmsec.evaluation.evaluator [--input attacks/l1.jsonl] [--max-samples 
 
 python -m llmsec.pipeline.runner [--phase {all,1,2}] [--input FILE] [--batch-size N]
                                  [--max-rounds N] [--twin-window N]
+                                 [--cluster-retrain-threshold N] [--cluster-seed-count N]
+                                 [--cluster-retrain-force]
     # 自适应编排：ELO 驱动逐轮攻击（phase 1）→ 边界附近按需过敏检测（phase 2）。
     # --twin-window 未指定时按 ELO 边界置信度自适应窗口（置信度越低窗口越大）。
+    # --cluster-retrain-threshold 控制新增多少真实样本后重训练聚类（默认 10）。
+    # --cluster-seed-count 控制首次运行自动采样多少种子方法做真实评估（默认 5）。
+
+python -m llmsec.evaluation.elo_cluster --status
+    # 查看聚类-ELO 预测器状态：ground truth 数、预测数、簇数、下次触发训练阈值等。
 
 python -m llmsec.evaluation.safe_twin [--generate|--evaluate|--all]
     # 安全孪生生成与过敏（FPR）检测。
@@ -122,6 +131,8 @@ llmsec/output/
 ├── attacks/                # 攻击集（l1.jsonl、harmbench_jailbreak.jsonl）
 ├── state/                  # 持久化状态
 │   ├── elo.json            #   ELO 评分（攻击方/防守方 + 历史）
+│   ├── ground_truth_elo.json # 真实评估过的攻击方法 ELO（聚类输入）
+│   ├── predicted_elo.json    # 聚类预测的初始 ELO 缓存
 │   └── safe_twins.jsonl    #   安全孪生集
 ├── runs/<时间戳>/          # runner 单次运行产物
 │   ├── attack_results.jsonl
