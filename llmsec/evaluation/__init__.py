@@ -12,6 +12,15 @@ llmsec.evaluation — 评估子包
 
 from llmsec.evaluation.elo import ELOTracker, update_elo_from_results
 from llmsec.evaluation.elo_cluster import ClusterEloPredictor
+from llmsec.evaluation.samplers import (
+    AttackSampler,
+    CoordinateDescentSampler,
+    GapMinSampler,
+    HybridSampler,
+    InfoGainSampler,
+    build_sampler,
+)
+from llmsec.evaluation.cluster_analysis import analyze_clusters, save_cluster_analysis
 from llmsec.evaluation.evaluator import (
     compute_eval_score_legacy,
     compute_eval_score_v2,
@@ -38,6 +47,11 @@ __all__ = [
     "ELOTracker", "update_elo_from_results",
     # elo_cluster
     "ClusterEloPredictor",
+    # samplers
+    "AttackSampler", "GapMinSampler", "InfoGainSampler",
+    "CoordinateDescentSampler", "HybridSampler", "build_sampler",
+    # cluster_analysis
+    "analyze_clusters", "save_cluster_analysis",
     # evaluator
     "evaluate_single", "compute_math_score", "compute_eval_score_v2",
     "compute_eval_score_legacy", "extract_math_answer",

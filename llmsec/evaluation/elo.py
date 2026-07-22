@@ -78,6 +78,8 @@ class ELOTracker:
         self.ground_truth_methods: set[str] = set()
         # 聚类冷启动预测器
         self.predictor = ClusterEloPredictor()
+        # 攻击方法级统计：测试次数、成功次数、得分历史、Elo 方差估计
+        self.attacker_stats: dict[str, dict] = {}
 
     # ============================================================
     # ELO 计算
@@ -127,6 +129,9 @@ class ELOTracker:
         self.ground_truth_methods.add(attacker_name)
         self.predictor.update_ground_truth(attacker_name, new_att_elo)
 
+        # 更新方法级不确定性统计
+        self._update_attacker_stats(attacker_name, eval_score, attacker_won)
+
         # 记录滑动窗口
         self._defender_elo_window[defender_name].append(new_def_elo)
         if len(self._defender_elo_window[defender_name]) > CONVERGENCE_WINDOW * 3:
@@ -149,6 +154,95 @@ class ELOTracker:
         }
         self.history.append(info)
         return info
+
+    # ============================================================
+    # 方法级不确定性统计
+    # ============================================================
+    def _update_attacker_stats(
+        self,
+        method_name: str,
+        eval_score: float,
+        attacker_won: bool,
+        max_score_history: int = 10,
+    ):
+        """更新攻击方法的测试次数、成功次数与得分历史。"""
+        if method_name not in self.attacker_stats:
+            self.attacker_stats[method_name] = {
+                "n_matches": 0,
+                "wins": 0,
+                "scores": [],
+            }
+        stats = self.attacker_stats[method_name]
+        stats["n_matches"] += 1
+        if attacker_won:
+            stats["wins"] += 1
+        stats["scores"].append(float(eval_score))
+        if len(stats["scores"]) > max_score_history:
+            stats["scores"] = stats["scores"][-max_score_history:]
+
+    def get_attacker_uncertainty(self, method_name: str) -> float:
+        """
+        返回攻击方法的不确定性（越大越不确定）。
+
+        综合：
+        - 测试次数少 → 不确定性大
+        - 最近得分方差大 → 不确定性大
+        """
+        stats = self.attacker_stats.get(method_name)
+        if not stats:
+            return 1.0
+
+        n = stats.get("n_matches", 0)
+        if n == 0:
+            return 1.0
+
+        # 测试次数带来的不确定性（n=1 时最大，随 n 增加递减）
+        count_uncertainty = 1.0 / (1.0 + 0.1 * n)
+
+        # 得分方差带来的不确定性
+        scores = stats.get("scores", [])
+        if len(scores) >= 2:
+            score_std = float(np.std(scores))
+            # 标准化：典型 eval_score 范围 [-5, 5]，std 最大约 5
+            variance_uncertainty = min(score_std / 5.0, 1.0)
+        else:
+            variance_uncertainty = 1.0
+
+        # 加权综合
+        return 0.6 * count_uncertainty + 0.4 * variance_uncertainty
+
+    def get_attacker_success_rate(self, method_name: str) -> float:
+        """返回攻击方法的历史成功率。"""
+        stats = self.attacker_stats.get(method_name)
+        if not stats:
+            return 0.0
+        n = stats.get("n_matches", 0)
+        if n == 0:
+            return 0.0
+        return stats.get("wins", 0) / n
+
+    def get_attacker_rating_with_ci(
+        self,
+        method_name: str,
+        z: float = 1.96,
+    ) -> tuple[float, float, float]:
+        """
+        返回攻击方法 Elo 及其近似置信区间 (elo, lower, upper)。
+
+        用 Elo 后验方差近似：sigma ≈ K * sqrt(p * (1 - p) / n)，
+        其中 p 为观测胜率，n 为测试次数。
+        """
+        elo = self.get_attacker_elo(method_name)
+        stats = self.attacker_stats.get(method_name)
+        if not stats or stats.get("n_matches", 0) == 0:
+            return elo, elo - z * self.k, elo + z * self.k
+
+        n = stats["n_matches"]
+        p = stats.get("wins", 0) / n
+        # 防止 p 为 0 或 1 时方差为 0
+        p = max(0.05, min(0.95, p))
+        sigma = self.k * (p * (1 - p) / n) ** 0.5
+        return elo, elo - z * sigma, elo + z * sigma
 
     # ============================================================
     # 配对推荐
@@ -413,6 +507,7 @@ class ELOTracker:
             "history": self.history,
             "defender_elo_window": {k: v for k, v in self._defender_elo_window.items()},
             "ground_truth_methods": sorted(self.ground_truth_methods),
+            "attacker_stats": self.attacker_stats,
             "config": {"k_factor": self.k, "initial_elo": self.initial},
         }
         os.makedirs(
@@ -438,6 +533,8 @@ class ELOTracker:
         self.ground_truth_methods = set(data.get("ground_truth_methods", []))
         # 与 predictor 持久化的 ground truth 库保持一致
         self.ground_truth_methods.update(self.predictor.ground_truth.keys())
+
+        self.attacker_stats = data.get("attacker_stats", {})
 
         config = data.get("config", {})
         self.k = config.get("k_factor", K_FACTOR)

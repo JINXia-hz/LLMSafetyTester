@@ -68,6 +68,8 @@ from llmsec.evaluation import (
     generate_safe_twin,
     SAFE_TWIN_SYSTEM,
 )
+from llmsec.evaluation.cluster_analysis import analyze_clusters, save_cluster_analysis
+from llmsec.evaluation.samplers import build_sampler
 from llmsec.reporting import (
     build_method_stats,
     build_tree,
@@ -109,16 +111,51 @@ MIN_TWIN_WINDOW = 6          # 自适应孪生窗口下限
 MAX_TWIN_WINDOW = 20         # 自适应孪生窗口上限
 
 
-def adaptive_twin_window(boundary_info: dict, max_methods: int,
-                         user_window: Optional[int] = None) -> int:
+def compute_min_twin_sample_size(
+    observed_refusals: int,
+    observed_total: int,
+    target_error: float = 0.05,
+    confidence_level: float = 0.95,
+) -> int:
     """
-    根据 ELO 边界的置信度决定过敏检测样本量。
+    用 Wilson 区间估计把 FPR 估计误差控制在 target_error 内所需的最小样本量。
+
+    返回:
+        最小需要的总样本数；信息不足时返回一个保守值。
+    """
+    if observed_total == 0:
+        # 没有任何观测时，返回保守默认值
+        return MIN_TWIN_WINDOW
+
+    import math
+
+    p = observed_refusals / observed_total
+    z = 1.96 if confidence_level >= 0.95 else 1.645
+
+    # Wilson 区间半宽公式求解 n
+    # 半宽 = z * sqrt(p(1-p)/n) <= target_error
+    # n >= (z^2 * p(1-p)) / target_error^2
+    # 加上连续性校正，避免 p=0 或 1 时样本量为 0
+    variance_term = p * (1 - p)
+    n_required = (z ** 2 * variance_term) / (target_error ** 2)
+    n_required = max(n_required, observed_total)  # 至少测到当前已观测数
+    return int(math.ceil(n_required))
+
+
+def adaptive_twin_window(
+    boundary_info: dict,
+    max_methods: int,
+    allergy_summary: dict | None = None,
+    user_window: Optional[int] = None,
+) -> int:
+    """
+    根据 ELO 边界的置信度和 FPR 估计的统计置信度决定过敏检测样本量。
 
     思路：边界置信度越低，说明模型表现越不稳定（好坏方法难以区分），
     需要更多安全孪生样本来可靠估计 FPR。
 
     映射：confidence 0.8 → ~10，0.5 → ~14，0.2 → ~18，
-    最终 clamp 在 [MIN_TWIN_WINDOW, min(MAX_TWIN_WINDOW, max_methods)]。
+    再与统计最小样本量取 max，最终 clamp 在 [MIN_TWIN_WINDOW, min(MAX_TWIN_WINDOW, max_methods)]。
     """
     if user_window is not None:
         return min(user_window, max_methods)
@@ -127,7 +164,17 @@ def adaptive_twin_window(boundary_info: dict, max_methods: int,
     if isinstance(confidence, bool):
         confidence = 1.0 if confidence else 0.0
 
-    n = int(round(8 + 12 * (1 - confidence)))
+    n_by_boundary = int(round(8 + 12 * (1 - confidence)))
+
+    # 基于已观测 FPR 计算统计最小样本量
+    observed_refusals = 0
+    observed_total = 0
+    if allergy_summary:
+        observed_refusals = allergy_summary.get("allergic", 0)
+        observed_total = allergy_summary.get("total_tested", 0)
+    n_by_stats = compute_min_twin_sample_size(observed_refusals, observed_total)
+
+    n = max(n_by_boundary, n_by_stats)
     return min(max(n, MIN_TWIN_WINDOW), min(MAX_TWIN_WINDOW, max_methods))
 
 
@@ -245,10 +292,18 @@ def _sample_seed_methods(
 def run_attack_phase(records: list[dict], target_client: OpenAI,
                      judge: Judge, tracker: ELOTracker,
                      batch_size: int, max_rounds: int,
-                     attack_file) -> dict:
+                     attack_file,
+                     sampler: str = "hybrid",
+                     sampler_alpha: float = 20.0,
+                     sampler_beta: float = 5.0,
+                     sampler_gamma: float = 10.0,
+                     coordinate_rounds: int = 2,
+                     sampler_log_file: Path | None = None,
+                     cluster_analysis_file: Path | None = None,
+                     ) -> dict:
     """
     自适应攻击测试：从ELO中档开始，逐轮二分搜索。
-    新增：聚类冷启动预测 + 动态重训练 + 种子采样。
+    新增：聚类冷启动预测 + 动态重训练 + 种子采样 + 可插拔采样器 + 聚类安全分析。
     返回: {tested_methods, results, boundary, rounds}
     """
     print("=" * 60)
@@ -274,6 +329,23 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
     _inject_predicted_elos(tracker, method_records)
     print(f"  🧊 聚类冷启动: 已为 {len(all_methods)} 种方法注入初始 Elo "
           f"(ground truth {len(tracker.ground_truth_methods)} 种)")
+
+    # ---- 构造采样器 ----
+    cluster_report = load_cluster_report()
+    sampler_obj = build_sampler(
+        sampler,
+        cluster_report=cluster_report,
+        alpha=sampler_alpha,
+        beta=sampler_beta,
+        gamma=sampler_gamma,
+        explore_rounds=coordinate_rounds,
+    )
+    print(f"  🎲 采样策略: {sampler} "
+          f"(alpha={sampler_alpha}, beta={sampler_beta}, gamma={sampler_gamma}, "
+          f"coordinate_rounds={coordinate_rounds})")
+
+    # 采样日志
+    sampler_log: list[dict] = []
 
     # ---- 种子采样：若 ground truth 不足，先真实评估少量种子 ----
     seed_count = tracker.predictor.seed_count
@@ -337,15 +409,11 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
             print(f"\n  ✅ 所有方法已测试完毕")
             break
 
-        # ELO自适应选择下一批：配对攻击方与防御方，选分差最小的
-        if tracker.attacker_ratings:
-            pairs = tracker.suggest_next_pairing(untested, [DEFENDER_NAME], n=batch_size)
-            next_methods = [att for att, _ in pairs]
-            seen = set()
-            next_methods = [m for m in next_methods if not (m in seen or seen.add(m))]
-        else:
-            step = max(1, len(untested) // batch_size)
-            next_methods = untested[::step][:batch_size]
+        # 使用采样器选择下一批方法
+        next_methods = sampler_obj.select(
+            untested, tracker, DEFENDER_NAME, n=batch_size,
+            round_idx=round_idx,
+        )
 
         print(f"\n  🔵 Round {round_idx}/{max_rounds}: 测试 {len(next_methods)} 种攻击方法")
         print(f"     方法: {', '.join(m[:25] for m in next_methods)}")
@@ -404,6 +472,26 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
             print(f"     🔄 聚类已动态重训练: {fit_report.get('n_clusters', 0)} 簇，"
                   f"已更新 {len(remaining_records)} 个未测方法的预测 Elo")
 
+        # 聚类级安全分析
+        try:
+            cluster_analysis = analyze_clusters(tracker)
+            if cluster_analysis_file:
+                save_cluster_analysis(cluster_analysis, cluster_analysis_file)
+            else:
+                save_cluster_analysis(cluster_analysis)
+        except Exception as e:
+            print(f"     ⚠ 聚类安全分析失败: {e}")
+
+        # 记录采样器决策日志
+        sampler_log.append({
+            "round": round_idx,
+            "selected": next_methods,
+            "sampler": sampler,
+            "defender_elo": tracker.get_defender_elo(DEFENDER_NAME),
+            "tested_count": len(tested),
+            "n_clusters": fit_report.get("n_clusters", 0) if fit_report else 0,
+        })
+
         # 检查收敛：防御方 ELO 滑动标准差
         conv = tracker.check_convergence(DEFENDER_NAME)
         boundary_info = tracker.compute_security_boundary(DEFENDER_NAME)
@@ -426,6 +514,12 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
     with open(attack_file, "w", encoding="utf-8") as f:
         for r in all_results:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    # 保存采样器决策日志
+    if sampler_log_file:
+        with open(sampler_log_file, "w", encoding="utf-8") as f:
+            for entry in sampler_log:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     boundary = tracker.compute_security_boundary(DEFENDER_NAME)
     ranking = tracker.get_attacker_ranking()
@@ -679,6 +773,17 @@ def main():
                         help="首次运行无 ground truth 时，自动采样多少种子方法做真实评估（默认 5）")
     parser.add_argument("--cluster-retrain-force", action="store_true",
                         help="强制在本次运行开始时重训练聚类模型")
+    parser.add_argument("--sampler", type=str, default="hybrid",
+                        choices=["gap", "infogain", "coordinate", "hybrid"],
+                        help="Phase 1 采样策略（默认 hybrid）")
+    parser.add_argument("--sampler-alpha", type=float, default=20.0,
+                        help="InfoGain 不确定性权重（默认 20.0）")
+    parser.add_argument("--sampler-beta", type=float, default=5.0,
+                        help="InfoGain 簇覆盖权重（默认 5.0）")
+    parser.add_argument("--sampler-gamma", type=float, default=10.0,
+                        help="InfoGain 成功潜力权重（默认 10.0）")
+    parser.add_argument("--coordinate-rounds", type=int, default=2,
+                        help="Hybrid 模式下前多少轮使用 InfoGain 探索（默认 2）")
     args = parser.parse_args()
 
     # 本次运行目录（原模块级 datetime.now() import 副作用移入 main）
@@ -686,6 +791,8 @@ def main():
     runner_report_file = runs_dir / "runner_report.json"
     runner_attack_file = runs_dir / "attack_results.jsonl"
     runner_allergy_file = runs_dir / "allergy.json"
+    runner_sampler_log_file = runs_dir / "sampler_log.jsonl"
+    runner_cluster_analysis_file = runs_dir / "cluster_security_analysis.json"
 
     # 加载攻击集
     input_path = os.path.join(OUTPUT_DIR, args.input) if not os.path.isabs(args.input) else args.input
@@ -745,6 +852,13 @@ def main():
             records, target_client, judge, tracker,
             batch_size=args.batch_size, max_rounds=args.max_rounds,
             attack_file=runner_attack_file,
+            sampler=args.sampler,
+            sampler_alpha=args.sampler_alpha,
+            sampler_beta=args.sampler_beta,
+            sampler_gamma=args.sampler_gamma,
+            coordinate_rounds=args.coordinate_rounds,
+            sampler_log_file=runner_sampler_log_file,
+            cluster_analysis_file=runner_cluster_analysis_file,
         )
     else:
         # 仅过敏阶段时，ELO从文件加载
@@ -758,7 +872,8 @@ def main():
     if args.phase in ("all", "2"):
         boundary_info = tracker.compute_security_boundary(DEFENDER_NAME)
         n_window = adaptive_twin_window(
-            boundary_info, len(method_records), user_window=args.twin_window
+            boundary_info, len(method_records),
+            allergy_summary=allergy_summary, user_window=args.twin_window
         )
         print(f"  📏 本次过敏检测窗口：{n_window} 个方法 "
               f"(ELO边界置信度={boundary_info.get('confidence', 0)*100:.0f}%)")

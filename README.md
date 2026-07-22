@@ -94,10 +94,19 @@ python -m llmsec.pipeline.runner [--phase {all,1,2}] [--input FILE] [--batch-siz
                                  [--max-rounds N] [--twin-window N]
                                  [--cluster-retrain-threshold N] [--cluster-seed-count N]
                                  [--cluster-retrain-force]
+                                 [--sampler {gap,infogain,coordinate,hybrid}]
+                                 [--sampler-alpha A] [--sampler-beta B] [--sampler-gamma G]
+                                 [--coordinate-rounds R]
     # 自适应编排：ELO 驱动逐轮攻击（phase 1）→ 边界附近按需过敏检测（phase 2）。
     # --twin-window 未指定时按 ELO 边界置信度自适应窗口（置信度越低窗口越大）。
     # --cluster-retrain-threshold 控制新增多少真实样本后重训练聚类（默认 10）。
     # --cluster-seed-count 控制首次运行自动采样多少种子方法做真实评估（默认 5）。
+    # --sampler 选择 Phase 1 采样策略：gap（分差最小）/ infogain（全局信息增益）/
+    #   coordinate（簇坐标下降）/ hybrid（前 R 轮 InfoGain + 后接 Coordinate，默认）。
+    # --sampler-alpha/beta/gamma 调节 InfoGain 的不确定性、簇覆盖、成功潜力权重。
+
+python -m llmsec.evaluation.cluster_analysis [--defender NAME] [--output PATH]
+    # 基于当前 ELO 与聚类结果输出簇级安全分析（高风险/盲区/稳定簇）。
 
 python -m llmsec.evaluation.elo_cluster --status
     # 查看聚类-ELO 预测器状态：ground truth 数、预测数、簇数、下次触发训练阈值等。
@@ -138,6 +147,8 @@ llmsec/output/
 │   ├── attack_results.jsonl
 │   ├── runner_report.json  #   综合报告
 │   ├── allergy.json        #   过敏报告 + 2D 画像
+│   ├── sampler_log.jsonl   #   每轮采样器决策日志
+│   ├── cluster_security_analysis.json  # 簇级安全分析
 │   ├── security_tree.json  #   五维树形画像
 │   └── security_report.md  #   LLM 叙事报告
 ├── {输入名}_结果.jsonl      # evaluate 逐条结果
