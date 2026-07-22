@@ -51,6 +51,8 @@ RUNS_DIR = OUTPUT_DIR / "runs"
 # 状态文件（新约定：output/state/）
 ELO_FILE = STATE_DIR / "elo.json"
 SAFE_TWINS_FILE = STATE_DIR / "safe_twins.jsonl"
+GROUND_TRUTH_ELO_FILE = STATE_DIR / "ground_truth_elo.json"
+PREDICTED_ELO_FILE = STATE_DIR / "predicted_elo.json"
 
 # 攻击集（新约定：output/attacks/）
 ATTACK_SET_L1_FILE = ATTACKS_DIR / "l1.jsonl"
@@ -59,6 +61,7 @@ ATTACK_SET_L1_FILE = ATTACKS_DIR / "l1.jsonl"
 CLUSTER_REPORT_FILE = OUTPUT_DIR / "cluster_report.json"
 CLUSTER_MATRIX_FILE = OUTPUT_DIR / "cluster_matrix.csv"
 CLUSTER_FEATURES_FILE = OUTPUT_DIR / "cluster_features.json"
+CLUSTER_ARTIFACTS_FILE = OUTPUT_DIR / "cluster_artifacts.pkl"
 
 # ------------------------------------------------------------
 # 旧路径（仅用于读取兼容回退，写入一律走上面的新路径）
@@ -89,6 +92,9 @@ def resolve_existing(primary, *legacy_candidates):
 # ============================================================
 DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
 DEFAULT_MODEL = "deepseek-v4-flash"
+
+# ELO 默认参数
+INITIAL_ELO = 1500
 
 
 @dataclass

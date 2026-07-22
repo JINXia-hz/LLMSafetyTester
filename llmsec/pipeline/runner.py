@@ -44,6 +44,7 @@ if _VENV_PYTHON.exists() and sys.executable != str(_VENV_PYTHON):
 import argparse
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -193,6 +194,52 @@ def get_or_create_twin(method_name: str, rec: dict, twin_cache: dict,
 
 
 # ============================================================
+# Phase 1 辅助函数
+# ============================================================
+def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict]):
+    """
+    为所有尚未真实评估的方法注入聚类预测的初始 Elo。
+    已真实评估的方法保持其当前 Elo 不变。
+    """
+    predictor = tracker.predictor
+    for method, record in method_records.items():
+        if method in tracker.ground_truth_methods:
+            continue
+        pred = predictor.predict(method, record)
+        tracker.attacker_ratings[method] = pred["elo"]
+
+
+def _sample_seed_methods(
+    method_records: dict[str, dict],
+    needed: int,
+    tested: set[str],
+) -> list[str]:
+    """
+    按 category 分层采样 needed 个种子方法，优先保证类别多样性。
+    """
+    available = [m for m in method_records if m not in tested]
+    if len(available) <= needed:
+        return available
+
+    categories = defaultdict(list)
+    for m in available:
+        cat = method_records[m].get("category", "unknown")
+        categories[cat].append(m)
+
+    selected = []
+    # 每层先取一个
+    for cat in sorted(categories.keys()):
+        if len(selected) < needed:
+            selected.append(random.choice(categories[cat]))
+
+    # 不足则随机补充
+    remaining = [m for m in available if m not in selected]
+    random.shuffle(remaining)
+    selected.extend(remaining[: needed - len(selected)])
+    return selected[:needed]
+
+
+# ============================================================
 # Phase 1: ELO 自适应攻击测试
 # ============================================================
 def run_attack_phase(records: list[dict], target_client: OpenAI,
@@ -201,6 +248,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
                      attack_file) -> dict:
     """
     自适应攻击测试：从ELO中档开始，逐轮二分搜索。
+    新增：聚类冷启动预测 + 动态重训练 + 种子采样。
     返回: {tested_methods, results, boundary, rounds}
     """
     print("=" * 60)
@@ -221,6 +269,67 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
     tested = set()
     all_results = []
     recent_results = {}
+
+    # ---- 冷启动：用聚类预测为所有未测方法赋予初始 Elo ----
+    _inject_predicted_elos(tracker, method_records)
+    print(f"  🧊 聚类冷启动: 已为 {len(all_methods)} 种方法注入初始 Elo "
+          f"(ground truth {len(tracker.ground_truth_methods)} 种)")
+
+    # ---- 种子采样：若 ground truth 不足，先真实评估少量种子 ----
+    seed_count = tracker.predictor.seed_count
+    if len(tracker.ground_truth_methods) < seed_count and len(all_methods) > 0:
+        needed = min(seed_count - len(tracker.ground_truth_methods), len(all_methods))
+        seed_methods = _sample_seed_methods(method_records, needed, tested)
+        print(f"\n  🌱 种子采样: 先真实评估 {len(seed_methods)} 种方法以建立 ground truth")
+        print(f"     方法: {', '.join(m[:25] for m in seed_methods)}")
+
+        for method_name in seed_methods:
+            rec = method_records[method_name]
+            prompt_text = rec["prompt"]
+            expected_answer = rec["expected_answer"]
+
+            print(f"     → {method_name[:40]}", end="", flush=True)
+            result = evaluate_single(
+                prompt_text, expected_answer, target_client, judge, use_judge=True
+            )
+            tested.add(method_name)
+
+            # 实时更新 ELO（双边：攻击方 vs 防御方）
+            tracker.update(method_name, DEFENDER_NAME, result["eval_score"])
+
+            # 记录结果
+            all_results.append({
+                "round": 0,
+                "phase": "seed",
+                "method": method_name,
+                "id": rec["id"],
+                "harm_type": rec["harm_type"],
+                "eval_score": result["eval_score"],
+                "jailbreak_tax": result["jailbreak_tax"],
+                "status": result["status"],
+                "compliance_level": result.get("compliance_level"),
+                "latency_ms": result["latency_ms"],
+                "judge_harmfulness": result.get("judge_harmfulness", 1),
+                "judge_specificity": result.get("judge_specificity", 1),
+                "judge_dangerousness": result.get("judge_dangerousness", 1),
+                "is_harmful": result.get("is_harmful", False),
+                "is_refusal": result.get("is_refusal", False),
+                "response_preview": result.get("content", "")[:500],
+            })
+
+            score = result["eval_score"]
+            sym = "✅" if score > 0 else ("🔶" if score > -1 else "❌")
+            print(f" → {sym} score={score:.1f} {result['status']}")
+
+            time.sleep(API_DELAY)
+
+        # 用种子 ground truth 强制重训练聚类，并重新预测剩余方法
+        tracker.predictor.fit(records, all_results, force=True)
+        remaining_records = {m: r for m, r in method_records.items() if m not in tested}
+        _inject_predicted_elos(tracker, remaining_records)
+        tracker.save(ELO_FILE)
+        print(f"  ✅ 种子阶段完成: 已建立 ground truth {len(tracker.ground_truth_methods)} 种，"
+              f"剩余 {len(remaining_records)} 种使用新聚类模型预测 Elo")
 
     for round_idx in range(1, max_rounds + 1):
         untested = [m for m in all_methods if m not in tested]
@@ -286,6 +395,15 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
         # 保存ELO进度
         tracker.save(ELO_FILE)
 
+        # 动态重训练聚类：若新增 ground truth 跨过阈值，则重预测剩余未测方法
+        fit_report = tracker.predictor.fit(records, all_results)
+        if fit_report is not None:
+            remaining_records = {m: r for m, r in method_records.items() if m not in tested}
+            _inject_predicted_elos(tracker, remaining_records)
+            tracker.save(ELO_FILE)
+            print(f"     🔄 聚类已动态重训练: {fit_report.get('n_clusters', 0)} 簇，"
+                  f"已更新 {len(remaining_records)} 个未测方法的预测 Elo")
+
         # 检查收敛：防御方 ELO 滑动标准差
         conv = tracker.check_convergence(DEFENDER_NAME)
         boundary_info = tracker.compute_security_boundary(DEFENDER_NAME)
@@ -302,6 +420,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
                   f"(已测{len(tested)}/{len(all_methods)}方法)")
 
     tracker.save(ELO_FILE)
+    tracker.predictor.save()
 
     # 保存攻击结果到专用文件（避免 Phase 3 读到旧数据）
     with open(attack_file, "w", encoding="utf-8") as f:
@@ -554,6 +673,12 @@ def main():
                         help=f"最大自适应轮次（默认{DEFAULT_MAX_ROUNDS}）")
     parser.add_argument("--twin-window", type=int, default=None,
                         help="过敏检测方法数上限；未指定时按ELO边界置信度自适应（置信度越低窗口越大）")
+    parser.add_argument("--cluster-retrain-threshold", type=int, default=10,
+                        help="新增 ground truth 方法数达到多少时触发聚类重训练（默认 10）")
+    parser.add_argument("--cluster-seed-count", type=int, default=5,
+                        help="首次运行无 ground truth 时，自动采样多少种子方法做真实评估（默认 5）")
+    parser.add_argument("--cluster-retrain-force", action="store_true",
+                        help="强制在本次运行开始时重训练聚类模型")
     args = parser.parse_args()
 
     # 本次运行目录（原模块级 datetime.now() import 副作用移入 main）
@@ -596,11 +721,26 @@ def main():
     judge = Judge(judge_client)
     tracker = ELOTracker()
 
+    # 将 CLI 聚类参数同步给 predictor
+    tracker.predictor.threshold = args.cluster_retrain_threshold
+    tracker.predictor.seed_count = args.cluster_seed_count
+
     os.makedirs(runs_dir, exist_ok=True)
 
     # ---- Phase 1 ----
     attack_summary = {}
     if args.phase in ("all", "1"):
+        # 如用户要求强制重训练，且已有足够 ground truth，则先重训练再进入 Phase 1
+        if (
+            args.cluster_retrain_force
+            and tracker.predictor.ground_truth_count() >= tracker.predictor.min_cluster_size
+        ):
+            print("  🔄 强制重训练聚类模型 ...")
+            tracker.predictor.fit(records, [], force=True)
+            _inject_predicted_elos(tracker, method_records)
+            tracker.save(ELO_FILE)
+            print("  ✅ 强制重训练完成，已更新所有方法预测 Elo")
+
         attack_summary = run_attack_phase(
             records, target_client, judge, tracker,
             batch_size=args.batch_size, max_rounds=args.max_rounds,

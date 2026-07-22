@@ -134,12 +134,21 @@ def _get_embedding_model():
     return _embedding_model
 
 
-def extract_text_embeddings(prompts: list[str], pca_dim: int = 50) -> np.ndarray:
+def extract_text_embeddings(
+    prompts: list[str],
+    pca_dim: int = 50,
+    vectorizer=None,
+    pca=None,
+) -> tuple[np.ndarray, object, object]:
     """
     对 prompt 列表提取语义特征。
     优先用 sentence-transformers embedding → PCA 降维；
     网络不可用时自动降级为 TF-IDF 特征。
-    返回 (n_samples, pca_dim) 数组。
+
+    返回:
+        embeddings: (n_samples, pca_dim) 数组
+        vectorizer: 训练好的 TF-IDF vectorizer（仅 TF-IDF 路径有效；sentence-transformers 路径为 None）
+        pca: 训练好的 PCA 模型
     """
     model = _get_embedding_model()
     if model is not None:
@@ -152,12 +161,12 @@ def extract_text_embeddings(prompts: list[str], pca_dim: int = 50) -> np.ndarray
         n = embeddings.shape[0]
         target_dim = min(pca_dim, n - 1, embeddings.shape[1])
         if target_dim < embeddings.shape[1]:
-            pca = PCA(n_components=target_dim, random_state=42)
-            reduced = pca.fit_transform(embeddings)
+            fit_pca = pca if pca is not None else PCA(n_components=target_dim, random_state=42)
+            reduced = fit_pca.fit_transform(embeddings) if pca is None else fit_pca.transform(embeddings)
             print(f"  [*] PCA 降维: {embeddings.shape[1]} → {target_dim} "
-                  f"(解释方差比: {pca.explained_variance_ratio_.sum():.2%})")
-            return reduced
-        return embeddings
+                  f"(解释方差比: {fit_pca.explained_variance_ratio_.sum():.2%})")
+            return reduced, None, fit_pca
+        return embeddings, None, None
 
     # ---- Fallback: TF-IDF ----
     print(f"  [*] 使用 TF-IDF 降级方案 (离线)，编码 {len(prompts)} 条 prompt ...")
@@ -166,26 +175,29 @@ def extract_text_embeddings(prompts: list[str], pca_dim: int = 50) -> np.ndarray
     # 清洗 prompt
     cleaned_prompts = [strip_math_tax(p) for p in prompts]
 
-    vectorizer = TfidfVectorizer(
+    fit_vectorizer = vectorizer if vectorizer is not None else TfidfVectorizer(
         max_features=200,
         ngram_range=(1, 2),
         max_df=0.9,
         min_df=1,
         stop_words="english",
     )
-    tfidf_matrix = vectorizer.fit_transform(cleaned_prompts)
+    if vectorizer is None:
+        tfidf_matrix = fit_vectorizer.fit_transform(cleaned_prompts)
+    else:
+        tfidf_matrix = fit_vectorizer.transform(cleaned_prompts)
     dense = tfidf_matrix.toarray()
 
     # PCA 降维到目标维度
     n = dense.shape[0]
     target_dim = min(pca_dim, n - 1, dense.shape[1])
     if dense.shape[1] > target_dim:
-        pca = PCA(n_components=target_dim, random_state=42)
-        reduced = pca.fit_transform(dense)
+        fit_pca = pca if pca is not None else PCA(n_components=target_dim, random_state=42)
+        reduced = fit_pca.fit_transform(dense) if pca is None else fit_pca.transform(dense)
         print(f"  [*] TF-IDF ({dense.shape[1]}d) → PCA → {target_dim}d "
-              f"(解释方差比: {pca.explained_variance_ratio_.sum():.2%})")
-        return reduced
-    return dense
+              f"(解释方差比: {fit_pca.explained_variance_ratio_.sum():.2%})")
+        return reduced, fit_vectorizer, fit_pca
+    return dense, fit_vectorizer, None
 
 
 # ============================================================
@@ -481,7 +493,9 @@ def extract_all_features(
 
     # ---- 维 1b: 语义 embedding ----
     print("  维1b: 语义 embedding ...")
-    text_embeddings = extract_text_embeddings(method_prompts_text, pca_dim=embedding_pca_dim)
+    text_embeddings, emb_vectorizer, emb_pca = extract_text_embeddings(
+        method_prompts_text, pca_dim=embedding_pca_dim
+    )
     # 按方法索引
     embedding_feats = {}
     for m in methods:
@@ -527,6 +541,11 @@ def extract_all_features(
         "cross_model_feature_names": CROSS_MODEL_FEATURE_NAMES,
         "has_eval_data": len(eval_results) > 0,
         "has_embedding": True,
+        "embedding_artifacts": {
+            "vectorizer": emb_vectorizer,
+            "pca": emb_pca,
+            "pca_dim": embedding_pca_dim,
+        },
     }
 
     print(f"[特征提取] 完成: {n_methods} 种方法 × 5 维特征块")

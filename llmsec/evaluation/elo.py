@@ -31,16 +31,21 @@ from collections import defaultdict
 
 import numpy as np
 
-from llmsec.core.config import ELO_FILE, LEGACY_ELO_FILE, resolve_existing
+from llmsec.core.config import (
+    ELO_FILE,
+    INITIAL_ELO,
+    LEGACY_ELO_FILE,
+    resolve_existing,
+)
 from llmsec.core.io import iter_jsonl
 from llmsec.core.logging import setup_console
+from llmsec.evaluation.elo_cluster import ClusterEloPredictor
 
 setup_console()
 
 # ============================================================
 # ELO 配置
 # ============================================================
-INITIAL_ELO = 1500
 K_FACTOR = 32          # 标准 ELO K 值
 ELO_SCALE = 400        # 标准 ELO 缩放因子
 CONVERGENCE_WINDOW = 5  # 收敛判断滑动窗口大小
@@ -69,6 +74,10 @@ class ELOTracker:
         self.history: list[dict] = []  # 每次更新的完整记录
         # 收敛追踪：每个防御方最近 N 次 ELO 值
         self._defender_elo_window: dict[str, list[float]] = defaultdict(list)
+        # 哪些攻击者已经过真实评估（ground truth）
+        self.ground_truth_methods: set[str] = set()
+        # 聚类冷启动预测器
+        self.predictor = ClusterEloPredictor()
 
     # ============================================================
     # ELO 计算
@@ -113,6 +122,10 @@ class ELOTracker:
 
         self.attacker_ratings[attacker_name] = new_att_elo
         self.defender_ratings[defender_name] = new_def_elo
+
+        # 标记为真实评估，并同步到聚类 ground truth 库
+        self.ground_truth_methods.add(attacker_name)
+        self.predictor.update_ground_truth(attacker_name, new_att_elo)
 
         # 记录滑动窗口
         self._defender_elo_window[defender_name].append(new_def_elo)
@@ -399,6 +412,7 @@ class ELOTracker:
             "defender_ratings": self.defender_ratings,
             "history": self.history,
             "defender_elo_window": {k: v for k, v in self._defender_elo_window.items()},
+            "ground_truth_methods": sorted(self.ground_truth_methods),
             "config": {"k_factor": self.k, "initial_elo": self.initial},
         }
         os.makedirs(
@@ -420,6 +434,10 @@ class ELOTracker:
 
         window_data = data.get("defender_elo_window", {})
         self._defender_elo_window = defaultdict(list, window_data)
+
+        self.ground_truth_methods = set(data.get("ground_truth_methods", []))
+        # 与 predictor 持久化的 ground truth 库保持一致
+        self.ground_truth_methods.update(self.predictor.ground_truth.keys())
 
         config = data.get("config", {})
         self.k = config.get("k_factor", K_FACTOR)

@@ -19,10 +19,12 @@
 """
 
 import json
+import os
 import re
 from collections import Counter, defaultdict
 from datetime import datetime
 
+import joblib
 import numpy as np
 from scipy.spatial.distance import squareform, pdist
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -32,6 +34,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import StandardScaler
 
 from llmsec.core import (
+    CLUSTER_ARTIFACTS_FILE,
     CLUSTER_FEATURES_FILE,
     CLUSTER_MATRIX_FILE,
     CLUSTER_REPORT_FILE,
@@ -556,9 +559,25 @@ def run_clustering_pipeline(
     # 导出特征矩阵 CSV
     _export_matrix(labels, features, meta)
 
+    # ---- 保存聚类 artifacts（用于 ELO 冷启动预测） ----
+    artifacts = {
+        "features": features,
+        "meta": meta,
+        "labels": labels,
+        "weights": weights,
+        "block_info": block_info,
+        "dist_matrix": dist_matrix,
+        "cluster_names": cluster_names,
+        "cluster_profiles": cluster_profiles,
+        "generated_at": report["generated_at"],
+    }
+    os.makedirs(os.path.dirname(CLUSTER_ARTIFACTS_FILE) or ".", exist_ok=True)
+    joblib.dump(artifacts, CLUSTER_ARTIFACTS_FILE)
+
     if verbose:
         print(f"\n  📁 聚类报告: {CLUSTER_REPORT_FILE}")
         print(f"  📁 特征矩阵: {CLUSTER_MATRIX_FILE}")
+        print(f"  📁 聚类 artifacts: {CLUSTER_ARTIFACTS_FILE}")
 
     return report
 

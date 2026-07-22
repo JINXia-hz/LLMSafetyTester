@@ -23,6 +23,7 @@ from llmsec.clustering.features import (
     load_and_extract,
 )
 from llmsec.clustering.pipeline import (
+    CLUSTER_ARTIFACTS_FILE,
     CLUSTER_FEATURES_FILE,
     CLUSTER_MATRIX_FILE,
     CLUSTER_REPORT_FILE,
@@ -54,4 +55,5 @@ __all__ = [
     "cosine_distance_matrix", "jaccard_distance_matrix",
     "euclidean_distance_matrix",
     "CLUSTER_REPORT_FILE", "CLUSTER_MATRIX_FILE", "CLUSTER_FEATURES_FILE",
+    "CLUSTER_ARTIFACTS_FILE",
 ]

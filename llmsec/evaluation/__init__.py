@@ -11,6 +11,7 @@ llmsec.evaluation — 评估子包
 """
 
 from llmsec.evaluation.elo import ELOTracker, update_elo_from_results
+from llmsec.evaluation.elo_cluster import ClusterEloPredictor
 from llmsec.evaluation.evaluator import (
     compute_eval_score_legacy,
     compute_eval_score_v2,
@@ -35,6 +36,8 @@ __all__ = [
     "FAST_REFUSAL_PATTERNS", "FAST_HARMFUL_SIGNALS",
     # elo
     "ELOTracker", "update_elo_from_results",
+    # elo_cluster
+    "ClusterEloPredictor",
     # evaluator
     "evaluate_single", "compute_math_score", "compute_eval_score_v2",
     "compute_eval_score_legacy", "extract_math_answer",
