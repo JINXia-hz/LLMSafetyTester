@@ -68,7 +68,11 @@ from llmsec.evaluation import (
     generate_safe_twin,
     SAFE_TWIN_SYSTEM,
 )
-from llmsec.evaluation.cluster_analysis import analyze_clusters, save_cluster_analysis
+from llmsec.evaluation.cluster_analysis import (
+    analyze_clusters,
+    load_cluster_report,
+    save_cluster_analysis,
+)
 from llmsec.evaluation.samplers import build_sampler
 from llmsec.reporting import (
     build_method_stats,
@@ -487,6 +491,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
             "round": round_idx,
             "selected": next_methods,
             "sampler": sampler,
+            "sub_sampler": getattr(sampler_obj, "last_sub_sampler", None),
             "defender_elo": tracker.get_defender_elo(DEFENDER_NAME),
             "tested_count": len(tested),
             "n_clusters": fit_report.get("n_clusters", 0) if fit_report else 0,
@@ -929,6 +934,10 @@ def main():
         generated_files.append(runner_attack_file)
     if os.path.exists(runner_allergy_file):
         generated_files.append(runner_allergy_file)
+    if os.path.exists(runner_sampler_log_file):
+        generated_files.append(runner_sampler_log_file)
+    if os.path.exists(runner_cluster_analysis_file):
+        generated_files.append(runner_cluster_analysis_file)
 
     # ---- 清晰的文件清单 ----
     generated_files = [str(f) for f in generated_files]
@@ -939,6 +948,7 @@ def main():
     # 按类别分组
     reports = [f for f in generated_files if f.endswith(".md")]
     data = [f for f in generated_files if f.endswith(".json") and "elo" not in f.lower() and "allergy" not in f.lower()]
+    jsonl_files = [f for f in generated_files if f.endswith(".jsonl") and "attack_results" not in f]
     allergy = [f for f in generated_files if "allergy" in f.lower()]
     state = [f for f in generated_files if "elo" in f.lower()]
     tree_files = [f for f in generated_files if "tree" in f.lower()]
@@ -952,6 +962,10 @@ def main():
         print("  结构数据:")
         for f in data:
             print(f"    📊 {os.path.basename(f)}")
+    if jsonl_files:
+        print("  日志数据:")
+        for f in jsonl_files:
+            print(f"    📜 {os.path.basename(f)}")
     if detail:
         print("  攻击详情（含响应原文，可人工复核）:")
         for f in detail:

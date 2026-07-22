@@ -354,6 +354,8 @@ class HybridSampler(AttackSampler):
             min_tests_per_method=coordinate_min_tests_per_method,
             min_tests_per_cluster=coordinate_min_tests_per_cluster,
         )
+        # 记录上一轮实际使用的子策略
+        self.last_sub_sampler: str | None = None
 
     def set_cluster_info(
         self,
@@ -379,9 +381,11 @@ class HybridSampler(AttackSampler):
     ) -> list[str]:
         self._round_count += 1
         if self._round_count <= self.explore_rounds:
+            self.last_sub_sampler = "infogain"
             return self._info_sampler.select(
                 candidates, tracker, defender_name, n, **kwargs
             )
+        self.last_sub_sampler = "coordinate"
         return self._coord_sampler.select(
             candidates, tracker, defender_name, n, **kwargs
         )
