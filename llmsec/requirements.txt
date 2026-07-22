@@ -7,10 +7,12 @@ python-dotenv>=1,<2
 requests>=2,<3
 urllib3>=2,<3
 
-# 本地模拟模型服务器 (local_model_server.py)
+# 本地模拟模型服务器 + Web 面板 (local_model_server.py / dashboard_api.py)
 fastapi>=0.100,<1
 uvicorn>=0.20,<1
 pydantic>=2,<3
+jinja2>=3,<4               # FastAPI 模板渲染
+pandas>=2,<4               # Web 面板数据聚合
 
 # 聚类分析 (cluster.py)
 numpy>=1.24
