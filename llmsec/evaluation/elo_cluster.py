@@ -114,9 +114,29 @@ class ClusterEloPredictor:
                     self.artifacts.get("ground_truth_count", self.last_fit_gt_count)
                 )
                 self.last_fit_at = self.artifacts.get("generated_at", self.last_fit_at)
+                # 防御：清理 artifacts 中不在当前 ground_truth 的方法，避免缓存污染
+                self._sanitize_artifacts()
             except Exception as e:
                 logger.warning("加载 cluster artifacts 失败: %s", e)
                 self.artifacts = None
+
+    def _sanitize_artifacts(self):
+        """确保 artifacts 中的 labels / features 只包含当前 ground_truth 中的方法。"""
+        if self.artifacts is None:
+            return
+        gt_methods = set(self.ground_truth.keys())
+        labels = self.artifacts.get("labels", {})
+        cleaned_labels = {m: cid for m, cid in labels.items() if m in gt_methods}
+        if len(cleaned_labels) != len(labels):
+            logger.warning(
+                "清理 artifacts: 移除 %d 个不在 ground_truth 中的方法",
+                len(labels) - len(cleaned_labels),
+            )
+            self.artifacts["labels"] = cleaned_labels
+        features = self.artifacts.get("features", {})
+        cleaned_features = {m: f for m, f in features.items() if m in gt_methods or m == "__all_methods__"}
+        if len(cleaned_features) != len(features):
+            self.artifacts["features"] = cleaned_features
 
     def save(self):
         """保存 ground truth 与预测缓存。"""
@@ -544,7 +564,18 @@ class ClusterEloPredictor:
         meta = self.artifacts["meta"]
         labels = self.artifacts["labels"]  # {gt_method: cluster_id}
         gt_features = self.artifacts["features"]
-        gt_methods = sorted(labels.keys())
+        # 只使用在 ground_truth 中有 Elo 的方法作为锚点
+        gt_methods = sorted(m for m in labels.keys() if m in self.ground_truth)
+
+        if not gt_methods:
+            logger.warning("artifacts 中无有效 ground truth 锚点，回退到 INITIAL_ELO")
+            return {
+                "elo": float(INITIAL_ELO),
+                "source": "predicted",
+                "cluster_id": None,
+                "confidence": 0.0,
+                "based_on_gt_count": self.ground_truth_count(),
+            }
 
         if not record:
             logger.warning("预测 %s 时未提供 record，回退到 INITIAL_ELO", method)
@@ -560,7 +591,7 @@ class ClusterEloPredictor:
         new_features = self._extract_features_for_new_method(method, record, meta)
 
         # 4. 合并 features，计算复合距离
-        combined_features = {m: gt_features[m] for m in gt_methods}
+        combined_features = {m: gt_features[m] for m in gt_methods if m in gt_features}
         combined_features[method] = new_features
         all_methods = [method] + gt_methods
 
@@ -573,13 +604,38 @@ class ClusterEloPredictor:
 
         # 5. 找最近 ground truth 锚点（labels 已被 fit 处理，理论上无 -1）
         sorted_indices = np.argsort(distances_to_gt)
-        nearest_idx = sorted_indices[0]
-        nearest_method = gt_methods[nearest_idx]
-        nearest_cluster = labels[nearest_method]
-        nearest_dist = float(distances_to_gt[nearest_idx])
+        nearest_method = None
+        nearest_cluster = None
+        nearest_dist = None
+        for idx in sorted_indices:
+            candidate = gt_methods[idx]
+            if candidate not in labels:
+                continue
+            cid = labels[candidate]
+            # 跳过仍被标为噪声的锚点（理论上已挂回，但防御性保留）
+            if cid == -1:
+                continue
+            nearest_method = candidate
+            nearest_cluster = cid
+            nearest_dist = float(distances_to_gt[idx])
+            break
+
+        if nearest_method is None:
+            logger.warning("未找到有效最近锚点，回退到全局平均真实 Elo")
+            avg_elo = sum(v["elo"] for v in self.ground_truth.values()) / len(self.ground_truth)
+            return {
+                "elo": round(avg_elo, 2),
+                "source": "predicted",
+                "cluster_id": -1,
+                "confidence": 0.0,
+                "based_on_gt_count": self.ground_truth_count(),
+            }
 
         # 6. 取该簇内所有 ground truth 方法，按距离倒数加权求 Elo
-        cluster_members = [m for m, cid in labels.items() if cid == nearest_cluster]
+        cluster_members = [
+            m for m, cid in labels.items()
+            if cid == nearest_cluster and m in self.ground_truth
+        ]
         if not cluster_members:
             # 兜底：最近锚点单独预测
             predicted_elo = self.ground_truth[nearest_method]["elo"]

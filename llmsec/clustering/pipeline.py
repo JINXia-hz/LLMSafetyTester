@@ -223,6 +223,29 @@ def knee_eps(dist_matrix: np.ndarray, k_candidates: list[int] | None = None) -> 
     return int(best_k), float(best_eps)
 
 
+def _hdbscan_once(
+    dist_matrix: np.ndarray,
+    method_names: list[str],
+    min_cluster_size: int,
+    min_samples: int,
+    eps: float,
+) -> tuple[dict[str, int], int, int]:
+    """执行一次 HDBSCAN，返回 (labels, n_clusters, n_noise)。"""
+    import hdbscan
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        metric="precomputed",
+        cluster_selection_epsilon=eps,
+        allow_single_cluster=False,
+        cluster_selection_method="eom",
+    )
+    labels = clusterer.fit_predict(dist_matrix)
+    n_clusters = len(set(labels) - {-1})
+    n_noise = sum(1 for v in labels if v == -1)
+    return {name: int(label) for name, label in zip(method_names, labels)}, n_clusters, n_noise
+
+
 def run_hdbscan(
     dist_matrix: np.ndarray,
     method_names: list[str],
@@ -232,7 +255,7 @@ def run_hdbscan(
     """
     用 HDBSCAN 聚类（基于预计算距离矩阵）。
     自动用 k-distance 选择 min_samples 与 cluster_selection_epsilon。
-    若全部样本被标为噪声，则逐步降低 eps 重试。
+    若结果不理想，依次降低 eps、降低 min_samples 重试，直到分出可用簇。
     返回: {method_name: cluster_id}，噪声点为 -1。
     """
     try:
@@ -248,7 +271,7 @@ def run_hdbscan(
         effective_min_samples = min(effective_min_samples, n - 1)
         eps = min(eps, dist_matrix.max())
 
-        # 候选 eps：从 knee_eps 开始，逐步下降到最小非零距离的 50%
+        # 候选 eps：从 knee_eps 开始，逐步下降到最小非零距离附近
         sorted_distances = np.sort(dist_matrix[np.triu_indices_from(dist_matrix, k=1)])
         min_positive_dist = float(sorted_distances[sorted_distances > 0].min()) if np.any(sorted_distances > 0) else 1e-6
         eps_candidates = [eps]
@@ -257,34 +280,35 @@ def run_hdbscan(
             if candidate < eps_candidates[-1]:
                 eps_candidates.append(candidate)
 
-        for try_eps in eps_candidates:
-            logger.info(
-                "HDBSCAN 参数: min_cluster_size=%d, min_samples=%d, cluster_selection_epsilon=%.4f",
-                effective_min_cluster_size,
-                effective_min_samples,
-                try_eps,
-            )
-            clusterer = hdbscan.HDBSCAN(
-                min_cluster_size=effective_min_cluster_size,
-                min_samples=effective_min_samples,
-                metric="precomputed",
-                cluster_selection_epsilon=try_eps,
-                allow_single_cluster=False,
-                cluster_selection_method="eom",
-            )
-            labels = clusterer.fit_predict(dist_matrix)
-            n_clusters = len(set(labels) - {-1})
-            n_noise = sum(1 for v in labels if v == -1)
-            # 只要分出至少 2 个簇且噪声不过半，就接受
-            if n_clusters >= 2 and n_noise < n / 2:
-                return {name: int(label) for name, label in zip(method_names, labels)}
-            logger.info(
-                "HDBSCAN eps=%.4f 结果不理想 (簇=%d, 噪声=%d)，尝试更小 eps",
-                try_eps, n_clusters, n_noise,
-            )
+        # 候选 min_samples：从自动值逐步降到 2
+        min_samples_candidates = [effective_min_samples]
+        for ms in [effective_min_samples - 1, 2]:
+            if ms >= 2 and ms not in min_samples_candidates:
+                min_samples_candidates.append(ms)
+
+        last_labels = None
+        for try_ms in min_samples_candidates:
+            for try_eps in eps_candidates:
+                logger.info(
+                    "HDBSCAN 参数: min_cluster_size=%d, min_samples=%d, cluster_selection_epsilon=%.4f",
+                    effective_min_cluster_size,
+                    try_ms,
+                    try_eps,
+                )
+                labels, n_clusters, n_noise = _hdbscan_once(
+                    dist_matrix, method_names, effective_min_cluster_size, try_ms, try_eps
+                )
+                last_labels = labels
+                # 只要分出至少 2 个簇且噪声不过半，就接受
+                if n_clusters >= 2 and n_noise < n / 2:
+                    return labels
+                logger.info(
+                    "HDBSCAN eps=%.4f, min_samples=%d 结果不理想 (簇=%d, 噪声=%d)",
+                    try_eps, try_ms, n_clusters, n_noise,
+                )
 
         # 全部候选都不行，用最后一个结果
-        return {name: int(label) for name, label in zip(method_names, labels)}
+        return last_labels if last_labels is not None else {name: -1 for name in method_names}
     except Exception as e:
         logger.warning("HDBSCAN 失败: %s，回退到 K-Means (K=3)", e)
         return run_kmeans(dist_matrix, method_names, k=3)
