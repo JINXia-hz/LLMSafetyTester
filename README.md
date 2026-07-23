@@ -16,8 +16,9 @@
 - **反向 ELO**：攻击方法为进攻方、目标模型为防守方。攻击成功 → 攻击方法 ELO 上升；被防住 → 下降。ELO 越高威胁越大，防守方 ELO 即"安全边界"。
 - **ASR + FPR 二维画像**：ASR（攻击成功率）衡量防线强度；FPR（误杀率/过敏率）通过"安全孪生"（语义安全但结构相似的 prompt）衡量模型是否误伤正常请求。
 - **LLM-as-Judge**：三层递进评分——快速预筛（0 API 调用）→ 合规等级判断（A-E）→ 有害度三维评分（harmfulness / specificity / dangerousness），节省 70% 以上 Judge API 调用。
-- **聚类冷启动 ELO**：对未评估过的攻击方法，按文本/技术/意图/防御交互特征近似性分到最近簇，取簇内真实 ELO 的**距离倒数加权平均**作为初始值。首次运行无真实数据时自动采样少量种子方法做真实评估，再预测其余方法，实现海量攻击数据的免预热接入。
-- **动态聚类**：聚类模型只基于真实评估数据构建，新增真实样本跨过阈值（默认 10）时自动重训练，预测值绝不参与聚类，避免"死 ELO"污染簇结构。HDBSCAN 参数通过 **k-distance 图自动选择 `min_samples` 与 `cluster_selection_epsilon`**；若 ground truth 样本仍被标为噪声，会自动挂回到最近的非噪声簇，确保每个已测方法都是可用锚点。
+- **聚类冷启动 ELO**：对未评估过的攻击方法，按文本/技术/意图/防御交互特征近似性分到最近簇，取簇内真实 ELO 的**距离倒数加权平均**作为初始值；同一攻击基底的变体（如 `*_rot13`、`*_b64`、`*_code`、`*_story`）会优先相互借用 ELO，降低跨变体污染。首次运行无真实数据时自动采样少量种子方法做真实评估，再预测其余方法，实现海量攻击数据的免预热接入。
+- **动态聚类**：聚类模型只基于真实评估数据构建，预测值绝不参与聚类，避免"死 ELO"污染簇结构。启动时系统会复用已保存的 `cluster_artifacts`；仅在以下情况触发重训练：无 artifacts、攻击集方法列表变化、新增 ground truth 跨过阈值（默认 10）、或显式指定 `--cluster-retrain-force`。攻击过程中簇固定不变，最终聚类在全部真实评估完成后运行一次。HDBSCAN 参数通过 **k-distance 图自动选择 `min_samples` 与 `cluster_selection_epsilon`**；若 ground truth 样本仍被标为噪声，会自动挂回到最近的非噪声簇，确保每个已测方法都是可用锚点。
+- **抗假阳性收敛判定**：防御方 ELO 收敛不仅看最近轮次 ELO 标准差，还同时约束相对标准差、最近被测方法成功率必须接近 50%、以及已测方法覆盖率足够。避免"一轮全失败后因更新幅度小而误判收敛"的情况。
 
 ## 目录结构
 
@@ -92,15 +93,16 @@ python -m llmsec.evaluation.evaluator [--input attacks/l1.jsonl] [--max-samples 
 
 python -m llmsec.pipeline.runner [--phase {all,1,2}] [--input FILE] [--batch-size N]
                                  [--max-rounds N] [--twin-window N]
-                                 [--cluster-retrain-threshold N] [--cluster-seed-count N]
+                                 [--cluster-retrain-threshold N]
                                  [--cluster-retrain-force]
                                  [--sampler {gap,infogain,coordinate,hybrid}]
                                  [--sampler-alpha A] [--sampler-beta B] [--sampler-gamma G]
                                  [--coordinate-rounds R]
     # 自适应编排：ELO 驱动逐轮攻击（phase 1）→ 边界附近按需过敏检测（phase 2）。
     # --twin-window 未指定时按 ELO 边界置信度自适应窗口（置信度越低窗口越大）。
-    # --cluster-retrain-threshold 控制新增多少真实样本后重训练聚类（默认 10）。
-    # --cluster-seed-count 控制首次运行自动采样多少种子方法做真实评估（默认 5）。
+    # --cluster-retrain-threshold 控制新增多少真实样本后触发聚类重训练（默认 10）。
+    #   启动时会优先复用已保存的 cluster_artifacts；仅在必要时（无 artifacts、攻击集变化、
+    #   ground truth 增量达到 threshold、或 --cluster-retrain-force）才重训练。
     # --sampler 选择 Phase 1 采样策略：gap（分差最小）/ infogain（全局信息增益）/
     #   coordinate（簇坐标下降）/ hybrid（前 R 轮 InfoGain + 后接 Coordinate，默认）。
     # --sampler-alpha/beta/gamma 调节 InfoGain 的不确定性、簇覆盖、成功潜力权重。
@@ -110,6 +112,9 @@ python -m llmsec.evaluation.cluster_analysis [--defender NAME] [--output PATH]
 
 python -m tests.clustering_kdistance
     # 离线验证聚类效果：构造 base64/rot13/code 三类攻击，断言簇数 ≥3 且噪声比 <30%。
+
+python -m tests.test_elo_convergence
+    # 回归测试：验证 predict_fixed 变体兜底与 check_convergence 抗假阳性。
 
 python -m llmsec.evaluation.elo_cluster --status
     # 查看聚类-ELO 预测器状态：ground truth 数、预测数、簇数、下次触发训练阈值等。

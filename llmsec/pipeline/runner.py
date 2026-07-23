@@ -42,6 +42,7 @@ if _VENV_PYTHON.exists() and sys.executable != str(_VENV_PYTHON):
     sys.exit(0)
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -332,6 +333,43 @@ def _sample_seed_methods(
     return selected[:needed]
 
 
+def _compute_method_set_hash(methods: list[str]) -> str:
+    """计算方法集合的指纹 hash，用于判断攻击集是否发生变化。"""
+    content = ",".join(sorted(set(methods)))
+    return hashlib.md5(content.encode("utf-8")).hexdigest()
+
+
+def _should_retrain_cluster(
+    predictor,
+    method_records: dict[str, dict],
+    force: bool = False,
+) -> bool:
+    """
+    判断启动时是否需要重新训练聚类模型。
+
+    触发条件：
+    - force=True
+    - 无可用 artifacts 或缺少 labels
+    - 攻击集方法列表发生变化
+    - ground truth 数量比上次训练时增长达到 threshold
+    """
+    if force:
+        return True
+    if predictor.artifacts is None or "labels" not in predictor.artifacts:
+        return True
+
+    current_hash = _compute_method_set_hash(list(method_records.keys()))
+    if predictor.artifacts.get("method_set_hash") != current_hash:
+        return True
+
+    gt_count = predictor.ground_truth_count()
+    last_fit = predictor.last_fit_gt_count or 0
+    if gt_count - last_fit >= predictor.threshold:
+        return True
+
+    return False
+
+
 # ============================================================
 # Phase 1: ELO 自适应攻击测试
 # ============================================================
@@ -371,12 +409,24 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
     all_results = []
     recent_results = {}
 
-    # ---- 预聚类：无 ground truth 时先固定簇 ----
-    if len(tracker.ground_truth_methods) == 0:
+    # ---- 启动时聚类策略：复用 / 动态重训练 / 预聚类 ----
+    gt_count = len(tracker.ground_truth_methods)
+    needs_retrain = _should_retrain_cluster(tracker.predictor, method_records, force=False)
+
+    if needs_retrain and gt_count >= tracker.predictor.min_cluster_size:
+        # 有历史 ground truth，用真实数据重新训练聚类模型
+        print(f"  🔄 动态聚类重训练: 基于 {gt_count} 个 ground truth 方法")
+        tracker.predictor.fit_dynamic(records, [], force=True)
+    elif needs_retrain:
+        # 无 ground truth 或 ground truth 不足 min_cluster_size，做预聚类
         pre_report = tracker.predictor.pre_fit(records)
         print(f"  🧊 预聚类: {pre_report.get('n_clusters', 0)} 簇 (target_k={pre_report.get('target_k', 0)})")
+    else:
+        # 复用已有 artifacts
+        n_clusters = len(set(tracker.predictor.artifacts.get("labels", {}).values()) - {-1})
+        print(f"  ♻️ 复用已有聚类: {n_clusters} 簇 (ground truth {gt_count} 种)")
 
-    # ---- 固定簇冷启动：为所有未测方法注入预聚类预测 Elo ----
+    # ---- 固定簇冷启动：为所有未测方法注入预测 Elo ----
     _inject_predicted_elos_fixed(tracker, method_records)
     print(f"  🧊 固定簇冷启动: 已为 {len(all_methods)} 种方法注入初始 Elo "
           f"(ground truth {len(tracker.ground_truth_methods)} 种)")
@@ -448,6 +498,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
         remaining_records = {m: r for m, r in method_records.items() if m not in tested}
         _inject_predicted_elos_fixed(tracker, remaining_records)
         tracker.save(ELO_FILE)
+        tracker.record_round_end(DEFENDER_NAME)
         print(f"  ✅ 种子阶段完成: 已建立 ground truth {len(tracker.ground_truth_methods)} 种，"
               f"剩余 {len(remaining_records)} 种使用固定簇预测 Elo")
 
@@ -527,6 +578,9 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
         except Exception as e:
             print(f"     ⚠ 聚类安全分析失败: {e}")
 
+        # 记录本轮结束时的防御方 Elo，用于更稳健的收敛判断
+        tracker.record_round_end(DEFENDER_NAME)
+
         # 记录采样器决策日志
         sampler_log.append({
             "round": round_idx,
@@ -538,20 +592,23 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
             "n_clusters": len(set(tracker.predictor.artifacts.get("labels", {}).values()) - {-1}) if tracker.predictor.artifacts else 0,
         })
 
-        # 检查收敛：防御方 ELO 滑动标准差
-        conv = tracker.check_convergence(DEFENDER_NAME)
+        # 检查收敛：综合轮次 Elo 标准差、最近成功率、覆盖率
+        conv = tracker.check_convergence(DEFENDER_NAME, total_methods=len(all_methods), tested_count=len(tested))
         boundary_info = tracker.compute_security_boundary(DEFENDER_NAME)
         confidence = boundary_info.get("confidence", 0)
         if confidence >= CONFIDENCE_TARGET:
             print(f"\n  🎯 防御方 {DEFENDER_NAME} ELO 已收敛 "
                   f"(置信度={confidence*100:.0f}% ≥ {CONFIDENCE_TARGET*100:.0f}%, "
-                  f"σ={conv['std']:.1f}, ELO≈{conv['current_elo']:.0f}, "
+                  f"σ={conv['std']:.1f}, 最近成功率={conv['recent_success_rate']*100:.0f}%, "
+                  f"覆盖率={conv['coverage']*100:.0f}%, ELO≈{conv['current_elo']:.0f}, "
                   f"已测{len(tested)}/{len(all_methods)}方法)")
             break
         else:
+            notes = "; ".join(conv.get("notes", [])) if conv.get("notes") else "未收敛"
             print(f"     📊 防御={DEFENDER_NAME} ELO≈{conv['current_elo']:.0f} "
-                  f"σ={conv['std']} 置信度={confidence*100:.0f}% "
-                  f"(已测{len(tested)}/{len(all_methods)}方法)")
+                  f"σ={conv['std']} 最近成功率={conv['recent_success_rate']*100:.0f}% "
+                  f"覆盖率={conv['coverage']*100:.0f}% 置信度={confidence*100:.0f}% "
+                  f"({notes})")
 
     # ---- 攻击完成后最终聚类 ----
     final_report = tracker.predictor.final_fit(records, all_results)
@@ -895,8 +952,8 @@ def main():
             and tracker.predictor.ground_truth_count() >= tracker.predictor.min_cluster_size
         ):
             print("  🔄 强制重训练聚类模型 ...")
-            tracker.predictor.fit(records, [], force=True)
-            _inject_predicted_elos(tracker, method_records)
+            tracker.predictor.fit_dynamic(records, [], force=True)
+            _inject_predicted_elos_fixed(tracker, method_records)
             tracker.save(ELO_FILE)
             print("  ✅ 强制重训练完成，已更新所有方法预测 Elo")
 

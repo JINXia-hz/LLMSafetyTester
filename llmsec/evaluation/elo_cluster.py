@@ -17,6 +17,7 @@
     elo_info = predictor.predict("新攻击", record={"prompt": "...", "category": "..."})
 """
 
+import hashlib
 import json
 import os
 import re
@@ -211,10 +212,15 @@ class ClusterEloPredictor:
 
         logger.info("🧊 预聚类: 总方法记录 %d 条", len(attack_records))
         features, meta = extract_all_features(attack_records, eval_results=[])
-        report = run_pre_clustering(features, meta, weights=self.weights)
+        # 预聚类更依赖技术标签与意图，降低文本 embedding 权重，避免 rot13/b64 等表面变体主导
+        pre_weights = (0.15, 0.45, 0.25, 0.0)
+        report = run_pre_clustering(features, meta, weights=pre_weights)
 
         self.artifacts = joblib.load(CLUSTER_ARTIFACTS_FILE)
         self.artifacts["is_pre_cluster"] = True
+        self.artifacts["method_set_hash"] = _compute_method_set_hash(
+            sorted(self.artifacts.get("labels", {}).keys())
+        )
         self.last_fit_at = datetime.now().isoformat()
         joblib.dump(self.artifacts, CLUSTER_ARTIFACTS_FILE)
 
@@ -232,8 +238,13 @@ class ClusterEloPredictor:
         record: dict | None = None,
     ) -> dict:
         """
-        基于固定簇（预聚类结果）内 ground truth 平均 Elo 预测。
+        基于固定簇（预聚类结果）内 ground truth 的距离加权 Elo 预测。
         攻击阶段不再改变簇归属，只更新簇内 ground truth 统计。
+
+        预测优先级：
+        1. 同攻击基底变体（如 *_rot13 / *_b64 / *_code / *_story）已有 ground truth，优先取变体平均。
+        2. 簇内 ground truth 按特征距离倒数加权平均。
+        3. 全局 ground truth 按特征距离倒数加权平均。
         """
         if method in self.ground_truth:
             return {
@@ -254,38 +265,156 @@ class ClusterEloPredictor:
             }
 
         labels = self.artifacts["labels"]
-        if method not in labels:
-            logger.warning("方法 %s 不在预聚类结果中，回退到全局平均", method)
-            avg = sum(v["elo"] for v in self.ground_truth.values()) / max(1, len(self.ground_truth))
+
+        # ---- 1. 同基底变体兜底 ----
+        variant_gt = self._find_variant_ground_truth(method)
+        if variant_gt:
+            avg = sum(self.ground_truth[m]["elo"] for m in variant_gt) / len(variant_gt)
             return {
                 "elo": round(avg, 2),
-                "source": "predicted",
-                "cluster_id": -1,
-                "confidence": 0.0,
+                "source": "predicted_variant",
+                "cluster_id": int(labels.get(method, -1)) if method in labels else -1,
+                "confidence": round(min(len(variant_gt) / 2, 1.0), 4),
                 "based_on_gt_count": self.ground_truth_count(),
             }
+
+        if method not in labels:
+            logger.warning("方法 %s 不在预聚类结果中，回退到全局加权平均", method)
+            return self._predict_global_weighted(method, record)
 
         cluster_id = labels[method]
         cluster_members = [m for m, cid in labels.items() if cid == cluster_id]
         gt_members = [m for m in cluster_members if m in self.ground_truth]
 
         if not gt_members:
-            # 簇内无 ground truth，用全局平均
-            avg = sum(v["elo"] for v in self.ground_truth.values()) / max(1, len(self.ground_truth))
-            confidence = 0.0
-            source = "predicted_global"
-        else:
-            avg = sum(self.ground_truth[m]["elo"] for m in gt_members) / len(gt_members)
-            confidence = min(len(gt_members) / self.min_cluster_size, 1.0)
-            source = "predicted"
+            # 簇内无 ground truth，用全局加权平均
+            return self._predict_global_weighted(method, record, cluster_id=cluster_id)
+
+        # ---- 2. 簇内距离加权平均 ----
+        predicted_elo, distance_conf = self._weighted_elo_by_distance(method, gt_members, record)
+        size_conf = min(len(gt_members) / self.min_cluster_size, 1.0)
+        confidence = round(distance_conf * size_conf, 4)
 
         return {
-            "elo": round(avg, 2),
-            "source": source,
+            "elo": round(predicted_elo, 2),
+            "source": "predicted",
             "cluster_id": int(cluster_id),
-            "confidence": round(confidence, 4),
+            "confidence": confidence,
             "based_on_gt_count": self.ground_truth_count(),
         }
+
+    def _find_variant_ground_truth(self, method: str) -> list[str]:
+        """
+        找与 method 同一攻击基底的其它变体（去掉 _rot13/_b64/_code/_story/_N 等后缀）。
+        返回这些变体中已有 ground truth 的方法名列表。
+        """
+        if not self.ground_truth:
+            return []
+        base = _strip_variant_suffix(method)
+        if not base:
+            return []
+        variants = []
+        for gt_method in self.ground_truth.keys():
+            if gt_method == method:
+                continue
+            if _strip_variant_suffix(gt_method) == base:
+                variants.append(gt_method)
+        return variants
+
+    def _predict_global_weighted(
+        self,
+        method: str,
+        record: dict | None,
+        cluster_id: int = -1,
+    ) -> dict:
+        """用全局 ground truth 按特征距离倒数加权预测。"""
+        gt_members = list(self.ground_truth.keys())
+        if not gt_members:
+            return {
+                "elo": float(INITIAL_ELO),
+                "source": "predicted",
+                "cluster_id": cluster_id,
+                "confidence": 0.0,
+                "based_on_gt_count": 0,
+            }
+        predicted_elo, distance_conf = self._weighted_elo_by_distance(method, gt_members, record)
+        return {
+            "elo": round(predicted_elo, 2),
+            "source": "predicted_global",
+            "cluster_id": cluster_id,
+            "confidence": round(distance_conf, 4),
+            "based_on_gt_count": self.ground_truth_count(),
+        }
+
+    def _weighted_elo_by_distance(
+        self,
+        method: str,
+        gt_members: list[str],
+        record: dict | None,
+    ) -> tuple[float, float]:
+        """
+        计算 method 到 gt_members 的特征距离，并返回距离倒数加权的 Elo 和距离置信度。
+        若无法计算距离，回退到简单平均。
+        """
+        if not gt_members:
+            return float(INITIAL_ELO), 0.0
+
+        # 尝试从 artifacts 中获取 features
+        features = self.artifacts.get("features", {}) if self.artifacts else {}
+        weights = self.artifacts.get("weights", self.weights) if self.artifacts else self.weights
+        meta = self.artifacts.get("meta", {}) if self.artifacts else {}
+
+        target_features = features.get(method)
+        if target_features is None and record is not None:
+            try:
+                target_features = self._extract_features_for_new_method(method, record, meta)
+            except Exception as e:
+                logger.warning("为 %s 提取特征失败: %s", method, e)
+
+        if target_features is None:
+            # 无法获取目标特征，回退简单平均
+            avg = sum(self.ground_truth[m]["elo"] for m in gt_members) / len(gt_members)
+            return avg, 0.0
+
+        # 构造局部 features dict：目标方法 + ground truth 方法
+        local_features = {method: target_features}
+        for m in gt_members:
+            if m in features:
+                local_features[m] = features[m]
+            elif m == method:
+                continue
+            else:
+                # 缺少某个 ground truth 的特征，跳过该项（不应发生）
+                continue
+
+        local_methods = [method] + [m for m in gt_members if m in local_features and m != method]
+        if len(local_methods) < 2:
+            avg = sum(self.ground_truth[m]["elo"] for m in gt_members) / len(gt_members)
+            return avg, 0.0
+
+        try:
+            from llmsec.clustering import build_composite_distance
+            dist_matrix, _ = build_composite_distance(local_features, local_methods, weights=weights)
+            distances = dist_matrix[0, 1:]  # 目标方法到各 gt 方法的距离
+            gt_in_local = local_methods[1:]
+        except Exception as e:
+            logger.warning("计算 %s 的距离加权失败: %s", method, e)
+            avg = sum(self.ground_truth[m]["elo"] for m in gt_members) / len(gt_members)
+            return avg, 0.0
+
+        weights_list = []
+        elos_list = []
+        for i, gt_method in enumerate(gt_in_local):
+            d = float(distances[i])
+            w = 1.0 / (1.0 + d)
+            weights_list.append(w)
+            elos_list.append(self.ground_truth[gt_method]["elo"])
+
+        weights_arr = np.array(weights_list)
+        predicted_elo = float(np.dot(weights_arr, elos_list) / weights_arr.sum())
+        nearest_dist = float(np.min(distances))
+        distance_conf = round(1.0 / (1.0 + nearest_dist), 4)
+        return predicted_elo, distance_conf
 
     def final_fit(
         self,
@@ -310,6 +439,9 @@ class ClusterEloPredictor:
         self.artifacts["is_final_cluster"] = True
         self.artifacts["ground_truth_count"] = self.ground_truth_count()
         self.artifacts["ground_truth_methods"] = sorted(self.ground_truth.keys())
+        self.artifacts["method_set_hash"] = _compute_method_set_hash(
+            sorted(self.artifacts.get("labels", {}).keys())
+        )
         self.last_fit_gt_count = self.ground_truth_count()
         self.last_fit_at = datetime.now().isoformat()
         joblib.dump(self.artifacts, CLUSTER_ARTIFACTS_FILE)
@@ -417,6 +549,7 @@ class ClusterEloPredictor:
         self.artifacts["all_methods"] = all_methods
         self.artifacts["method_to_idx"] = method_to_idx
         self.artifacts["diagnostics"] = diagnostics
+        self.artifacts["method_set_hash"] = _compute_method_set_hash(all_methods)
         self.last_fit_gt_count = current_gt_count
         self.last_fit_at = datetime.now().isoformat()
 
@@ -870,6 +1003,23 @@ class ClusterEloPredictor:
             "n_noise": n_noise,
             "cluster_names": cluster_names,
         }
+
+
+# ============================================================
+# 模块级辅助函数
+# ============================================================
+_VARIANT_SUFFIX_RE = re.compile(r"(_rot13|_b64|_base64|_code|_story|_\d+)$", re.IGNORECASE)
+
+
+def _strip_variant_suffix(method_name: str) -> str:
+    """去掉方法名末尾的变体后缀（如 _rot13/_b64/_code/_story/_0），得到攻击基底名。"""
+    return _VARIANT_SUFFIX_RE.sub("", method_name)
+
+
+def _compute_method_set_hash(methods: list[str]) -> str:
+    """计算方法集合的指纹 hash，用于判断攻击集是否发生变化。"""
+    content = ",".join(sorted(set(methods)))
+    return hashlib.md5(content.encode("utf-8")).hexdigest()
 
 
 # ============================================================

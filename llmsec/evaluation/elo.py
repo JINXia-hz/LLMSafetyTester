@@ -48,8 +48,14 @@ setup_console()
 # ============================================================
 K_FACTOR = 32          # 标准 ELO K 值
 ELO_SCALE = 400        # 标准 ELO 缩放因子
-CONVERGENCE_WINDOW = 5  # 收敛判断滑动窗口大小
-CONVERGENCE_THRESHOLD = 10.0  # 滑动标准差阈值
+CONVERGENCE_WINDOW = 5  # 每次 update 的滑动窗口大小（兼容旧逻辑）
+CONVERGENCE_THRESHOLD = 10.0  # 每次 update 的滑动标准差阈值（兼容旧逻辑）
+ROUND_CONVERGENCE_WINDOW = 3   # 收敛判断使用最近 N 轮结束时的防御方 Elo
+RELATIVE_STD_THRESHOLD = 0.02  # 相对标准差阈值
+MIN_COVERAGE_RATIO = 0.20      # 最小覆盖率（相对所有方法）
+MIN_COVERAGE_ABSOLUTE = 20     # 最小覆盖方法数
+RECENT_SUCCESS_RATE_LOW = 0.35 # 最近成功率下限
+RECENT_SUCCESS_RATE_HIGH = 0.65 # 最近成功率上限
 
 
 class ELOTracker:
@@ -72,8 +78,10 @@ class ELOTracker:
         self.attacker_ratings: dict[str, float] = {}
         self.defender_ratings: dict[str, float] = {}
         self.history: list[dict] = []  # 每次更新的完整记录
-        # 收敛追踪：每个防御方最近 N 次 ELO 值
+        # 收敛追踪：每个防御方最近 N 次 ELO 值（每次 update 一个点，已弃用，保留兼容）
         self._defender_elo_window: dict[str, list[float]] = defaultdict(list)
+        # 每轮（batch）结束时的防御方 Elo，用于更稳健的收敛判断
+        self._round_defender_elos: dict[str, list[float]] = defaultdict(list)
         # 哪些攻击者已经过真实评估（ground truth）
         self.ground_truth_methods: set[str] = set()
         # 聚类冷启动预测器
@@ -154,6 +162,10 @@ class ELOTracker:
         }
         self.history.append(info)
         return info
+
+    def record_round_end(self, defender_name: str):
+        """记录本轮结束时的防御方 Elo，用于收敛判断。应在每轮 batch 测试后调用。"""
+        self._round_defender_elos[defender_name].append(self.get_defender_elo(defender_name))
 
     # ============================================================
     # 方法级不确定性统计
@@ -275,48 +287,129 @@ class ELOTracker:
     # ============================================================
     # 收敛判断
     # ============================================================
+    def _recent_success_rate(self, window_methods: int = 15) -> float:
+        """返回最近 window_methods 个被测方法的成功率。"""
+        recent_wins = 0
+        recent_total = 0
+        for h in reversed(self.history):
+            if recent_total >= window_methods:
+                break
+            if h["attacker_won"]:
+                recent_wins += 1
+            recent_total += 1
+        if recent_total == 0:
+            return 0.0
+        return recent_wins / recent_total
+
     def check_convergence(
         self,
         defender_name: str,
         threshold: float = CONVERGENCE_THRESHOLD,
-        window: int = CONVERGENCE_WINDOW,
+        window: int = ROUND_CONVERGENCE_WINDOW,
+        total_methods: int | None = None,
+        tested_count: int | None = None,
     ) -> dict:
         """
         检查指定防御方是否收敛。
 
-        返回: {"converged": bool, "std": float, "current_elo": float, "n_updates": int}
+        综合判断指标：
+        - 最近 N 轮结束时防御方 Elo 的标准差 < threshold
+        - 相对标准差 < RELATIVE_STD_THRESHOLD
+        - 最近被测方法成功率在 [RECENT_SUCCESS_RATE_LOW, RECENT_SUCCESS_RATE_HIGH] 区间
+        - 已测方法覆盖率 >= MIN_COVERAGE_RATIO 或绝对数 >= MIN_COVERAGE_ABSOLUTE
+
+        参数:
+            total_methods: 当前攻击集的总方法数。
+            tested_count: 当前攻击集中已真实评估的方法数；若未提供，使用 self.ground_truth_methods 的计数。
+
+        返回: {
+            "converged": bool,
+            "std": float | None,
+            "relative_std": float | None,
+            "current_elo": float,
+            "n_rounds": int,
+            "recent_success_rate": float,
+            "coverage": float,
+            "coverage_ok": bool,
+            "success_rate_ok": bool,
+            "notes": list[str],
+        }
         """
-        elos = self._defender_elo_window.get(defender_name, [])
-        if len(elos) < window:
+        round_elos = self._round_defender_elos.get(defender_name, [])
+        current_elo = self.get_defender_elo(defender_name)
+
+        if total_methods is None:
+            total_methods = max(1, len(self.attacker_ratings))
+        if tested_count is None:
+            tested_count = len(self.ground_truth_methods)
+        coverage = tested_count / total_methods
+        coverage_ok = coverage >= MIN_COVERAGE_RATIO or tested_count >= MIN_COVERAGE_ABSOLUTE
+
+        recent_success_rate = self._recent_success_rate()
+        success_rate_ok = RECENT_SUCCESS_RATE_LOW <= recent_success_rate <= RECENT_SUCCESS_RATE_HIGH
+
+        notes = []
+        if len(round_elos) < window:
+            notes.append(f"轮次不足，需要至少 {window} 轮")
             return {
                 "converged": False,
                 "std": None,
-                "current_elo": self.get_defender_elo(defender_name),
-                "n_updates": len(elos),
-                "note": "数据不足，需要更多轮测试",
+                "relative_std": None,
+                "current_elo": round(current_elo, 1),
+                "n_rounds": len(round_elos),
+                "recent_success_rate": round(recent_success_rate, 4),
+                "coverage": round(coverage, 4),
+                "coverage_ok": coverage_ok,
+                "success_rate_ok": success_rate_ok,
+                "notes": notes,
             }
 
-        recent = elos[-window:]
+        recent = round_elos[-window:]
         std = float(np.std(recent))
+        relative_std = std / current_elo if current_elo != 0 else float("inf")
+
+        std_ok = std < threshold
+        rel_std_ok = relative_std < RELATIVE_STD_THRESHOLD
+
+        if not std_ok:
+            notes.append(f"Elo 标准差 {std:.1f} >= 阈值 {threshold}")
+        if not rel_std_ok:
+            notes.append(f"相对标准差 {relative_std:.2%} >= 阈值 {RELATIVE_STD_THRESHOLD:.2%}")
+        if not success_rate_ok:
+            notes.append(f"最近成功率 {recent_success_rate:.1%} 不在 [{RECENT_SUCCESS_RATE_LOW:.0%}, {RECENT_SUCCESS_RATE_HIGH:.0%}]")
+        if not coverage_ok:
+            notes.append(f"覆盖率 {coverage:.1%} 不足")
+
+        converged = std_ok and rel_std_ok and success_rate_ok and coverage_ok
 
         return {
-            "converged": std < threshold,
+            "converged": converged,
             "std": round(std, 2),
-            "current_elo": round(recent[-1], 1),
-            "n_updates": len(elos),
+            "std_ok": std_ok,
+            "relative_std": round(relative_std, 4),
+            "rel_std_ok": rel_std_ok,
+            "current_elo": round(current_elo, 1),
+            "n_rounds": len(round_elos),
+            "recent_success_rate": round(recent_success_rate, 4),
+            "coverage": round(coverage, 4),
+            "coverage_ok": coverage_ok,
+            "success_rate_ok": success_rate_ok,
+            "notes": notes,
         }
 
     def all_converged(
         self,
         defenders: list[str],
         threshold: float = CONVERGENCE_THRESHOLD,
-        window: int = CONVERGENCE_WINDOW,
+        window: int = ROUND_CONVERGENCE_WINDOW,
+        total_methods: int | None = None,
+        tested_count: int | None = None,
     ) -> bool:
         """检查所有防御方是否都已收敛。"""
         if not defenders:
             return False
         return all(
-            self.check_convergence(d, threshold, window)["converged"]
+            self.check_convergence(d, threshold, window, total_methods, tested_count)["converged"]
             for d in defenders
         )
 
@@ -471,6 +564,8 @@ class ELOTracker:
             }
 
         def_elo = self.get_defender_elo(defender_name)
+        total_methods = max(1, len(self.attacker_ratings))
+        tested_count = len(self.ground_truth_methods & set(self.attacker_ratings.keys()))
 
         # 攻击方 ELO 高于防御方的攻击标记为"可能突破"
         threats_above = sum(
@@ -478,13 +573,34 @@ class ELOTracker:
             if elo > def_elo
         )
 
-        # 置信度 = sigmoid 映射：σ=0 → 100%，σ→∞ → 0%
-        conv = self.check_convergence(defender_name)
-        std = conv.get("std")
-        if std is not None:
-            confidence = 1.0 / (1.0 + std / CONVERGENCE_THRESHOLD)
+        # 收敛状态（综合多维度指标）
+        conv = self.check_convergence(defender_name, total_methods=total_methods, tested_count=tested_count)
+
+        # 置信度综合计算：
+        # - 已收敛时给高置信度（0.8 ~ 0.95），随覆盖率和成功率微调
+        # - 未收敛时根据各指标距离目标的程度给低置信度
+        if conv["converged"]:
+            base_conf = 0.85
+            # 成功率越接近 50%，置信度越高
+            success_rate = conv["recent_success_rate"]
+            success_bonus = 0.1 * (1.0 - abs(success_rate - 0.5) / 0.5)
+            # 覆盖率越高，置信度越高
+            coverage_bonus = 0.05 * min(conv["coverage"] / MIN_COVERAGE_RATIO, 1.0)
+            confidence = min(0.98, base_conf + success_bonus + coverage_bonus)
         else:
-            confidence = 0.0
+            # 未收敛时基于未完成项数量给低置信度
+            missing = 0
+            if not conv.get("std_ok", False):
+                missing += 1
+            if not conv.get("rel_std_ok", False):
+                missing += 1
+            if not conv.get("success_rate_ok", False):
+                missing += 1
+            if not conv.get("coverage_ok", False):
+                missing += 1
+            if conv.get("std") is None:
+                missing += 1
+            confidence = max(0.05, 0.5 - 0.12 * missing)
 
         return {
             "boundary_elo": round(def_elo, 1),
@@ -494,6 +610,12 @@ class ELOTracker:
             "confidence": round(float(confidence), 4),
             "converged": conv["converged"],
             "elo_std": conv.get("std"),
+            "relative_std": conv.get("relative_std"),
+            "recent_success_rate": conv.get("recent_success_rate"),
+            "coverage": conv.get("coverage"),
+            "coverage_ok": conv.get("coverage_ok"),
+            "success_rate_ok": conv.get("success_rate_ok"),
+            "convergence_notes": conv.get("notes", []),
         }
 
     # ============================================================
@@ -506,6 +628,7 @@ class ELOTracker:
             "defender_ratings": self.defender_ratings,
             "history": self.history,
             "defender_elo_window": {k: v for k, v in self._defender_elo_window.items()},
+            "round_defender_elos": {k: v for k, v in self._round_defender_elos.items()},
             "ground_truth_methods": sorted(self.ground_truth_methods),
             "attacker_stats": self.attacker_stats,
             "config": {"k_factor": self.k, "initial_elo": self.initial},
@@ -529,6 +652,9 @@ class ELOTracker:
 
         window_data = data.get("defender_elo_window", {})
         self._defender_elo_window = defaultdict(list, window_data)
+
+        round_elo_data = data.get("round_defender_elos", {})
+        self._round_defender_elos = defaultdict(list, round_elo_data)
 
         self.ground_truth_methods = set(data.get("ground_truth_methods", []))
         # 与 predictor 持久化的 ground truth 库保持一致
