@@ -31,13 +31,10 @@ from llmsec.core.config import (
     ATTACK_SET_L1_FILE,
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
-    LEGACY_ATTACK_SET_L1_FILE,
-    LEGACY_SAFE_TWINS_FILE,
     OUTPUT_DIR,
     SAFE_TWINS_FILE,
     GeneratorConfig,
     TargetConfig,
-    resolve_existing,
 )
 from llmsec.core.io import load_done_ids, read_jsonl
 from llmsec.core.llm import create_openai_client
@@ -63,8 +60,8 @@ TARGET_API_KEY = _TARGET_CONFIG.api_key
 TARGET_BASE_URL = _TARGET_CONFIG.base_url
 TARGET_MODEL = _TARGET_CONFIG.model
 
-INPUT_FILE = ATTACK_SET_L1_FILE   # 读取时经 resolve_existing 回退旧路径
-TWIN_FILE = SAFE_TWINS_FILE       # 读取/追加时经 resolve_existing 回退旧路径
+INPUT_FILE = ATTACK_SET_L1_FILE
+TWIN_FILE = SAFE_TWINS_FILE
 TWIN_RESULT_FILE = OUTPUT_DIR / "allergy_results.jsonl"
 ALLERGY_REPORT_FILE = OUTPUT_DIR / "allergy_report.json"
 
@@ -128,8 +125,8 @@ def generate_safe_twin(attack_prompt: str, client) -> Optional[dict]:
 
 def generate_all_twins():
     """批量生成所有攻击prompt的安全孪生。"""
-    input_file = resolve_existing(INPUT_FILE, LEGACY_ATTACK_SET_L1_FILE)
-    twin_file = resolve_existing(TWIN_FILE, LEGACY_SAFE_TWINS_FILE)
+    input_file = INPUT_FILE
+    twin_file = TWIN_FILE
 
     if not os.path.exists(input_file):
         print(f"❌ 攻击集不存在: {input_file}")
@@ -190,7 +187,7 @@ def generate_all_twins():
 # ============================================================
 def evaluate_allergy():
     """用安全孪生攻击目标模型，判断是否过敏。"""
-    twin_file = resolve_existing(TWIN_FILE, LEGACY_SAFE_TWINS_FILE)
+    twin_file = TWIN_FILE
 
     if not os.path.exists(twin_file):
         print(f"❌ 安全孪生集不存在: {twin_file}")

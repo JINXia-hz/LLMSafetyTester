@@ -31,12 +31,7 @@ from collections import defaultdict
 
 import numpy as np
 
-from llmsec.core.config import (
-    ELO_FILE,
-    INITIAL_ELO,
-    LEGACY_ELO_FILE,
-    resolve_existing,
-)
+from llmsec.core.config import INITIAL_ELO, STATE_FILE
 from llmsec.core.io import iter_jsonl
 from llmsec.core.logging import setup_console
 from llmsec.evaluation.elo_cluster import ClusterEloPredictor
@@ -78,9 +73,7 @@ class ELOTracker:
         self.attacker_ratings: dict[str, float] = {}
         self.defender_ratings: dict[str, float] = {}
         self.history: list[dict] = []  # 每次更新的完整记录
-        # 收敛追踪：每个防御方最近 N 次 ELO 值（每次 update 一个点，已弃用，保留兼容）
-        self._defender_elo_window: dict[str, list[float]] = defaultdict(list)
-        # 每轮（batch）结束时的防御方 Elo，用于更稳健的收敛判断
+        # 每轮（batch）结束时的防御方 Elo，用于收敛判断
         self._round_defender_elos: dict[str, list[float]] = defaultdict(list)
         # 哪些攻击者已经过真实评估（ground truth）
         self.ground_truth_methods: set[str] = set()
@@ -139,13 +132,6 @@ class ELOTracker:
 
         # 更新方法级不确定性统计
         self._update_attacker_stats(attacker_name, eval_score, attacker_won)
-
-        # 记录滑动窗口
-        self._defender_elo_window[defender_name].append(new_def_elo)
-        if len(self._defender_elo_window[defender_name]) > CONVERGENCE_WINDOW * 3:
-            self._defender_elo_window[defender_name] = (
-                self._defender_elo_window[defender_name][-CONVERGENCE_WINDOW * 2:]
-            )
 
         info = {
             "attacker": attacker_name,
@@ -576,31 +562,13 @@ class ELOTracker:
         # 收敛状态（综合多维度指标）
         conv = self.check_convergence(defender_name, total_methods=total_methods, tested_count=tested_count)
 
-        # 置信度综合计算：
-        # - 已收敛时给高置信度（0.8 ~ 0.95），随覆盖率和成功率微调
-        # - 未收敛时根据各指标距离目标的程度给低置信度
-        if conv["converged"]:
-            base_conf = 0.85
-            # 成功率越接近 50%，置信度越高
-            success_rate = conv["recent_success_rate"]
-            success_bonus = 0.1 * (1.0 - abs(success_rate - 0.5) / 0.5)
-            # 覆盖率越高，置信度越高
-            coverage_bonus = 0.05 * min(conv["coverage"] / MIN_COVERAGE_RATIO, 1.0)
-            confidence = min(0.98, base_conf + success_bonus + coverage_bonus)
-        else:
-            # 未收敛时基于未完成项数量给低置信度
-            missing = 0
-            if not conv.get("std_ok", False):
-                missing += 1
-            if not conv.get("rel_std_ok", False):
-                missing += 1
-            if not conv.get("success_rate_ok", False):
-                missing += 1
-            if not conv.get("coverage_ok", False):
-                missing += 1
-            if conv.get("std") is None:
-                missing += 1
-            confidence = max(0.05, 0.5 - 0.12 * missing)
+        # 置信度 = 四项指标加权评分（std 40% + 成功率 30% + 覆盖率 20% + 相对std 10%）
+        confidence = (
+            0.4 * float(conv.get("std_ok", False))
+            + 0.3 * float(conv.get("success_rate_ok", False))
+            + 0.2 * float(conv.get("coverage_ok", False))
+            + 0.1 * float(conv.get("rel_std_ok", False))
+        )
 
         return {
             "boundary_elo": round(def_elo, 1),
@@ -621,15 +589,14 @@ class ELOTracker:
     # ============================================================
     # 持久化
     # ============================================================
-    def save(self, filepath):
-        filepath = str(filepath)
+    def save(self, filepath=None):
+        filepath = str(filepath or STATE_FILE)
         data = {
             "attacker_ratings": self.attacker_ratings,
             "defender_ratings": self.defender_ratings,
             "history": self.history,
-            "defender_elo_window": {k: v for k, v in self._defender_elo_window.items()},
             "round_defender_elos": {k: v for k, v in self._round_defender_elos.items()},
-            "ground_truth_methods": sorted(self.ground_truth_methods),
+            "ground_truth": self.predictor.ground_truth,
             "attacker_stats": self.attacker_stats,
             "config": {"k_factor": self.k, "initial_elo": self.initial},
         }
@@ -640,8 +607,8 @@ class ELOTracker:
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def load(self, filepath):
-        filepath = str(filepath)
+    def load(self, filepath=None):
+        filepath = str(filepath or STATE_FILE)
         if not os.path.exists(filepath):
             return
         with open(filepath, "r", encoding="utf-8") as f:
@@ -650,15 +617,13 @@ class ELOTracker:
         self.defender_ratings = data.get("defender_ratings", {})
         self.history = data.get("history", [])
 
-        window_data = data.get("defender_elo_window", {})
-        self._defender_elo_window = defaultdict(list, window_data)
-
         round_elo_data = data.get("round_defender_elos", {})
         self._round_defender_elos = defaultdict(list, round_elo_data)
 
-        self.ground_truth_methods = set(data.get("ground_truth_methods", []))
-        # 与 predictor 持久化的 ground truth 库保持一致
-        self.ground_truth_methods.update(self.predictor.ground_truth.keys())
+        # ground_truth 统一从 state.json 恢复，与 ground_truth_methods 保持同步
+        ground_truth = data.get("ground_truth", {})
+        self.predictor.ground_truth = ground_truth
+        self.ground_truth_methods = set(ground_truth.keys())
 
         self.attacker_stats = data.get("attacker_stats", {})
 
@@ -672,32 +637,25 @@ class ELOTracker:
 # ============================================================
 def update_elo_from_results(
     results_file: str,
-    elo_file: str = None,
+    state_file: str = None,
     defender_name: str = "target-model",
 ):
     """
     读取评估结果 .jsonl，批量更新 ELO。
 
     results_file: 评估结果 .jsonl 文件路径
-    elo_file: ELO 状态保存路径；缺省为 core.config.ELO_FILE（output/state/elo.json），
-              读取时经 resolve_existing 回退兼容旧路径 output/elo.json，写入只写新路径
+    state_file: ELO 状态保存路径；缺省为 core.config.STATE_FILE
     defender_name: 防御方模型名
     """
-    if elo_file is None:
-        load_path = resolve_existing(ELO_FILE, LEGACY_ELO_FILE)
-        save_path = ELO_FILE
-    else:
-        load_path = save_path = elo_file
-
     tracker = ELOTracker()
-    tracker.load(load_path)
+    tracker.load(state_file)
 
     for r in iter_jsonl(results_file):
         method = r.get("method", "unknown")
         score = r.get("eval_score", 0)
         tracker.update(method, defender_name, score)
 
-    tracker.save(save_path)
+    tracker.save(state_file)
     return tracker
 
 

@@ -10,7 +10,7 @@
     from llmsec.evaluation import ELOTracker
 
     tracker = ELOTracker()
-    tracker.load(ELO_FILE)
+    tracker.load(STATE_FILE)
     analysis = analyze_clusters(tracker)
 """
 
@@ -271,11 +271,10 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    from llmsec.core.config import ELO_FILE, LEGACY_ELO_FILE, resolve_existing
+    from llmsec.core.config import STATE_FILE
 
-    elo_path = resolve_existing(ELO_FILE, LEGACY_ELO_FILE)
     tracker = ELOTracker()
-    tracker.load(elo_path)
+    tracker.load(STATE_FILE)
 
     analysis = analyze_clusters(tracker, defender_name=args.defender)
     out_path = save_cluster_analysis(analysis, args.output)

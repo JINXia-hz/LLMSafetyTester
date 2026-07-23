@@ -27,11 +27,9 @@ from sklearn.decomposition import PCA
 
 from llmsec.core import (
     ATTACK_SET_L1_FILE,
-    LEGACY_ATTACK_SET_L1_FILE,
     OUTPUT_DIR,
     estimate_tokens,
     read_jsonl,
-    resolve_existing,
     strip_math_tax,
 )
 
@@ -572,8 +570,7 @@ def load_and_extract(
     attack_path = Path(attack_file)
     if not attack_path.is_absolute():
         if attack_file == "攻击集_L1.jsonl":
-            # 默认攻击集：优先新路径 output/attacks/l1.jsonl，回退旧路径 output/攻击集_L1.jsonl
-            attack_path = resolve_existing(ATTACK_SET_L1_FILE, LEGACY_ATTACK_SET_L1_FILE)
+            attack_path = ATTACK_SET_L1_FILE
         else:
             attack_path = OUTPUT_DIR / attack_file
     if not attack_path.exists():

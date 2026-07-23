@@ -22,11 +22,8 @@ from llmsec.evaluation.samplers import (
 )
 from llmsec.evaluation.cluster_analysis import analyze_clusters, save_cluster_analysis
 from llmsec.evaluation.evaluator import (
-    compute_eval_score_legacy,
     compute_eval_score_v2,
     compute_math_score,
-    detect_harmful_legacy,
-    detect_refusal_legacy,
     evaluate_single,
     extract_math_answer,
 )
@@ -54,8 +51,7 @@ __all__ = [
     "analyze_clusters", "save_cluster_analysis",
     # evaluator
     "evaluate_single", "compute_math_score", "compute_eval_score_v2",
-    "compute_eval_score_legacy", "extract_math_answer",
-    "detect_refusal_legacy", "detect_harmful_legacy",
+    "extract_math_answer",
     # safe_twin
     "generate_safe_twin", "SAFE_TWIN_SYSTEM",
 ]

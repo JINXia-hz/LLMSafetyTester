@@ -48,11 +48,9 @@ STATE_DIR = OUTPUT_DIR / "state"
 ATTACKS_DIR = OUTPUT_DIR / "attacks"
 RUNS_DIR = OUTPUT_DIR / "runs"
 
-# 状态文件（新约定：output/state/）
-ELO_FILE = STATE_DIR / "elo.json"
+# 状态文件（统一持久化：output/state/state.json）
+STATE_FILE = STATE_DIR / "state.json"
 SAFE_TWINS_FILE = STATE_DIR / "safe_twins.jsonl"
-GROUND_TRUTH_ELO_FILE = STATE_DIR / "ground_truth_elo.json"
-PREDICTED_ELO_FILE = STATE_DIR / "predicted_elo.json"
 
 # 攻击集（新约定：output/attacks/）
 ATTACK_SET_L1_FILE = ATTACKS_DIR / "l1.jsonl"
@@ -62,29 +60,6 @@ CLUSTER_REPORT_FILE = OUTPUT_DIR / "cluster_report.json"
 CLUSTER_MATRIX_FILE = OUTPUT_DIR / "cluster_matrix.csv"
 CLUSTER_FEATURES_FILE = OUTPUT_DIR / "cluster_features.json"
 CLUSTER_ARTIFACTS_FILE = OUTPUT_DIR / "cluster_artifacts.pkl"
-
-# ------------------------------------------------------------
-# 旧路径（仅用于读取兼容回退，写入一律走上面的新路径）
-# ------------------------------------------------------------
-LEGACY_ELO_FILE = OUTPUT_DIR / "elo.json"
-LEGACY_SAFE_TWINS_FILE = OUTPUT_DIR / "safe_twins.jsonl"
-LEGACY_ATTACK_SET_L1_FILE = OUTPUT_DIR / "攻击集_L1.jsonl"
-
-
-def resolve_existing(primary, *legacy_candidates):
-    """
-    兼容回退读取：primary 存在则返回 primary，
-    否则依次返回第一个存在的旧路径；都不存在时返回 primary。
-    参数与返回值均为 pathlib.Path。
-    """
-    primary = Path(primary)
-    if primary.exists():
-        return primary
-    for candidate in legacy_candidates:
-        candidate = Path(candidate)
-        if candidate.exists():
-            return candidate
-    return primary
 
 
 # ============================================================

@@ -26,7 +26,7 @@ if _VENV_PYTHON.exists() and sys.executable != str(_VENV_PYTHON):
 import json
 import os
 
-from llmsec.core.config import ATTACKS_DIR, ELO_FILE, PROJECT_ROOT, load_env
+from llmsec.core.config import ATTACKS_DIR, PROJECT_ROOT, STATE_FILE, load_env
 from llmsec.core.logging import setup_console
 
 setup_console()
@@ -125,15 +125,15 @@ def main():
     print(f"  已选择: {selected_file}")
     print()
 
-    # ---- ELO 重置（路径统一为 output/state/elo.json） ----
+    # ---- ELO 重置（路径统一为 output/state/state.json） ----
     elo_reset = False
-    if os.path.exists(ELO_FILE):
-        elo_size = os.path.getsize(ELO_FILE)
-        if elo_size > 100:
-            print(f"  检测到已有 ELO 数据 ({elo_size} 字节)")
+    if os.path.exists(STATE_FILE):
+        state_size = os.path.getsize(STATE_FILE)
+        if state_size > 100:
+            print(f"  检测到已有 ELO 数据 ({state_size} 字节)")
             elo_reset = prompt_yn("是否清空 ELO 重新开始？", default=True)
             if elo_reset:
-                os.remove(ELO_FILE)
+                os.remove(STATE_FILE)
                 print("  ELO 已重置")
             print()
     else:

@@ -60,20 +60,17 @@ def cosine_distance_matrix(vectors: np.ndarray) -> np.ndarray:
 
 def jaccard_distance_matrix(vectors: np.ndarray) -> np.ndarray:
     """
-    计算 Jaccard 距离矩阵（适用于稀疏二值特征）。
+    计算 Jaccard 距离矩阵（适用于稀疏二值特征），numpy 向量化实现。
     d_jaccard(A, B) = 1 - |A ∩ B| / |A ∪ B|
     """
-    n = vectors.shape[0]
-    dist = np.zeros((n, n))
-    for i in range(n):
-        for j in range(i + 1, n):
-            intersection = np.sum(vectors[i] * vectors[j])
-            union = np.sum(np.clip(vectors[i] + vectors[j], 0, 1))
-            jaccard = intersection / union if union > 0 else 1.0
-            d = 1.0 - jaccard
-            dist[i, j] = d
-            dist[j, i] = d
-    return dist
+    v = vectors.astype(bool)
+    intersection = v.astype(float) @ v.T.astype(float)
+    row_sums = v.sum(axis=1).astype(float)
+    union = row_sums[:, None] + row_sums[None, :] - intersection
+    return 1.0 - np.divide(
+        intersection, union,
+        out=np.ones_like(intersection), where=union != 0
+    )
 
 
 def euclidean_distance_matrix(vectors: np.ndarray, standardize: bool = True) -> np.ndarray:
@@ -249,6 +246,18 @@ def _hdbscan_once(
     return {name: int(label) for name, label in zip(method_names, labels)}, n_clusters, n_noise
 
 
+def _build_eps_candidates(dist_matrix: np.ndarray, eps: float) -> list[float]:
+    """从初始 eps 构建候选 eps 列表：逐步下降，不低于最小非零距离。"""
+    sorted_distances = np.sort(dist_matrix[np.triu_indices_from(dist_matrix, k=1)])
+    min_positive_dist = float(sorted_distances[sorted_distances > 0].min()) if np.any(sorted_distances > 0) else 1e-6
+    candidates = [eps]
+    for factor in [0.75, 0.5, 0.33, 0.25]:
+        candidate = max(eps * factor, min_positive_dist * 1.05)
+        if candidate < candidates[-1]:
+            candidates.append(candidate)
+    return candidates
+
+
 def run_hdbscan(
     dist_matrix: np.ndarray,
     method_names: list[str],
@@ -276,14 +285,7 @@ def run_hdbscan(
         effective_min_samples = min(effective_min_samples, n - 1)
         eps = min(eps, dist_matrix.max())
 
-        # 候选 eps：从 knee_eps 开始，逐步下降到最小非零距离附近
-        sorted_distances = np.sort(dist_matrix[np.triu_indices_from(dist_matrix, k=1)])
-        min_positive_dist = float(sorted_distances[sorted_distances > 0].min()) if np.any(sorted_distances > 0) else 1e-6
-        eps_candidates = [eps]
-        for factor in [0.75, 0.5, 0.33, 0.25]:
-            candidate = max(eps * factor, min_positive_dist * 1.05)
-            if candidate < eps_candidates[-1]:
-                eps_candidates.append(candidate)
+        eps_candidates = _build_eps_candidates(dist_matrix, eps)
 
         # 候选 min_samples：从自动值逐步降到 2
         min_samples_candidates = [effective_min_samples]
@@ -1055,14 +1057,7 @@ def run_dbscan(
     min_samples = min(min_samples, n - 1)
     eps = min(eps, dist_matrix.max())
 
-    sorted_distances = np.sort(dist_matrix[np.triu_indices_from(dist_matrix, k=1)])
-    min_positive_dist = float(sorted_distances[sorted_distances > 0].min()) if np.any(sorted_distances > 0) else 1e-6
-
-    eps_candidates = [eps]
-    for factor in [0.75, 0.5, 0.33, 0.25]:
-        candidate = max(eps * factor, min_positive_dist * 1.05)
-        if candidate < eps_candidates[-1]:
-            eps_candidates.append(candidate)
+    eps_candidates = _build_eps_candidates(dist_matrix, eps)
 
     last_labels = None
     for try_eps in eps_candidates:

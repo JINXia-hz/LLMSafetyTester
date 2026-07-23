@@ -55,7 +55,7 @@ from typing import Optional
 
 from openai import OpenAI
 
-from llmsec.core.config import ELO_FILE, OUTPUT_DIR, RUNS_DIR, SAFE_TWINS_FILE
+from llmsec.core.config import OUTPUT_DIR, RUNS_DIR, SAFE_TWINS_FILE, STATE_FILE
 from llmsec.core.io import read_jsonl
 from llmsec.core.logging import setup_console
 from llmsec.evaluation import (
@@ -261,19 +261,6 @@ def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict])
         tracker.attacker_ratings[method] = pred["elo"]
 
 
-def _inject_predicted_elos_fixed(tracker: ELOTracker, method_records: dict[str, dict]):
-    """
-    为所有尚未真实评估的方法注入固定簇预测的初始 Elo。
-    已真实评估的方法保持其当前 Elo 不变。
-    """
-    predictor = tracker.predictor
-    for method, record in method_records.items():
-        if method in tracker.ground_truth_methods:
-            continue
-        pred = predictor.predict_fixed(method, record)
-        tracker.attacker_ratings[method] = pred["elo"]
-
-
 def _sample_seed_methods_from_pre_cluster(
     tracker: ELOTracker, method_records: dict[str, dict]
 ) -> list[str]:
@@ -404,7 +391,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
     all_methods = sorted(method_records.keys())
 
     # 加载已有 ELO
-    tracker.load(ELO_FILE)
+    tracker.load(STATE_FILE)
     tested = set()
     all_results = []
     recent_results = {}
@@ -427,7 +414,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
         print(f"  ♻️ 复用已有聚类: {n_clusters} 簇 (ground truth {gt_count} 种)")
 
     # ---- 固定簇冷启动：为所有未测方法注入预测 Elo ----
-    _inject_predicted_elos_fixed(tracker, method_records)
+    _inject_predicted_elos(tracker, method_records)
     print(f"  🧊 固定簇冷启动: 已为 {len(all_methods)} 种方法注入初始 Elo "
           f"(ground truth {len(tracker.ground_truth_methods)} 种)")
 
@@ -496,8 +483,8 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
 
         # 用固定簇重新预测剩余方法
         remaining_records = {m: r for m, r in method_records.items() if m not in tested}
-        _inject_predicted_elos_fixed(tracker, remaining_records)
-        tracker.save(ELO_FILE)
+        _inject_predicted_elos(tracker, remaining_records)
+        tracker.save(STATE_FILE)
         tracker.record_round_end(DEFENDER_NAME)
         print(f"  ✅ 种子阶段完成: 已建立 ground truth {len(tracker.ground_truth_methods)} 种，"
               f"剩余 {len(remaining_records)} 种使用固定簇预测 Elo")
@@ -560,12 +547,12 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
             time.sleep(API_DELAY)
 
         # 保存ELO进度
-        tracker.save(ELO_FILE)
+        tracker.save(STATE_FILE)
 
         # 固定簇更新：不再重训练聚类，只基于新增 ground truth 更新未测方法 Elo
         remaining_records = {m: r for m, r in method_records.items() if m not in tested}
-        _inject_predicted_elos_fixed(tracker, remaining_records)
-        tracker.save(ELO_FILE)
+        _inject_predicted_elos(tracker, remaining_records)
+        tracker.save(STATE_FILE)
         print(f"     🔄 固定簇已更新: {len(remaining_records)} 个未测方法的预测 Elo")
 
         # 聚类级安全分析
@@ -616,8 +603,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
           f"(DBSCAN核心={final_report.get('dbscan_core_clusters', 0)}, "
           f"silhouette={final_report.get('validation', {}).get('silhouette', 0):.4f})")
 
-    tracker.save(ELO_FILE)
-    tracker.predictor.save()
+    tracker.save(STATE_FILE)
 
     # 保存攻击结果到专用文件（避免 Phase 3 读到旧数据）
     with open(attack_file, "w", encoding="utf-8") as f:
@@ -878,8 +864,6 @@ def main():
                         help="过敏检测方法数上限；未指定时按ELO边界置信度自适应（置信度越低窗口越大）")
     parser.add_argument("--cluster-retrain-threshold", type=int, default=10,
                         help="新增 ground truth 方法数达到多少时触发聚类重训练（默认 10）")
-    parser.add_argument("--cluster-seed-count", type=int, default=5,
-                        help="首次运行无 ground truth 时，自动采样多少种子方法做真实评估（默认 5）")
     parser.add_argument("--cluster-retrain-force", action="store_true",
                         help="强制在本次运行开始时重训练聚类模型")
     parser.add_argument("--sampler", type=str, default="hybrid",
@@ -939,7 +923,6 @@ def main():
 
     # 将 CLI 聚类参数同步给 predictor
     tracker.predictor.threshold = args.cluster_retrain_threshold
-    tracker.predictor.seed_count = args.cluster_seed_count
 
     os.makedirs(runs_dir, exist_ok=True)
 
@@ -953,8 +936,8 @@ def main():
         ):
             print("  🔄 强制重训练聚类模型 ...")
             tracker.predictor.fit_dynamic(records, [], force=True)
-            _inject_predicted_elos_fixed(tracker, method_records)
-            tracker.save(ELO_FILE)
+            _inject_predicted_elos(tracker, method_records)
+            tracker.save(STATE_FILE)
             print("  ✅ 强制重训练完成，已更新所有方法预测 Elo")
 
         attack_summary = run_attack_phase(
@@ -971,7 +954,7 @@ def main():
         )
     else:
         # 仅过敏阶段时，ELO从文件加载
-        tracker.load(ELO_FILE)
+        tracker.load(STATE_FILE)
         if not tracker.attacker_ratings:
             print("⚠ 无ELO数据，请先运行 Phase 1")
             sys.exit(1)
@@ -1014,7 +997,7 @@ def main():
 
     metadata = load_prompt_metadata()
 
-    generated_files = [runner_report_file, ELO_FILE]  # 必定生成
+    generated_files = [runner_report_file, STATE_FILE]  # 必定生成
 
     if results:
         print("🌳 生成层级安全报告...")

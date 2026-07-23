@@ -24,13 +24,11 @@ from openai import OpenAI
 
 from llmsec.core import (
     ATTACK_SET_L1_FILE,
-    LEGACY_ATTACK_SET_L1_FILE,
     PROJECT_ROOT,
     GeneratorConfig,
     append_jsonl,
     create_openai_client,
     load_done_ids,
-    resolve_existing,
     setup_console,
 )
 from llmsec.core.text import MATH_TAX_PATTERN
@@ -365,9 +363,9 @@ def main():
     else:
         methods = all_methods
 
-    # ---- 加载已有记录 (断点续传，读取兼容旧路径) ----
+    # ---- 加载已有记录 (断点续传) ----
     done_ids = set()
-    resume_file = resolve_existing(output_file, LEGACY_ATTACK_SET_L1_FILE)
+    resume_file = output_file
     for record_id in load_done_ids(resume_file):
         # 提取方法编号 (如 "1.1.1-001" → "1.1.1")
         done_ids.add(str(record_id).rsplit("-", 1)[0])

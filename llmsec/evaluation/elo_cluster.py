@@ -45,11 +45,7 @@ from llmsec.clustering.features import (
     TECHNIQUE_LABELS,
     TEXTUAL_FEATURE_NAMES,
 )
-from llmsec.core.config import (
-    GROUND_TRUTH_ELO_FILE,
-    INITIAL_ELO,
-    PREDICTED_ELO_FILE,
-)
+from llmsec.core.config import INITIAL_ELO
 from llmsec.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -77,42 +73,25 @@ class ClusterEloPredictor:
         self.k_neighbors = k_neighbors
         self.weights = weights
 
-        # ground truth 库：只记录真实评估过的方法
+        # ground truth 库：只记录真实评估过的方法（由 ELOTracker 统一持久化到 state.json）
         self.ground_truth: dict[str, dict] = {}
-        # 预测缓存：记录最近一次预测结果
-        self.predicted: dict[str, dict] = {}
 
         self.last_fit_gt_count: int = 0
         self.last_fit_at: str | None = None
         self.artifacts: dict | None = None
 
-        self._load()
+        self._load_artifacts()
 
     # ============================================================
-    # 持久化
+    # artifacts 持久化（ground truth 已由 ELOTracker 统一保存）
     # ============================================================
-    def _load(self):
-        """从磁盘加载 ground truth 与预测缓存。"""
-        if GROUND_TRUTH_ELO_FILE.exists():
-            try:
-                with open(GROUND_TRUTH_ELO_FILE, "r", encoding="utf-8") as f:
-                    self.ground_truth = json.load(f)
-            except Exception as e:
-                logger.warning("加载 ground_truth_elo 失败: %s", e)
-                self.ground_truth = {}
-
-        if PREDICTED_ELO_FILE.exists():
-            try:
-                with open(PREDICTED_ELO_FILE, "r", encoding="utf-8") as f:
-                    self.predicted = json.load(f)
-            except Exception as e:
-                logger.warning("加载 predicted_elo 失败: %s", e)
-                self.predicted = {}
-
-        # 若 artifacts 文件存在则预加载（预测时会用到）
+    def _load_artifacts(self):
+        """从磁盘加载聚类 artifacts（不保存完整 dist_matrix，预测时按需计算局部距离）。"""
         if CLUSTER_ARTIFACTS_FILE.exists():
             try:
                 self.artifacts = joblib.load(CLUSTER_ARTIFACTS_FILE)
+                # 丢弃训练期使用的完整 dist_matrix，节省内存
+                self.artifacts.pop("dist_matrix", None)
                 self.last_fit_gt_count = int(
                     self.artifacts.get("ground_truth_count", self.last_fit_gt_count)
                 )
@@ -141,15 +120,14 @@ class ClusterEloPredictor:
         if len(cleaned_features) != len(features):
             self.artifacts["features"] = cleaned_features
 
-    def save(self):
-        """保存 ground truth 与预测缓存。"""
-        GROUND_TRUTH_ELO_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(GROUND_TRUTH_ELO_FILE, "w", encoding="utf-8") as f:
-            json.dump(self.ground_truth, f, ensure_ascii=False, indent=2)
-
-        PREDICTED_ELO_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(PREDICTED_ELO_FILE, "w", encoding="utf-8") as f:
-            json.dump(self.predicted, f, ensure_ascii=False, indent=2)
+    def _save_artifacts(self):
+        """保存聚类 artifacts（不含 dist_matrix）。"""
+        if self.artifacts is None:
+            return
+        # 确保不保存完整 dist_matrix
+        self.artifacts.pop("dist_matrix", None)
+        os.makedirs(os.path.dirname(CLUSTER_ARTIFACTS_FILE) or ".", exist_ok=True)
+        joblib.dump(self.artifacts, CLUSTER_ARTIFACTS_FILE)
 
     # ============================================================
     # ground truth 管理
@@ -222,7 +200,7 @@ class ClusterEloPredictor:
             sorted(self.artifacts.get("labels", {}).keys())
         )
         self.last_fit_at = datetime.now().isoformat()
-        joblib.dump(self.artifacts, CLUSTER_ARTIFACTS_FILE)
+        self._save_artifacts()
 
         logger.info(
             "✅ 预聚类完成: %d 簇, target_k=%d, silhouette=%.4f",
@@ -232,7 +210,7 @@ class ClusterEloPredictor:
         )
         return report
 
-    def predict_fixed(
+    def predict(
         self,
         method: str,
         record: dict | None = None,
@@ -444,7 +422,7 @@ class ClusterEloPredictor:
         )
         self.last_fit_gt_count = self.ground_truth_count()
         self.last_fit_at = datetime.now().isoformat()
-        joblib.dump(self.artifacts, CLUSTER_ARTIFACTS_FILE)
+        self._save_artifacts()
 
         logger.info(
             "✅ 最终聚类完成: %d 簇, DBSCAN核心簇=%d, 噪声=%d, silhouette=%.4f",
@@ -553,8 +531,8 @@ class ClusterEloPredictor:
         self.last_fit_gt_count = current_gt_count
         self.last_fit_at = datetime.now().isoformat()
 
-        # 写回 artifacts
-        joblib.dump(self.artifacts, CLUSTER_ARTIFACTS_FILE)
+        # 写回 artifacts（不含 dist_matrix）
+        self._save_artifacts()
 
         logger.info(
             "✅ 聚类完成: %d 簇, %d 原始噪声点, %d 挂回噪声点, "
@@ -773,227 +751,21 @@ class ClusterEloPredictor:
         }
 
     # ============================================================
-    # 预测
-    # ============================================================
-    def predict(
-        self,
-        method: str,
-        record: dict | None = None,
-    ) -> dict:
-        """
-        预测单个方法的初始 Elo。
-
-        核心逻辑：
-        - 已测方法直接返回 ground truth Elo。
-        - 未测方法在统一特征空间中找到最近 ground truth 锚点，强制归入其所在簇。
-        - 簇内 Elo 按与目标方法的距离倒数加权，已测方法天然权重最高（未测方法不参与）。
-
-        参数:
-            method: 攻击方法名
-            record: 该方法的攻击记录（含 prompt / category / harm_type）
-
-        返回:
-            {
-                "elo": float,
-                "source": "ground_truth" | "predicted",
-                "cluster_id": int | None,
-                "confidence": float,
-                "based_on_gt_count": int,
-            }
-        """
-        # 1. 已在 ground truth 中，直接返回真实 Elo
-        if method in self.ground_truth:
-            return {
-                "elo": self.ground_truth[method]["elo"],
-                "source": "ground_truth",
-                "cluster_id": None,
-                "confidence": 1.0,
-                "based_on_gt_count": self.ground_truth_count(),
-            }
-
-        # 2. 无 artifacts 或 ground truth 不足，回退到 INITIAL_ELO
-        if (
-            self.artifacts is None
-            or self.ground_truth_count() < self.min_cluster_size
-        ):
-            return {
-                "elo": float(INITIAL_ELO),
-                "source": "predicted",
-                "cluster_id": None,
-                "confidence": 0.0,
-                "based_on_gt_count": self.ground_truth_count(),
-            }
-
-        meta = self.artifacts["meta"]
-        labels = self.artifacts["labels"]  # {gt_method: cluster_id}
-        gt_features = self.artifacts["features"]
-        # 只使用在 ground_truth 中有 Elo 的方法作为锚点
-        gt_methods = sorted(m for m in labels.keys() if m in self.ground_truth)
-
-        if not gt_methods:
-            logger.warning("artifacts 中无有效 ground truth 锚点，回退到 INITIAL_ELO")
-            return {
-                "elo": float(INITIAL_ELO),
-                "source": "predicted",
-                "cluster_id": None,
-                "confidence": 0.0,
-                "based_on_gt_count": self.ground_truth_count(),
-            }
-
-        if not record:
-            logger.warning("预测 %s 时未提供 record，回退到 INITIAL_ELO", method)
-            return {
-                "elo": float(INITIAL_ELO),
-                "source": "predicted",
-                "cluster_id": None,
-                "confidence": 0.0,
-                "based_on_gt_count": self.ground_truth_count(),
-            }
-
-        # 3. 构造新方法的特征
-        new_features = self._extract_features_for_new_method(method, record, meta)
-
-        # 4. 合并 features，计算复合距离
-        combined_features = {m: gt_features[m] for m in gt_methods if m in gt_features}
-        combined_features[method] = new_features
-        all_methods = [method] + gt_methods
-
-        dist_matrix, _ = build_composite_distance(
-            combined_features, all_methods, weights=self.weights
-        )
-
-        # 第一行是新方法到所有 gt 方法的距离
-        distances_to_gt = dist_matrix[0, 1:]
-
-        # 5. 找最近 ground truth 锚点（labels 已被 fit 处理，理论上无 -1）
-        sorted_indices = np.argsort(distances_to_gt)
-        nearest_method = None
-        nearest_cluster = None
-        nearest_dist = None
-        for idx in sorted_indices:
-            candidate = gt_methods[idx]
-            if candidate not in labels:
-                continue
-            cid = labels[candidate]
-            # 跳过仍被标为噪声的锚点（理论上已挂回，但防御性保留）
-            if cid == -1:
-                continue
-            nearest_method = candidate
-            nearest_cluster = cid
-            nearest_dist = float(distances_to_gt[idx])
-            break
-
-        if nearest_method is None:
-            logger.warning("未找到有效最近锚点，回退到全局平均真实 Elo")
-            avg_elo = sum(v["elo"] for v in self.ground_truth.values()) / len(self.ground_truth)
-            return {
-                "elo": round(avg_elo, 2),
-                "source": "predicted",
-                "cluster_id": -1,
-                "confidence": 0.0,
-                "based_on_gt_count": self.ground_truth_count(),
-            }
-
-        # 6. 取该簇内所有 ground truth 方法，按距离倒数加权求 Elo
-        cluster_members = [
-            m for m, cid in labels.items()
-            if cid == nearest_cluster and m in self.ground_truth
-        ]
-        if not cluster_members:
-            # 兜底：最近锚点单独预测
-            predicted_elo = self.ground_truth[nearest_method]["elo"]
-            confidence = 1.0 / (1.0 + nearest_dist)
-            result = {
-                "elo": round(predicted_elo, 2),
-                "source": "predicted",
-                "cluster_id": int(nearest_cluster),
-                "confidence": round(confidence, 4),
-                "based_on_gt_count": self.ground_truth_count(),
-            }
-            self.predicted[method] = {**result, "predicted_at": datetime.now().isoformat()}
-            return result
-
-        # 加权平均：同一簇内 ground truth 方法按与目标方法距离倒数加权
-        weights_list = []
-        elos_list = []
-        for member in cluster_members:
-            member_idx = gt_methods.index(member)
-            d = float(distances_to_gt[member_idx])
-            w = 1.0 / (1.0 + d)
-            weights_list.append(w)
-            elos_list.append(self.ground_truth[member]["elo"])
-
-        weights_arr = np.array(weights_list)
-        predicted_elo = float(np.dot(weights_arr, elos_list) / weights_arr.sum())
-
-        # 置信度：距离越近越可信；簇越大越可信
-        cluster_size = len(cluster_members)
-        distance_conf = 1.0 / (1.0 + nearest_dist)
-        size_conf = min(cluster_size / self.min_cluster_size, 1.0)
-        confidence = round(distance_conf * size_conf, 4)
-
-        result = {
-            "elo": round(predicted_elo, 2),
-            "source": "predicted",
-            "cluster_id": int(nearest_cluster),
-            "confidence": confidence,
-            "based_on_gt_count": self.ground_truth_count(),
-        }
-
-        # 7. 缓存预测结果
-        self.predicted[method] = {
-            **result,
-            "predicted_at": datetime.now().isoformat(),
-        }
-
-        return result
-
-    def predict_all(
-        self,
-        method_records: dict[str, dict],
-    ) -> dict[str, dict]:
-        """
-        批量预测多个方法。
-
-        参数:
-            method_records: {method_name: record}
-
-        返回:
-            {method_name: predict_result}
-        """
-        results = {}
-        for method, record in method_records.items():
-            if method in self.ground_truth:
-                results[method] = {
-                    "elo": self.ground_truth[method]["elo"],
-                    "source": "ground_truth",
-                    "cluster_id": None,
-                    "confidence": 1.0,
-                    "based_on_gt_count": self.ground_truth_count(),
-                }
-            else:
-                results[method] = self.predict(method, record)
-        return results
-
-    # ============================================================
     # 状态查询
     # ============================================================
     def get_status(self) -> dict:
         """返回当前预测器状态摘要。"""
         n_gt = self.ground_truth_count()
-        n_predicted = len(self.predicted)
         n_clusters = 0
         n_noise = 0
         cluster_names = {}
         if self.artifacts:
-            report = self.artifacts.get("cluster_profiles", {})
-            n_clusters = self.artifacts.get("n_clusters", 0)
-            n_noise = self.artifacts.get("n_noise", 0)
+            n_clusters = len(set(self.artifacts.get("labels", {}).values()) - {-1})
+            n_noise = sum(1 for v in self.artifacts.get("labels", {}).values() if v == -1)
             cluster_names = self.artifacts.get("cluster_names", {})
 
         return {
             "ground_truth_count": n_gt,
-            "predicted_count": n_predicted,
             "last_fit_gt_count": self.last_fit_gt_count,
             "last_fit_at": self.last_fit_at,
             "next_fit_at_gt_count": (

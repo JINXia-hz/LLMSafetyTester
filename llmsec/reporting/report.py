@@ -33,11 +33,9 @@ from pathlib import Path
 from llmsec.core.config import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
-    ELO_FILE,
-    LEGACY_ELO_FILE,
     OUTPUT_DIR,
+    STATE_FILE,
     GeneratorConfig,
-    resolve_existing,
 )
 from llmsec.core.io import iter_jsonl, read_jsonl
 from llmsec.core.llm import chat_with_retry, create_openai_client
@@ -78,20 +76,14 @@ def load_all_results(output_dir) -> list[dict]:
 def load_elo(output_dir) -> dict:
     """
     加载 ELO 攻击方评分（method → elo）。
-
-    按 ELOTracker.save 的实际落盘格式读取 attacker_ratings
-    （旧代码读不存在的 "ratings" 键，永远拿不到评分——bug#1 修复）；
-    兼容回退：新约定 output/state/elo.json，旧路径 output/elo.json。
+    从统一状态文件 output/state/state.json 读取 attacker_ratings。
     """
-    elo_file = resolve_existing(
-        Path(output_dir) / "state" / "elo.json",
-        Path(output_dir) / "elo.json",
-    )
-    if not elo_file.exists():
+    state_file = Path(output_dir) / "state" / "state.json"
+    if not state_file.exists():
         return {}
-    with open(elo_file, "r", encoding="utf-8") as f:
+    with open(state_file, "r", encoding="utf-8") as f:
         data = json.load(f)
-    return data.get("attacker_ratings") or data.get("ratings", {})
+    return data.get("attacker_ratings", {})
 
 
 def load_allergy(output_dir) -> dict:
@@ -198,11 +190,10 @@ def build_method_stats(results: list[dict], elo_ratings: dict,
 
 def _load_elo_tracker() -> ELOTracker | None:
     """加载完整 ELO 状态（攻击方+防御方），文件不存在返回 None。"""
-    elo_file = resolve_existing(ELO_FILE, LEGACY_ELO_FILE)
-    if not elo_file.exists():
+    if not STATE_FILE.exists():
         return None
     tracker = ELOTracker()
-    tracker.load(elo_file)
+    tracker.load(STATE_FILE)
     return tracker
 
 

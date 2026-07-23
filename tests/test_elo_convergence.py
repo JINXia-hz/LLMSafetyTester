@@ -3,7 +3,7 @@
 回归测试：Elo 收敛判定与固定簇预测。
 
 验证：
-1. predict_fixed 对同基底变体优先使用变体 ground truth，而不是整个簇的平均。
+1. predict 对同基底变体优先使用变体 ground truth，而不是整个簇的平均。
 2. check_convergence 在成功率偏离 50% 时不判收敛（抗假阳性）。
 3. check_convergence 在标准差小、成功率接近 50%、覆盖率足够时判收敛。
 """
@@ -38,8 +38,8 @@ def test_strip_variant_suffix() -> int:
     return 0
 
 
-def test_predict_fixed_variant_fallback() -> int:
-    """predict_fixed 应优先用同基底变体的 ground truth。"""
+def test_predict_variant_fallback() -> int:
+    """predict 应优先用同基底变体的 ground truth。"""
     predictor = ClusterEloPredictor()
     predictor.ground_truth = {
         "attack_rot13": {"elo": 1800.0},
@@ -60,22 +60,22 @@ def test_predict_fixed_variant_fallback() -> int:
 
     # 预测同基底的新变体 attack_code：应接近变体平均 (1800+1200)/2 = 1500，但来源是 variant
     # 不传入 record，避免触发 embedding 网络请求；测试只验证变体兜底逻辑
-    pred = predictor.predict_fixed("attack_code", record=None)
+    pred = predictor.predict("attack_code", record=None)
     if pred["source"] != "predicted_variant":
-        print(f"❌ predict_fixed 未优先使用变体兜底: source={pred['source']}")
+        print(f"❌ predict 未优先使用变体兜底: source={pred['source']}")
         return 1
     expected = (1800.0 + 1200.0) / 2
     if abs(pred["elo"] - expected) > 1e-6:
-        print(f"❌ predict_fixed 变体预测错误: elo={pred['elo']}, expected={expected}")
+        print(f"❌ predict 变体预测错误: elo={pred['elo']}, expected={expected}")
         return 1
 
     # 预测没有同基底变体的 other_new：应使用簇内/全局平均
-    pred2 = predictor.predict_fixed("other_new", record=None)
+    pred2 = predictor.predict("other_new", record=None)
     if pred2["source"] == "predicted_variant":
-        print(f"❌ predict_fixed 错误地把无关方法识别为变体: source={pred2['source']}")
+        print(f"❌ predict 错误地把无关方法识别为变体: source={pred2['source']}")
         return 1
 
-    print("✅ predict_fixed 变体兜底通过")
+    print("✅ predict 变体兜底通过")
     return 0
 
 
@@ -140,7 +140,7 @@ def test_convergence_true_positive() -> int:
 def main() -> int:
     tests = [
         test_strip_variant_suffix,
-        test_predict_fixed_variant_fallback,
+        test_predict_variant_fallback,
         test_convergence_resists_false_positive,
         test_convergence_true_positive,
     ]

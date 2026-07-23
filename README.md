@@ -147,9 +147,7 @@ python -m llmsec.server.local_model_server [--port 8000] [--refusal-rate 0.7] [-
 llmsec/output/
 ├── attacks/                # 攻击集（l1.jsonl、harmbench_jailbreak.jsonl）
 ├── state/                  # 持久化状态
-│   ├── elo.json            #   ELO 评分（攻击方/防守方 + 历史）
-│   ├── ground_truth_elo.json # 真实评估过的攻击方法 ELO（聚类输入）
-│   ├── predicted_elo.json    # 聚类预测的初始 ELO 缓存
+│   ├── state.json          #   统一 ELO + ground truth 状态（攻击方/防守方 + 历史 + 聚类锚点）
 │   └── safe_twins.jsonl    #   安全孪生集
 ├── runs/<时间戳>/          # runner 单次运行产物
 │   ├── attack_results.jsonl
@@ -166,8 +164,6 @@ llmsec/output/
 ├── cluster_matrix.csv      # 方法×特征矩阵
 └── cluster_features.json   # --dump-features 导出的特征
 ```
-
-旧路径（`output/elo.json`、`output/攻击集_L1.jsonl` 等）保留兼容回退读取。
 
 ## 许可
 
