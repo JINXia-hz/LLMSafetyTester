@@ -357,6 +357,46 @@ def _should_retrain_cluster(
     return False
 
 
+def _adaptive_batch_size(
+    current_batch: int,
+    conv: dict | None,
+    min_batch: int = 3,
+    max_batch: int = 12,
+) -> tuple[int, str]:
+    """
+    根据上一轮收敛指标自适应调整 batch_size。
+
+    规则：
+    - round_std > 30：波动过大，减小 batch（更精细探索）
+    - round_std < 10 且连续 2 轮稳定：增大 batch（加速覆盖）
+    - round_std < 5 且覆盖率 > 50%：提前收敛信号，保持当前 batch
+    - 无历史数据：保持当前 batch
+    """
+    if conv is None or conv.get("std") is None:
+        return current_batch, "无历史数据，保持初始 batch"
+
+    std = conv["std"]
+    coverage = conv.get("coverage", 0)
+    n_rounds = conv.get("n_rounds", 0)
+
+    if std > 30:
+        new_batch = max(min_batch, current_batch - 1)
+        if new_batch != current_batch:
+            return new_batch, f"波动大(std={std:.1f}>30)，减小 batch 至 {new_batch}"
+        return current_batch, f"波动大(std={std:.1f}>30)，batch 已达下限"
+
+    if std < 10 and n_rounds >= 2:
+        new_batch = min(max_batch, current_batch + 1)
+        if new_batch != current_batch:
+            return new_batch, f"趋于稳定(std={std:.1f}<10)，增大 batch 至 {new_batch}"
+        return current_batch, f"趋于稳定(std={std:.1f}<10)，batch 已达上限"
+
+    if std < 5 and coverage > 0.5:
+        return current_batch, f"接近收敛(std={std:.1f}<5, coverage={coverage:.0%})，保持 batch"
+
+    return current_batch, f"波动适中(std={std:.1f})，保持 batch"
+
+
 # ============================================================
 # Phase 1: ELO 自适应攻击测试
 # ============================================================
@@ -494,15 +534,24 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
         print(f"  ✅ 种子阶段完成: 已建立 ground truth {len(tracker.ground_truth_methods)} 种，"
               f"剩余 {len(remaining_records)} 种使用固定簇预测 Elo")
 
+    current_batch_size = batch_size
+    prev_conv = None
     for round_idx in range(1, max_rounds + 1):
         untested = [m for m in all_methods if m not in tested]
         if not untested:
             print(f"\n  ✅ 所有方法已测试完毕")
             break
 
+        # 自适应调整 batch_size
+        current_batch_size, batch_reason = _adaptive_batch_size(current_batch_size, prev_conv)
+        if round_idx == 1:
+            print(f"  📏 初始 batch_size={current_batch_size}")
+        elif batch_reason:
+            print(f"  📏 自适应 batch_size={current_batch_size} ({batch_reason})")
+
         # 使用采样器选择下一批方法
         next_methods = sampler_obj.select(
-            untested, tracker, DEFENDER_NAME, n=batch_size,
+            untested, tracker, DEFENDER_NAME, n=current_batch_size,
             round_idx=round_idx,
         )
 
@@ -590,6 +639,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
 
         # 检查收敛：综合轮次 Elo 标准差、相对标准差、覆盖率
         conv = tracker.check_convergence(DEFENDER_NAME, total_methods=len(all_methods), tested_count=len(tested))
+        prev_conv = conv
         boundary_info = tracker.compute_security_boundary(DEFENDER_NAME)
         confidence = boundary_info.get("confidence", 0)
         if confidence >= CONFIDENCE_TARGET:
