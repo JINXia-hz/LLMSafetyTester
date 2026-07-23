@@ -400,15 +400,16 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
     gt_count = len(tracker.ground_truth_methods)
     needs_retrain = _should_retrain_cluster(tracker.predictor, method_records, force=False)
 
+    pre_report = None
     if needs_retrain and gt_count >= tracker.predictor.min_cluster_size:
         # 有历史 ground truth，用真实数据重新训练聚类模型
         print(f"  🔄 动态聚类重训练: 基于 {gt_count} 个 ground truth 方法")
-        tracker.predictor.fit_dynamic(records, [], force=True)
-    elif needs_retrain:
-        # 无 ground truth 或 ground truth 不足 min_cluster_size，做预聚类
+        pre_report = tracker.predictor.fit_dynamic(records, [], force=True)
+    if needs_retrain and pre_report is None:
+        # 无 ground truth、ground truth 不足，或动态聚类因方法不匹配失败，做预聚类
         pre_report = tracker.predictor.pre_fit(records)
         print(f"  🧊 预聚类: {pre_report.get('n_clusters', 0)} 簇 (target_k={pre_report.get('target_k', 0)})")
-    else:
+    elif not needs_retrain:
         # 复用已有 artifacts
         n_clusters = len(set(tracker.predictor.artifacts.get("labels", {}).values()) - {-1})
         print(f"  ♻️ 复用已有聚类: {n_clusters} 簇 (ground truth {gt_count} 种)")
@@ -461,6 +462,10 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
                 "phase": "seed",
                 "method": method_name,
                 "id": rec["id"],
+                "category": rec.get("category", "unknown"),
+                "category_name": rec.get("category_name", ""),
+                "source": rec.get("source", "our"),
+                "functional_category": rec.get("functional_category", "standard"),
                 "harm_type": rec["harm_type"],
                 "eval_score": result["eval_score"],
                 "jailbreak_tax": result["jailbreak_tax"],
@@ -526,6 +531,10 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
                 "phase": "attack",
                 "method": method_name,
                 "id": rec["id"],
+                "category": rec.get("category", "unknown"),
+                "category_name": rec.get("category_name", ""),
+                "source": rec.get("source", "our"),
+                "functional_category": rec.get("functional_category", "standard"),
                 "harm_type": rec["harm_type"],
                 "eval_score": result["eval_score"],
                 "jailbreak_tax": result["jailbreak_tax"],

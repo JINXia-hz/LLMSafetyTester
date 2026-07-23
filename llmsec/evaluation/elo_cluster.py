@@ -489,6 +489,9 @@ class ClusterEloPredictor:
         # 2. 提取 ground truth 子集，在其上训练 HDBSCAN
         gt_records = [r for r in attack_records if r.get("method") in gt_methods]
         gt_eval_results = [r for r in eval_results if r.get("method") in gt_methods]
+        if not gt_records:
+            logger.warning("ground truth 方法不在当前攻击集中，跳过动态聚类")
+            return None
         gt_features, gt_meta = extract_all_features(gt_records, gt_eval_results)
         gt_method_list = sorted(gt_features.keys())
 
