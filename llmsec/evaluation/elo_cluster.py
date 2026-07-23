@@ -244,7 +244,19 @@ class ClusterEloPredictor:
 
         labels = self.artifacts["labels"]
 
-        # ---- 1. 同基底变体兜底 ----
+        # ---- 1. 同后缀变体兜底（如 *_rot13 / *_b64 / *_code / *_story） ----
+        suffix_gt = self._find_suffix_variant_ground_truth(method)
+        if suffix_gt:
+            avg = sum(self.ground_truth[m]["elo"] for m in suffix_gt) / len(suffix_gt)
+            return {
+                "elo": round(avg, 2),
+                "source": "predicted_suffix_variant",
+                "cluster_id": int(labels.get(method, -1)) if method in labels else -1,
+                "confidence": round(min(len(suffix_gt) / 3, 1.0), 4),
+                "based_on_gt_count": self.ground_truth_count(),
+            }
+
+        # ---- 2. 同基底变体兜底 ----
         variant_gt = self._find_variant_ground_truth(method)
         if variant_gt:
             avg = sum(self.ground_truth[m]["elo"] for m in variant_gt) / len(variant_gt)
@@ -298,6 +310,24 @@ class ClusterEloPredictor:
             if _strip_variant_suffix(gt_method) == base:
                 variants.append(gt_method)
         return variants
+
+    def _find_suffix_variant_ground_truth(self, method: str, max_members: int = 8) -> list[str]:
+        """
+        找与 method 同后缀的其它变体（如 *_rot13 / *_b64 / *_code / *_story）。
+        返回这些变体中已有 ground truth 的方法名列表，最多返回 max_members 个。
+        """
+        if not self.ground_truth:
+            return []
+        suffix = _extract_variant_suffix(method)
+        if not suffix:
+            return []
+        variants = []
+        for gt_method in self.ground_truth.keys():
+            if gt_method == method:
+                continue
+            if _extract_variant_suffix(gt_method) == suffix:
+                variants.append(gt_method)
+        return variants[:max_members]
 
     def _predict_global_weighted(
         self,
@@ -789,6 +819,18 @@ _VARIANT_SUFFIX_RE = re.compile(r"(_rot13|_b64|_base64|_code|_story|_\d+)$", re.
 def _strip_variant_suffix(method_name: str) -> str:
     """去掉方法名末尾的变体后缀（如 _rot13/_b64/_code/_story/_0），得到攻击基底名。"""
     return _VARIANT_SUFFIX_RE.sub("", method_name)
+
+
+def _extract_variant_suffix(method_name: str) -> str:
+    """提取方法名末尾的变体后缀（如 rot13 / b64 / code / story / 0），无后缀返回空字符串。"""
+    m = _VARIANT_SUFFIX_RE.search(method_name)
+    if not m:
+        return ""
+    suffix = m.group(1).lstrip("_").lower()
+    # 统一别名
+    if suffix == "base64":
+        return "b64"
+    return suffix
 
 
 def _compute_method_set_hash(methods: list[str]) -> str:

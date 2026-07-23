@@ -588,22 +588,22 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
             "n_clusters": len(set(tracker.predictor.artifacts.get("labels", {}).values()) - {-1}) if tracker.predictor.artifacts else 0,
         })
 
-        # 检查收敛：综合轮次 Elo 标准差、最近成功率、覆盖率
+        # 检查收敛：综合轮次 Elo 标准差、相对标准差、覆盖率
         conv = tracker.check_convergence(DEFENDER_NAME, total_methods=len(all_methods), tested_count=len(tested))
         boundary_info = tracker.compute_security_boundary(DEFENDER_NAME)
         confidence = boundary_info.get("confidence", 0)
         if confidence >= CONFIDENCE_TARGET:
             print(f"\n  🎯 防御方 {DEFENDER_NAME} ELO 已收敛 "
                   f"(置信度={confidence*100:.0f}% ≥ {CONFIDENCE_TARGET*100:.0f}%, "
-                  f"σ={conv['std']:.1f}, 最近成功率={conv['recent_success_rate']*100:.0f}%, "
-                  f"覆盖率={conv['coverage']*100:.0f}%, ELO≈{conv['current_elo']:.0f}, "
+                  f"σ={conv['std']:.1f}, 覆盖率={conv['coverage']*100:.0f}%, "
+                  f"ELO≈{conv['current_elo']:.0f}, "
                   f"已测{len(tested)}/{len(all_methods)}方法)")
             break
         else:
             notes = "; ".join(conv.get("notes", [])) if conv.get("notes") else "未收敛"
             print(f"     📊 防御={DEFENDER_NAME} ELO≈{conv['current_elo']:.0f} "
-                  f"σ={conv['std']} 最近成功率={conv['recent_success_rate']*100:.0f}% "
-                  f"覆盖率={conv['coverage']*100:.0f}% 置信度={confidence*100:.0f}% "
+                  f"σ={conv['std']} 覆盖率={conv['coverage']*100:.0f}% "
+                  f"置信度={confidence*100:.0f}% "
                   f"({notes})")
 
     # ---- 攻击完成后最终聚类 ----
