@@ -367,6 +367,7 @@ class ELOTracker:
         if not coverage_ok:
             notes.append(f"覆盖率 {coverage:.1%} 不足")
 
+        # 收敛 = 核心指标全部满足；置信度由 compute_security_boundary 基于连续评分计算
         converged = std_ok and rel_std_ok and coverage_ok
 
         return {
@@ -562,12 +563,24 @@ class ELOTracker:
         # 收敛状态（综合多维度指标）
         conv = self.check_convergence(defender_name, total_methods=total_methods, tested_count=tested_count)
 
-        # 置信度 = 三项指标加权评分（std 50% + 覆盖率 30% + 相对std 20%）
+        # 置信度：基于连续统计量的严格评分，避免二值跳变飙升到 100%
+        std = conv.get("std")
+        relative_std = conv.get("relative_std")
+        coverage = conv.get("coverage", 0.0)
+        n_rounds = conv.get("n_rounds", 0)
+
+        std_score = max(0.0, 1.0 - (std / (CONVERGENCE_THRESHOLD * 2))) if std is not None else 0.0
+        rel_std_score = max(0.0, 1.0 - (relative_std / (RELATIVE_STD_THRESHOLD * 2))) if relative_std is not None else 0.0
+        coverage_score = min(coverage / MIN_COVERAGE_RATIO, 1.0)
+        rounds_score = min(n_rounds / ROUND_CONVERGENCE_WINDOW, 1.0)
+
         confidence = (
-            0.5 * float(conv.get("std_ok", False))
-            + 0.3 * float(conv.get("coverage_ok", False))
-            + 0.2 * float(conv.get("rel_std_ok", False))
+            0.4 * std_score
+            + 0.25 * rel_std_score
+            + 0.2 * coverage_score
+            + 0.15 * rounds_score
         )
+        confidence = min(confidence, 0.99)  # 永不达到 100%，保留统计不确定性
 
         return {
             "boundary_elo": round(def_elo, 1),
@@ -622,6 +635,9 @@ class ELOTracker:
         ground_truth = data.get("ground_truth", {})
         self.predictor.ground_truth = ground_truth
         self.ground_truth_methods = set(ground_truth.keys())
+
+        # ground_truth 恢复后再清理 artifacts，避免初始化时因 ground_truth 为空而误清空聚类信息
+        self.predictor._sanitize_artifacts()
 
         self.attacker_stats = data.get("attacker_stats", {})
 

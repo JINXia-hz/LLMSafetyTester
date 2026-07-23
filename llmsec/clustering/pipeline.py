@@ -944,8 +944,8 @@ def run_final_clustering(
 
     dist_matrix, block_info = build_composite_distance(features, methods, weights=weights)
 
-    # ---- Step 1: DBSCAN ----
-    labels_dbscan = run_dbscan(dist_matrix, methods)
+    # ---- Step 1: 递归 DBSCAN（大簇自动用更小 eps 细分） ----
+    labels_dbscan = run_dbscan_recursive(dist_matrix, methods, max_cluster_size=max(10, n // 8))
     core_ids = sorted(set(labels_dbscan.values()) - {-1})
     n_core = len(core_ids)
     n_noise_dbscan = sum(1 for v in labels_dbscan.values() if v == -1)
@@ -1072,3 +1072,72 @@ def run_dbscan(
         logger.info("DBSCAN eps=%.4f 结果不理想 (簇=%d, 噪声=%d)，尝试更小 eps", try_eps, n_clusters, n_noise)
 
     return last_labels if last_labels is not None else {name: -1 for name in method_names}
+
+
+def run_dbscan_recursive(
+    dist_matrix: np.ndarray,
+    method_names: list[str],
+    max_cluster_size: int = 20,
+    depth: int = 0,
+    max_depth: int = 2,
+) -> dict[str, int]:
+    """
+    递归 DBSCAN：先做一次 DBSCAN，然后对每个过大的簇用更小的 eps 再次 DBSCAN。
+    解决大型聚类吞噬导致部分簇数据量不足的问题。
+
+    参数:
+        dist_matrix: 预计算距离矩阵
+        method_names: 方法名列表
+        max_cluster_size: 簇大小超过该值时触发递归细分
+        depth: 当前递归深度
+        max_depth: 最大递归深度
+
+    返回: {method_name: cluster_id}，噪声点为 -1。
+    """
+    from collections import Counter
+
+    if depth >= max_depth or len(method_names) <= max_cluster_size:
+        return run_dbscan(dist_matrix, method_names)
+
+    labels = run_dbscan(dist_matrix, method_names)
+    cluster_sizes = Counter(labels.values())
+
+    # 找出需要细分的大簇（排除噪声）
+    large_clusters = {cid for cid, size in cluster_sizes.items() if cid != -1 and size > max_cluster_size}
+    if not large_clusters:
+        return labels
+
+    logger.info(
+        "递归 DBSCAN: 发现 %d 个大簇超过 size=%d，用更小 eps 细分",
+        len(large_clusters), max_cluster_size,
+    )
+
+    method_to_idx = {m: i for i, m in enumerate(method_names)}
+    next_cluster_id = max(labels.values()) + 1 if labels else 0
+
+    for cid in large_clusters:
+        members = [m for m, c in labels.items() if c == cid]
+        if len(members) <= max_cluster_size:
+            continue
+
+        indices = [method_to_idx[m] for m in members]
+        sub_dist = dist_matrix[np.ix_(indices, indices)]
+
+        sub_labels = run_dbscan_recursive(
+            sub_dist, members,
+            max_cluster_size=max_cluster_size,
+            depth=depth + 1,
+            max_depth=max_depth,
+        )
+
+        # 合并：子簇重新编号，噪声保持 -1
+        sub_max = max(sub_labels.values()) if sub_labels else -1
+        for m, sub_cid in sub_labels.items():
+            if sub_cid == -1:
+                labels[m] = -1
+            else:
+                labels[m] = next_cluster_id + sub_cid
+        if sub_max >= 0:
+            next_cluster_id += sub_max + 1
+
+    return labels

@@ -86,7 +86,11 @@ class ClusterEloPredictor:
     # artifacts 持久化（ground truth 已由 ELOTracker 统一保存）
     # ============================================================
     def _load_artifacts(self):
-        """从磁盘加载聚类 artifacts（不保存完整 dist_matrix，预测时按需计算局部距离）。"""
+        """从磁盘加载聚类 artifacts（不保存完整 dist_matrix，预测时按需计算局部距离）。
+
+        注意：此处不调用 _sanitize_artifacts，因为 ground_truth 由 ELOTracker.load 统一恢复。
+        若在 ground_truth 未加载时 sanitize，会把所有 labels 清空，导致已有聚类信息被误删。
+        """
         if CLUSTER_ARTIFACTS_FILE.exists():
             try:
                 self.artifacts = joblib.load(CLUSTER_ARTIFACTS_FILE)
@@ -96,14 +100,15 @@ class ClusterEloPredictor:
                     self.artifacts.get("ground_truth_count", self.last_fit_gt_count)
                 )
                 self.last_fit_at = self.artifacts.get("generated_at", self.last_fit_at)
-                # 防御：清理 artifacts 中不在当前 ground_truth 的方法，避免缓存污染
-                self._sanitize_artifacts()
             except Exception as e:
                 logger.warning("加载 cluster artifacts 失败: %s", e)
                 self.artifacts = None
 
     def _sanitize_artifacts(self):
-        """确保 artifacts 中的 labels / features 只包含当前 ground_truth 中的方法。"""
+        """确保 artifacts 中的 labels / features 只包含当前 ground_truth 中的方法。
+
+        应在 ground_truth 加载完成后由 ELOTracker.load 调用，避免在 ground_truth 为空时误清空。
+        """
         if self.artifacts is None:
             return
         gt_methods = set(self.ground_truth.keys())
