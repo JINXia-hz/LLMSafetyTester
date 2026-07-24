@@ -79,6 +79,8 @@ class ELOTracker:
         self.predictor = ClusterEloPredictor()
         # 攻击方法级统计：测试次数、成功次数、得分历史、Elo 方差估计
         self.attacker_stats: dict[str, dict] = {}
+        # 未测方法的预测 Elo 标准差（SVD-Ridge MAP 不确定性）
+        self.attacker_pred_std: dict[str, float] = {}
 
     # ============================================================
     # ELO 计算
@@ -339,36 +341,49 @@ class ELOTracker:
         recent_success_rate = self._recent_success_rate()
 
         notes = []
-        if len(round_elos) < window:
-            notes.append(f"轮次不足，需要至少 {window} 轮")
+        n_rounds = len(round_elos)
+
+        if n_rounds == 0:
+            notes.append("尚无完整轮次")
             return {
                 "converged": False,
                 "std": None,
                 "relative_std": None,
                 "current_elo": round(current_elo, 1),
-                "n_rounds": len(round_elos),
+                "n_rounds": 0,
                 "recent_success_rate": round(recent_success_rate, 4),
                 "coverage": round(coverage, 4),
                 "coverage_ok": coverage_ok,
                 "notes": notes,
             }
 
+        # 轮次不足 window 时也用现有数据计算统计量，
+        # 但 rounds_score 会按 n_rounds / window 折扣，且不判收敛
         recent = round_elos[-window:]
-        std = float(np.std(recent))
+        if n_rounds >= 2:
+            std = float(np.std(recent))
+        else:
+            # 单点无法估计波动，若按 std=0 处理会让 std/rel_std 两项满分、
+            # 置信度越过收敛目标造成假收敛；这里按阈值保守处理（std_score=0.5）
+            std = float(threshold)
         relative_std = std / current_elo if current_elo != 0 else float("inf")
+
+        rounds_sufficient = n_rounds >= window
+        if not rounds_sufficient:
+            notes.append(f"轮次不足({n_rounds}/{window})，置信度已折扣")
 
         std_ok = std < threshold
         rel_std_ok = relative_std < RELATIVE_STD_THRESHOLD
 
-        if not std_ok:
+        if not std_ok and n_rounds >= 2:
             notes.append(f"Elo 标准差 {std:.1f} >= 阈值 {threshold}")
-        if not rel_std_ok:
+        if not rel_std_ok and n_rounds >= 2:
             notes.append(f"相对标准差 {relative_std:.2%} >= 阈值 {RELATIVE_STD_THRESHOLD:.2%}")
         if not coverage_ok:
             notes.append(f"覆盖率 {coverage:.1%} 不足")
 
-        # 收敛 = 核心指标全部满足；置信度由 compute_security_boundary 基于连续评分计算
-        converged = std_ok and rel_std_ok and coverage_ok
+        # 收敛 = 核心指标全部满足且轮次足够；置信度由 compute_security_boundary 基于连续评分计算
+        converged = std_ok and rel_std_ok and coverage_ok and rounds_sufficient
 
         return {
             "converged": converged,
@@ -574,10 +589,11 @@ class ELOTracker:
         coverage_score = min(coverage / MIN_COVERAGE_RATIO, 1.0)
         rounds_score = min(n_rounds / ROUND_CONVERGENCE_WINDOW, 1.0)
 
+        # 相对标准差比绝对标准差更能反映真实波动，权重相应上调
         confidence = (
-            0.4 * std_score
-            + 0.25 * rel_std_score
-            + 0.2 * coverage_score
+            0.30 * std_score
+            + 0.35 * rel_std_score
+            + 0.20 * coverage_score
             + 0.15 * rounds_score
         )
         confidence = min(confidence, 0.99)  # 永不达到 100%，保留统计不确定性
@@ -609,6 +625,7 @@ class ELOTracker:
             "round_defender_elos": {k: v for k, v in self._round_defender_elos.items()},
             "ground_truth": self.predictor.ground_truth,
             "attacker_stats": self.attacker_stats,
+            "attacker_pred_std": self.attacker_pred_std,
             "config": {"k_factor": self.k, "initial_elo": self.initial},
         }
         os.makedirs(
@@ -640,6 +657,7 @@ class ELOTracker:
         self.predictor._sanitize_artifacts()
 
         self.attacker_stats = data.get("attacker_stats", {})
+        self.attacker_pred_std = data.get("attacker_pred_std", {})
 
         config = data.get("config", {})
         self.k = config.get("k_factor", K_FACTOR)

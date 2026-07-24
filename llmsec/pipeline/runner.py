@@ -102,8 +102,11 @@ GENERATOR_MODEL = os.getenv("GENERATOR_MODEL", "deepseek-v4-flash")
 # 目标后端类型（与原 targets.py 一致，由环境变量 TARGET_TYPE 决定）
 TARGET_TYPE = os.getenv("TARGET_TYPE", "openai")
 
-# 防御方（目标模型）名称，从 .env TARGET_MODEL 读取
-DEFENDER_NAME = TARGET_MODEL
+# 防御方（目标模型）名称：PCAP 模式使用 PCAP_MODEL_VERSION，其它模式使用 TARGET_MODEL
+if TARGET_TYPE == "pcap_judge":
+    DEFENDER_NAME = PCAP_MODEL_VERSION
+else:
+    DEFENDER_NAME = TARGET_MODEL
 
 API_DELAY = 0.5
 REQUEST_TIMEOUT = 60.0
@@ -250,15 +253,20 @@ def get_or_create_twin(method_name: str, rec: dict, twin_cache: dict,
 # ============================================================
 def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict]):
     """
-    为所有尚未真实评估的方法注入聚类预测的初始 Elo。
+    为所有尚未真实评估的方法注入预测初始 Elo。
+    优先使用 SVD-Ridge 模型批量预测（含 MAP 不确定性）；
+    ground truth 不足时由 predict_batch 内部回退到同后缀/同基底变体平均。
     已真实评估的方法保持其当前 Elo 不变。
     """
-    predictor = tracker.predictor
-    for method, record in method_records.items():
-        if method in tracker.ground_truth_methods:
-            continue
-        pred = predictor.predict(method, record)
+    untested = {
+        m: r for m, r in method_records.items()
+        if m not in tracker.ground_truth_methods
+    }
+    predictions = tracker.predictor.predict_batch(untested)
+    for method, pred in predictions.items():
         tracker.attacker_ratings[method] = pred["elo"]
+        if pred.get("std") is not None:
+            tracker.attacker_pred_std[method] = pred["std"]
 
 
 def _sample_seed_methods_from_pre_cluster(
@@ -854,7 +862,7 @@ def generate_final_report(attack_summary: dict, allergy_summary: dict,
 
     report = {
         "generated_at": datetime.now().isoformat(),
-        "target_model": TARGET_MODEL,
+        "target_model": DEFENDER_NAME,
         "overall_verdict": portrait,
         "security_level": level,
         "attack_phase": {

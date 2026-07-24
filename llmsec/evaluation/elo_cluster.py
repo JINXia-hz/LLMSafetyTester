@@ -19,6 +19,7 @@
 
 import hashlib
 import json
+import math
 import os
 import re
 from collections import defaultdict
@@ -47,8 +48,210 @@ from llmsec.clustering.features import (
 )
 from llmsec.core.config import INITIAL_ELO
 from llmsec.core.logging import get_logger
+from llmsec.core.text import MATH_TAX_PATTERN
 
 logger = get_logger(__name__)
+
+
+class EloPredictorModel:
+    """
+    基于 SVD 的 Ridge 回归 Elo 预测模型。
+
+    - 用已测方法的特征向量 X 和真实 Elo y 训练模型。
+    - 对特征矩阵做 SVD：X = UΣV^T，Ridge 解 w(λ) = V (Σ² + λI)^(-1) Σ U^T y。
+    - 用 K-Fold 交叉验证在正则化路径 λ ∈ logspace(-3, 3, 20) 上选择最优 λ。
+    - 贝叶斯解释：Ridge 等价于高斯先验的 MAP；
+      预测均值 E = X_test @ w，预测方差 σ² · diag(X_test (X^T X + λI)^(-1) X_test^T)。
+    """
+
+    BLOCK_ORDER = ("textual", "embedding", "technique", "intent", "prior")
+
+    def __init__(self, lambda_candidates=None, n_folds: int = 5):
+        self.lambda_candidates = (
+            np.logspace(-3, 3, 20) if lambda_candidates is None else lambda_candidates
+        )
+        self.n_folds = n_folds
+        self.w: np.ndarray | None = None
+        self.x_mean: np.ndarray | None = None
+        self.x_std: np.ndarray | None = None
+        self.lambda_opt: float | None = None
+        self.sigma2: float | None = None
+        self.xtx_inv: np.ndarray | None = None
+        self.cv_errors: list[float] = []
+        self.block_dims: dict[str, int] = {}
+        self.feature_names: list[str] = []
+
+    @classmethod
+    def _features_to_matrix(
+        cls, features_dict: dict, methods: list[str]
+    ) -> tuple[np.ndarray, dict[str, int]]:
+        """
+        把 features dict 转换为特征矩阵 X（textual + embedding + technique + intent + prior）。
+        各特征块在方法间维度不一致时按块内最大维度零填充，保证可拼接。
+        返回 (X, block_dims)。
+        """
+        blocks: dict[str, list[np.ndarray]] = {b: [] for b in cls.BLOCK_ORDER}
+        dims = {b: 0 for b in cls.BLOCK_ORDER}
+        for m in methods:
+            feat = features_dict.get(m, {})
+            for b in cls.BLOCK_ORDER:
+                vec = np.atleast_1d(
+                    np.asarray(feat.get(b, np.zeros(0)), dtype=np.float64)
+                )
+                blocks[b].append(vec)
+                dims[b] = max(dims[b], vec.shape[0])
+
+        rows = []
+        for i in range(len(methods)):
+            parts = []
+            for b in cls.BLOCK_ORDER:
+                vec = blocks[b][i]
+                if vec.shape[0] < dims[b]:
+                    vec = np.pad(vec, (0, dims[b] - vec.shape[0]))
+                parts.append(vec)
+            rows.append(np.concatenate(parts))
+        return np.array(rows, dtype=np.float64), dims
+
+    def _resolve_feature_names(self, name_blocks: dict | None) -> list[str]:
+        """按块顺序生成与 w 对齐的特征名列表，缺失的用通用名补齐。"""
+        names = []
+        for b in self.BLOCK_ORDER:
+            dim = self.block_dims.get(b, 0)
+            block_names = list((name_blocks or {}).get(b, []))[:dim]
+            block_names += [f"{b}_{i}" for i in range(len(block_names), dim)]
+            names.extend(block_names)
+        return names
+
+    def fit(
+        self,
+        features_dict: dict,
+        ground_truth: dict,
+        feature_name_blocks: dict | None = None,
+    ) -> "EloPredictorModel":
+        """
+        用 ground truth 训练 Ridge 回归模型。
+
+        参数:
+            features_dict: {method: features}，需包含所有 ground truth 方法
+            ground_truth: {method: {"elo": float, ...}}
+            feature_name_blocks: 各特征块的特征名（用于特征重要性输出）
+        """
+        methods = sorted(ground_truth.keys())
+        if not methods:
+            raise ValueError("ground_truth 为空，无法训练")
+
+        X, self.block_dims = self._features_to_matrix(features_dict, methods)
+        y = np.array([ground_truth[m]["elo"] for m in methods], dtype=np.float64)
+        self.feature_names = self._resolve_feature_names(feature_name_blocks)
+
+        # 标准化
+        self.x_mean = X.mean(axis=0)
+        self.x_std = X.std(axis=0) + 1e-8
+        X_scaled = (X - self.x_mean) / self.x_std
+
+        n = len(X_scaled)
+        k = min(self.n_folds, n)
+        if k < 2:
+            # 样本太少，直接用中等 λ
+            self.lambda_opt = 1.0
+            self.cv_errors = []
+        else:
+            # SVD 分解（全数据）
+            U, S, Vt = np.linalg.svd(X_scaled, full_matrices=False)
+
+            # K-Fold 交叉验证选择 λ
+            indices = np.arange(n)
+            rng = np.random.default_rng(42)
+            rng.shuffle(indices)
+            fold_size = n // k
+
+            best_lambda = None
+            best_error = float("inf")
+            self.cv_errors = []
+
+            for lam in self.lambda_candidates:
+                errors = []
+                for i in range(k):
+                    start = i * fold_size
+                    end = (i + 1) * fold_size if i < k - 1 else n
+                    test_idx = indices[start:end]
+                    train_idx = np.concatenate([indices[:start], indices[end:]])
+
+                    X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
+                    y_train, y_test = y[train_idx], y[test_idx]
+
+                    # 用训练集 SVD 计算 Ridge 解
+                    U_train, S_train, Vt_train = np.linalg.svd(X_train, full_matrices=False)
+                    w = Vt_train.T @ np.diag(S_train / (S_train**2 + lam)) @ U_train.T @ y_train
+
+                    pred = X_test @ w
+                    errors.append(float(np.mean((pred - y_test) ** 2)))
+
+                avg_error = float(np.mean(errors))
+                self.cv_errors.append(avg_error)
+                if avg_error < best_error:
+                    best_error = avg_error
+                    best_lambda = lam
+
+            self.lambda_opt = float(best_lambda)
+
+        # 用最优 λ 在全数据上训练最终模型
+        U, S, Vt = np.linalg.svd(X_scaled, full_matrices=False)
+        self.w = Vt.T @ np.diag(S / (S**2 + self.lambda_opt)) @ U.T @ y
+
+        # 残差方差
+        y_pred = X_scaled @ self.w
+        residuals = y - y_pred
+        self.sigma2 = float(np.mean(residuals**2))
+
+        # 保存 (X^T X + λI)^(-1) 用于 MAP 方差
+        XTX = X_scaled.T @ X_scaled
+        self.xtx_inv = np.linalg.inv(XTX + self.lambda_opt * np.eye(XTX.shape[0]))
+
+        logger.info(
+            "EloPredictorModel 训练完成: n=%d, λ*=%.4f, σ²=%.2f",
+            n, self.lambda_opt, self.sigma2,
+        )
+        return self
+
+    def predict(self, features_dict: dict, methods: list[str]) -> tuple[np.ndarray, np.ndarray]:
+        """
+        批量预测 Elo 均值和 MAP 方差。
+
+        返回: (means, variances)，shape 均为 (len(methods),)
+        """
+        if self.w is None:
+            raise ValueError("模型未训练")
+
+        X, _ = self._features_to_matrix(features_dict, methods)
+        X_scaled = (X - self.x_mean) / self.x_std
+
+        means = X_scaled @ self.w
+        variances = self.sigma2 * np.sum((X_scaled @ self.xtx_inv) * X_scaled, axis=1)
+        return means, variances
+
+    def get_regularization_path(self) -> dict:
+        """返回正则化路径信息，用于可视化。"""
+        return {
+            "lambda_candidates": self.lambda_candidates.tolist(),
+            "cv_errors": self.cv_errors,
+            "lambda_opt": self.lambda_opt,
+        }
+
+    def get_feature_importance(self, top_n: int = 20) -> list[dict]:
+        """按 Ridge 系数绝对值降序返回特征重要性。"""
+        if self.w is None:
+            return []
+        names = self.feature_names or [f"x_{i}" for i in range(len(self.w))]
+        order = np.argsort(-np.abs(self.w))
+        return [
+            {
+                "feature": names[i],
+                "coef": round(float(self.w[i]), 4),
+                "abs_coef": round(float(abs(self.w[i])), 4),
+            }
+            for i in order[:top_n]
+        ]
 
 
 class ClusterEloPredictor:
@@ -79,6 +282,11 @@ class ClusterEloPredictor:
         self.last_fit_gt_count: int = 0
         self.last_fit_at: str | None = None
         self.artifacts: dict | None = None
+
+        # 机器学习预测模型（SVD-Ridge）
+        self.model = EloPredictorModel()
+        # 最近一次批量预测结果（含 MAP 不确定性），供聚类安全分析输出
+        self.last_predictions: dict[str, dict] = {}
 
         self._load_artifacts()
 
@@ -297,6 +505,104 @@ class ClusterEloPredictor:
             "confidence": confidence,
             "based_on_gt_count": self.ground_truth_count(),
         }
+
+    # ============================================================
+    # SVD-Ridge 批量预测
+    # ============================================================
+    def predict_batch(self, method_records: dict[str, dict]) -> dict[str, dict]:
+        """
+        批量预测未测方法的初始 Elo。
+
+        - ground truth 数 >= min_cluster_size 且特征可用时：
+          训练 SVD-Ridge 模型（K-Fold 选 λ），一次前向传播得到预测均值与 MAP 方差。
+        - 否则回退到逐方法的同后缀/同基底变体简单平均（predict）。
+
+        返回: {method: {"elo", "source", "std", "ci95", "confidence", ...}}
+        """
+        methods = [m for m in method_records if m not in self.ground_truth]
+        if not methods:
+            self.last_predictions = {}
+            return {}
+
+        gt_count = self.ground_truth_count()
+        features = self.artifacts.get("features", {}) if self.artifacts else {}
+        gt_methods = sorted(self.ground_truth.keys())
+        use_model = (
+            gt_count >= self.min_cluster_size
+            and bool(features)
+            and all(m in features for m in gt_methods)
+        )
+
+        results: dict[str, dict] = {}
+        if use_model:
+            try:
+                results = self._predict_batch_svd_ridge(methods, method_records, features)
+            except Exception as e:
+                logger.warning("SVD-Ridge 批量预测失败，回退到变体平均: %s", e)
+
+        if not results:
+            results = {m: self.predict(m, method_records.get(m)) for m in methods}
+
+        self.last_predictions = results
+        return results
+
+    def _predict_batch_svd_ridge(
+        self,
+        methods: list[str],
+        method_records: dict[str, dict],
+        features: dict,
+    ) -> dict[str, dict]:
+        """SVD-Ridge 批量预测主流程：训练 → 预测均值/方差 → 组装结果。"""
+        meta = self.artifacts.get("meta", {}) if self.artifacts else {}
+        labels = self.artifacts.get("labels", {}) if self.artifacts else {}
+        gt_methods = sorted(self.ground_truth.keys())
+
+        # 为缺失特征的未测方法批量提取特征（复用训练时的 vectorizer/PCA 保证同一特征空间）
+        missing = [m for m in methods if m not in features]
+        extra_features = {}
+        if missing:
+            extra_features = self._extract_features_for_methods(missing, method_records, meta)
+
+        def _with_prior(method: str) -> dict:
+            base = features.get(method) or extra_features.get(method) or {}
+            feat = dict(base)
+            feat["prior"] = build_prior_features(method, method_records.get(method))
+            return feat
+
+        train_features = {m: _with_prior(m) for m in gt_methods}
+        test_features = {m: _with_prior(m) for m in methods}
+
+        feature_name_blocks = {
+            "textual": meta.get("textual_feature_names", TEXTUAL_FEATURE_NAMES),
+            "technique": meta.get("technique_label_names", []),
+            "intent": meta.get("intent_feature_names", INTENT_FEATURE_NAMES),
+            "prior": PRIOR_FEATURE_NAMES,
+        }
+        self.model.fit(train_features, self.ground_truth, feature_name_blocks)
+        means, variances = self.model.predict(test_features, methods)
+
+        results = {}
+        for m, mean, var in zip(methods, means, variances):
+            std = float(np.sqrt(max(float(var), 0.0)))
+            elo = round(float(mean), 2)
+            results[m] = {
+                "elo": elo,
+                "source": "svd_ridge",
+                "cluster_id": int(labels.get(m, -1)) if m in labels else -1,
+                "std": round(std, 2),
+                "ci95": [round(elo - 1.96 * std, 2), round(elo + 1.96 * std, 2)],
+                "confidence": round(1.0 / (1.0 + std / 200.0), 4),
+                "based_on_gt_count": self.ground_truth_count(),
+            }
+
+        logger.info(
+            "SVD-Ridge 批量预测: %d 个未测方法 (ground truth %d, λ*=%.4f, σ²=%.2f)",
+            len(methods),
+            self.ground_truth_count(),
+            self.model.lambda_opt,
+            self.model.sigma2,
+        )
+        return results
 
     def _find_variant_ground_truth(self, method: str) -> list[str]:
         """
@@ -788,6 +1094,72 @@ class ClusterEloPredictor:
             "cross_model": np.array([], dtype=np.float64),
         }
 
+    def _extract_embeddings_batch(
+        self,
+        prompts: list[str],
+        vectorizer,
+        pca,
+    ) -> np.ndarray:
+        """为多个 prompt 批量提取与训练时同维度的 embedding（模型只加载一次）。"""
+        from llmsec.core.text import strip_math_tax
+
+        cleaned = [strip_math_tax(p) for p in prompts]
+
+        # TF-IDF 路径
+        if vectorizer is not None:
+            dense = vectorizer.transform(cleaned).toarray()
+            return pca.transform(dense) if pca is not None else dense
+
+        # sentence-transformers 路径
+        try:
+            from sentence_transformers import SentenceTransformer
+            model_name = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+            model = SentenceTransformer(model_name)
+        except Exception as e:
+            logger.warning("批量预测时加载 embedding 模型失败: %s", e)
+            dim = pca.n_components if pca is not None else 384
+            return np.zeros((len(prompts), dim), dtype=np.float64)
+
+        emb = model.encode(cleaned, show_progress_bar=False, batch_size=32)
+        return pca.transform(emb) if pca is not None else emb
+
+    def _extract_features_for_methods(
+        self,
+        methods: list[str],
+        method_records: dict[str, dict],
+        meta: dict,
+    ) -> dict[str, dict[str, np.ndarray]]:
+        """为多个未测方法批量提取与训练时同维度、同尺度的特征块。"""
+        prompts = [method_records[m].get("prompt", "") for m in methods]
+        vectorizer = meta.get("embedding_artifacts", {}).get("vectorizer")
+        pca = meta.get("embedding_artifacts", {}).get("pca")
+        embeddings = np.atleast_2d(self._extract_embeddings_batch(prompts, vectorizer, pca))
+
+        textual_names = meta.get("textual_feature_names", TEXTUAL_FEATURE_NAMES)
+        technique_names = meta.get("technique_label_names", [])
+        defense_names = meta.get("defense_feature_names", DEFENSE_FEATURE_NAMES)
+
+        method_to_idx = {m: i for i, m in enumerate(methods)}
+        method_prompts = {m: [method_records[m].get("prompt", "")] for m in methods}
+        intent_feats = extract_intent_features(methods, method_prompts, embeddings, method_to_idx)
+
+        result = {}
+        for i, m in enumerate(methods):
+            rec = method_records[m]
+            textual_dict = extract_textual_features(rec.get("prompt", ""))
+            textual_vec = np.array(
+                [textual_dict.get(k, 0.0) for k in textual_names], dtype=np.float64
+            )
+            result[m] = {
+                "textual": textual_vec,
+                "embedding": np.asarray(embeddings[i], dtype=np.float64),
+                "technique": self._build_technique_vector(rec, technique_names),
+                "intent": intent_feats.get(m, np.zeros(len(INTENT_FEATURE_NAMES))),
+                "defense": np.zeros(len(defense_names), dtype=np.float64),
+                "cross_model": np.array([], dtype=np.float64),
+            }
+        return result
+
     # ============================================================
     # 状态查询
     # ============================================================
@@ -819,6 +1191,40 @@ class ClusterEloPredictor:
 # 模块级辅助函数
 # ============================================================
 _VARIANT_SUFFIX_RE = re.compile(r"(_rot13|_b64|_base64|_code|_story|_\d+)$", re.IGNORECASE)
+
+# 先验特征：无需真实评估即可从方法名 / prompt 推导，作为 SVD-Ridge 的额外输入
+PRIOR_FEATURE_NAMES = [
+    "name_char_len",          # 方法名长度
+    "name_token_count",       # 方法名分词数
+    "suffix_rot13",           # 变体后缀 one-hot
+    "suffix_b64",
+    "suffix_code",
+    "suffix_story",
+    "suffix_numeric",
+    "has_math_tax",           # prompt 是否含数学越狱税
+    "prompt_line_count_log",  # prompt 行数（log1p）
+]
+
+
+def build_prior_features(method: str, record: dict | None = None) -> np.ndarray:
+    """
+    构造先验特征向量：只依赖方法名与 prompt，不需要任何评估结果。
+    变体后缀（rot13/b64/code/story/数字）与数学越狱税是与 Elo 强相关的先验信号。
+    """
+    suffix = _extract_variant_suffix(method)
+    prompt = (record or {}).get("prompt", "") or ""
+    tokens = [t for t in re.split(r"[_\s\-]+", method) if t]
+    return np.array([
+        float(len(method)),
+        float(len(tokens)),
+        1.0 if suffix == "rot13" else 0.0,
+        1.0 if suffix == "b64" else 0.0,
+        1.0 if suffix == "code" else 0.0,
+        1.0 if suffix == "story" else 0.0,
+        1.0 if suffix.isdigit() else 0.0,
+        1.0 if MATH_TAX_PATTERN.search(prompt) else 0.0,
+        float(math.log1p(prompt.count("\n") + 1)),
+    ], dtype=np.float64)
 
 
 def _strip_variant_suffix(method_name: str) -> str:

@@ -56,6 +56,41 @@ def load_cluster_report(path: Path | str | None = None) -> dict | None:
 
 
 # ============================================================
+# SVD-Ridge 预测模型诊断
+# ============================================================
+def build_svd_ridge_summary(tracker: ELOTracker) -> dict | None:
+    """
+    汇总 SVD-Ridge Elo 预测模型的诊断信息：
+    - 正则化路径（λ vs K-Fold 验证误差）与最优 λ
+    - 特征重要性（Ridge 系数绝对值排序）
+    - 未测方法的预测 Elo 置信区间（均值 ± 1.96σ）
+    """
+    predictor = getattr(tracker, "predictor", None)
+    model = getattr(predictor, "model", None) if predictor else None
+    if model is None or model.w is None:
+        return None
+
+    predictions = {}
+    for method, pred in (predictor.last_predictions or {}).items():
+        if pred.get("source") != "svd_ridge":
+            continue
+        predictions[method] = {
+            "elo": pred.get("elo"),
+            "std": pred.get("std"),
+            "ci95": pred.get("ci95"),
+        }
+
+    return {
+        "lambda_opt": model.lambda_opt,
+        "sigma2": round(model.sigma2, 4) if model.sigma2 is not None else None,
+        "regularization_path": model.get_regularization_path(),
+        "feature_importance": model.get_feature_importance(top_n=20),
+        "n_ground_truth": predictor.ground_truth_count(),
+        "predictions": predictions,
+    }
+
+
+# ============================================================
 # 分析核心
 # ============================================================
 def analyze_clusters(
@@ -83,6 +118,7 @@ def analyze_clusters(
             "high_risk_clusters": [...],
             "blind_spot_clusters": [...],
             "stable_clusters": [...],
+            "svd_ridge": {...},  # SVD-Ridge 模型已训练时存在
         }
     """
     if cluster_report is None:
@@ -155,7 +191,7 @@ def analyze_clusters(
         elif detail["test_coverage"] >= 0.5 and detail["elo_std"] <= 100:
             stable.append(cid_str)
 
-    return {
+    analysis = {
         "defender_name": defender_name,
         "defender_elo": round(defender_elo, 2),
         "n_methods": len(labels),
@@ -166,6 +202,16 @@ def analyze_clusters(
         "blind_spot_clusters": blind_spots,
         "stable_clusters": stable,
     }
+
+    # SVD-Ridge 预测模型诊断（正则化路径 / 最优 λ / 特征重要性 / 预测置信区间）
+    try:
+        svd_summary = build_svd_ridge_summary(tracker)
+        if svd_summary:
+            analysis["svd_ridge"] = svd_summary
+    except Exception:
+        pass
+
+    return analysis
 
 
 def analyze_single_cluster(
