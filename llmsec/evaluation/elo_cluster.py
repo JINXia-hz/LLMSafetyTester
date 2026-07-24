@@ -57,41 +57,53 @@ class EloPredictorModel:
     """
     基于 SVD 的 Ridge 回归 Elo 预测模型。
 
-    - 用已测方法的特征向量 X 和真实 Elo y 训练模型。
+    - 用已测方法的特征向量 X 和真实 Elo y（中心化后）训练模型。
     - 对特征矩阵做 SVD：X = UΣV^T，Ridge 解 w(λ) = V (Σ² + λI)^(-1) Σ U^T y。
-    - 用 K-Fold 交叉验证在正则化路径 λ ∈ logspace(-3, 3, 20) 上选择最优 λ。
+    - 用 K-Fold 交叉验证在正则化路径 λ ∈ logspace(-3, 4, 24) 上选择最优 λ。
+    - SVD 同时提供主成分视角：解释方差比与有效自由度 df(λ) 由 get_pca_summary 输出。
     - 贝叶斯解释：Ridge 等价于高斯先验的 MAP；
-      预测均值 E = X_test @ w，预测方差 σ² · diag(X_test (X^T X + λI)^(-1) X_test^T)。
+      预测均值 E = y_mean + X_test @ w，预测方差 σ² · diag(X_test (X^T X + λI)^(-1) X_test^T)。
     """
 
     BLOCK_ORDER = ("textual", "embedding", "technique", "intent", "prior")
 
     def __init__(self, lambda_candidates=None, n_folds: int = 5):
         self.lambda_candidates = (
-            np.logspace(-3, 3, 20) if lambda_candidates is None else lambda_candidates
+            np.logspace(-3, 4, 24) if lambda_candidates is None else lambda_candidates
         )
         self.n_folds = n_folds
         self.w: np.ndarray | None = None
         self.x_mean: np.ndarray | None = None
         self.x_std: np.ndarray | None = None
+        self.y_mean: float = 0.0
         self.lambda_opt: float | None = None
         self.sigma2: float | None = None
         self.xtx_inv: np.ndarray | None = None
         self.cv_errors: list[float] = []
         self.block_dims: dict[str, int] = {}
         self.feature_names: list[str] = []
+        # SVD / 主成分诊断
+        self.singular_values: np.ndarray | None = None
+        self.n_samples: int = 0
+        self.effective_df: float | None = None
+        # 训练计数（供缓存与测试断言）
+        self.fit_count: int = 0
 
     @classmethod
     def _features_to_matrix(
-        cls, features_dict: dict, methods: list[str]
+        cls,
+        features_dict: dict,
+        methods: list[str],
+        block_dims: dict[str, int] | None = None,
     ) -> tuple[np.ndarray, dict[str, int]]:
         """
         把 features dict 转换为特征矩阵 X（textual + embedding + technique + intent + prior）。
-        各特征块在方法间维度不一致时按块内最大维度零填充，保证可拼接。
-        返回 (X, block_dims)。
+
+        - block_dims=None（训练）：各块按块内最大维度零填充，返回实际维度。
+        - block_dims 给定（预测）：严格按该维度截断/零填充，保证与训练时的 w 对齐。
         """
         blocks: dict[str, list[np.ndarray]] = {b: [] for b in cls.BLOCK_ORDER}
-        dims = {b: 0 for b in cls.BLOCK_ORDER}
+        dims = dict(block_dims) if block_dims is not None else {b: 0 for b in cls.BLOCK_ORDER}
         for m in methods:
             feat = features_dict.get(m, {})
             for b in cls.BLOCK_ORDER:
@@ -99,7 +111,8 @@ class EloPredictorModel:
                     np.asarray(feat.get(b, np.zeros(0)), dtype=np.float64)
                 )
                 blocks[b].append(vec)
-                dims[b] = max(dims[b], vec.shape[0])
+                if block_dims is None:
+                    dims[b] = max(dims[b], vec.shape[0])
 
         rows = []
         for i in range(len(methods)):
@@ -108,6 +121,8 @@ class EloPredictorModel:
                 vec = blocks[b][i]
                 if vec.shape[0] < dims[b]:
                     vec = np.pad(vec, (0, dims[b] - vec.shape[0]))
+                elif vec.shape[0] > dims[b]:
+                    vec = vec[: dims[b]]
                 parts.append(vec)
             rows.append(np.concatenate(parts))
         return np.array(rows, dtype=np.float64), dims
@@ -127,6 +142,7 @@ class EloPredictorModel:
         features_dict: dict,
         ground_truth: dict,
         feature_name_blocks: dict | None = None,
+        lambda_override: float | None = None,
     ) -> "EloPredictorModel":
         """
         用 ground truth 训练 Ridge 回归模型。
@@ -135,6 +151,8 @@ class EloPredictorModel:
             features_dict: {method: features}，需包含所有 ground truth 方法
             ground_truth: {method: {"elo": float, ...}}
             feature_name_blocks: 各特征块的特征名（用于特征重要性输出）
+            lambda_override: 指定 λ 时跳过 K-Fold 直接 refit w（快速通道，
+                用于 ground truth 小幅增长时的增量更新）
         """
         methods = sorted(ground_truth.keys())
         if not methods:
@@ -144,73 +162,93 @@ class EloPredictorModel:
         y = np.array([ground_truth[m]["elo"] for m in methods], dtype=np.float64)
         self.feature_names = self._resolve_feature_names(feature_name_blocks)
 
-        # 标准化
+        # X 标准化 + y 中心化（截距项：否则零均值的 X_scaled @ w 无法表达 ~1500 的基准 Elo）
         self.x_mean = X.mean(axis=0)
         self.x_std = X.std(axis=0) + 1e-8
         X_scaled = (X - self.x_mean) / self.x_std
+        self.y_mean = float(y.mean())
+        y_c = y - self.y_mean
 
         n = len(X_scaled)
-        k = min(self.n_folds, n)
-        if k < 2:
-            # 样本太少，直接用中等 λ
-            self.lambda_opt = 1.0
-            self.cv_errors = []
+        self.n_samples = n
+        best_error = None
+
+        if lambda_override is not None:
+            # 快速通道：复用既有 λ，不重跑 K-Fold
+            self.lambda_opt = float(lambda_override)
         else:
-            # SVD 分解（全数据）
-            U, S, Vt = np.linalg.svd(X_scaled, full_matrices=False)
+            k = min(self.n_folds, n)
+            if k < 2:
+                # 样本太少，直接用中等 λ
+                self.lambda_opt = 1.0
+                self.cv_errors = []
+            else:
+                # K-Fold 交叉验证选择 λ
+                indices = np.arange(n)
+                rng = np.random.default_rng(42)
+                rng.shuffle(indices)
+                fold_size = n // k
 
-            # K-Fold 交叉验证选择 λ
-            indices = np.arange(n)
-            rng = np.random.default_rng(42)
-            rng.shuffle(indices)
-            fold_size = n // k
+                best_lambda = None
+                best_error = float("inf")
+                self.cv_errors = []
 
-            best_lambda = None
-            best_error = float("inf")
-            self.cv_errors = []
+                for lam in self.lambda_candidates:
+                    errors = []
+                    for i in range(k):
+                        start = i * fold_size
+                        end = (i + 1) * fold_size if i < k - 1 else n
+                        test_idx = indices[start:end]
+                        train_idx = np.concatenate([indices[:start], indices[end:]])
 
-            for lam in self.lambda_candidates:
-                errors = []
-                for i in range(k):
-                    start = i * fold_size
-                    end = (i + 1) * fold_size if i < k - 1 else n
-                    test_idx = indices[start:end]
-                    train_idx = np.concatenate([indices[:start], indices[end:]])
+                        X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
+                        y_train, y_test = y_c[train_idx], y_c[test_idx]
 
-                    X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
-                    y_train, y_test = y[train_idx], y[test_idx]
+                        # 用训练集 SVD 计算 Ridge 解
+                        U_train, S_train, Vt_train = np.linalg.svd(X_train, full_matrices=False)
+                        w = Vt_train.T @ np.diag(S_train / (S_train**2 + lam)) @ U_train.T @ y_train
 
-                    # 用训练集 SVD 计算 Ridge 解
-                    U_train, S_train, Vt_train = np.linalg.svd(X_train, full_matrices=False)
-                    w = Vt_train.T @ np.diag(S_train / (S_train**2 + lam)) @ U_train.T @ y_train
+                        pred = X_test @ w
+                        errors.append(float(np.mean((pred - y_test) ** 2)))
 
-                    pred = X_test @ w
-                    errors.append(float(np.mean((pred - y_test) ** 2)))
+                    avg_error = float(np.mean(errors))
+                    self.cv_errors.append(avg_error)
+                    if avg_error < best_error:
+                        best_error = avg_error
+                        best_lambda = lam
 
-                avg_error = float(np.mean(errors))
-                self.cv_errors.append(avg_error)
-                if avg_error < best_error:
-                    best_error = avg_error
-                    best_lambda = lam
+                self.lambda_opt = float(best_lambda)
 
-            self.lambda_opt = float(best_lambda)
-
-        # 用最优 λ 在全数据上训练最终模型
+        # 用最优 λ 在全数据上训练最终模型（截断数值近零奇异值保证稳定）
         U, S, Vt = np.linalg.svd(X_scaled, full_matrices=False)
-        self.w = Vt.T @ np.diag(S / (S**2 + self.lambda_opt)) @ U.T @ y
+        s_max = S.max() if S.size else 0.0
+        keep = S > max(1e-10 * s_max, 1e-12)
+        self.singular_values = S
+        shrink = np.where(keep, S / (S**2 + self.lambda_opt), 0.0)
+        self.w = Vt.T @ (shrink * (U.T @ y_c))
 
-        # 残差方差
-        y_pred = X_scaled @ self.w
-        residuals = y - y_pred
-        self.sigma2 = float(np.mean(residuals**2))
+        # 残差方差：优先用 K-Fold 在 λ* 上的交叉验证误差（out-of-sample 估计）；
+        # 快速通道保留上次 K-Fold 的 σ²（in-sample 残差会趋近于 0，置信区间过于乐观）；
+        # 其余情况退回训练集残差
+        if best_error is not None and np.isfinite(best_error):
+            self.sigma2 = float(best_error)
+        elif lambda_override is not None and self.sigma2 is not None:
+            pass
+        else:
+            residuals = y_c - X_scaled @ self.w
+            self.sigma2 = float(np.mean(residuals**2))
+
+        # 有效自由度 df(λ) = Σ σᵢ²/(σᵢ²+λ)：Ridge 收缩后的有效维度
+        self.effective_df = float(np.sum(S**2 / (S**2 + self.lambda_opt))) if S.size else 0.0
 
         # 保存 (X^T X + λI)^(-1) 用于 MAP 方差
         XTX = X_scaled.T @ X_scaled
         self.xtx_inv = np.linalg.inv(XTX + self.lambda_opt * np.eye(XTX.shape[0]))
 
+        self.fit_count += 1
         logger.info(
-            "EloPredictorModel 训练完成: n=%d, λ*=%.4f, σ²=%.2f",
-            n, self.lambda_opt, self.sigma2,
+            "EloPredictorModel 训练完成: n=%d, λ*=%.4f, σ²=%.2f, df=%.1f/%d",
+            n, self.lambda_opt, self.sigma2, self.effective_df, X_scaled.shape[1],
         )
         return self
 
@@ -223,10 +261,11 @@ class EloPredictorModel:
         if self.w is None:
             raise ValueError("模型未训练")
 
-        X, _ = self._features_to_matrix(features_dict, methods)
+        # 严格按训练时的块维度对齐，避免维度不匹配导致静默失败
+        X, _ = self._features_to_matrix(features_dict, methods, block_dims=self.block_dims)
         X_scaled = (X - self.x_mean) / self.x_std
 
-        means = X_scaled @ self.w
+        means = self.y_mean + X_scaled @ self.w
         variances = self.sigma2 * np.sum((X_scaled @ self.xtx_inv) * X_scaled, axis=1)
         return means, variances
 
@@ -235,6 +274,28 @@ class EloPredictorModel:
         return {
             "lambda_candidates": self.lambda_candidates.tolist(),
             "cv_errors": self.cv_errors,
+            "lambda_opt": self.lambda_opt,
+        }
+
+    def get_pca_summary(self, top_n: int = 20) -> dict:
+        """
+        返回 SVD 主成分诊断：奇异值谱、解释方差比、累计解释方差、有效自由度。
+        用于评估降维效果（df 远小于特征数说明 Ridge/SVD 起到了压缩作用）。
+        """
+        if self.singular_values is None:
+            return {}
+        S = self.singular_values
+        var = S**2
+        total = float(var.sum())
+        ratio = var / total if total > 0 else np.zeros_like(var)
+        cumulative = np.cumsum(ratio)
+        return {
+            "n_samples": self.n_samples,
+            "n_features": int(len(self.w)) if self.w is not None else 0,
+            "singular_values": [round(float(s), 6) for s in S[:top_n]],
+            "explained_variance_ratio": [round(float(r), 6) for r in ratio[:top_n]],
+            "cumulative_variance_ratio": [round(float(c), 6) for c in cumulative[:top_n]],
+            "effective_df": round(self.effective_df, 4) if self.effective_df is not None else None,
             "lambda_opt": self.lambda_opt,
         }
 
@@ -287,6 +348,9 @@ class ClusterEloPredictor:
         self.model = EloPredictorModel()
         # 最近一次批量预测结果（含 MAP 不确定性），供聚类安全分析输出
         self.last_predictions: dict[str, dict] = {}
+        # 模型缓存：ground truth 未变时复用 w，避免每轮重跑 K-Fold
+        self._model_gt_hash: str | None = None
+        self._model_cv_gt_count: int = 0  # 上次完整 K-Fold 时的 GT 数
 
         self._load_artifacts()
 
@@ -369,6 +433,13 @@ class ClusterEloPredictor:
 
     def ground_truth_count(self) -> int:
         return len(self.ground_truth)
+
+    def _ground_truth_hash(self) -> str:
+        """ground truth（方法名 + Elo）的指纹，用于判断预测模型是否需要重训。"""
+        content = ",".join(
+            f"{m}:{self.ground_truth[m]['elo']}" for m in sorted(self.ground_truth)
+        )
+        return hashlib.md5(content.encode("utf-8")).hexdigest()
 
     # ============================================================
     # 动态聚类触发判断
@@ -578,7 +649,30 @@ class ClusterEloPredictor:
             "intent": meta.get("intent_feature_names", INTENT_FEATURE_NAMES),
             "prior": PRIOR_FEATURE_NAMES,
         }
-        self.model.fit(train_features, self.ground_truth, feature_name_blocks)
+
+        # 模型缓存：GT 未变 → 直接复用 w（纯矩阵预测）；
+        # GT 小幅增长 → 用现有 λ* 单次 SVD 快速 refit；
+        # GT 增长 ≥ threshold → 重跑 K-Fold 选 λ
+        gt_hash = self._ground_truth_hash()
+        gt_count = self.ground_truth_count()
+        if self.model.w is not None and gt_hash == self._model_gt_hash:
+            logger.info("SVD-Ridge 复用缓存模型 (ground truth %d 未变)", gt_count)
+        elif (
+            self.model.w is not None
+            and self.model.lambda_opt is not None
+            and 0 < gt_count - self._model_cv_gt_count < self.threshold
+        ):
+            self.model.fit(
+                train_features, self.ground_truth, feature_name_blocks,
+                lambda_override=self.model.lambda_opt,
+            )
+            logger.info("SVD-Ridge 快速 refit (λ*=%.4f 复用, ground truth %d)",
+                        self.model.lambda_opt, gt_count)
+        else:
+            self.model.fit(train_features, self.ground_truth, feature_name_blocks)
+            self._model_cv_gt_count = gt_count
+        self._model_gt_hash = gt_hash
+
         means, variances = self.model.predict(test_features, methods)
 
         results = {}

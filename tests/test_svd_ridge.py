@@ -148,6 +148,18 @@ def test_predict_batch_svd_ridge() -> int:
         print(f"❌ Ridge 预测与真实 Elo 相关性过低: r={corr_true:.3f}")
         return 1
 
+    # 绝对精度：截距（~1500 基准）必须被正确还原，不能整体偏移到 0 附近
+    mean_shift = abs(float(np.mean(pred_elos)) - float(np.mean(true_elos)))
+    if mean_shift > 100:
+        print(f"❌ 预测均值偏移过大（截距缺失？）: shift={mean_shift:.1f}")
+        return 1
+    rmse = float(np.sqrt(np.mean((np.array(pred_elos) - np.array(true_elos)) ** 2)))
+    gt_mean = float(np.mean([g["elo"] for g in predictor.ground_truth.values()]))
+    baseline_rmse = float(np.sqrt(np.mean((np.array(true_elos) - gt_mean) ** 2)))
+    if rmse >= baseline_rmse:
+        print(f"❌ RMSE={rmse:.1f} 未优于 GT 均值基线 {baseline_rmse:.1f}")
+        return 1
+
     # 与距离加权基线趋势一致（欧氏距离倒数加权）
     gt_methods = sorted(predictor.ground_truth.keys())
     blocks = list(_SYNTH_DIMS.keys())
@@ -167,7 +179,49 @@ def test_predict_batch_svd_ridge() -> int:
         return 1
 
     print(f"✅ SVD-Ridge 批量预测通过 (r_true={corr_true:.3f}, r_距离加权={corr_dw:.3f}, "
-          f"λ*={predictor.model.lambda_opt:.4f})")
+          f"RMSE={rmse:.1f}<基线{baseline_rmse:.1f}, λ*={predictor.model.lambda_opt:.4f})")
+    return 0
+
+
+def test_model_cache() -> int:
+    """GT 未变时 predict_batch 复用 w 不重训；GT 小幅增长走快速 refit 不重跑 K-Fold。"""
+    predictor, test_methods, method_records, elos, features = _make_predictor()
+
+    preds1 = predictor.predict_batch(method_records)
+    fit_count1 = predictor.model.fit_count
+    w1 = predictor.model.w
+
+    # GT 未变 → 复用缓存
+    preds2 = predictor.predict_batch(method_records)
+    if predictor.model.fit_count != fit_count1 or predictor.model.w is not w1:
+        print(f"❌ GT 未变但模型重训: fit_count {fit_count1} -> {predictor.model.fit_count}")
+        return 1
+    for m in test_methods:
+        if abs(preds1[m]["elo"] - preds2[m]["elo"]) > 1e-9:
+            print(f"❌ 缓存后预测不一致: {m}")
+            return 1
+
+    # GT 小幅增长（+1 < threshold=10）→ 快速 refit，不重跑 K-Fold
+    moved = test_methods[0]
+    predictor.ground_truth[moved] = {"elo": round(elos[moved], 2)}
+    cv_errors_before = list(predictor.model.cv_errors)
+    predictor.predict_batch(method_records)
+    if predictor.model.fit_count != fit_count1 + 1:
+        print(f"❌ GT 小幅增长应触发一次快速 refit: fit_count={predictor.model.fit_count}")
+        return 1
+    if predictor.model.cv_errors != cv_errors_before:
+        print("❌ 快速 refit 不应重跑 K-Fold（cv_errors 被修改）")
+        return 1
+
+    # GT 增长 ≥ threshold → 重跑 K-Fold
+    for i, m in enumerate(test_methods[1:11]):
+        predictor.ground_truth[m] = {"elo": round(elos[m], 2)}
+    predictor.predict_batch(method_records)
+    if predictor.model.fit_count != fit_count1 + 2:
+        print(f"❌ GT 增长 ≥ threshold 应触发完整重训: fit_count={predictor.model.fit_count}")
+        return 1
+
+    print("✅ 模型缓存通过")
     return 0
 
 
@@ -277,6 +331,7 @@ def main() -> int:
         test_predict_batch_fallback,
         test_first_round_convergence,
         test_kfold_lambda_stability,
+        test_model_cache,
     ]
     for t in tests:
         if t() != 0:

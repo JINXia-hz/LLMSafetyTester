@@ -84,6 +84,7 @@ def build_svd_ridge_summary(tracker: ELOTracker) -> dict | None:
         "lambda_opt": model.lambda_opt,
         "sigma2": round(model.sigma2, 4) if model.sigma2 is not None else None,
         "regularization_path": model.get_regularization_path(),
+        "pca_summary": model.get_pca_summary(),
         "feature_importance": model.get_feature_importance(top_n=20),
         "n_ground_truth": predictor.ground_truth_count(),
         "predictions": predictions,
