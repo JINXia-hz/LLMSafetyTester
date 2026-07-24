@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLMSEC 安全评估工作台</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+  <style>
+    :root {
+      --c-bg: #f5f4f1;
+      --c-sidebar: #2f3a3d;
+      --c-sidebar-active: #435457;
+      --c-primary: #5f8d8b;
+      --c-accent: #c07a5a;
+      --c-warn: #b0563f;
+      --c-safe: #6d8f6e;
+      --c-text: #3c4447;
+      --c-muted: #8a8f93;
+    }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: var(--c-bg); color: var(--c-text); }
+    .card { background: #fff; border: 1px solid #e6e3dd; border-radius: 12px; padding: 16px; }
+    .metric-value { font-size: 1.75rem; font-weight: 700; color: var(--c-text); line-height: 1.2; }
+    .metric-label { font-size: 0.8rem; color: var(--c-muted); }
+    .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-radius: 10px; color: #c4cdd0; cursor: pointer; font-size: 0.9rem; transition: background .15s, color .15s; }
+    .nav-item:hover { background: var(--c-sidebar-active); color: #fff; }
+    .nav-item.active { background: var(--c-primary); color: #fff; }
+    .section { display: none; }
+    .section.visible { display: block; animation: fadeIn .2s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 600; }
+    .badge-gt { background: #e3ede4; color: #4f7351; }
+    .badge-pred { background: #e4e9ee; color: #5a7186; }
+    .btn { padding: 8px 16px; border-radius: 10px; font-size: 0.85rem; font-weight: 600; transition: opacity .15s; cursor: pointer; border: none; }
+    .btn:hover { opacity: .88; }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .btn-primary { background: var(--c-primary); color: #fff; }
+    .btn-accent { background: var(--c-accent); color: #fff; }
+    .btn-plain { background: #eceae5; color: var(--c-text); }
+    .banner { border-radius: 14px; padding: 22px 26px; color: #fff; }
+    .level-safe { background: var(--c-safe); }
+    .level-allergic { background: #b39b54; }
+    .level-vulnerable { background: var(--c-warn); }
+    .level-broken { background: var(--c-accent); }
+    .level-inconclusive { background: #8a8f93; }
+    .report-body h1, .report-body h2, .report-body h3 { font-weight: 700; margin: 0.8em 0 0.4em; color: var(--c-text); }
+    .report-body h1 { font-size: 1.3rem; } .report-body h2 { font-size: 1.15rem; } .report-body h3 { font-size: 1rem; }
+    .report-body p, .report-body li { font-size: 0.9rem; line-height: 1.7; color: #4a5255; }
+    .report-body ul, .report-body ol { padding-left: 1.4em; margin: 0.4em 0; }
+    .report-body ul { list-style: disc; } .report-body ol { list-style: decimal; }
+    .report-body table { border-collapse: collapse; margin: 0.6em 0; font-size: 0.85rem; }
+    .report-body th, .report-body td { border: 1px solid #ddd9d2; padding: 5px 10px; }
+    .report-body th { background: #f0eeea; }
+    .report-body code { background: #f0eeea; border-radius: 4px; padding: 1px 5px; font-size: 0.82rem; }
+    .report-body blockquote { border-left: 3px solid var(--c-primary); padding-left: 12px; color: var(--c-muted); margin: 0.6em 0; }
+    .log-box { background: #232b2d; color: #b9c4c2; font-family: ui-monospace, Consolas, monospace; font-size: 0.75rem; border-radius: 10px; padding: 12px; height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+    select, input[type="number"] { border: 1px solid #d8d4cc; border-radius: 8px; padding: 6px 10px; font-size: 0.85rem; background: #fff; color: var(--c-text); }
+    .cluster-tag { font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="flex min-h-screen">
+    <!-- ============ 侧边栏 ============ -->
+    <aside class="w-56 shrink-0 flex flex-col" style="background: var(--c-sidebar);">
+      <div class="px-5 py-5">
+        <div class="text-white font-bold text-lg">🛡️ LLMSEC</div>
+        <div class="text-xs mt-1" style="color: #93a1a4;">安全评估工作台</div>
+      </div>
+      <nav class="flex-1 px-3 space-y-1" id="nav">
+        <div class="nav-item active" data-section="overview">📊 总览</div>
+        <div class="nav-item" data-section="threats">🗡️ 威胁看板</div>
+        <div class="nav-item" data-section="report">📄 报告</div>
+        <div class="nav-item" data-section="clusters">🧬 聚类分析</div>
+        <div class="nav-item" data-section="model">🤖 预测模型</div>
+        <div class="nav-item" data-section="run">▶️ 运行控制</div>
+      </nav>
+      <div class="px-5 py-4 text-xs" style="color: #6f7e81;">只读数据 + 子进程任务<br>绑定 127.0.0.1</div>
+    </aside>
+
+    <!-- ============ 主区域 ============ -->
+    <main class="flex-1 min-w-0">
+      <!-- 顶栏 -->
+      <div class="flex items-center gap-3 px-6 py-4" style="background: #eceae5;">
+        <label class="text-sm font-medium">运行批次:</label>
+        <select id="runSelect" class="min-w-[240px]"><option value="">最新</option></select>
+        <button id="refreshBtn" class="btn btn-plain">🔄 刷新</button>
+        <span id="status" class="text-sm" style="color: var(--c-muted);"></span>
+      </div>
+
+      <div class="p-6 max-w-6xl">
+
+        <!-- ============ 总览 ============ -->
+        <section id="sec-overview" class="section visible">
+          <div id="ov_banner" class="banner level-inconclusive mb-5">
+            <div class="text-sm opacity-80" id="ov_target">目标模型: -</div>
+            <div class="text-2xl font-bold mt-1" id="ov_verdict">暂无数据</div>
+            <div class="text-sm mt-2 opacity-90" id="ov_recommendation"></div>
+          </div>
+
+          <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
+            <div class="card"><div class="metric-label">ASR 攻击成功率</div><div class="metric-value" id="ov_asr">-</div></div>
+            <div class="card"><div class="metric-label">FPR 误杀率</div><div class="metric-value" id="ov_fpr">-</div></div>
+            <div class="card"><div class="metric-label">ELO 安全边界</div><div class="metric-value" id="ov_boundary">-</div></div>
+            <div class="card"><div class="metric-label">边界置信度</div><div class="metric-value" id="ov_conf">-</div></div>
+            <div class="card"><div class="metric-label">已测方法</div><div class="metric-value" id="ov_tested">-</div></div>
+            <div class="card"><div class="metric-label">边界以上威胁</div><div class="metric-value" id="ov_above">-</div></div>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="card"><h3 class="font-semibold mb-2 text-sm">五维安全画像</h3><div id="chart_radar"></div></div>
+            <div class="card"><h3 class="font-semibold mb-2 text-sm">按有害类别 ASR</h3><div id="chart_harm"></div></div>
+          </div>
+        </section>
+
+        <!-- ============ 威胁看板 ============ -->
+        <section id="sec-threats" class="section">
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+            <div class="card"><h3 class="font-semibold mb-2 text-sm">Top 10 威胁（ELO）</h3><div id="chart_top_threats"></div></div>
+            <div class="card"><h3 class="font-semibold mb-2 text-sm">防御方 ELO 收敛曲线</h3><div id="chart_convergence"></div></div>
+          </div>
+          <div class="card mb-4">
+            <h3 class="font-semibold mb-3 text-sm">高威胁方法清单</h3>
+            <div class="overflow-auto"><table class="min-w-full text-sm">
+              <thead><tr class="text-left" style="color: var(--c-muted);">
+                <th class="py-2 pr-4">方法</th><th class="py-2 pr-4">ELO</th><th class="py-2 pr-4">ASR</th>
+                <th class="py-2 pr-4">来源</th><th class="py-2">95% CI</th>
+              </tr></thead>
+              <tbody id="threatTable"></tbody>
+            </table></div>
+          </div>
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="card">
+              <h3 class="font-semibold mb-3 text-sm">🧱 防御强项</h3>
+              <div id="defenseList" class="space-y-2 text-sm"></div>
+            </div>
+            <div class="card">
+              <h3 class="font-semibold mb-3 text-sm">⚠️ 意外盲区（低 ELO 攻击成功）</h3>
+              <div id="upsetList" class="space-y-2 text-sm"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ============ 报告 ============ -->
+        <section id="sec-report" class="section">
+          <div class="flex gap-4">
+            <div class="w-48 shrink-0">
+              <div class="card text-sm space-y-1 sticky top-4" id="reportNav"></div>
+            </div>
+            <div class="flex-1 min-w-0 space-y-4" id="reportBody"></div>
+          </div>
+        </section>
+
+        <!-- ============ 聚类分析 ============ -->
+        <section id="sec-clusters" class="section">
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <div class="card"><div class="metric-label">方法数</div><div class="metric-value" id="cl_methods">-</div></div>
+            <div class="card"><div class="metric-label">簇数</div><div class="metric-value" id="cl_n">-</div></div>
+            <div class="card"><div class="metric-label">轮廓系数</div><div class="metric-value" id="cl_sil">-</div></div>
+            <div class="card"><div class="metric-label">Davies-Bouldin</div><div class="metric-value" id="cl_db">-</div></div>
+          </div>
+          <div class="card mb-4"><h3 class="font-semibold mb-2 text-sm">簇规模与测试覆盖</h3><div id="chart_cluster_cover"></div></div>
+          <div class="space-y-3" id="clusterCards"></div>
+        </section>
+
+        <!-- ============ 预测模型 ============ -->
+        <section id="sec-model" class="section">
+          <div id="modelEmpty" class="card text-sm hidden" style="color: var(--c-muted);">
+            该运行批次没有 SVD-Ridge 模型诊断数据（需用新版 pipeline 运行后生成）。
+          </div>
+          <div id="modelBody">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+              <div class="card"><div class="metric-label">最优 λ*</div><div class="metric-value" id="md_lambda">-</div></div>
+              <div class="card"><div class="metric-label">残差 σ²</div><div class="metric-value" id="md_sigma">-</div></div>
+              <div class="card"><div class="metric-label">有效自由度 df</div><div class="metric-value" id="md_df">-</div></div>
+              <div class="card"><div class="metric-label">Ground Truth</div><div class="metric-value" id="md_gt">-</div></div>
+            </div>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+              <div class="card"><h3 class="font-semibold mb-2 text-sm">正则化路径（λ vs 交叉验证误差）</h3><div id="chart_regpath"></div></div>
+              <div class="card"><h3 class="font-semibold mb-2 text-sm">主成分解释方差</h3><div id="chart_pca"></div></div>
+            </div>
+            <div class="card mb-4"><h3 class="font-semibold mb-2 text-sm">特征重要性 Top 20（|Ridge 系数|）</h3><div id="chart_importance"></div></div>
+            <div class="card"><h3 class="font-semibold mb-2 text-sm">未测方法预测 Elo 与 95% 置信区间</h3><div id="chart_pred_ci"></div></div>
+          </div>
+        </section>
+
+        <!-- ============ 运行控制 ============ -->
+        <section id="sec-run" class="section">
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+            <div class="card">
+              <h3 class="font-semibold text-sm mb-2">🧪 生成攻击集</h3>
+              <p class="text-xs mb-3" style="color: var(--c-muted);">从 攻击分析.md 解析 L1 方法并生成攻击 prompt</p>
+              <button class="btn btn-primary w-full" onclick="startTask('generate')">开始生成</button>
+            </div>
+            <div class="card">
+              <h3 class="font-semibold text-sm mb-2">🗡️ 自适应评估</h3>
+              <div class="space-y-2 text-xs mb-3">
+                <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">攻击集</span><select id="evalInput" class="flex-1"></select></div>
+                <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">阶段</span>
+                  <select id="evalPhase" class="flex-1"><option value="all">全部</option><option value="1">仅攻击</option><option value="2">仅过敏</option></select></div>
+                <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">批大小</span><input type="number" id="evalBatch" value="10" min="1" max="50" class="flex-1"></div>
+                <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">最大轮次</span><input type="number" id="evalRounds" value="5" min="1" max="50" class="flex-1"></div>
+                <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">采样器</span>
+                  <select id="evalSampler" class="flex-1"><option value="hybrid">hybrid</option><option value="gap">gap</option><option value="infogain">infogain</option><option value="coordinate">coordinate</option></select></div>
+              </div>
+              <button class="btn btn-accent w-full" onclick="startEvaluate()">启动评估</button>
+            </div>
+            <div class="card">
+              <h3 class="font-semibold text-sm mb-2">🧬 聚类安全分析</h3>
+              <p class="text-xs mb-3" style="color: var(--c-muted);">基于当前 ELO 与聚类结果重新生成簇级分析</p>
+              <button class="btn btn-primary w-full" onclick="startTask('cluster-analysis')">运行分析</button>
+            </div>
+          </div>
+          <div class="card">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="font-semibold text-sm">任务列表</h3>
+              <button class="btn btn-plain text-xs" onclick="loadTasks()">刷新</button>
+            </div>
+            <div id="taskList" class="space-y-3 text-sm" ></div>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

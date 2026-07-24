@@ -241,7 +241,28 @@ python -m tests.test_elo_convergence
 python -m tests.test_svd_ridge
     # 回归测试：PCAP 防御方名称、SVD-Ridge 批量预测精度（含截距/RMSE/趋势）、
     # ground truth 不足回退、首轮收敛统计、K-Fold λ 稳定性、模型缓存
+
+python -m tests.test_dashboard_api
+    # 冒烟测试：Web 面板 API、run 参数校验、任务运行器生命周期
 ```
+
+---
+
+## Web 面板（图形化工作台）
+
+```bash
+.venv/Scripts/uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
+# 打开 http://localhost:8080
+```
+
+侧边栏六个版块：
+
+- **总览**：安全等级横幅、ASR/FPR/边界 ELO/置信度指标卡、五维安全画像雷达图、按有害类别 ASR
+- **威胁看板**：Top 10 威胁、高威胁方法表（实测/预测徽标 + 95% CI）、防御方 ELO 收敛曲线、意外盲区
+- **报告**：`security_report.md` 分段渲染，带段内导航
+- **聚类分析**：验证指标、簇规模与测试覆盖、高风险/盲区/稳定簇卡片
+- **预测模型**：SVD-Ridge 诊断——正则化路径、主成分解释方差、特征重要性、预测 Elo 置信区间
+- **运行控制**：按钮触发生成攻击集 / 自适应评估（参数表单）/ 聚类分析，任务状态与日志实时轮询
 
 ---
 
