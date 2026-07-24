@@ -32,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from llmsec.core.config import OUTPUT_DIR, RUNS_DIR, STATE_FILE
+from llmsec.core.config import CLUSTER_ARTIFACTS_FILE, OUTPUT_DIR, RUNS_DIR, STATE_FILE
 
 # ============================================================
 # 路径
@@ -350,6 +350,121 @@ async def api_attack_sets():
         return {"files": []}
     files = sorted(p.name for p in ATTACKS_DIR.glob("*.jsonl"))
     return {"files": files}
+
+
+# ============================================================
+# 聚类特征空间投影（PCA / t-SNE，按需计算 + 缓存）
+# ============================================================
+_PROJECTION_CACHE: dict[tuple[str, float], dict] = {}
+_PROJECTION_BLOCKS = ("textual", "embedding", "technique", "intent")
+
+
+def _build_feature_matrix(features: dict, methods: list[str]):
+    """拼接 textual+embedding+technique+intent 特征块为矩阵（块维度不一致零填充）。"""
+    import numpy as np
+
+    dims = {b: 0 for b in _PROJECTION_BLOCKS}
+    vecs = {}
+    for m in methods:
+        feat = features.get(m, {})
+        v = {}
+        for b in _PROJECTION_BLOCKS:
+            vec = np.atleast_1d(np.asarray(feat.get(b, np.zeros(0)), dtype=np.float64))
+            v[b] = vec
+            dims[b] = max(dims[b], vec.shape[0])
+        vecs[m] = v
+
+    rows = []
+    for m in methods:
+        parts = []
+        for b in _PROJECTION_BLOCKS:
+            vec = vecs[m][b]
+            if vec.shape[0] < dims[b]:
+                vec = np.pad(vec, (0, dims[b] - vec.shape[0]))
+            parts.append(vec)
+        rows.append(np.concatenate(parts))
+    return np.array(rows, dtype=np.float64)
+
+
+@app.get("/api/cluster-projection")
+async def api_cluster_projection(method: str = "pca"):
+    """
+    对聚类 artifacts 中的高维特征做 2D 投影（PCA / t-SNE），供分布散点图使用。
+    结果按 (method, artifacts mtime) 缓存。
+    """
+    import joblib
+    import numpy as np
+
+    if method not in ("pca", "tsne"):
+        raise HTTPException(status_code=400, detail=f"不支持的投影方法: {method!r}")
+    if not CLUSTER_ARTIFACTS_FILE.exists():
+        return {"available": False}
+
+    mtime = CLUSTER_ARTIFACTS_FILE.stat().st_mtime
+    cache_key = (method, mtime)
+    if cache_key in _PROJECTION_CACHE:
+        return _PROJECTION_CACHE[cache_key]
+
+    try:
+        artifacts = joblib.load(CLUSTER_ARTIFACTS_FILE)
+    except Exception:
+        return {"available": False}
+
+    features = artifacts.get("features", {})
+    labels = artifacts.get("labels", {})
+    cluster_names = artifacts.get("cluster_names", {})
+    gt_methods = set(artifacts.get("ground_truth_methods", []))
+    if not features:
+        return {"available": False}
+
+    methods = sorted(features.keys())
+    n = len(methods)
+    X = _build_feature_matrix(features, methods)
+    X = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-8)
+
+    result: dict = {"available": True, "method": method, "n": n}
+    if n < 2:
+        coords = np.zeros((n, 2))
+    elif method == "pca":
+        from sklearn.decomposition import PCA
+
+        pca = PCA(n_components=2, random_state=42)
+        coords = pca.fit_transform(X)
+        result["explained_variance"] = [
+            round(float(r), 4) for r in pca.explained_variance_ratio_
+        ]
+    else:
+        from sklearn.manifold import TSNE
+
+        # sklearn 要求 perplexity < n，小样本自适应收缩
+        perplexity = max(1, min(30, (n - 1) // 3))
+        tsne = TSNE(n_components=2, perplexity=perplexity, init="pca", random_state=42)
+        coords = tsne.fit_transform(X)
+        result["perplexity"] = perplexity
+
+    state = _load_state()
+    ratings = state.get("attacker_ratings", {})
+
+    points = []
+    for i, m in enumerate(methods):
+        cid = labels.get(m, -1)
+        try:
+            cid = int(cid)
+        except (TypeError, ValueError):
+            cid = -1
+        points.append({
+            "method": m,
+            "x": round(float(coords[i, 0]), 4),
+            "y": round(float(coords[i, 1]), 4),
+            "cluster": cid,
+            "cluster_name": cluster_names.get(str(cid), f"簇{cid}"),
+            "tested": m in gt_methods,
+            "elo": round(ratings[m], 1) if m in ratings else None,
+        })
+
+    result["points"] = points
+    _PROJECTION_CACHE[cache_key] = result
+    return result
 
 
 # ============================================================

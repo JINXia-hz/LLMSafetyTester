@@ -200,8 +200,56 @@ async function loadReport() {
 }
 
 // ---------- 聚类分析 ----------
+const CLUSTER_COLORS = [
+  '#5f8d8b', '#c07a5a', '#7a8f6d', '#8a7ba8', '#b39b54', '#5a7186', '#b0563f',
+  '#6d8fa8', '#a87b7b', '#7ba89a', '#96896f', '#845f8d', '#63855a', '#a8948a',
+];
+let projMethod = 'pca';
+
+async function loadProjection(method) {
+  projMethod = method;
+  $('projPcaBtn').className = 'btn text-xs ' + (method === 'pca' ? 'btn-primary' : 'btn-plain');
+  $('projTsneBtn').className = 'btn text-xs ' + (method === 'tsne' ? 'btn-primary' : 'btn-plain');
+  try {
+    const d = await api('/api/cluster-projection?method=' + method);
+    if (!d.available) { $('projMeta').textContent = '（无聚类 artifacts）'; return; }
+
+    const byCluster = {};
+    d.points.forEach(p => { (byCluster[p.cluster] = byCluster[p.cluster] || []).push(p); });
+    const traces = Object.entries(byCluster).map(([cid, pts], i) => ({
+      x: pts.map(p => p.x),
+      y: pts.map(p => p.y),
+      type: 'scatter', mode: 'markers',
+      name: cid === '-1' ? '噪声' : pts[0].cluster_name,
+      marker: {
+        size: 9,
+        color: CLUSTER_COLORS[i % CLUSTER_COLORS.length],
+        opacity: pts.map(p => p.tested ? 0.95 : 0.4),
+      },
+      text: pts.map(p =>
+        `${p.method}<br>${p.cluster_name}` +
+        (p.elo != null ? `<br>ELO ${p.elo}` : '') +
+        (p.tested ? '<br>实测' : '<br>预测')),
+      hovertemplate: '%{text}<extra></extra>',
+    }));
+
+    const meta = method === 'pca' && d.explained_variance
+      ? `两维解释方差 ${(d.explained_variance[0] * 100).toFixed(1)}% + ${(d.explained_variance[1] * 100).toFixed(1)}%`
+      : method === 'tsne' ? `perplexity=${d.perplexity}` : '';
+    $('projMeta').textContent = `（${d.n} 种方法 · ${meta} · 实心=实测 空心=预测）`;
+
+    Plotly.newPlot('chart_projection', traces, {
+      margin: { t: 10 }, height: 520, font: PLOT_FONT,
+      xaxis: { title: method === 'pca' ? 'PC1' : 't-SNE 1' },
+      yaxis: { title: method === 'pca' ? 'PC2' : 't-SNE 2' },
+      legend: { orientation: 'h', y: -0.18, font: { size: 10 } },
+    }, PLOT_CFG);
+  } catch (e) { $('projMeta').textContent = '（投影加载失败: ' + e.message + '）'; }
+}
+
 async function loadClusters() {
   try {
+    loadProjection(projMethod);
     const d = await api('/api/clusters' + runQuery());
     if (!d.available) return;
     $('cl_methods').textContent = d.n_methods ?? '-';

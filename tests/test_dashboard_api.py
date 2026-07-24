@@ -121,6 +121,37 @@ def test_task_lifecycle() -> int:
     return 0
 
 
+def test_cluster_projection() -> int:
+    rc = 0
+    r = client.get("/api/cluster-projection?method=pca")
+    rc |= _check(r.status_code == 200, "pca 投影 200")
+    d = r.json()
+    rc |= _check("available" in d, "pca 投影含 available")
+    if d.get("available"):
+        rc |= _check(d["n"] == len(d["points"]), "pca 点数与方法数一致")
+        rc |= _check("explained_variance" in d and len(d["explained_variance"]) == 2,
+                     "pca 含两维解释方差")
+        p0 = d["points"][0]
+        rc |= _check(all(k in p0 for k in ("method", "x", "y", "cluster", "tested")),
+                     "pca 点字段完整")
+        rc |= _check(isinstance(p0["x"], float) and isinstance(p0["y"], float),
+                     "pca 坐标为数值")
+
+    r = client.get("/api/cluster-projection?method=tsne")
+    rc |= _check(r.status_code == 200, "tsne 投影 200")
+    d = r.json()
+    if d.get("available"):
+        rc |= _check(d["n"] == len(d["points"]), "tsne 点数与方法数一致")
+        rc |= _check("perplexity" in d and 1 <= d["perplexity"] < max(d["n"], 2),
+                     "tsne perplexity 合法")
+
+    r = client.get("/api/cluster-projection?method=umap")
+    rc |= _check(r.status_code == 400, "非法投影方法 400")
+    if rc == 0:
+        print("✅ 聚类投影 API 通过")
+    return rc
+
+
 def main() -> int:
     tests = [
         test_index_and_data_apis,
@@ -128,6 +159,7 @@ def main() -> int:
         test_model_fallback,
         test_evaluate_validation,
         test_task_lifecycle,
+        test_cluster_projection,
     ]
     for t in tests:
         if t() != 0:
