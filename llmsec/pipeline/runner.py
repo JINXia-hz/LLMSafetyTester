@@ -386,7 +386,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
     print(f"  🧊 冷启动: 已为 {len(all_methods)} 种方法注入初始 Elo "
           f"(ground truth {len(tracker.ground_truth_methods)} 种)")
 
-    # ---- 构造采样器（使用预聚类固定簇） ----
+    # ---- 构造采样器（使用前置树聚类的簇结构） ----
     cluster_report = load_cluster_report()
     sampler_obj = build_sampler(
         sampler,
@@ -457,13 +457,13 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
 
             time.sleep(API_DELAY)
 
-        # 用固定簇重新预测剩余方法
+        # 用 SVD-Ridge 重新预测剩余方法
         remaining_records = {m: r for m, r in method_records.items() if m not in tested}
         _inject_predicted_elos(tracker, remaining_records)
         tracker.save(STATE_FILE)
         tracker.record_round_end(DEFENDER_NAME)
         print(f"  ✅ 种子阶段完成: 已建立 ground truth {len(tracker.ground_truth_methods)} 种，"
-              f"剩余 {len(remaining_records)} 种使用固定簇预测 Elo")
+              f"剩余 {len(remaining_records)} 种使用 SVD-Ridge 预测 Elo")
 
     current_batch_size = batch_size
     prev_conv = None
@@ -538,11 +538,11 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
         # 保存ELO进度
         tracker.save(STATE_FILE)
 
-        # 固定簇更新：不再重训练聚类，只基于新增 ground truth 更新未测方法 Elo
+        # SVD-Ridge 更新：基于新增 ground truth 刷新未测方法预测 Elo（聚类不重训）
         remaining_records = {m: r for m, r in method_records.items() if m not in tested}
         _inject_predicted_elos(tracker, remaining_records)
         tracker.save(STATE_FILE)
-        print(f"     🔄 固定簇已更新: {len(remaining_records)} 个未测方法的预测 Elo")
+        print(f"     🔄 预测已更新: {len(remaining_records)} 个未测方法的 SVD-Ridge 预测 Elo")
 
         # 聚类级安全分析
         try:
@@ -590,7 +590,8 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
     # ---- 攻击完成后最终聚类 ----
     final_report = tracker.predictor.final_fit(records, all_results)
     print(f"\n  🏁 最终聚类: {final_report.get('n_clusters', 0)} 簇 "
-          f"(DBSCAN核心={final_report.get('dbscan_core_clusters', 0)}, "
+          f"(DBSCAN核心={final_report.get('dbscan', {}).get('n_core_clusters', 0)}, "
+          f"噪声={final_report.get('dbscan', {}).get('n_noise', 0)}, "
           f"silhouette={final_report.get('validation', {}).get('silhouette', 0):.4f})")
 
     tracker.save(STATE_FILE)

@@ -317,6 +317,13 @@ class CoordinateDescentSampler(AttackSampler):
         cluster_methods.sort(key=method_score)
         selected = cluster_methods[:n]
 
+        # 聚焦簇耗尽：从全局候选按 gap 补足，避免退化小批次（1~2 条浪费轮次）
+        if len(selected) < n:
+            selected_set = set(selected)
+            remaining = [m for m in candidates if m not in selected_set]
+            remaining.sort(key=lambda m: abs(tracker.get_attacker_elo(m) - def_elo))
+            selected.extend(remaining[: n - len(selected)])
+
         for m in selected:
             self._cluster_test_count[self._method_to_cluster(m)] += 1
 

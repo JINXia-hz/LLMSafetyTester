@@ -183,12 +183,24 @@ def test_cluster_tree_and_cut() -> int:
     return rc
 
 
+def test_run_endpoints_post_only() -> int:
+    """任务端点只接受 POST（前端曾用 GET 调用导致 405）。"""
+    rc = 0
+    for ep in ["/api/run/generate", "/api/run/cluster-analysis", "/api/run/evaluate"]:
+        r = client.get(ep)
+        rc |= _check(r.status_code == 405, f"GET {ep} 应 405，实际 {r.status_code}")
+    if rc == 0:
+        print("✅ 任务端点 POST-only 通过")
+    return rc
+
+
 def main() -> int:
     tests = [
         test_index_and_data_apis,
         test_run_param_validation,
         test_model_fallback,
         test_evaluate_validation,
+        test_run_endpoints_post_only,
         test_task_lifecycle,
         test_cluster_projection,
         test_cluster_tree_and_cut,

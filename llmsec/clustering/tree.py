@@ -146,8 +146,13 @@ def sweep_candidates(
 
 def select_knee(sweep: list[dict], flatten_ratio: float = KNEE_FLATTEN_RATIO) -> tuple[int, list[int]]:
     """
-    拐点选择：增益 Δ 首次低于 max(Δ)×flatten_ratio 视为开始平缓，
-    在拐点（含）之前的候选中选 score 最优；全程无拐点则取全局 argmax。
+    auto-k 选择：全局 argmax S 为主规则。
+
+    历史教训：小 k 端的非单调抖动会让"首个平缓点即停"把主峰丢掉
+    （真实数据误判 k*=6，实际峰值 k=12）。argmax 在合成团簇上同样在
+    真实簇数 ±2 内，且不受起始段抖动影响。
+    若 argmax 落在最大候选且末尾仍在快速上升，标注 k 可能被低估。
+
     返回 (best_k, top3_ks)。
     """
     if not sweep:
@@ -156,12 +161,15 @@ def select_knee(sweep: list[dict], flatten_ratio: float = KNEE_FLATTEN_RATIO) ->
     chosen_idx = int(np.argmax(scores))
 
     deltas = np.diff(scores)
-    if deltas.size and float(deltas.max()) > 0:
-        thr = flatten_ratio * float(deltas.max())
-        for i, d in enumerate(deltas):
-            if d < thr:
-                chosen_idx = int(np.argmax(scores[: i + 2]))
-                break
+    if (
+        chosen_idx == len(sweep) - 1
+        and deltas.size
+        and float(deltas.max()) > 0
+        and float(deltas[-1]) > flatten_ratio * float(deltas.max())
+    ):
+        # 边界仍在上升：k 可能被低估，候选范围偏窄
+        sweep[-1]["boundary_rising"] = True
+        logger.info("auto-k: 最大候选 k=%d 处得分仍在上升，k 可能被低估", sweep[-1]["k"])
 
     top3 = [s["k"] for s in sorted(sweep, key=lambda s: -s["score"])[:3]]
     return sweep[chosen_idx]["k"], sorted(top3)

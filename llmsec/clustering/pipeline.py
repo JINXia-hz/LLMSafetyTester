@@ -94,10 +94,8 @@ def knee_eps(dist_matrix: np.ndarray, k_candidates: list[int] | None = None) -> 
 # DBSCAN（含递归细分）
 # ============================================================
 def _build_eps_candidates(dist_matrix: np.ndarray, eps: float) -> list[float]:
-    """以自动 eps 为中心构造候选序列（逐步缩小，避免噪声过多）。"""
-    candidates = [eps]
-    for factor in (0.8, 0.6, 0.45, 0.35):
-        candidates.append(eps * factor)
+    """以自动 eps 为中心构造双向候选序列（白化空间尺度与初始估计可能偏差较大）。"""
+    candidates = [eps * f for f in (1.5, 1.25, 1.0, 0.8, 0.6, 0.45)]
     upper = float(np.median(dist_matrix[dist_matrix > 0])) if np.any(dist_matrix > 0) else eps
     return [min(c, upper) for c in candidates]
 
@@ -108,7 +106,8 @@ def run_dbscan(
 ) -> dict[str, int]:
     """
     用 DBSCAN 聚类（基于预计算距离矩阵）。
-    用 knee_eps 自动选 eps 和 min_samples。
+    用 knee_eps 自动选 eps 和 min_samples，双向候选中按
+    "簇数 ≥2 且噪声最少"选最优组（而非最后一组，避免小 eps 噪声爆炸）。
     返回: {method_name: cluster_id}，噪声点为 -1。
     """
     from sklearn.cluster import DBSCAN
@@ -124,19 +123,30 @@ def run_dbscan(
 
     eps_candidates = _build_eps_candidates(dist_matrix, eps)
 
-    last_labels = None
+    best_labels = None
+    best_key = None  # (噪声数, -簇数)：噪声最少优先，其次簇数最多
     for try_eps in eps_candidates:
         logger.info("DBSCAN 参数: min_samples=%d, eps=%.4f", min_samples, try_eps)
         clusterer = DBSCAN(eps=try_eps, min_samples=min_samples, metric="precomputed")
         labels = clusterer.fit_predict(dist_matrix)
         n_clusters = len(set(labels) - {-1})
         n_noise = sum(1 for v in labels if v == -1)
-        last_labels = {name: int(label) for name, label in zip(method_names, labels)}
-        if n_clusters >= 2 and n_noise < n / 2:
-            return last_labels
-        logger.info("DBSCAN eps=%.4f 结果不理想 (簇=%d, 噪声=%d)，尝试更小 eps", try_eps, n_clusters, n_noise)
+        labeled = {name: int(label) for name, label in zip(method_names, labels)}
 
-    return last_labels if last_labels is not None else {name: -1 for name in method_names}
+        if n_clusters >= 2:
+            key = (n_noise, -n_clusters)
+            if best_key is None or key < best_key:
+                best_key = key
+                best_labels = labeled
+            if n_noise < n / 2:
+                return labeled
+        else:
+            logger.info("DBSCAN eps=%.4f 结果不理想 (簇=%d, 噪声=%d)，尝试其它 eps",
+                        try_eps, n_clusters, n_noise)
+
+    if best_labels is not None:
+        return best_labels
+    return {name: -1 for name in method_names}
 
 
 def run_dbscan_recursive(
@@ -185,6 +195,13 @@ def run_dbscan_recursive(
             depth=depth + 1,
             max_depth=max_depth,
         )
+
+        # 细分验收：至少分出 2 个子簇且新增噪声 ≤10%，
+        # 否则保留原簇（集中空间里递归细分只会把成员甩成噪声）
+        sub_noise = sum(1 for v in sub_labels.values() if v == -1)
+        sub_clusters = len(set(sub_labels.values()) - {-1})
+        if sub_clusters < 2 or sub_noise * 10 > len(members):
+            continue
 
         # 合并：子簇重新编号，噪声保持 -1
         sub_max = max(sub_labels.values()) if sub_labels else -1

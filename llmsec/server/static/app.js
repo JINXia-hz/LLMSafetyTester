@@ -487,7 +487,11 @@ async function loadRunSection() {
 
 async function startTask(kind) {
   try {
-    await api(`/api/run/${kind}`);
+    const res = await fetch(`/api/run/${kind}`, { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || res.status);
+    }
     setStatus(`${kind} 任务已启动`);
     await loadTasks();
   } catch (e) { setStatus(`启动失败: ${e.message}`); }

@@ -653,9 +653,6 @@ class ELOTracker:
         self.predictor.ground_truth = ground_truth
         self.ground_truth_methods = set(ground_truth.keys())
 
-        # ground_truth 恢复后再清理 artifacts，避免初始化时因 ground_truth 为空而误清空聚类信息
-        self.predictor._sanitize_artifacts()
-
         self.attacker_stats = data.get("attacker_stats", {})
         self.attacker_pred_std = data.get("attacker_pred_std", {})
 
