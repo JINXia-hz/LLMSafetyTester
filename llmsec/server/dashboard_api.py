@@ -468,6 +468,129 @@ async def api_cluster_projection(method: str = "pca"):
 
 
 # ============================================================
+# 聚类层次树（树图 + 任意层切割）
+# ============================================================
+_CUT_CACHE: dict[tuple[int, float], dict] = {}
+
+
+def _load_tree_artifacts() -> dict | None:
+    """加载含 linkage 的聚类 artifacts；不存在或缺 linkage 时返回 None。"""
+    import joblib
+
+    if not CLUSTER_ARTIFACTS_FILE.exists():
+        return None
+    try:
+        artifacts = joblib.load(CLUSTER_ARTIFACTS_FILE)
+    except Exception:
+        return None
+    if artifacts.get("linkage") is None:
+        return None
+    return artifacts
+
+
+@app.get("/api/cluster-tree")
+async def api_cluster_tree():
+    """返回层次树的树图坐标（scipy dendrogram 的 icoord/dcoord）与 auto-k 信息。"""
+    artifacts = _load_tree_artifacts()
+    if artifacts is None:
+        return {"available": False}
+
+    from scipy.cluster.hierarchy import dendrogram
+
+    Z = artifacts["linkage"]
+    labels = artifacts.get("labels", {})
+    n = len(labels)
+    dd = dendrogram(Z, no_plot=True)
+
+    # maxclust=k 对应的切割高度：第 n-k 与 n-k+1 次合并高度之间
+    heights = sorted(float(h) for h in Z[:, 2])
+
+    def cut_height(k: int) -> float:
+        if k <= 1:
+            return heights[-1] * 1.05 if heights else 1.0
+        if k >= n:
+            return 0.0
+        return (heights[n - k - 1] + heights[n - k]) / 2
+
+    chosen_k = artifacts.get("chosen_k") or len(set(labels.values()) - {-1})
+    return {
+        "available": True,
+        "n": n,
+        "icoord": dd["icoord"],
+        "dcoord": dd["dcoord"],
+        "merge_heights": heights,
+        "chosen_k": chosen_k,
+        "chosen_height": cut_height(chosen_k),
+        "top_ks": artifacts.get("top_ks", [chosen_k]),
+        "candidate_sweep": artifacts.get("candidate_sweep", []),
+        "max_height": heights[-1] if heights else 1.0,
+    }
+
+
+@app.get("/api/cluster-cut")
+async def api_cluster_cut(k: int):
+    """在层次树上切出 k 个簇（fcluster O(n)），返回该层簇结构与命名。"""
+    import joblib
+
+    artifacts = _load_tree_artifacts()
+    if artifacts is None:
+        return {"available": False}
+
+    labels = artifacts.get("labels", {})
+    n = len(labels)
+    if k < 2 or k > n:
+        raise HTTPException(status_code=400, detail=f"k 必须在 [2, {n}] 内")
+
+    mtime = CLUSTER_ARTIFACTS_FILE.stat().st_mtime
+    cache_key = (k, mtime)
+    if cache_key in _CUT_CACHE:
+        return _CUT_CACHE[cache_key]
+
+    from scipy.cluster.hierarchy import fcluster
+
+    from llmsec.clustering.pipeline import auto_name_clusters
+
+    Z = artifacts["linkage"]
+    methods = sorted(labels.keys())
+    raw = fcluster(Z, t=k, criterion="maxclust")
+    cut_labels = {m: int(c) - 1 for m, c in zip(methods, raw)}
+
+    names = auto_name_clusters(
+        cut_labels,
+        artifacts.get("features", {}),
+        artifacts.get("meta", {}),
+        artifacts.get("meta", {}).get("method_prompts", {}),
+    )
+
+    clusters: dict[int, list[str]] = {}
+    for m, cid in cut_labels.items():
+        clusters.setdefault(cid, []).append(m)
+
+    state = _load_state()
+    ratings = state.get("attacker_ratings", {})
+
+    result = {
+        "available": True,
+        "k": k,
+        "clusters": [
+            {
+                "id": cid,
+                "name": names.get(cid, f"簇{cid}"),
+                "size": len(members),
+                "members": sorted(members),
+                "mean_elo": (
+                    round(sum(ratings.get(m, 1500.0) for m in members) / len(members), 1)
+                    if members else None
+                ),
+            }
+            for cid, members in sorted(clusters.items())
+        ],
+    }
+    _CUT_CACHE[cache_key] = result
+    return result
+
+
+# ============================================================
 # 操作 API（子进程任务）
 # ============================================================
 TASKS: dict[str, dict] = {}

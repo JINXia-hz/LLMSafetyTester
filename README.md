@@ -71,9 +71,17 @@ TARGET_TYPE=local_sim TARGET_BASE_URL=http://127.0.0.1:8000/v1 \
 - **模型缓存**：ground truth 未变 → 直接复用 w 纯矩阵预测；小幅增长 → 用现有 λ* 单次 SVD 快速 refit；增长 ≥ 阈值 → 才重跑 K-Fold。每轮只调整预测矩阵，开销最小。
 - **回退链**：ground truth 不足时，回退到同后缀/同基底变体（如 `*_rot13`、`*_b64`）的简单平均。
 
-### 固定簇 + 动态重训练
+### 统一先验度量空间（轻量马氏）
 
-攻击开始前预聚类固定簇结构，攻击过程中簇不变；启动时优先复用已有 `cluster_artifacts`，只在攻击集变化、ground truth 显著增长或强制要求时才重新训练。最终聚类在攻击完成后基于全部真实数据运行一次。
+聚类与预测的度量空间只使用**先验特征**（textual + embedding + technique + intent + 名称先验，任何方法都可得）。后验特征（defense 交互，未测点全零）一律不进入距离度量，只作为簇级画像。特征矩阵经 SVD 降维后做**阻尼白化**（damp=0.5）：强信号方向近似马氏校正、噪声方向由谱拐点自动抑制——全白化会放大噪声，实测不如阻尼版。
+
+### 树聚类 + 拐点 auto-k
+
+层次聚类（Ward）只建一次树，候选 k 全部从同一棵 linkage 上切出：以 `k0 = ceil(log2(n))`（log 增长，n=100→7，n=1000→10）为中心取 log 间隔候选，每个 k 计算轮廓系数、Calinski-Harabasz、DB 指数，归一化合成后取增益开始平缓的拐点。保留 top-3 k 作为前端树图缩放预设停点。linkage 树存入 artifacts，前端可任意层切割查看。最终聚类附加白化空间递归 DBSCAN 密度视图（大簇自动细分，小簇/单点簇也有名称）。
+
+### D-Optimality 种子（取代预聚类采样）
+
+冷启动种子不再是"每簇随机一个"，而是贪心 D-optimality：反复选 `xᵀ(X_gtᵀX_gt + λI)⁻¹x` 最大的方法（对预测矩阵信息量最大的方向），每次选中后 Sherman–Morrison 秩1更新信息矩阵。GT 为空时自动退化为最大杠杆点，天然覆盖特征空间。采样器的不确定性与 ridge MAP 方差同源。
 
 ### 抗假阳性收敛
 
@@ -215,9 +223,8 @@ python -m llmsec.evaluation.elo_cluster --status
 python -m llmsec.evaluation.safe_twin [--generate|--evaluate|--all]
     # 安全孪生生成与过敏（FPR）检测
 
-python -m llmsec.clustering.cli [--method {hdbscan,kmeans,hierarchical}] [--k N]
-                                [--min-cluster-size N] [--weights emb,tech,intent,defense]
-    # 攻击方法聚类分析
+python -m llmsec.clustering.cli [--final] [--input FILE] [--result-file FILE] [--dump-features]
+    # 攻击方法树聚类（Ward + 拐点 auto-k）；--final 附加递归 DBSCAN 密度视图
 
 python -m llmsec.reporting.report [--output-dir DIR]
     # 独立生成报告：扫描 *_结果.jsonl 和最新 runs/ 的 attack_results.jsonl
@@ -233,7 +240,10 @@ python -m llmsec.pipeline.probe [--text "测试文本"]
 
 ```bash
 python -m tests.clustering_kdistance
-    # 离线验证聚类效果：构造 base64/rot13/code 三类攻击，断言簇数 ≥3 且噪声比 <30%
+    # 离线验证聚类效果：构造 base64/rot13/code 三类攻击，断言簇数 ≥3 且小簇全部有名称
+
+python -m tests.test_whitened_tree
+    # 回归测试：阻尼白化空间、log 增长 k0、拐点 auto-k（已知簇数 ±2）、D-optimal 种子覆盖
 
 python -m tests.test_elo_convergence
     # 回归测试：验证 predict 变体兜底与 check_convergence 抗假阳性
@@ -260,7 +270,7 @@ python -m tests.test_dashboard_api
 - **总览**：安全等级横幅、ASR/FPR/边界 ELO/置信度指标卡、五维安全画像雷达图、按有害类别 ASR
 - **威胁看板**：Top 10 威胁、高威胁方法表（实测/预测徽标 + 95% CI）、防御方 ELO 收敛曲线、意外盲区
 - **报告**：`security_report.md` 分段渲染，带段内导航
-- **聚类分析**：验证指标、簇规模与测试覆盖、高风险/盲区/稳定簇卡片
+- **聚类分析**：验证指标、PCA/t-SNE 特征空间分布图（可切换）、层次聚类树图（缩放查看任意层切割，top-3 k 预设停点）、高风险/盲区/稳定簇卡片
 - **预测模型**：SVD-Ridge 诊断——正则化路径、主成分解释方差、特征重要性、预测 Elo 置信区间
 - **运行控制**：按钮触发生成攻击集 / 自适应评估（参数表单）/ 聚类分析，任务状态与日志实时轮询
 

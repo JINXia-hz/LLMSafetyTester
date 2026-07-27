@@ -1,11 +1,12 @@
 """
 llmsec.clustering — 攻击方法聚类子包
 
-  - features.py：5 维攻击特征提取（原根目录 features.py）
-  - pipeline.py：复合距离聚类主流程（原根目录 clustering.py，
-    模块改名以避免与子包名冲突）
+  - features.py：5 维攻击特征提取
+  - space.py：阻尼白化（轻量马氏）特征空间
+  - tree.py：Ward 层次树聚类 + 多指标拐点 auto-k + 递归 DBSCAN 密度视图
+  - pipeline.py：聚类工具（DBSCAN / 自动命名 / 画像 / 导出）
 
-常用符号再导出，方便 `from llmsec.clustering import run_clustering_pipeline, ...`。
+常用符号再导出，方便 `from llmsec.clustering import run_tree_clustering, ...`。
 """
 
 from llmsec.clustering.features import (
@@ -23,24 +24,29 @@ from llmsec.clustering.features import (
     load_and_extract,
 )
 from llmsec.clustering.pipeline import (
+    auto_name_clusters,
+    build_cluster_profiles,
+    euclidean_distance_matrix,
+    knee_eps,
+    run_dbscan,
+    run_dbscan_recursive,
+)
+from llmsec.clustering.space import build_whitened_space, transform_to_space
+from llmsec.clustering.tree import (
+    build_tree,
+    candidate_ks,
+    cut_tree,
+    log_growth_k0,
+    run_final_tree_clustering,
+    run_tree_clustering,
+    select_knee,
+    sweep_candidates,
+)
+from llmsec.core.config import (
     CLUSTER_ARTIFACTS_FILE,
     CLUSTER_FEATURES_FILE,
     CLUSTER_MATRIX_FILE,
     CLUSTER_REPORT_FILE,
-    auto_name_clusters,
-    build_cluster_profiles,
-    build_composite_distance,
-    compute_external_validation,
-    cosine_distance_matrix,
-    euclidean_distance_matrix,
-    jaccard_distance_matrix,
-    run_clustering_pipeline,
-    run_dbscan,
-    run_final_clustering,
-    run_hdbscan,
-    run_hierarchical,
-    run_kmeans,
-    run_pre_clustering,
 )
 
 __all__ = [
@@ -51,13 +57,16 @@ __all__ = [
     "extract_defense_features",
     "TEXTUAL_FEATURE_NAMES", "TECHNIQUE_LABELS", "INTENT_FEATURE_NAMES",
     "DEFENSE_FEATURE_NAMES", "CROSS_MODEL_FEATURE_NAMES",
-    # pipeline
-    "run_clustering_pipeline", "run_hdbscan", "run_kmeans", "run_hierarchical",
-    "run_dbscan", "run_pre_clustering", "run_final_clustering",
-    "build_composite_distance", "build_cluster_profiles",
-    "auto_name_clusters", "compute_external_validation",
-    "cosine_distance_matrix", "jaccard_distance_matrix",
+    # pipeline（工具）
+    "run_dbscan", "run_dbscan_recursive", "knee_eps",
     "euclidean_distance_matrix",
+    "auto_name_clusters", "build_cluster_profiles",
+    # space / tree
+    "build_whitened_space", "transform_to_space",
+    "run_tree_clustering", "run_final_tree_clustering",
+    "build_tree", "cut_tree",
+    "candidate_ks", "sweep_candidates", "select_knee", "log_growth_k0",
+    # 路径常量
     "CLUSTER_REPORT_FILE", "CLUSTER_MATRIX_FILE", "CLUSTER_FEATURES_FILE",
     "CLUSTER_ARTIFACTS_FILE",
 ]

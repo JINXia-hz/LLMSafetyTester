@@ -250,6 +250,7 @@ async function loadProjection(method) {
 async function loadClusters() {
   try {
     loadProjection(projMethod);
+    loadClusterTree();
     const d = await api('/api/clusters' + runQuery());
     if (!d.available) return;
     $('cl_methods').textContent = d.n_methods ?? '-';
@@ -299,6 +300,98 @@ async function loadClusters() {
       wrap.appendChild(div);
     });
   } catch (e) { setStatus('聚类分析加载失败: ' + e.message); }
+}
+
+// ---------- 层次树（树图 + 缩放切割） ----------
+let treeData = null;
+let treeK = null;
+
+function treeCutHeight(k) {
+  const h = treeData.merge_heights, n = treeData.n;
+  if (k <= 1) return h.length ? h[h.length - 1] * 1.05 : 1;
+  if (k >= n) return 0;
+  return (h[n - k - 1] + h[n - k]) / 2;
+}
+
+function cutLineShape(h) {
+  return { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: h, y1: h,
+           line: { color: C.warn, width: 1.5, dash: 'dash' } };
+}
+
+async function loadClusterTree() {
+  try {
+    const d = await api('/api/cluster-tree');
+    if (!d.available) { $('treeMeta').textContent = '（无层次树数据，需新版树聚类运行后生成）'; return; }
+    treeData = d;
+    treeK = d.chosen_k;
+    $('treeK').textContent = treeK;
+    $('treeMeta').textContent = `（${d.n} 种方法 · auto-k=${d.chosen_k}）`;
+    const presets = $('treePresets');
+    presets.innerHTML = '';
+    (d.top_ks || []).forEach(k => {
+      const b = document.createElement('button');
+      b.className = 'btn btn-plain text-xs';
+      b.textContent = 'k=' + k;
+      b.onclick = () => setTreeK(k);
+      presets.appendChild(b);
+    });
+    drawDendrogram();
+  } catch (e) { $('treeMeta').textContent = '（树图加载失败）'; }
+}
+
+function drawDendrogram() {
+  const d = treeData;
+  const xs = [], ys = [];
+  d.icoord.forEach((x4, i) => {
+    const y4 = d.dcoord[i];
+    xs.push(x4[0], x4[1], x4[2], x4[3], null);
+    ys.push(y4[0], y4[1], y4[2], y4[3], null);
+  });
+  Plotly.newPlot('chart_dendrogram', [{
+    x: xs, y: ys, type: 'scatter', mode: 'lines',
+    line: { color: C.primary, width: 1.2 }, hoverinfo: 'skip',
+  }], {
+    margin: { t: 10 }, height: 300, font: PLOT_FONT, showlegend: false,
+    xaxis: { showticklabels: false, title: `${d.n} 种方法（叶节点）` },
+    yaxis: { title: '合并距离' },
+    shapes: [cutLineShape(treeCutHeight(treeK))],
+  }, PLOT_CFG);
+}
+
+async function setTreeK(k) {
+  if (!treeData) return;
+  treeK = Math.max(2, Math.min(k, treeData.n - 1));
+  $('treeK').textContent = treeK;
+  Plotly.relayout('chart_dendrogram', { shapes: [cutLineShape(treeCutHeight(treeK))] });
+  try {
+    const d = await api('/api/cluster-cut?k=' + treeK);
+    if (d.available) renderCutClusters(d);
+  } catch (e) { setStatus('树切割失败: ' + e.message); }
+}
+
+function zoomTree(delta) { setTreeK((treeK || 2) + delta); }
+
+function renderCutClusters(d) {
+  $('treeMeta').textContent = `（树切割视图 k=${d.k} · 点"复位"回到分析视图）`;
+  const wrap = $('clusterCards');
+  wrap.innerHTML = '';
+  d.clusters.forEach((c, i) => {
+    const color = CLUSTER_COLORS[i % CLUSTER_COLORS.length];
+    const div = document.createElement('div');
+    div.className = 'card';
+    div.innerHTML = `
+      <div class="flex items-center justify-between">
+        <div class="font-semibold text-sm">
+          <span class="cluster-tag" style="background:${color}22;color:${color};">k=${d.k}</span> ${c.name}</div>
+        <div class="text-xs" style="color: var(--c-muted);">${c.size} 种方法 · 平均 ELO ${fmtNum(c.mean_elo, 0)}</div>
+      </div>
+      <div class="text-xs mt-2 truncate" style="color: var(--c-muted);">${c.members.slice(0, 24).join('、')}${c.members.length > 24 ? ' …' : ''}</div>`;
+    wrap.appendChild(div);
+  });
+}
+
+async function resetTreeCut() {
+  await loadClusters();
 }
 
 // ---------- 预测模型 ----------

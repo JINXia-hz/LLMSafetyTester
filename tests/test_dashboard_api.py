@@ -152,6 +152,37 @@ def test_cluster_projection() -> int:
     return rc
 
 
+def test_cluster_tree_and_cut() -> int:
+    rc = 0
+    r = client.get("/api/cluster-tree")
+    rc |= _check(r.status_code == 200, "/api/cluster-tree 200")
+    d = r.json()
+    rc |= _check("available" in d, "/api/cluster-tree 含 available")
+    if d.get("available"):
+        rc |= _check(d["n"] > 0 and len(d["icoord"]) == d["n"] - 1,
+                     "树图坐标数量正确")
+        rc |= _check(len(d["merge_heights"]) == d["n"] - 1,
+                     "合并高度数量正确")
+        rc |= _check(d["chosen_k"] >= 2, "chosen_k 合法")
+
+        n = d["n"]
+        r = client.get(f"/api/cluster-cut?k={min(5, n - 1)}")
+        rc |= _check(r.status_code == 200, "/api/cluster-cut 200")
+        c = r.json()
+        if c.get("available"):
+            rc |= _check(len(c["clusters"]) == min(5, n - 1), "切割簇数 == k")
+            rc |= _check(all("name" in cl and "members" in cl for cl in c["clusters"]),
+                         "切割簇字段完整")
+            total = sum(cl["size"] for cl in c["clusters"])
+            rc |= _check(total == n, "切割覆盖全部方法")
+
+        r = client.get("/api/cluster-cut?k=99999")
+        rc |= _check(r.status_code == 400, "非法 k 被 400 拦截")
+    if rc == 0:
+        print("✅ 层次树/切割 API 通过")
+    return rc
+
+
 def main() -> int:
     tests = [
         test_index_and_data_apis,
@@ -160,6 +191,7 @@ def main() -> int:
         test_evaluate_validation,
         test_task_lifecycle,
         test_cluster_projection,
+        test_cluster_tree_and_cut,
     ]
     for t in tests:
         if t() != 0:

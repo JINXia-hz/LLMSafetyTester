@@ -45,11 +45,9 @@ import argparse
 import hashlib
 import json
 import os
-import random
 import re
 import sys
 import time
-from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Optional
 
@@ -269,100 +267,29 @@ def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict])
             tracker.attacker_pred_std[method] = pred["std"]
 
 
-def _sample_seed_methods_from_pre_cluster(
-    tracker: ELOTracker, method_records: dict[str, dict]
-) -> list[str]:
-    """
-    从预聚类结果中，每个簇随机选 1 个方法作为种子。
-    """
-    import random
-
-    labels = tracker.predictor.artifacts.get("labels", {}) if tracker.predictor.artifacts else {}
-    if not labels:
-        # 无预聚类结果，回退到随机选 5 个
-        available = [m for m in method_records if m not in tracker.ground_truth_methods]
-        random.shuffle(available)
-        return available[:5]
-
-    # 按簇分组
-    clusters = defaultdict(list)
-    for method, cid in labels.items():
-        if method in method_records and method not in tracker.ground_truth_methods:
-            clusters[cid].append(method)
-
-    seed_methods = []
-    for cid, members in sorted(clusters.items()):
-        random.shuffle(members)
-        seed_methods.append(members[0])
-
-    return seed_methods
-
-
-def _sample_seed_methods(
-    method_records: dict[str, dict],
-    needed: int,
-    tested: set[str],
-) -> list[str]:
-    """
-    按 category 分层采样 needed 个种子方法，优先保证类别多样性。
-    """
-    available = [m for m in method_records if m not in tested]
-    if len(available) <= needed:
-        return available
-
-    categories = defaultdict(list)
-    for m in available:
-        cat = method_records[m].get("category", "unknown")
-        categories[cat].append(m)
-
-    selected = []
-    # 每层先取一个
-    for cat in sorted(categories.keys()):
-        if len(selected) < needed:
-            selected.append(random.choice(categories[cat]))
-
-    # 不足则随机补充
-    remaining = [m for m in available if m not in selected]
-    random.shuffle(remaining)
-    selected.extend(remaining[: needed - len(selected)])
-    return selected[:needed]
-
-
 def _compute_method_set_hash(methods: list[str]) -> str:
     """计算方法集合的指纹 hash，用于判断攻击集是否发生变化。"""
     content = ",".join(sorted(set(methods)))
     return hashlib.md5(content.encode("utf-8")).hexdigest()
 
 
-def _should_retrain_cluster(
+def _should_recluster(
     predictor,
     method_records: dict[str, dict],
     force: bool = False,
 ) -> bool:
     """
-    判断启动时是否需要重新训练聚类模型。
+    判断启动时是否需要重新做前置树聚类（特征缓存 + 树结构）。
 
-    触发条件：
-    - force=True
-    - 无可用 artifacts 或缺少 labels
-    - 攻击集方法列表发生变化
-    - ground truth 数量比上次训练时增长达到 threshold
+    触发条件：force=True、无可用 artifacts 或缺少 labels、攻击集方法列表发生变化。
+    树聚类只使用先验特征，与 ground truth 增长无关。
     """
     if force:
         return True
     if predictor.artifacts is None or "labels" not in predictor.artifacts:
         return True
-
     current_hash = _compute_method_set_hash(list(method_records.keys()))
-    if predictor.artifacts.get("method_set_hash") != current_hash:
-        return True
-
-    gt_count = predictor.ground_truth_count()
-    last_fit = predictor.last_fit_gt_count or 0
-    if gt_count - last_fit >= predictor.threshold:
-        return True
-
-    return False
+    return predictor.artifacts.get("method_set_hash") != current_hash
 
 
 def _adaptive_batch_size(
@@ -444,27 +371,19 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
     all_results = []
     recent_results = {}
 
-    # ---- 启动时聚类策略：复用 / 动态重训练 / 预聚类 ----
+    # ---- 启动时树聚类：复用 / 重训练（先验特征，与 ground truth 无关） ----
     gt_count = len(tracker.ground_truth_methods)
-    needs_retrain = _should_retrain_cluster(tracker.predictor, method_records, force=False)
-
-    pre_report = None
-    if needs_retrain and gt_count >= tracker.predictor.min_cluster_size:
-        # 有历史 ground truth，用真实数据重新训练聚类模型
-        print(f"  🔄 动态聚类重训练: 基于 {gt_count} 个 ground truth 方法")
-        pre_report = tracker.predictor.fit_dynamic(records, [], force=True)
-    if needs_retrain and pre_report is None:
-        # 无 ground truth、ground truth 不足，或动态聚类因方法不匹配失败，做预聚类
-        pre_report = tracker.predictor.pre_fit(records)
-        print(f"  🧊 预聚类: {pre_report.get('n_clusters', 0)} 簇 (target_k={pre_report.get('target_k', 0)})")
-    elif not needs_retrain:
-        # 复用已有 artifacts
+    if _should_recluster(tracker.predictor, method_records, force=False):
+        pre_report = tracker.predictor.tree_fit(records)
+        print(f"  🌲 前置树聚类: k*={pre_report.get('n_clusters', 0)} "
+              f"(top3 {pre_report.get('top_ks', [])})")
+    else:
         n_clusters = len(set(tracker.predictor.artifacts.get("labels", {}).values()) - {-1})
-        print(f"  ♻️ 复用已有聚类: {n_clusters} 簇 (ground truth {gt_count} 种)")
+        print(f"  ♻️ 复用已有树聚类: {n_clusters} 簇 (ground truth {gt_count} 种)")
 
-    # ---- 固定簇冷启动：为所有未测方法注入预测 Elo ----
+    # ---- 冷启动：为所有未测方法注入预测 Elo ----
     _inject_predicted_elos(tracker, method_records)
-    print(f"  🧊 固定簇冷启动: 已为 {len(all_methods)} 种方法注入初始 Elo "
+    print(f"  🧊 冷启动: 已为 {len(all_methods)} 种方法注入初始 Elo "
           f"(ground truth {len(tracker.ground_truth_methods)} 种)")
 
     # ---- 构造采样器（使用预聚类固定簇） ----
@@ -484,10 +403,14 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
     # 采样日志
     sampler_log: list[dict] = []
 
-    # ---- 种子采样：每个预簇随机选 1 个方法做真实评估 ----
+    # ---- D-optimality 种子：选信息量最大的方法做真实评估 ----
     if len(tracker.ground_truth_methods) == 0 and len(all_methods) > 0:
-        seed_methods = _sample_seed_methods_from_pre_cluster(tracker, method_records)
-        print(f"\n  🌱 种子采样: 每个预簇随机选 1 种方法，共 {len(seed_methods)} 种")
+        from llmsec.clustering import log_growth_k0
+
+        n_seeds = max(5, log_growth_k0(len(all_methods)))
+        seed_methods = tracker.predictor.select_d_optimal_seeds(method_records, n_seeds)
+        print(f"\n  🌱 D-optimal 种子: {len(seed_methods)} 种"
+              f"（对预测矩阵信息量最大的方向，n={len(all_methods)} → k0={log_growth_k0(len(all_methods))}）")
         print(f"     方法: {', '.join(m[:25] for m in seed_methods)}")
 
         for method_name in seed_methods:
@@ -996,13 +919,10 @@ def main():
     # ---- Phase 1 ----
     attack_summary = {}
     if args.phase in ("all", "1"):
-        # 如用户要求强制重训练，且已有足够 ground truth，则先重训练再进入 Phase 1
-        if (
-            args.cluster_retrain_force
-            and tracker.predictor.ground_truth_count() >= tracker.predictor.min_cluster_size
-        ):
-            print("  🔄 强制重训练聚类模型 ...")
-            tracker.predictor.fit_dynamic(records, [], force=True)
+        # 如用户要求强制重训练，先重做前置树聚类再进入 Phase 1
+        if args.cluster_retrain_force:
+            print("  🔄 强制重训练树聚类 ...")
+            tracker.predictor.tree_fit(records)
             _inject_predicted_elos(tracker, method_records)
             tracker.save(STATE_FILE)
             print("  ✅ 强制重训练完成，已更新所有方法预测 Elo")

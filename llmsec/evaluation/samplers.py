@@ -35,7 +35,7 @@ class AttackSampler(ABC):
         注入聚类信息。子类可选择是否使用。
 
         参数:
-            cluster_report: run_clustering_pipeline 返回的报告 dict
+            cluster_report: 聚类报告 dict（含 method_labels）
             cluster_artifacts: joblib 加载的 cluster artifacts dict
         """
         self.cluster_report = cluster_report or {}

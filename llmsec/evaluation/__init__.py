@@ -10,8 +10,9 @@ llmsec.evaluation — 评估子包
 常用符号再导出，供 runner 等模块按 `from llmsec.evaluation import ...` 使用。
 """
 
+from llmsec.evaluation.active_learning import d_optimal_scores, greedy_d_optimal
 from llmsec.evaluation.elo import ELOTracker, update_elo_from_results
-from llmsec.evaluation.elo_cluster import ClusterEloPredictor
+from llmsec.evaluation.elo_cluster import ClusterEloPredictor, EloPredictorModel
 from llmsec.evaluation.samplers import (
     AttackSampler,
     CoordinateDescentSampler,
@@ -43,7 +44,9 @@ __all__ = [
     # elo
     "ELOTracker", "update_elo_from_results",
     # elo_cluster
-    "ClusterEloPredictor",
+    "ClusterEloPredictor", "EloPredictorModel",
+    # active_learning
+    "greedy_d_optimal", "d_optimal_scores",
     # samplers
     "AttackSampler", "GapMinSampler", "InfoGainSampler",
     "CoordinateDescentSampler", "HybridSampler", "build_sampler",

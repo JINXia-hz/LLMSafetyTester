@@ -165,6 +165,21 @@
             </div>
             <div id="chart_projection"></div>
           </div>
+          <div class="card mb-4">
+            <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+              <h3 class="font-semibold text-sm">层次聚类树
+                <span id="treeMeta" class="text-xs font-normal" style="color: var(--c-muted);"></span>
+              </h3>
+              <div class="flex items-center gap-2">
+                <button class="btn btn-plain text-xs" onclick="zoomTree(-1)">◀ 拉回更粗层</button>
+                <span class="text-xs font-semibold">k=<span id="treeK">-</span></span>
+                <button class="btn btn-plain text-xs" onclick="zoomTree(1)">进入更细层 ▶</button>
+                <span id="treePresets" class="flex gap-1"></span>
+                <button class="btn btn-plain text-xs" onclick="resetTreeCut()">复位</button>
+              </div>
+            </div>
+            <div id="chart_dendrogram"></div>
+          </div>
           <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
             <div class="card"><div class="metric-label">方法数</div><div class="metric-value" id="cl_methods">-</div></div>
             <div class="card"><div class="metric-label">簇数</div><div class="metric-value" id="cl_n">-</div></div>
