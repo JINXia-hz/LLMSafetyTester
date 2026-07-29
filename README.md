@@ -56,6 +56,7 @@ TARGET_TYPE=local_sim TARGET_BASE_URL=http://127.0.0.1:8000/v1 \
 ## 攻击集从哪来
 
 **本项目的核心是安全评估管线（ELO 边界 / SVD-Ridge 预测 / 聚类分析 / 看板），攻击集只是输入耗材。** `llmsec/attacks/` 下的生成器（攻击分析.md 解析、内置 HarmBench 数据包装）仅是**测试与示范用的样例来源**——你完全可以从任何渠道自带攻击集。
+> 📚 关于作者如何引用了HarmBench的信息用作测试和示范，以及其包含的许可见 [llmsec/data/Explication.md](llmsec/data/Explication.md)。
 
 自带攻击集只需满足标准 JSONL 格式（每行一条）：
 
@@ -176,7 +177,7 @@ llmsec/
 │                 # elo_cluster(SVD-Ridge批量预测) / cluster_analysis(簇级分析+模型诊断)
 │                 # safe_twin(过敏检测)
 ├── attacks/      # 示例攻击集生成（可选，非核心）: generate(L1) / harmbench(内置数据)
-├── data/         # 内置攻击数据（HarmBench 行为库 + 越狱模板，MIT 出处见目录内 README）
+├── data/         # 内置攻击数据（HarmBench 行为库 + 越狱模板，出处见目录内 Explication）
 ├── pipeline/     # runner(自适应编排) / launcher(交互启动器) / probe(连通性探测)
 ├── reporting/    # report(五维树形画像 + LLM叙事报告 + 方法注册表)
 ├── clustering/   # 特征提取 + hdbscan/kmeans/hierarchical 聚类 + CLI
