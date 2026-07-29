@@ -174,7 +174,14 @@ Python 3.11。其中 `hdbscan`、`sentence-transformers`、`tiktoken` 为聚类�
 | `GENERATOR_MODEL` | 生成模型名 | `deepseek-v4-flash` |
 | `JUDGE_MODEL` | Judge 模型名（缺省回退 GENERATOR） | `deepseek-v4-flash` |
 | `EMBEDDING_MODEL` | 聚类语义嵌入模型 | `all-MiniLM-L6-v2` |
+| `HF_ENDPOINT` | HF 镜像地址（huggingface.co 不可达时） | `https://hf-mirror.com` |
+| `SENTENCE_TRANSFORMERS_HOME` | embedding 模型缓存目录（项目内，下载一次离线可用） | `llmsec/.models` |
+| `EMBEDDING_API_BASE/KEY/MODEL` | 可选：OpenAI 兼容 API embedding 兜底（DeepSeek 无此接口，需 DashScope/智谱等） | - |
 | `PCAP_JUDGE_URL` | PCAP Judge 地址（TARGET_TYPE=pcap_judge 时） | - |
+
+完整配置模板见 `llmsec/.env.example`（复制为 `.env` 即可）。
+
+embedding 降级链：本地缓存 → HF 镜像 → API embedding → TF-IDF。模型首次经镜像下载后缓存于 `llmsec/.models/`，之后完全离线可用。
 
 ---
 

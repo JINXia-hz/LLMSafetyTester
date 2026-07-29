@@ -297,6 +297,44 @@ def test_select_knee_real_curve() -> int:
     return 0
 
 
+def test_embedding_fallback_chain() -> int:
+    """embedding 降级链：本地缓存优先（不触网）；env HF_ENDPOINT 覆盖预检列表。"""
+    import os
+
+    import llmsec.clustering.features as F
+
+    # 1. 缓存命中 → 直接返回，不触网（修复"有缓存却因断网降级 TF-IDF"的 bug）
+    sentinel = object()
+    orig_try = F._try_local_cache
+    orig_state = (F._embedding_model, F._embedding_available, F._embedding_source)
+    try:
+        F._embedding_model, F._embedding_available, F._embedding_source = None, True, None
+        F._try_local_cache = lambda name: sentinel
+        got = F._get_embedding_model()
+        if got is not sentinel or F._embedding_source != "cache":
+            print(f"❌ 本地缓存未优先命中: source={F._embedding_source}")
+            return 1
+    finally:
+        F._try_local_cache = orig_try
+        F._embedding_model, F._embedding_available, F._embedding_source = orig_state
+
+    # 2. env HF_ENDPOINT 不可达时返回 None（env 优先，不回退默认列表）
+    old = os.environ.get("HF_ENDPOINT")
+    os.environ["HF_ENDPOINT"] = "https://unreachable.invalid"
+    try:
+        if F._first_reachable_hf_host() is not None:
+            print("❌ env 指定的不可达 host 未被尊重")
+            return 1
+    finally:
+        if old is None:
+            os.environ.pop("HF_ENDPOINT", None)
+        else:
+            os.environ["HF_ENDPOINT"] = old
+
+    print("✅ embedding 降级链通过")
+    return 0
+
+
 def main() -> int:
     tests = [
         test_whitening_unit_variance,
@@ -306,6 +344,7 @@ def main() -> int:
         test_posterior_supervision,
         test_d_optimal_coverage,
         test_select_knee_real_curve,
+        test_embedding_fallback_chain,
     ]
     for t in tests:
         if t() != 0:

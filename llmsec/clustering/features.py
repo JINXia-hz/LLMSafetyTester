@@ -99,37 +99,114 @@ def _batch_textual_to_array(textual_feats: list[dict]) -> np.ndarray:
 # ============================================================
 _embedding_model = None
 _embedding_available = True  # 尝试加载，失败则回退
+_embedding_source = None     # "cache" | "mirror" | "api" | None(TF-IDF)
+
+# HF 预检主机列表：env HF_ENDPOINT 优先，否则镜像在前、官方在后
+_DEFAULT_HF_HOSTS = ("https://hf-mirror.com", "https://huggingface.co")
+
+
+class _ApiEmbedder:
+    """OpenAI 兼容 /embeddings 客户端（企业网络兜底），接口对齐 sentence-transformers。"""
+
+    def __init__(self, base_url: str, api_key: str, model: str, batch_size: int = 32):
+        from openai import OpenAI
+
+        self._client = OpenAI(base_url=base_url, api_key=api_key)
+        self._model = model
+        self._batch_size = batch_size
+
+    def encode(self, sentences, show_progress_bar=False, batch_size=None, **kwargs):
+        bs = batch_size or self._batch_size
+        embs = []
+        for i in range(0, len(sentences), bs):
+            batch = list(sentences[i:i + bs])
+            resp = self._client.embeddings.create(model=self._model, input=batch)
+            embs.extend(item.embedding for item in resp.data)
+        return np.array(embs, dtype=np.float64)
+
+
+def _try_local_cache(model_name: str):
+    """第 1 层：本地缓存模型（完全离线可用）。"""
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        return SentenceTransformer(model_name, local_files_only=True)
+    except Exception:
+        return None
+
+
+def _first_reachable_hf_host() -> str | None:
+    """按序预检 HF host（env 指定优先，否则镜像在前官方在后），返回首个可达者。"""
+    import socket
+
+    env_host = os.environ.get("HF_ENDPOINT")
+    hosts = [env_host] if env_host else list(_DEFAULT_HF_HOSTS)
+    for host in hosts:
+        hostname = host.replace("https://", "").replace("http://", "").rstrip("/").split("/")[0]
+        try:
+            sock = socket.create_connection((hostname, 443), timeout=3)
+            sock.close()
+            return host
+        except Exception:
+            continue
+    return None
 
 
 def _get_embedding_model():
-    global _embedding_model, _embedding_available
+    """
+    四层降级链：本地缓存 → HF 镜像/官方 → API embedding → TF-IDF。
+
+    关键修复：本地缓存优先——旧逻辑先预检网络，不可达就降级 TF-IDF，
+    即使模型已缓存也永远用不上。
+    """
+    global _embedding_model, _embedding_available, _embedding_source
     if _embedding_model is not None or not _embedding_available:
         return _embedding_model if _embedding_available else None
 
-    # 快速网络预检：3 秒内检查 HF 是否可达
-    import socket
-    hf_host = os.environ.get("HF_ENDPOINT", "https://huggingface.co").replace("https://", "").replace("http://", "").rstrip("/")
-    hf_host = hf_host.split("/")[0]  # 只取主机名
-    try:
-        sock = socket.create_connection((hf_host, 443), timeout=3)
-        sock.close()
-    except Exception:
-        print(f"  ⚠ 无法连接 {hf_host}")
-        print(f"  🔄 降级为 TF-IDF 文本特征 (无需网络)")
-        _embedding_available = False
-        return None
+    model_name = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
-    try:
-        from sentence_transformers import SentenceTransformer
-        model_name = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-        print(f"  [*] 加载 embedding 模型: {model_name}")
-        _embedding_model = SentenceTransformer(model_name)
-    except Exception as e:
-        print(f"  ⚠ embedding 模型加载失败: {e}")
-        print(f"  🔄 降级为 TF-IDF 文本特征 (无需网络)")
-        _embedding_available = False
-        return None
-    return _embedding_model
+    # 第 1 层：本地缓存（离线可用）
+    model = _try_local_cache(model_name)
+    if model is not None:
+        print(f"  [*] 加载本地缓存 embedding 模型: {model_name}")
+        _embedding_model = model
+        _embedding_source = "cache"
+        return _embedding_model
+
+    # 第 2 层：HF 镜像/官方（首个可达 host；下载后自动缓存，下次走第 1 层）
+    host = _first_reachable_hf_host()
+    if host:
+        os.environ["HF_ENDPOINT"] = host  # huggingface_hub 原生尊重该变量
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            print(f"  [*] 加载 embedding 模型: {model_name} (via {host})")
+            _embedding_model = SentenceTransformer(model_name)
+            _embedding_source = "mirror"
+            return _embedding_model
+        except Exception as e:
+            print(f"  ⚠ embedding 模型下载/加载失败: {e}")
+
+    # 第 3 层：API embedding（OpenAI 兼容 /embeddings，企业网络兜底）
+    api_base = os.environ.get("EMBEDDING_API_BASE")
+    api_key = os.environ.get("EMBEDDING_API_KEY")
+    api_model = os.environ.get("EMBEDDING_API_MODEL")
+    if api_base and api_key and api_model:
+        try:
+            embedder = _ApiEmbedder(api_base, api_key, api_model)
+            embedder.encode(["ping"], batch_size=1)  # 探活
+            print(f"  [*] 使用 API embedding: {api_model} @ {api_base}")
+            _embedding_model = embedder
+            _embedding_source = "api"
+            return _embedding_model
+        except Exception as e:
+            print(f"  ⚠ API embedding 不可用: {e}")
+
+    # 第 4 层：TF-IDF 兜底
+    print("  ⚠ 无可用 embedding 通道（本地缓存 / HF镜像 / API）")
+    print("  🔄 降级为 TF-IDF 文本特征 (无需网络)")
+    _embedding_available = False
+    return None
 
 
 def extract_text_embeddings(
@@ -538,7 +615,8 @@ def extract_all_features(
         "defense_feature_names": DEFENSE_FEATURE_NAMES,
         "cross_model_feature_names": CROSS_MODEL_FEATURE_NAMES,
         "has_eval_data": len(eval_results) > 0,
-        "has_embedding": True,
+        "has_embedding": _embedding_source is not None,
+        "embedding_source": _embedding_source,
         "embedding_artifacts": {
             "vectorizer": emb_vectorizer,
             "pca": emb_pca,
