@@ -85,6 +85,7 @@ def run_hdbscan_clustering(
     )
 
     # 2. HDBSCAN
+    # 2. HDBSCAN 密度视图（flat labels + 稀疏区）
     # min_samples=1 放宽互达距离，集中空间里显著降低噪声率；
     # min_cluster_size 随规模温和增长
     min_cluster_size = max(3, n // 40)
@@ -93,63 +94,50 @@ def run_hdbscan_clustering(
         min_samples=1,
         metric="euclidean",
     )
-    label_arr = clf.fit_predict(coords)
-    labels = {m: int(v) for m, v in zip(methods, label_arr)}
-    Z = clf.single_linkage_tree_.to_numpy()
-
-    cluster_ids = sorted(set(labels.values()) - {-1})
-    n_clusters = len(cluster_ids)
-    n_noise = sum(1 for v in labels.values() if v == -1)
+    flat_arr = clf.fit_predict(coords)
+    flat_labels = {m: int(v) for m, v in zip(methods, flat_arr)}
+    n_flat = len(set(flat_labels.values()) - {-1})
+    n_noise = sum(1 for v in flat_labels.values() if v == -1)
     logger.info(
-        "  HDBSCAN: %d 簇, 噪声 %d (%.0f%%), min_cluster_size=%d",
-        n_clusters, n_noise, n_noise / n * 100, min_cluster_size,
+        "  HDBSCAN 密度视图: %d 簇, 噪声 %d (%.0f%%), min_cluster_size=%d",
+        n_flat, n_noise, n_noise / n * 100, min_cluster_size,
     )
 
-    # 3. 关键层：同一棵 single-linkage 树上 sweep + argmax
+    # 3. Ward 缩放树 + 关键层（主 labels）
+    # 注意：HDBSCAN 的 single_linkage_tree_ 在最近邻链式合并下会产出
+    # 97% 单簇 + 单点的退化切割（实测 127/132 一簇），无法用于切层；
+    # condensed tree 的"留在父簇的点"身份不可枚举，还原 k 层成员脆弱。
+    # 因此缩放/关键层/簇效分析改用均衡的 Ward 树（同一白化坐标）。
+    from scipy.cluster.hierarchy import linkage
+
+    Z = linkage(coords, method="ward")
     ks = candidate_ks(n)
     sweep = sweep_candidates(coords, Z, methods, ks)
     k_best, top_ks = select_knee(sweep)
+    labels = cut_tree(Z, methods, k_best)
     logger.info("  关键层: 候选 %s → k*=%d (top3 %s)", ks, k_best, top_ks)
 
-    # 4. 命名（噪声组固定命名为稀疏区，小簇沿用兜底规则）
+    # 4. 命名（关键层各簇 + 密度视图各簇；噪声组固定命名为稀疏区）
     cluster_names = auto_name_clusters(labels, features, meta, meta.get("method_prompts", {}))
-    if -1 in cluster_names:
-        cluster_names[-1] = "稀疏区（低密度噪声）"
+    flat_names = auto_name_clusters(flat_labels, features, meta, meta.get("method_prompts", {}))
+    if -1 in flat_names:
+        flat_names[-1] = "稀疏区（低密度噪声）"
     cluster_profiles = build_cluster_profiles(labels, features, meta, cluster_names)
 
-    # flat labels 的验证指标（非噪声点上）
-    from sklearn.metrics import davies_bouldin_score, silhouette_score
-
-    validation = {}
-    valid = [m for m in methods if labels[m] != -1]
-    if len(valid) >= 3 and n_clusters >= 2:
-        vidx = [methods.index(m) for m in valid]
-        try:
-            validation["silhouette"] = round(float(silhouette_score(
-                coords[vidx], [labels[m] for m in valid],
-            )), 4)
-        except Exception:
-            validation["silhouette"] = 0.0
-        try:
-            validation["davies_bouldin"] = round(float(davies_bouldin_score(
-                coords[vidx], [labels[m] for m in valid],
-            )), 4)
-        except Exception:
-            validation["davies_bouldin"] = 0.0
-    else:
-        validation = {"silhouette": 0.0, "davies_bouldin": 0.0}
-
+    # 关键层 labels 的验证指标（取 sweep 中 k* 条目，另附轮廓/DB 一致性）
     best_entry = next((s for s in sweep if s["k"] == k_best), {})
-    validation["calinski_harabasz"] = best_entry.get("calinski_harabasz", 0.0)
+    validation = {
+        "silhouette": best_entry.get("silhouette", 0.0),
+        "calinski_harabasz": best_entry.get("calinski_harabasz", 0.0),
+        "davies_bouldin": best_entry.get("davies_bouldin", 0.0),
+    }
 
     report = {
         "generated_at": datetime.now().isoformat(),
         "method_count": n,
-        "clustering_method": "hdbscan_eom",
-        "n_clusters": n_clusters,
-        "n_noise": n_noise,
-        "noise_ratio": round(n_noise / n, 4),
-        "min_cluster_size": min_cluster_size,
+        "clustering_method": "ward_autok+hdbscan",
+        "n_clusters": k_best,
+        "n_noise": 0,
         "chosen_k": k_best,
         "k0_log_growth": log_growth_k0(n),
         "top_ks": top_ks,
@@ -158,13 +146,23 @@ def run_hdbscan_clustering(
         "cluster_names": {str(k): v for k, v in cluster_names.items()},
         "cluster_profiles": cluster_profiles,
         "method_labels": {m: labels[m] for m in sorted(labels.keys())},
+        "hdbscan": {
+            "n_clusters": n_flat,
+            "n_noise": n_noise,
+            "noise_ratio": round(n_noise / n, 4),
+            "min_cluster_size": min_cluster_size,
+            "cluster_names": {str(k): v for k, v in flat_names.items()},
+            "method_labels": {m: flat_labels[m] for m in sorted(flat_labels.keys())},
+        },
     }
 
-    # 5. 后验簇效验证（ANOVA / Kruskal-Wallis）
+    # 5. 后验簇效验证（ANOVA / Kruskal-Wallis，验证对象 = 关键层切割）
     if reactions:
         from llmsec.clustering.posterior import reaction_validation
 
-        report["reaction_validation"] = reaction_validation(labels, reactions)
+        rv = reaction_validation(labels, reactions)
+        rv["validated_on"] = f"ward_cut_k{k_best}"
+        report["reaction_validation"] = rv
 
     if write:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -176,6 +174,7 @@ def run_hdbscan_clustering(
             "features": features,
             "meta": meta,
             "labels": labels,
+            "hdbscan_labels": flat_labels,
             "cluster_names": cluster_names,
             "cluster_profiles": cluster_profiles,
             "linkage": Z,
@@ -200,8 +199,8 @@ def run_hdbscan_clustering(
         }
         joblib.dump(artifacts, CLUSTER_ARTIFACTS_FILE)
         logger.info(
-            "✅ HDBSCAN 聚类完成: %d 簇, 噪声 %.0f%%, silhouette=%.4f",
-            n_clusters, n_noise / n * 100, validation.get("silhouette", 0.0),
+            "✅ 聚类完成: 关键层 k*=%d, 密度视图 %d 簇+%d 噪声, silhouette=%.4f",
+            k_best, n_flat, n_noise, validation.get("silhouette", 0.0),
         )
 
     return report

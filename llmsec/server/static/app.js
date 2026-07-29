@@ -309,6 +309,26 @@ async function loadClusters() {
 
     const wrap = $('clusterCards');
     wrap.innerHTML = '';
+
+    // HDBSCAN 密度视图的稀疏区（关键层切割无噪声，稀疏区来自密度视图）
+    const hdb = d.hdbscan;
+    if (hdb && hdb.n_noise > 0) {
+      const sparseName = (hdb.cluster_names || {})['-1'] || '稀疏区（低密度噪声）';
+      const sparseMembers = Object.entries(hdb.method_labels || {})
+        .filter(([, c]) => c === -1).map(([m]) => m);
+      const div = document.createElement('div');
+      div.className = 'card';
+      div.style.background = '#f7f6f4';
+      div.innerHTML = `
+        <div class="flex items-center justify-between">
+          <div class="font-semibold text-sm">
+            <span class="cluster-tag" style="background:#eceae5;color:#6b7276;">稀疏区</span> ${sparseName}</div>
+          <div class="text-xs" style="color: var(--c-muted);">${hdb.n_noise} 种方法 · HDBSCAN 密度视图（共 ${hdb.n_clusters} 个密度簇）</div>
+        </div>
+        <div class="text-xs mt-2 truncate" style="color: var(--c-muted);">${sparseMembers.slice(0, 24).join('、')}${sparseMembers.length > 24 ? ' …' : ''}</div>`;
+      wrap.appendChild(div);
+    }
+
     (d.clusters || []).forEach(c => {
       let tag = '', bg = '#fff';
       if (String(c.id) === '-1') { tag = '<span class="cluster-tag" style="background:#eceae5;color:#6b7276;">稀疏区</span>'; bg = '#f7f6f4'; }

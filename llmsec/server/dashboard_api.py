@@ -328,6 +328,7 @@ async def api_clusters(run: str | None = None):
         "n_noise": analysis.get("n_noise", report.get("n_noise", 0)),
         "validation": report.get("validation", {}),
         "reaction_validation": report.get("reaction_validation"),
+        "hdbscan": report.get("hdbscan"),
         "clusters": clusters,
         "high_risk_clusters": analysis.get("high_risk_clusters", []),
         "blind_spot_clusters": analysis.get("blind_spot_clusters", []),

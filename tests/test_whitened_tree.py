@@ -156,15 +156,26 @@ def test_run_hdbscan_clustering_e2e() -> int:
         features, meta, reactions=reactions, write=False,
     )
     if report.get("n_clusters", 0) < 2:
-        print(f"❌ HDBSCAN 端到端聚类失败: {report.get('error')}")
+        print(f"❌ 端到端聚类失败: {report.get('error')}")
         return 1
     labels = report.get("method_labels", {})
     if len(labels) != len(methods):
         print(f"❌ method_labels 数量不符: {len(labels)}/{len(methods)}")
         return 1
+    # 主 labels（关键层切割）最大簇占比 < 60%（防 127/132 链式巨簇回归）
+    from collections import Counter
+    max_share = max(Counter(labels.values()).values()) / len(methods)
+    if max_share >= 0.6:
+        print(f"❌ 主 labels 出现巨型簇: 最大簇占比 {max_share:.0%}")
+        return 1
     names = report.get("cluster_names", {})
     if len(names) < report["n_clusters"]:
         print(f"❌ 存在未命名簇: {len(names)}/{report['n_clusters']}")
+        return 1
+    # HDBSCAN 密度视图段
+    hdb = report.get("hdbscan")
+    if not hdb or "n_clusters" not in hdb or "method_labels" not in hdb:
+        print("❌ 缺少 hdbscan 密度视图段")
         return 1
     if not report.get("top_ks") or not report.get("candidate_sweep"):
         print("❌ 缺少 top_ks / candidate_sweep")
@@ -176,8 +187,8 @@ def test_run_hdbscan_clustering_e2e() -> int:
     if rv["p_anova"] > 0.05 and rv["p_kruskal"] > 0.05:
         print(f"❌ 强相关反应下簇效应应显著: p={rv['p_anova']}/{rv['p_kruskal']}")
         return 1
-    print(f"✅ HDBSCAN 端到端通过 (k={report['n_clusters']}, 噪声={report['n_noise']}, "
-          f"p_anova={rv['p_anova']}, eta²={rv['eta2']})")
+    print(f"✅ 端到端聚类通过 (k={report['n_clusters']}, 最大簇占比={max_share:.0%}, "
+          f"密度视图={hdb['n_clusters']}簇+{hdb['n_noise']}噪声, eta²={rv['eta2']})")
     return 0
 
 

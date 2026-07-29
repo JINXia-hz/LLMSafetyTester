@@ -56,7 +56,7 @@ def main() -> int:
     pre_report = run_hdbscan_clustering(features, meta, write=False)
 
     n_clusters_pre = pre_report["n_clusters"]
-    noise_ratio_pre = pre_report["noise_ratio"]
+    noise_ratio_pre = pre_report["hdbscan"]["noise_ratio"]
 
     print(f"  方法总数: {pre_report['method_count']}")
     print(f"  簇数: {n_clusters_pre}, 噪声比: {noise_ratio_pre:.2%}")
@@ -94,7 +94,7 @@ def main() -> int:
     )
 
     rv = final_report.get("reaction_validation", {})
-    print(f"  簇数: {final_report['n_clusters']}, 噪声比: {final_report['noise_ratio']:.2%}")
+    print(f"  簇数: {final_report['n_clusters']}, 密度视图噪声比: {final_report['hdbscan']['noise_ratio']:.2%}")
     print(f"  簇效: {rv.get('verdict')} (p={rv.get('p_anova')}, eta²={rv.get('eta2')})")
 
     ok = True
