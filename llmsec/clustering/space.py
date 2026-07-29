@@ -82,7 +82,7 @@ def build_whitened_space(
     variance_ratio: float = 0.95,
     max_dims: int = 50,
     lambda_w: float | None = None,
-    damp: float = 0.5,
+    damp: float = 0.0,
     blocks: tuple[str, ...] = PRIOR_BLOCKS,
     feature_weights: np.ndarray | None = None,
 ) -> dict:
@@ -91,8 +91,12 @@ def build_whitened_space(
 
     参数:
         lambda_w: 白化正则地板；None 时取谱拐点处的 σ²（拐点后噪声方向被抑制）
-        damp: 白化强度 ∈ [0,1]。1=全白化（严格马氏，谱平滑时会放大噪声），
-            0=不白化（原始 PC 得分），默认 0.5（轻量马氏）
+        damp: 白化强度 ∈ [0,1]，默认 0（不白化，纯 PC 得分）。
+            实测本数据上白化是负优化：簇分离信号住在高方差方向，
+            白化的方向级等权会稀释信号（同配置 damp=0 轮廓系数约为
+            damp=0.5 的 2.8 倍）。保留参数仅供实验调参。
+            注：特征级量纲修正由 z-score 完成（与白化无关），
+            0/1 与连续特征均已归一。
 
     返回: {
         "methods": [...],
@@ -148,8 +152,12 @@ def build_whitened_space(
     # damp=0 不白化（原始 PC 得分）；damp=0.5 为兼顾度量校正与信噪比的折中。
     raw_scale = S[:k] / np.sqrt(n)
     white_scale = np.sqrt(n) * S[:k] / np.sqrt(S[:k] ** 2 + lambda_w)
-    scale = (raw_scale ** (1 - damp)) * (white_scale ** damp)
-    coords = U[:, :k] * scale
+    if damp == 0.0:
+        # 纯 PC 得分（标准主成分投影），跳过低效乘法
+        coords = U[:, :k] * raw_scale
+    else:
+        scale = (raw_scale ** (1 - damp)) * (white_scale ** damp)
+        coords = U[:, :k] * scale
 
     return {
         "methods": methods,

@@ -19,7 +19,6 @@
 
 import hashlib
 import json
-import math
 import os
 import re
 from collections import defaultdict
@@ -38,12 +37,15 @@ from llmsec.clustering import (
 from llmsec.clustering.features import (
     DEFENSE_FEATURE_NAMES,
     INTENT_FEATURE_NAMES,
+    PRIOR_FEATURE_NAMES,
     TECHNIQUE_LABELS,
     TEXTUAL_FEATURE_NAMES,
+    _extract_variant_suffix,
+    _strip_variant_suffix,
+    build_prior_features,
 )
 from llmsec.core.config import INITIAL_ELO
 from llmsec.core.logging import get_logger
-from llmsec.core.text import MATH_TAX_PATTERN
 
 logger = get_logger(__name__)
 
@@ -908,60 +910,6 @@ class ClusterEloPredictor:
 # ============================================================
 # 模块级辅助函数
 # ============================================================
-_VARIANT_SUFFIX_RE = re.compile(r"(_rot13|_b64|_base64|_code|_story|_\d+)$", re.IGNORECASE)
-
-# 先验特征：无需真实评估即可从方法名 / prompt 推导，作为 SVD-Ridge 的额外输入
-PRIOR_FEATURE_NAMES = [
-    "name_char_len",          # 方法名长度
-    "name_token_count",       # 方法名分词数
-    "suffix_rot13",           # 变体后缀 one-hot
-    "suffix_b64",
-    "suffix_code",
-    "suffix_story",
-    "suffix_numeric",
-    "has_math_tax",           # prompt 是否含数学越狱税
-    "prompt_line_count_log",  # prompt 行数（log1p）
-]
-
-
-def build_prior_features(method: str, record: dict | None = None) -> np.ndarray:
-    """
-    构造先验特征向量：只依赖方法名与 prompt，不需要任何评估结果。
-    变体后缀（rot13/b64/code/story/数字）与数学越狱税是与 Elo 强相关的先验信号。
-    """
-    suffix = _extract_variant_suffix(method)
-    prompt = (record or {}).get("prompt", "") or ""
-    tokens = [t for t in re.split(r"[_\s\-]+", method) if t]
-    return np.array([
-        float(len(method)),
-        float(len(tokens)),
-        1.0 if suffix == "rot13" else 0.0,
-        1.0 if suffix == "b64" else 0.0,
-        1.0 if suffix == "code" else 0.0,
-        1.0 if suffix == "story" else 0.0,
-        1.0 if suffix.isdigit() else 0.0,
-        1.0 if MATH_TAX_PATTERN.search(prompt) else 0.0,
-        float(math.log1p(prompt.count("\n") + 1)),
-    ], dtype=np.float64)
-
-
-def _strip_variant_suffix(method_name: str) -> str:
-    """去掉方法名末尾的变体后缀（如 _rot13/_b64/_code/_story/_0），得到攻击基底名。"""
-    return _VARIANT_SUFFIX_RE.sub("", method_name)
-
-
-def _extract_variant_suffix(method_name: str) -> str:
-    """提取方法名末尾的变体后缀（如 rot13 / b64 / code / story / 0），无后缀返回空字符串。"""
-    m = _VARIANT_SUFFIX_RE.search(method_name)
-    if not m:
-        return ""
-    suffix = m.group(1).lstrip("_").lower()
-    # 统一别名
-    if suffix == "base64":
-        return "b64"
-    return suffix
-
-
 def _compute_method_set_hash(methods: list[str]) -> str:
     """计算方法集合的指纹 hash，用于判断攻击集是否发生变化。"""
     content = ",".join(sorted(set(methods)))

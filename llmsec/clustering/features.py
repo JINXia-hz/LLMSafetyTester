@@ -438,6 +438,66 @@ INTENT_FEATURE_NAMES = ["semantic_drift", "typo_ratio", "filler_ratio"]
 
 
 # ============================================================
+# 维 3.5: 名称先验（Prior，无需评估即可从方法名/prompt 推导）
+# ============================================================
+_VARIANT_SUFFIX_RE = re.compile(r"(_rot13|_b64|_base64|_code|_story|_\d+)$", re.IGNORECASE)
+
+PRIOR_FEATURE_NAMES = [
+    "name_char_len",          # 方法名长度
+    "name_token_count",       # 方法名分词数
+    "suffix_rot13",           # 变体后缀 one-hot
+    "suffix_b64",
+    "suffix_code",
+    "suffix_story",
+    "suffix_numeric",
+    "has_math_tax",           # prompt 是否含数学越狱税
+    "prompt_line_count_log",  # prompt 行数（log1p）
+]
+
+
+def _strip_variant_suffix(method_name: str) -> str:
+    """去掉方法名末尾的变体后缀（如 _rot13/_b64/_code/_story/_0），得到攻击基底名。"""
+    return _VARIANT_SUFFIX_RE.sub("", method_name)
+
+
+def _extract_variant_suffix(method_name: str) -> str:
+    """提取方法名末尾的变体后缀（如 rot13 / b64 / code / story / 0），无后缀返回空字符串。"""
+    m = _VARIANT_SUFFIX_RE.search(method_name)
+    if not m:
+        return ""
+    suffix = m.group(1).lstrip("_").lower()
+    # 统一别名
+    if suffix == "base64":
+        return "b64"
+    return suffix
+
+
+def build_prior_features(method: str, record: dict | None = None) -> np.ndarray:
+    """
+    构造先验特征向量：只依赖方法名与 prompt，不需要任何评估结果。
+    变体后缀（rot13/b64/code/story/数字）与数学越狱税是与 Elo 强相关的先验信号。
+    """
+    from llmsec.core.text import MATH_TAX_PATTERN
+
+    suffix = _extract_variant_suffix(method)
+    prompt = (record or {}).get("prompt", "") or ""
+    tokens = [t for t in re.split(r"[_\s\-]+", method) if t]
+    import math
+
+    return np.array([
+        float(len(method)),
+        float(len(tokens)),
+        1.0 if suffix == "rot13" else 0.0,
+        1.0 if suffix == "b64" else 0.0,
+        1.0 if suffix == "code" else 0.0,
+        1.0 if suffix == "story" else 0.0,
+        1.0 if suffix.isdigit() else 0.0,
+        1.0 if MATH_TAX_PATTERN.search(prompt) else 0.0,
+        float(math.log1p(prompt.count("\n") + 1)),
+    ], dtype=np.float64)
+
+
+# ============================================================
 # 维 4: 防御交互细粒度行为 (Defense Interaction)
 # ============================================================
 DEFENSE_FEATURE_NAMES = [
@@ -592,6 +652,11 @@ def extract_all_features(
     # ---- 维 5: 跨模型 (占位，未来有多模型评估数据后启用) ----
     cross_model_feats = {m: np.array([], dtype=np.float64) for m in methods}
 
+    # ---- 维 3.5: 名称先验（无需评估，聚类与 ridge 共用） ----
+    prior_feats = {}
+    for m in methods:
+        prior_feats[m] = build_prior_features(m, {"prompt": method_prompts_text[method_to_idx[m]]})
+
     # ---- 组装 ----
     features = {}
     for m in methods:
@@ -600,6 +665,7 @@ def extract_all_features(
             "embedding": embedding_feats[m],
             "technique": technique_feats.get(m, np.zeros(len(technique_label_names))),
             "intent": intent_feats.get(m, np.zeros(len(INTENT_FEATURE_NAMES))),
+            "prior": prior_feats[m],
             "defense": defense_feats.get(m, np.zeros(len(DEFENSE_FEATURE_NAMES))),
             "cross_model": cross_model_feats.get(m, np.zeros(len(CROSS_MODEL_FEATURE_NAMES))),
         }
@@ -612,6 +678,7 @@ def extract_all_features(
         "textual_feature_names": TEXTUAL_FEATURE_NAMES,
         "technique_label_names": technique_label_names,
         "intent_feature_names": INTENT_FEATURE_NAMES,
+        "prior_feature_names": PRIOR_FEATURE_NAMES,
         "defense_feature_names": DEFENSE_FEATURE_NAMES,
         "cross_model_feature_names": CROSS_MODEL_FEATURE_NAMES,
         "has_eval_data": len(eval_results) > 0,
@@ -624,7 +691,7 @@ def extract_all_features(
         },
     }
 
-    print(f"[特征提取] 完成: {n_methods} 种方法 × 5 维特征块")
+    print(f"[特征提取] 完成: {n_methods} 种方法 × 6 维特征块")
     return features, meta
 
 

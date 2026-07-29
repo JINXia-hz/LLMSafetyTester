@@ -102,11 +102,9 @@ def test_log_growth_k0() -> int:
 def test_auto_k_on_blobs() -> int:
     features, methods = _make_blob_features(n_blobs=6)
     space = build_whitened_space(features, methods)
-    # HDBSCAN 的 single_linkage_tree_ 与层工具管线
-    import hdbscan
-    clf = hdbscan.HDBSCAN(min_cluster_size=5, metric="euclidean")
-    clf.fit(space["coords"])
-    Z = clf.single_linkage_tree_.to_numpy()
+    # 生产管线使用 Ward 树做关键层（single-linkage 会链式退化）
+    from scipy.cluster.hierarchy import linkage
+    Z = linkage(space["coords"], method="ward")
     sweep = sweep_candidates(space["coords"], Z, methods)
     k_best, top3 = select_knee(sweep)
     if not (4 <= k_best <= 8):
