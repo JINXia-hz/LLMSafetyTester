@@ -7,9 +7,6 @@ llmsec/.models/
 __pycache__/
 *.py[cod]
 
-# HarmBench（不上传）
-HarmBench/
-
 # output
 output/
 

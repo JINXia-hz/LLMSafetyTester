@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-HarmBench 攻击集生成器
+HarmBench 攻击集生成器（内置数据，测试与示范用，非项目核心）
 
-读取 HarmBench 的 behavior 数据集，用人工越狱模板（jailbreaks）包装每条行为，
+读取内置的 HarmBench 行为库（llmsec/data/harmbench_behaviors.csv，
+1528 条），用人工越狱模板（llmsec/data/human_jailbreaks.json，114 个）包装，
 输出标准 JSONL 格式，可用 evaluate.py / runner.py 直接测试。
+
+数据已静态提取（见 llmsec/data/README.md 的出处与 MIT 许可证声明），
+无需克隆 HarmBench 仓库。
 
 用法:
     python -m llmsec.attacks.harmbench                    # 每行为随机一个模板（旧行为）
     python -m llmsec.attacks.harmbench --max 50 --variants 5 --obfuscate
-
-原根目录 generate_harmbench_attacks.py 平移而来：新增多模板 ensemble 与 L2 混淆包装。
-路径解析改由 llmsec.core.config 提供，win32 修复与 JSONL 写入改由 llmsec.core 提供。
 """
 
 import csv
+import json
 import random
 import re
 from pathlib import Path
@@ -24,14 +26,10 @@ from llmsec.core import ATTACKS_DIR, PROJECT_ROOT, setup_console, write_jsonl
 # 修复Windows CMD GBK编码导致emoji/Unicode输出报错
 setup_console()
 
-# HarmBench 数据路径（HarmBench/ 为项目根下的子模块）
-HARMBENCH_DIR = PROJECT_ROOT / "HarmBench"
-BEHAVIORS_CSV = (
-    HARMBENCH_DIR / "data" / "behavior_datasets" / "harmbench_behaviors_text_all.csv"
-)
-JAILBREAKS_PY = (
-    HARMBENCH_DIR / "baselines" / "human_jailbreaks" / "jailbreaks.py"
-)
+# 内置数据路径（随仓库分发，见 llmsec/data/README.md）
+DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+BEHAVIORS_CSV = DATA_DIR / "harmbench_behaviors.csv"
+JAILBREAKS_JSON = DATA_DIR / "human_jailbreaks.json"
 
 # 默认输出
 DEFAULT_OUTPUT = ATTACKS_DIR / "harmbench_jailbreak.jsonl"
@@ -42,57 +40,16 @@ DEFAULT_OUTPUT = ATTACKS_DIR / "harmbench_jailbreak.jsonl"
 # ============================================================
 # 加载 jailbreak 模板
 # ============================================================
-def load_jailbreaks(path) -> list[str]:
-    """从 jailbreaks.py 中提取 80+ 个人工越狱模板列表。"""
+def load_jailbreaks(path=None) -> list[str]:
+    """从内置 JSON 加载 114 个人工越狱模板。"""
+    path = Path(path) if path else JAILBREAKS_JSON
     if not path.exists():
-        print(f"⚠ 未找到 jailbreaks.py: {path}")
-        print("  使用内置简化模板")
+        print(f"⚠ 未找到模板文件: {path}，使用内置简化模板")
         return _fallback_jailbreaks()
-
     with open(path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    # 提取 JAILBREAKS = [...] 列表
-    match = re.search(r"JAILBREAKS\s*=\s*\[", content)
-    if not match:
-        return _fallback_jailbreaks()
-
-    start = match.end() - 1  # '['
-    # 找到对应的闭合 ']'（需要处理嵌套引号）
-    depth = 1
-    i = start + 1
-    while i < len(content) and depth > 0:
-        if content[i] == "[":
-            depth += 1
-        elif content[i] == "]":
-            depth -= 1
-        elif content[i] == '"' and i > 0 and content[i - 1] != "\\":
-            # 跳过引号内的内容
-            j = i + 1
-            while j < len(content):
-                if content[j] == "\\":
-                    j += 2
-                elif content[j] == '"':
-                    break
-                else:
-                    j += 1
-            i = j
-        i += 1
-
-    list_str = content[start : i + 1]
-
-    # 暴力清理：移除所有 surrogate 字符（\ud800-\udfff）
-    list_str_clean = re.sub(r'[\ud800-\udfff]', '', list_str)
-
-    # 用 Python 解析
-    import ast
-    try:
-        jailbreaks = ast.literal_eval(list_str_clean)
-        print(f"  ✅ 加载 {len(jailbreaks)} 个越狱模板")
-        return jailbreaks
-    except Exception as e:
-        print(f"  ⚠ 解析失败: {e}，使用简化模板")
-        return _fallback_jailbreaks()
+        jailbreaks = json.load(f)
+    print(f"  ✅ 加载 {len(jailbreaks)} 个越狱模板")
+    return jailbreaks
 
 
 def _fallback_jailbreaks() -> list[str]:
@@ -266,13 +223,13 @@ def main():
     if args.obfuscations:
         obfuscations = [x.strip() for x in args.obfuscations.split(",") if x.strip()]
 
-    print("🔧 HarmBench 攻击集生成器")
+    print("🔧 HarmBench 攻击集生成器（内置数据）")
     print(f"   行为数据: {BEHAVIORS_CSV}")
-    print(f"   越狱模板: {JAILBREAKS_PY}")
+    print(f"   越狱模板: {JAILBREAKS_JSON}")
     print(f"   变体数: {args.variants}{' + 混淆' if args.obfuscate else ''}")
     print()
 
-    jailbreaks = load_jailbreaks(JAILBREAKS_PY)
+    jailbreaks = load_jailbreaks()
 
     generate(
         behaviors_csv=BEHAVIORS_CSV,

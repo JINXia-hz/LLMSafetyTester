@@ -116,7 +116,7 @@ def main():
     print("  可用的攻击集:")
     attack_sets = list_attack_sets()
     if not attack_sets:
-        print("    未找到攻击集！请先运行 generate_attacks.py 或 generate_harmbench_attacks.py")
+        print("    未找到攻击集！请先运行 python -m llmsec.attacks.generate 或 python -m llmsec.attacks.harmbench")
         sys.exit(1)
 
     keys = list(attack_sets.keys())

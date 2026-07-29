@@ -676,7 +676,7 @@ def main():
 
     if not os.path.exists(input_file):
         print(f"❌ 输入文件不存在: {input_file}")
-        print("   提示: python generate_harmbench_attacks.py 或 python generate_attacks.py")
+        print("   提示: python -m llmsec.attacks.harmbench 或 python -m llmsec.attacks.generate")
         sys.exit(1)
 
     # 根据输入文件名派生结果文件名

@@ -53,6 +53,35 @@ TARGET_TYPE=local_sim TARGET_BASE_URL=http://127.0.0.1:8000/v1 \
 
 ---
 
+## 攻击集从哪来
+
+**本项目的核心是安全评估管线（ELO 边界 / SVD-Ridge 预测 / 聚类分析 / 看板），攻击集只是输入耗材。** `llmsec/attacks/` 下的生成器（攻击分析.md 解析、内置 HarmBench 数据包装）仅是**测试与示范用的样例来源**——你完全可以从任何渠道自带攻击集。
+
+自带攻击集只需满足标准 JSONL 格式（每行一条）：
+
+```json
+{"id": "唯一标识", "method": "方法名", "category": "类别", "harm_type": "危害类型", "prompt": "攻击文本", "expected_answer": 0, "source": "自定义来源", "functional_category": "standard"}
+```
+
+字段说明：
+
+- `id`：唯一标识（建议 `方法名-序号`）
+- `method`：攻击方法名（聚类与 ELO 追踪的键；变体建议 `基底_后缀` 命名，如 `dan_style_rot13`，同基底/同后缀会互相借用预测）
+- `category` / `category_name`：攻击类别（可选，默认 `unknown`）
+- `harm_type`：危害类型（如 `cybercrime`、`fraud`、`chemical_biological`）
+- `prompt`：攻击文本全文
+- `expected_answer`：越狱税数学题答案；不用数学税时置 `0`
+- `source`：来源标记（可选，默认 `our`）
+- `functional_category`：功能类别（可选，默认 `standard`）
+
+放入 `llmsec/output/attacks/` 后直接运行：
+
+```bash
+python -m llmsec.pipeline.runner --input attacks/<你的文件>.jsonl
+```
+
+---
+
 ## 核心概念
 
 ### 反向 ELO
@@ -146,7 +175,8 @@ llmsec/
 ├── evaluation/   # evaluator(全量评估) / judge(LLM评分) / elo(反向ELO)
 │                 # elo_cluster(SVD-Ridge批量预测) / cluster_analysis(簇级分析+模型诊断)
 │                 # safe_twin(过敏检测)
-├── attacks/      # generate(L1攻击生成) / harmbench(HarmBench攻击集生成)
+├── attacks/      # 示例攻击集生成（可选，非核心）: generate(L1) / harmbench(内置数据)
+├── data/         # 内置攻击数据（HarmBench 行为库 + 越狱模板，MIT 出处见目录内 README）
 ├── pipeline/     # runner(自适应编排) / launcher(交互启动器) / probe(连通性探测)
 ├── reporting/    # report(五维树形画像 + LLM叙事报告 + 方法注册表)
 ├── clustering/   # 特征提取 + hdbscan/kmeans/hierarchical 聚类 + CLI
@@ -193,8 +223,9 @@ embedding 降级链：本地缓存 → HF 镜像 → API embedding → TF-IDF。
 python -m llmsec.attacks.generate [--dry-run] [--only ID] [--start-from ID] [--output PATH]
     # 解析 llmsec/攻击分析.md 中的 L1 攻击方法
 
-python -m llmsec.attacks.harmbench [--max N] [--seed N]
-    # 生成 HarmBench 攻击集（默认 output/attacks/harmbench_jailbreak.jsonl）
+python -m llmsec.attacks.harmbench [--max N] [--seed N] [--variants N] [--obfuscate]
+    # 用内置 HarmBench 数据（llmsec/data/，已静态提取，无需克隆仓库）生成示范攻击集
+    # 默认输出 output/attacks/harmbench_jailbreak.jsonl
 ```
 
 ### 自适应评估（主入口）

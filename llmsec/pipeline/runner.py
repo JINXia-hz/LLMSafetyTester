@@ -878,7 +878,7 @@ def main():
     input_path = os.path.join(OUTPUT_DIR, args.input) if not os.path.isabs(args.input) else args.input
     if not os.path.exists(input_path):
         print(f"❌ 攻击集不存在: {input_path}")
-        print("   提示: python generate_attacks.py 或 python generate_harmbench_attacks.py")
+        print("   提示: python -m llmsec.attacks.generate 或 python -m llmsec.attacks.harmbench")
         sys.exit(1)
 
     records = load_prompt_records(input_path)
