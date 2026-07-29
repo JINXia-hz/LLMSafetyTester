@@ -12,20 +12,7 @@ pip install -r llmsec/requirements.txt
 
 ### 2. 配置环境
 
-在 `llmsec/.env` 中填入目标模型与生成模型配置：
-
-```env
-TARGET_TYPE=openai
-TARGET_API_KEY=sk-yyy
-TARGET_BASE_URL=https://api.deepseek.com/v1
-TARGET_MODEL=deepseek-v4-flash
-
-GENERATOR_API_KEY=sk-xxx
-GENERATOR_BASE_URL=https://api.deepseek.com/v1
-GENERATOR_MODEL=deepseek-v4-flash
-
-JUDGE_MODEL=deepseek-v4-flash
-```
+复制 `llmsec/.env.exemple` 为 `llmsec/.env` 并于其中填入目标模型与生成模型配置。
 
 ### 3. 三步跑通
 
