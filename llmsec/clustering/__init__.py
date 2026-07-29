@@ -2,11 +2,13 @@
 llmsec.clustering — 攻击方法聚类子包
 
   - features.py：5 维攻击特征提取
-  - space.py：阻尼白化（轻量马氏）特征空间
-  - tree.py：Ward 层次树聚类 + 多指标拐点 auto-k + 递归 DBSCAN 密度视图
-  - pipeline.py：聚类工具（DBSCAN / 自动命名 / 画像 / 导出）
+  - space.py：阻尼白化（轻量马氏）特征空间 + 弱监督特征权重
+  - hdb.py：HDBSCAN 聚类主管线（post-test）+ single-linkage 树关键层
+  - tree.py：层次树层选择工具（算法无关）
+  - posterior.py：后验统计（机器反应 / 弱监督 / ANOVA 簇效验证）
+  - pipeline.py：聚类工具（自动命名 / 画像 / 导出）
 
-常用符号再导出，方便 `from llmsec.clustering import run_tree_clustering, ...`。
+常用符号再导出，方便 `from llmsec.clustering import run_hdbscan_clustering, ...`。
 """
 
 from llmsec.clustering.features import (
@@ -23,22 +25,21 @@ from llmsec.clustering.features import (
     extract_textual_features,
     load_and_extract,
 )
+from llmsec.clustering.hdb import run_hdbscan_clustering
 from llmsec.clustering.pipeline import (
     auto_name_clusters,
     build_cluster_profiles,
-    euclidean_distance_matrix,
-    knee_eps,
-    run_dbscan,
-    run_dbscan_recursive,
 )
-from llmsec.clustering.space import build_whitened_space, transform_to_space
+from llmsec.clustering.posterior import (
+    compute_method_reactions,
+    learn_supervised_weights,
+    reaction_validation,
+)
+from llmsec.clustering.space import build_feature_matrix, build_whitened_space, transform_to_space
 from llmsec.clustering.tree import (
-    build_tree,
     candidate_ks,
     cut_tree,
     log_growth_k0,
-    run_final_tree_clustering,
-    run_tree_clustering,
     select_knee,
     sweep_candidates,
 )
@@ -57,15 +58,15 @@ __all__ = [
     "extract_defense_features",
     "TEXTUAL_FEATURE_NAMES", "TECHNIQUE_LABELS", "INTENT_FEATURE_NAMES",
     "DEFENSE_FEATURE_NAMES", "CROSS_MODEL_FEATURE_NAMES",
+    # hdb（主管线）
+    "run_hdbscan_clustering",
     # pipeline（工具）
-    "run_dbscan", "run_dbscan_recursive", "knee_eps",
-    "euclidean_distance_matrix",
     "auto_name_clusters", "build_cluster_profiles",
+    # posterior
+    "compute_method_reactions", "learn_supervised_weights", "reaction_validation",
     # space / tree
-    "build_whitened_space", "transform_to_space",
-    "run_tree_clustering", "run_final_tree_clustering",
-    "build_tree", "cut_tree",
-    "candidate_ks", "sweep_candidates", "select_knee", "log_growth_k0",
+    "build_feature_matrix", "build_whitened_space", "transform_to_space",
+    "cut_tree", "candidate_ks", "sweep_candidates", "select_knee", "log_growth_k0",
     # 路径常量
     "CLUSTER_REPORT_FILE", "CLUSTER_MATRIX_FILE", "CLUSTER_FEATURES_FILE",
     "CLUSTER_ARTIFACTS_FILE",

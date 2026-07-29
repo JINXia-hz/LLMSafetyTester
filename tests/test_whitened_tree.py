@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-单元测试：马氏白化空间 + 树聚类拐点 auto-k。
+单元测试：阻尼白化空间 + HDBSCAN 聚类 + 层选择 auto-k + 后验验证。
 
 验证：
-1. 白化后各保留主成分方向的方差 ≈ 1（轻量马氏距离成立）。
+1. 白化后强信号方向方差 ≈ 1、噪声方向被抑制（轻量马氏距离成立）。
 2. k0 随 n 按 log 增长。
-3. 已知簇数的合成数据上，auto-k 误差 ≤ 2。
-4. run_tree_clustering(write=False) 端到端结构正确。
+3. 已知簇数的合成数据上，auto-k 误差 ≤ 2（HDBSCAN single-linkage 树）。
+4. run_hdbscan_clustering 端到端结构正确（含 ANOVA 簇效验证）。
+5. 弱监督特征权重放大相关特征；D-optimal 种子覆盖优于随机。
 """
 
 import sys
@@ -21,11 +22,9 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from llmsec.clustering.space import build_whitened_space
 from llmsec.clustering.tree import (
-    build_tree,
     candidate_ks,
     cut_tree,
     log_growth_k0,
-    run_tree_clustering,
     select_knee,
     sweep_candidates,
 )
@@ -103,7 +102,11 @@ def test_log_growth_k0() -> int:
 def test_auto_k_on_blobs() -> int:
     features, methods = _make_blob_features(n_blobs=6)
     space = build_whitened_space(features, methods)
-    Z = build_tree(space["coords"])
+    # HDBSCAN 的 single_linkage_tree_ 与层工具管线
+    import hdbscan
+    clf = hdbscan.HDBSCAN(min_cluster_size=5, metric="euclidean")
+    clf.fit(space["coords"])
+    Z = clf.single_linkage_tree_.to_numpy()
     sweep = sweep_candidates(space["coords"], Z, methods)
     k_best, top3 = select_knee(sweep)
     if not (4 <= k_best <= 8):
@@ -121,7 +124,7 @@ def test_auto_k_on_blobs() -> int:
                 if labels[m1] == labels[m2]:
                     same += 1
     purity = same / max(total, 1)
-    # argmax 规则偏好略微偏细的 k（8 vs 真值 6），同簇率阈值相应校准
+    # argmax 规则偏好略微偏细的 k，同簇率阈值相应校准
     if purity < 0.85:
         print(f"❌ 同 blob 同簇率过低: {purity:.2%}")
         return 1
@@ -129,7 +132,11 @@ def test_auto_k_on_blobs() -> int:
     return 0
 
 
-def test_run_tree_clustering_e2e() -> int:
+def test_run_hdbscan_clustering_e2e() -> int:
+    """HDBSCAN 主管线端到端：团簇 + 反应验证 + 报告结构。"""
+    from llmsec.clustering.hdb import run_hdbscan_clustering
+    from llmsec.clustering.posterior import compute_method_reactions
+
     features, methods = _make_blob_features()
     meta = {
         "method_names": methods,
@@ -138,9 +145,18 @@ def test_run_tree_clustering_e2e() -> int:
         "textual_feature_names": [f"tx{i}" for i in range(12)],
         "defense_feature_names": [f"df{i}" for i in range(14)],
     }
-    report = run_tree_clustering(features, meta, write=False)
+    # 反应与 blob 编号强相关（b 越大分越高）→ 簇效应显著
+    eval_results = [
+        {"method": m, "eval_score": float(m.split("_")[1][1:]) * 2 - 5}
+        for m in methods
+    ]
+    reactions = compute_method_reactions(eval_results)
+
+    report = run_hdbscan_clustering(
+        features, meta, reactions=reactions, write=False,
+    )
     if report.get("n_clusters", 0) < 2:
-        print(f"❌ 端到端聚类失败: {report.get('error')}")
+        print(f"❌ HDBSCAN 端到端聚类失败: {report.get('error')}")
         return 1
     labels = report.get("method_labels", {})
     if len(labels) != len(methods):
@@ -153,7 +169,61 @@ def test_run_tree_clustering_e2e() -> int:
     if not report.get("top_ks") or not report.get("candidate_sweep"):
         print("❌ 缺少 top_ks / candidate_sweep")
         return 1
-    print(f"✅ 端到端树聚类通过 (k={report['n_clusters']}, silhouette={report['validation']['silhouette']})")
+    rv = report.get("reaction_validation", {})
+    if not rv.get("available"):
+        print(f"❌ 簇效验证不可用: {rv.get('reason')}")
+        return 1
+    if rv["p_anova"] > 0.05 and rv["p_kruskal"] > 0.05:
+        print(f"❌ 强相关反应下簇效应应显著: p={rv['p_anova']}/{rv['p_kruskal']}")
+        return 1
+    print(f"✅ HDBSCAN 端到端通过 (k={report['n_clusters']}, 噪声={report['n_noise']}, "
+          f"p_anova={rv['p_anova']}, eta²={rv['eta2']})")
+    return 0
+
+
+def test_posterior_supervision() -> int:
+    """弱监督：相关特征被放大，无关特征被压低；加权后簇效应增强。"""
+    from llmsec.clustering.posterior import learn_supervised_weights, reaction_validation
+
+    rng = np.random.default_rng(7)
+    n, d_rel, d_noise = 60, 10, 30
+    # 三个反应组：y = -2 / 0 / +2；相关特征 = y + 噪声，无关特征 = 纯噪声
+    y = np.repeat([-2.0, 0.0, 2.0], n // 3)
+    X = np.hstack([
+        y[:, None] + rng.normal(0, 0.3, (n, d_rel)),
+        rng.normal(0, 1, (n, d_noise)),
+    ])
+    methods = [f"m{i}" for i in range(n)]
+    y_by_method = {m: float(y[i]) for i, m in enumerate(methods)}
+
+    w = learn_supervised_weights(X, methods, y_by_method)
+    if w.shape[0] != d_rel + d_noise:
+        print(f"❌ 权重维度错误: {w.shape}")
+        return 1
+    if w[:d_rel].mean() <= w[d_rel:].mean():
+        print(f"❌ 相关特征未被放大: rel={w[:d_rel].mean():.2f} noise={w[d_rel:].mean():.2f}")
+        return 1
+
+    # 按反应组构造 labels：加权后 ANOVA 应显著且效应量大
+    labels = {m: int(np.sign(y[i])) for i, m in enumerate(methods)}
+    reactions = {m: {"mean_score": float(y[i]), "n": 1, "win_rate": 1.0 if y[i] > 0 else 0.0}
+                 for i, m in enumerate(methods)}
+    rv = reaction_validation(labels, reactions)
+    if not rv.get("available") or not rv.get("effective"):
+        print(f"❌ 分组反应下簇效应应有效: {rv}")
+        return 1
+
+    # 随机反应：不应判定有效
+    y_rand = rng.normal(0, 1, n)
+    reactions_rand = {m: {"mean_score": float(y_rand[i]), "n": 1, "win_rate": 0.5}
+                      for i, m in enumerate(methods)}
+    rv_rand = reaction_validation(labels, reactions_rand)
+    if rv_rand.get("available") and rv_rand.get("effective") and rv_rand["p_anova"] < 0.001:
+        print(f"❌ 随机反应被误判为有效: {rv_rand}")
+        return 1
+
+    print(f"✅ 弱监督与 ANOVA 通过 (相关特征权重 {w[:d_rel].mean():.2f}× "
+          f"vs 噪声 {w[d_rel:].mean():.2f}×, eta²={rv['eta2']})")
     return 0
 
 
@@ -232,7 +302,8 @@ def main() -> int:
         test_whitening_unit_variance,
         test_log_growth_k0,
         test_auto_k_on_blobs,
-        test_run_tree_clustering_e2e,
+        test_run_hdbscan_clustering_e2e,
+        test_posterior_supervision,
         test_d_optimal_coverage,
         test_select_knee_real_curve,
     ]

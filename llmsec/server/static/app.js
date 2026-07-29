@@ -279,11 +279,40 @@ async function loadClusters() {
     const riskSet = new Set(d.high_risk_clusters || []);
     const blindSet = new Set(d.blind_spot_clusters || []);
     const stableSet = new Set(d.stable_clusters || []);
+
+    // ---- 簇效验证卡片 ----
+    const rv = d.reaction_validation;
+    if (rv && rv.available) {
+      $('rvBanner').className = 'banner mb-3 ' + (rv.effective ? 'level-safe' : 'level-broken');
+      $('rvBanner').style.padding = '12px 16px';
+      $('rvVerdict').textContent = (rv.effective ? '✅ ' : '⚠️ ') + rv.verdict;
+      $('rvStats').textContent = `p_anova=${rv.p_anova} · p_kruskal=${rv.p_kruskal} · eta²=${rv.eta2} · ε²=${rv.epsilon2}`;
+      const pcs = Object.entries(rv.per_cluster || {}).sort((a, b) => b[1].mean_score - a[1].mean_score);
+      if (pcs.length) {
+        Plotly.newPlot('chart_rv', [{
+          x: pcs.map(([cid]) => cid === '-1' ? '稀疏区' : `簇${cid}`),
+          y: pcs.map(([, v]) => v.mean_score),
+          type: 'bar',
+          text: pcs.map(([, v]) => `${v.mean_score.toFixed(2)} (n=${v.n_tested})`),
+          textposition: 'auto',
+          marker: { color: pcs.map(([, v]) => v.mean_score > 0 ? C.warn : C.primary) },
+        }], { margin: { t: 10 }, height: 260, font: PLOT_FONT,
+              yaxis: { title: '簇内平均机器反应 (eval_score)' } }, PLOT_CFG);
+      }
+    } else {
+      $('rvBanner').className = 'banner level-inconclusive mb-3';
+      $('rvBanner').style.padding = '12px 16px';
+      $('rvVerdict').textContent = '暂无簇效验证数据';
+      $('rvStats').textContent = (rv && rv.reason) ? rv.reason : '需在新版聚类流程（post-test HDBSCAN）运行后生成';
+      $('chart_rv').innerHTML = '';
+    }
+
     const wrap = $('clusterCards');
     wrap.innerHTML = '';
     (d.clusters || []).forEach(c => {
       let tag = '', bg = '#fff';
-      if (riskSet.has(c.id)) { tag = '<span class="cluster-tag" style="background:#f3ded8;color:#9a4a35;">高风险</span>'; bg = '#faf3f1'; }
+      if (String(c.id) === '-1') { tag = '<span class="cluster-tag" style="background:#eceae5;color:#6b7276;">稀疏区</span>'; bg = '#f7f6f4'; }
+      else if (riskSet.has(c.id)) { tag = '<span class="cluster-tag" style="background:#f3ded8;color:#9a4a35;">高风险</span>'; bg = '#faf3f1'; }
       else if (blindSet.has(c.id)) { tag = '<span class="cluster-tag" style="background:#f5e8dc;color:#a0663f;">盲区</span>'; bg = '#faf6f1'; }
       else if (stableSet.has(c.id)) { tag = '<span class="cluster-tag" style="background:#e3ede4;color:#4f7351;">稳定</span>'; bg = '#f4f7f4'; }
       const div = document.createElement('div');

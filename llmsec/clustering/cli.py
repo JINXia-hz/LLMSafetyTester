@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-攻击聚类分析 CLI 入口
+攻击聚类分析 CLI 入口（post-test 设计：聚类在测试流程结束后运行）
 
-流程：features 提取 5 维特征 → space 阻尼白化 → tree Ward 层次聚类 + 拐点 auto-k。
---final 时附加白化空间递归 DBSCAN 密度视图（含小簇命名）。
+流程：features 提取 → （可选弱监督特征权重）→ 阻尼白化 → HDBSCAN
+→ single-linkage 树关键层 auto-k → 全簇命名 → ANOVA 簇效验证。
 
 用法:
-    python -m llmsec.clustering.cli                     # 树聚类（auto-k）
-    python -m llmsec.clustering.cli --final             # 树聚类 + DBSCAN 密度视图
+    python -m llmsec.clustering.cli                     # HDBSCAN 聚类
+    python -m llmsec.clustering.cli --result-file X.jsonl  # 带评估结果（启用弱监督 + 簇效验证）
     python -m llmsec.clustering.cli --dump-features     # 仅导出特征（不聚类）
 """
 
@@ -21,27 +21,32 @@ from llmsec.core.logging import setup_console
 from llmsec.clustering import (
     CLUSTER_MATRIX_FILE,
     CLUSTER_REPORT_FILE,
+    compute_method_reactions,
+    learn_supervised_weights,
     load_and_extract,
-    run_final_tree_clustering,
-    run_tree_clustering,
+    run_hdbscan_clustering,
 )
+from llmsec.clustering.space import build_feature_matrix
+from llmsec.core.io import read_jsonl
 
 setup_console()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="攻击方法聚类分析（树聚类 + 拐点 auto-k）")
-    parser.add_argument("--final", action="store_true",
-                        help="附加递归 DBSCAN 密度视图（最终聚类，含小簇命名）")
+    parser = argparse.ArgumentParser(description="攻击方法聚类分析（HDBSCAN + 关键层 auto-k）")
     parser.add_argument("--input", type=str, default="攻击集_L1.jsonl",
                         help="攻击集输入文件")
     parser.add_argument("--result-file", type=str, default=None,
-                        help="评估结果文件 (默认自动查找)")
+                        help="评估结果文件（提供时启用弱监督加权与 ANOVA 簇效验证）")
     parser.add_argument("--dump-features", action="store_true",
                         help="仅提取特征并导出 JSON，不聚类")
     args = parser.parse_args()
 
     print(f"📂 加载数据: {args.input}")
+    eval_results = []
+    if args.result_file:
+        eval_results = read_jsonl(args.result_file)
+        print(f"📂 评估结果: {args.result_file} ({len(eval_results)} 条)")
     features, meta = load_and_extract(
         attack_file=args.input,
         result_file=args.result_file,
@@ -49,10 +54,6 @@ def main():
 
     methods = meta["method_names"]
     print(f"   共 {len(methods)} 种攻击方法")
-    if meta["has_eval_data"]:
-        print(f"   含评估数据: 是 (防御交互特征仅用于画像，不进入度量)")
-    else:
-        print(f"   含评估数据: 否")
 
     feat_dims = {}
     for m in methods[:1]:
@@ -76,11 +77,20 @@ def main():
         print(f"\n📁 特征导出: {out_path}")
         return
 
-    print(f"\n⏳ 树聚类（Ward + 拐点 auto-k{' + 递归DBSCAN' if args.final else ''}）")
-    if args.final:
-        report = run_final_tree_clustering(features, meta)
-    else:
-        report = run_tree_clustering(features, meta)
+    # 弱监督权重（有评估结果时）
+    weights = None
+    reactions = None
+    if eval_results:
+        reactions = compute_method_reactions(eval_results)
+        X = build_feature_matrix(features, methods)
+        y = {m: reactions[m]["mean_score"] for m in methods if m in reactions}
+        weights = learn_supervised_weights(X, methods, y)
+        print(f"   弱监督: {len(y)} 个已测方法参与特征加权")
+
+    print(f"\n⏳ HDBSCAN 聚类")
+    report = run_hdbscan_clustering(
+        features, meta, feature_weights=weights, reactions=reactions,
+    )
 
     if "error" in report:
         print(f"\n❌ {report['error']}")
@@ -89,23 +99,27 @@ def main():
     print(f"\n{'='*60}")
     print(f"📊 聚类分析结果")
     print(f"{'='*60}")
-    print(f"  簇数: {report['n_clusters']} (top3 候选: {report.get('top_ks', [])})")
+    print(f"  簇数: {report['n_clusters']} (+ {report['n_noise']} 噪声)")
+    print(f"  关键层: k*={report.get('chosen_k')} (top3 {report.get('top_ks', [])})")
 
     val = report.get("validation", {})
     print(f"  轮廓系数: {val.get('silhouette', 0):.4f}")
     print(f"  Calinski-Harabasz: {val.get('calinski_harabasz', 0):.2f}")
     print(f"  Davies-Bouldin: {val.get('davies_bouldin', 0):.4f}")
 
+    rv = report.get("reaction_validation")
+    if rv and rv.get("available"):
+        print(f"\n  簇效验证: {rv['verdict']}")
+        print(f"    p_anova={rv['p_anova']}, p_kruskal={rv['p_kruskal']}, "
+              f"eta²={rv['eta2']}, ε²={rv['epsilon2']}")
+
     print(f"\n  簇命名:")
     for cid, name in sorted(report.get("cluster_names", {}).items(), key=lambda x: int(x[0])):
+        tag = "🟡 稀疏区" if cid == "-1" else f"簇{cid}"
         members = [m for m, c in report.get("method_labels", {}).items() if str(c) == str(cid)]
-        print(f"    簇{cid} ({len(members)} 种方法): {name}")
+        print(f"    {tag} ({len(members)} 种方法): {name}")
         if len(members) <= 8:
             print(f"      → {', '.join(members)}")
-
-    dbscan = report.get("dbscan")
-    if dbscan:
-        print(f"\n  DBSCAN 密度视图: 核心簇 {dbscan['n_core_clusters']} 个, 噪声 {dbscan['n_noise']} 点")
 
     print(f"\n  📁 报告: {CLUSTER_REPORT_FILE}")
     print(f"  📁 矩阵: {CLUSTER_MATRIX_FILE}")

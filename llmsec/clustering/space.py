@@ -84,6 +84,7 @@ def build_whitened_space(
     lambda_w: float | None = None,
     damp: float = 0.5,
     blocks: tuple[str, ...] = PRIOR_BLOCKS,
+    feature_weights: np.ndarray | None = None,
 ) -> dict:
     """
     构建阻尼白化（轻量马氏）空间。
@@ -110,6 +111,8 @@ def build_whitened_space(
         methods = sorted(features.keys())
     n = len(methods)
     X = build_feature_matrix(features, methods, blocks=blocks)
+    if feature_weights is not None and X.shape[1] == len(feature_weights):
+        X = X * np.asarray(feature_weights, dtype=np.float64)
 
     if n == 0 or X.shape[1] == 0:
         return {
@@ -129,15 +132,16 @@ def build_whitened_space(
     ratio = var / total if total > 0 else np.zeros_like(var)
     cumulative = np.cumsum(ratio)
 
-    k = int(np.searchsorted(cumulative, variance_ratio) + 1)
-    k = max(1, min(k, max_dims, len(S)))
+    k_var = int(np.searchsorted(cumulative, variance_ratio) + 1)
 
+    # 谱拐点：既决定 λw（噪声地板），也决定硬截断位置（拐点×2 封顶，
+    # 不需要"白化前再 PCA 一次"——那是同一线性操作的重复）
+    knee = _spectral_knee(S)
     if lambda_w is None:
-        # 谱拐点处的 σ² 作为噪声地板：拐点后的噪声方向被压制，
-        # 拐点前的信号方向保持近似单位方差
-        knee = _spectral_knee(S)
         lambda_w = float(S[min(knee - 1, len(S) - 1)] ** 2) if S.size else 0.0
         lambda_w = max(lambda_w, LAMBDA_W_REL * float(S[0] ** 2) if S.size else 0.0, 1e-12)
+
+    k = max(1, min(k_var, knee * 2, max_dims, len(S)))
 
     # 阻尼白化（轻量马氏）：在原始 PC 得分与全白化之间按 damp 几何插值。
     # damp=1 全白化（各方向方差均等，谱平滑时会放大噪声）；
@@ -159,6 +163,7 @@ def build_whitened_space(
         "vt": Vt[:k],
         "lambda_w": lambda_w,
         "damp": damp,
+        "feature_weights": feature_weights,
     }
 
 
@@ -167,6 +172,9 @@ def transform_to_space(space: dict, features: dict, methods: list[str]) -> np.nd
     if space["vt"] is None or space["n_dims"] == 0:
         return np.zeros((len(methods), 0))
     X = build_feature_matrix(features, methods)
+    fw = space.get("feature_weights")
+    if fw is not None and X.shape[1] == len(fw):
+        X = X * np.asarray(fw, dtype=np.float64)
     # 对齐训练时的特征维度
     d_train = space["x_mean"].shape[0]
     if X.shape[1] < d_train:

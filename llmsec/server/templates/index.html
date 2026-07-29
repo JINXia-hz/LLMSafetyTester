@@ -186,6 +186,14 @@
             <div class="card"><div class="metric-label">轮廓系数</div><div class="metric-value" id="cl_sil">-</div></div>
             <div class="card"><div class="metric-label">Davies-Bouldin</div><div class="metric-value" id="cl_db">-</div></div>
           </div>
+          <div class="card mb-4">
+            <h3 class="font-semibold mb-2 text-sm">簇效验证（ANOVA / Kruskal-Wallis）</h3>
+            <div id="rvBanner" class="banner level-inconclusive mb-3" style="padding: 12px 16px;">
+              <div class="text-sm font-semibold" id="rvVerdict">暂无验证数据</div>
+              <div class="text-xs opacity-90" id="rvStats"></div>
+            </div>
+            <div id="chart_rv"></div>
+          </div>
           <div class="card mb-4"><h3 class="font-semibold mb-2 text-sm">簇规模与测试覆盖</h3><div id="chart_cluster_cover"></div></div>
           <div class="space-y-3" id="clusterCards"></div>
         </section>

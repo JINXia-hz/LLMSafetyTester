@@ -315,7 +315,7 @@ class ClusterEloPredictor:
     新攻击方法的 Elo 冷启动预测器。
 
     - SVD-Ridge 批量预测为主（predict_batch），同后缀/同基底变体平均为兜底（predict）。
-    - 前置树聚类（tree_fit）提供采样分层结构与特征缓存；D-optimality 负责种子选择。
+    - 前置特征缓存（fit_features）供 ridge / D-optimal 使用；聚类只在测试结束后进行（final_fit，HDBSCAN）。
     - 聚类只用先验特征，ground truth 增长不触发重聚类；ridge 模型按 GT 指纹缓存。
     """
 
@@ -407,39 +407,34 @@ class ClusterEloPredictor:
         return hashlib.md5(content.encode("utf-8")).hexdigest()
 
     # ============================================================
-    # 前置树聚类 / D-optimality 种子 / 最终聚类
+    # 前置特征缓存 / D-optimality 种子 / 最终聚类（post-test）
     # ============================================================
-    def tree_fit(self, attack_records: list[dict]) -> dict | None:
+    def fit_features(self, attack_records: list[dict]) -> dict | None:
         """
-        前置树聚类：提取先验特征 → 马氏白化空间 → Ward 树 + 拐点 auto-k。
-        不依赖 ground truth：为采样器提供分层结构，为 ridge / D-optimal 提供特征缓存。
+        前置特征缓存（非聚类）：提取先验特征写入 artifacts，
+        供 SVD-Ridge 预测与 D-optimality 种子使用。
+        聚类只在整个测试流程结束后进行（final_fit）。
 
-        返回: 树聚类报告 dict；未触发时返回 None。
+        返回: {"method_count": int}；未触发时返回 None。
         """
         if len(attack_records) < 2:
-            logger.warning("攻击记录不足，跳过树聚类")
+            logger.warning("攻击记录不足，跳过特征缓存")
             return None
 
-        from llmsec.clustering import run_tree_clustering
-
-        logger.info("🌲 前置树聚类: 总方法记录 %d 条", len(attack_records))
+        logger.info("🧩 前置特征缓存: 总方法记录 %d 条", len(attack_records))
         features, meta = extract_all_features(attack_records, eval_results=[])
-        report = run_tree_clustering(features, meta)
 
-        self.artifacts = joblib.load(CLUSTER_ARTIFACTS_FILE)
-        self.artifacts["method_set_hash"] = _compute_method_set_hash(
-            sorted(self.artifacts.get("labels", {}).keys())
-        )
-        self.last_fit_at = datetime.now().isoformat()
+        self.artifacts = {
+            "features": features,
+            "meta": meta,
+            "method_set_hash": _compute_method_set_hash(sorted(features.keys())),
+            "generated_at": datetime.now().isoformat(),
+        }
+        self.last_fit_at = self.artifacts["generated_at"]
         self._save_artifacts()
 
-        logger.info(
-            "✅ 前置树聚类完成: k*=%d (top3 %s), silhouette=%.4f",
-            report.get("n_clusters", 0),
-            report.get("top_ks", []),
-            report.get("validation", {}).get("silhouette", 0.0),
-        )
-        return report
+        logger.info("✅ 特征缓存完成: %d 种方法", len(features))
+        return {"method_count": len(features)}
 
     def select_d_optimal_seeds(
         self,
@@ -729,8 +724,10 @@ class ClusterEloPredictor:
         eval_results: list[dict],
     ) -> dict | None:
         """
-        攻击完成后最终聚类：树聚类(auto-k) + 白化空间递归 DBSCAN 密度视图。
-        用全部真实评估数据重建特征空间（后验特征仅用于画像，不进入度量）。
+        攻击完成后最终聚类（post-test）：
+        弱监督特征加权（真实 GT 反应）→ 阻尼白化 → HDBSCAN + single-linkage 树
+        → 关键层 auto-k → 全簇命名 → ANOVA/Kruskal 簇效验证。
+        后验特征仅用于画像与验证，不进入度量。
 
         返回: 最终聚类报告 dict。
         """
@@ -738,11 +735,29 @@ class ClusterEloPredictor:
             logger.warning("攻击记录不足，跳过最终聚类")
             return None
 
-        from llmsec.clustering import run_final_tree_clustering
+        from llmsec.clustering import run_hdbscan_clustering
+        from llmsec.clustering.posterior import (
+            compute_method_reactions,
+            learn_supervised_weights,
+        )
+        from llmsec.clustering.space import build_feature_matrix
 
         logger.info("🏁 最终聚类: 总方法记录 %d 条，评估结果 %d 条", len(attack_records), len(eval_results))
         features, meta = extract_all_features(attack_records, eval_results)
-        report = run_final_tree_clustering(features, meta)
+        reactions = compute_method_reactions(eval_results)
+
+        # 弱监督特征权重（只用真实 GT 反应，防特征-预测自相关）
+        methods = sorted(features.keys())
+        X = build_feature_matrix(features, methods)
+        y = {m: reactions[m]["mean_score"] for m in methods if m in reactions}
+        weights = learn_supervised_weights(X, methods, y)
+
+        report = run_hdbscan_clustering(
+            features, meta,
+            feature_weights=weights,
+            reactions=reactions,
+            write=True,
+        )
 
         self.artifacts = joblib.load(CLUSTER_ARTIFACTS_FILE)
         self.artifacts["is_final_cluster"] = True
@@ -755,12 +770,14 @@ class ClusterEloPredictor:
         self.last_fit_at = datetime.now().isoformat()
         self._save_artifacts()
 
+        rv = report.get("reaction_validation", {})
         logger.info(
-            "✅ 最终聚类完成: 树 k*=%d, DBSCAN核心簇=%d, 噪声=%d, silhouette=%.4f",
+            "✅ 最终聚类完成: %d 簇, 噪声=%d, k*=%d, silhouette=%.4f, 簇效=%s",
             report.get("n_clusters", 0),
-            report.get("dbscan", {}).get("n_core_clusters", 0),
-            report.get("dbscan", {}).get("n_noise", 0),
+            report.get("n_noise", 0),
+            report.get("chosen_k", 0),
             report.get("validation", {}).get("silhouette", 0.0),
+            rv.get("verdict", "未验证"),
         )
         return report
 

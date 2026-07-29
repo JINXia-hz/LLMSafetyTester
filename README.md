@@ -71,13 +71,19 @@ TARGET_TYPE=local_sim TARGET_BASE_URL=http://127.0.0.1:8000/v1 \
 - **模型缓存**：ground truth 未变 → 直接复用 w 纯矩阵预测；小幅增长 → 用现有 λ* 单次 SVD 快速 refit；增长 ≥ 阈值 → 才重跑 K-Fold。每轮只调整预测矩阵，开销最小。
 - **回退链**：ground truth 不足时，回退到同后缀/同基底变体（如 `*_rot13`、`*_b64`）的简单平均。
 
-### 统一先验度量空间（轻量马氏）
+### 统一先验度量空间（轻量马氏 + 弱监督）
 
-聚类与预测的度量空间只使用**先验特征**（textual + embedding + technique + intent + 名称先验，任何方法都可得）。后验特征（defense 交互，未测点全零）一律不进入距离度量，只作为簇级画像。特征矩阵经 SVD 降维后做**阻尼白化**（damp=0.5）：强信号方向近似马氏校正、噪声方向由谱拐点自动抑制——全白化会放大噪声，实测不如阻尼版。
+聚类与预测的度量空间只使用**先验特征**（textual + embedding + technique + intent + 名称先验，任何方法都可得）。后验特征（defense 交互，未测点全零）一律不进入距离度量，只作为簇级画像。特征矩阵经 SVD 降维后做**阻尼白化**（damp=0.5）：强信号方向近似马氏校正、噪声尾由谱拐点硬截断。
 
-### 树聚类 + 拐点 auto-k
+测试结束后，用真实机器反应做**弱监督特征加权**：`w_j = |corr(X_j, 反应)|`（只在 ground truth 上学习，防止特征-预测自相关），相关方向放大、无关方向压低——产生相同机器反应的攻击在向量空间中自然拉近。
 
-层次聚类（Ward）只建一次树，候选 k 全部从同一棵 linkage 上切出：以 `k0 = ceil(log2(n))`（log 增长，n=100→7，n=1000→10）为中心取 log 间隔候选，每个 k 计算轮廓系数、Calinski-Harabasz、DB 指数，归一化合成后取增益开始平缓的拐点。保留 top-3 k 作为前端树图缩放预设停点。linkage 树存入 artifacts，前端可任意层切割查看。最终聚类附加白化空间递归 DBSCAN 密度视图（大簇自动细分，小簇/单点簇也有名称）。
+### HDBSCAN 聚类 + 关键层（post-test）
+
+聚类**只在整个测试流程结束后运行**。HDBSCAN（EOM）在白化坐标上密度聚类，保留 `single_linkage_tree_` 作为可缩放聚类树：候选 k 以 `k0 = ceil(log2(n))`（log 增长）为中心取 log 间隔点，全部从同一棵树切出，轮廓系数/CH/DB 归一化合成后取全局 argmax 作为关键层，top-3 k 为前端缩放预设停点。小簇/单点簇自动命名，噪声组标记为稀疏区。
+
+### 簇效验证（ANOVA / Kruskal-Wallis）
+
+聚类完成后做后验检验：不同簇的机器反应是否有显著差异（ANOVA + Kruskal-Wallis + 效应量 eta²/ε²）。p 小且效应量大 → 特征有效；若无差异，说明特征抓到的文本结构与该机器关心的东西不相关，提示特征抽象需要升级。判定结果写入报告并在前端展示。
 
 ### D-Optimality 种子（取代预聚类采样）
 
@@ -223,8 +229,9 @@ python -m llmsec.evaluation.elo_cluster --status
 python -m llmsec.evaluation.safe_twin [--generate|--evaluate|--all]
     # 安全孪生生成与过敏（FPR）检测
 
-python -m llmsec.clustering.cli [--final] [--input FILE] [--result-file FILE] [--dump-features]
-    # 攻击方法树聚类（Ward + 拐点 auto-k）；--final 附加递归 DBSCAN 密度视图
+python -m llmsec.clustering.cli [--input FILE] [--result-file FILE] [--dump-features]
+    # 攻击方法聚类分析（HDBSCAN + 关键层 auto-k）；
+    # --result-file 提供评估结果时启用弱监督特征加权与 ANOVA 簇效验证
 
 python -m llmsec.reporting.report [--output-dir DIR]
     # 独立生成报告：扫描 *_结果.jsonl 和最新 runs/ 的 attack_results.jsonl

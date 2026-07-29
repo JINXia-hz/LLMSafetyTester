@@ -69,7 +69,6 @@ from llmsec.evaluation import (
 )
 from llmsec.evaluation.cluster_analysis import (
     analyze_clusters,
-    load_cluster_report,
     save_cluster_analysis,
 )
 from llmsec.evaluation.samplers import build_sampler
@@ -273,20 +272,20 @@ def _compute_method_set_hash(methods: list[str]) -> str:
     return hashlib.md5(content.encode("utf-8")).hexdigest()
 
 
-def _should_recluster(
+def _should_refresh_features(
     predictor,
     method_records: dict[str, dict],
     force: bool = False,
 ) -> bool:
     """
-    判断启动时是否需要重新做前置树聚类（特征缓存 + 树结构）。
+    判断启动时是否需要重新提取特征缓存（供 SVD-Ridge / D-optimality）。
+    聚类只在测试结束后进行，此处只维护特征缓存。
 
-    触发条件：force=True、无可用 artifacts 或缺少 labels、攻击集方法列表发生变化。
-    树聚类只使用先验特征，与 ground truth 增长无关。
+    触发条件：force=True、无可用 artifacts/features、攻击集方法列表发生变化。
     """
     if force:
         return True
-    if predictor.artifacts is None or "labels" not in predictor.artifacts:
+    if predictor.artifacts is None or "features" not in predictor.artifacts:
         return True
     current_hash = _compute_method_set_hash(list(method_records.keys()))
     return predictor.artifacts.get("method_set_hash") != current_hash
@@ -371,26 +370,22 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
     all_results = []
     recent_results = {}
 
-    # ---- 启动时树聚类：复用 / 重训练（先验特征，与 ground truth 无关） ----
+    # ---- 启动时特征缓存：复用 / 重新提取（聚类在测试结束后才进行） ----
     gt_count = len(tracker.ground_truth_methods)
-    if _should_recluster(tracker.predictor, method_records, force=False):
-        pre_report = tracker.predictor.tree_fit(records)
-        print(f"  🌲 前置树聚类: k*={pre_report.get('n_clusters', 0)} "
-              f"(top3 {pre_report.get('top_ks', [])})")
+    if _should_refresh_features(tracker.predictor, method_records, force=False):
+        tracker.predictor.fit_features(records)
+        print(f"  🧩 特征缓存: {len(method_records)} 种方法")
     else:
-        n_clusters = len(set(tracker.predictor.artifacts.get("labels", {}).values()) - {-1})
-        print(f"  ♻️ 复用已有树聚类: {n_clusters} 簇 (ground truth {gt_count} 种)")
+        print(f"  ♻️ 复用已有特征缓存 (ground truth {gt_count} 种)")
 
     # ---- 冷启动：为所有未测方法注入预测 Elo ----
     _inject_predicted_elos(tracker, method_records)
     print(f"  🧊 冷启动: 已为 {len(all_methods)} 种方法注入初始 Elo "
           f"(ground truth {len(tracker.ground_truth_methods)} 种)")
 
-    # ---- 构造采样器（使用前置树聚类的簇结构） ----
-    cluster_report = load_cluster_report()
+    # ---- 构造采样器 ----
     sampler_obj = build_sampler(
         sampler,
-        cluster_report=cluster_report,
         alpha=sampler_alpha,
         beta=sampler_beta,
         gamma=sampler_gamma,
@@ -544,16 +539,6 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
         tracker.save(STATE_FILE)
         print(f"     🔄 预测已更新: {len(remaining_records)} 个未测方法的 SVD-Ridge 预测 Elo")
 
-        # 聚类级安全分析
-        try:
-            cluster_analysis = analyze_clusters(tracker)
-            if cluster_analysis_file:
-                save_cluster_analysis(cluster_analysis, cluster_analysis_file)
-            else:
-                save_cluster_analysis(cluster_analysis)
-        except Exception as e:
-            print(f"     ⚠ 聚类安全分析失败: {e}")
-
         # 记录本轮结束时的防御方 Elo，用于更稳健的收敛判断
         tracker.record_round_end(DEFENDER_NAME)
 
@@ -565,7 +550,6 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
             "sub_sampler": getattr(sampler_obj, "last_sub_sampler", None),
             "defender_elo": tracker.get_defender_elo(DEFENDER_NAME),
             "tested_count": len(tested),
-            "n_clusters": len(set(tracker.predictor.artifacts.get("labels", {}).values()) - {-1}) if tracker.predictor.artifacts else 0,
         })
 
         # 检查收敛：综合轮次 Elo 标准差、相对标准差、覆盖率
@@ -587,12 +571,24 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
                   f"置信度={confidence*100:.0f}% "
                   f"({notes})")
 
-    # ---- 攻击完成后最终聚类 ----
+    # ---- 攻击完成后最终聚类（post-test）+ 簇级安全分析 ----
     final_report = tracker.predictor.final_fit(records, all_results)
     print(f"\n  🏁 最终聚类: {final_report.get('n_clusters', 0)} 簇 "
-          f"(DBSCAN核心={final_report.get('dbscan', {}).get('n_core_clusters', 0)}, "
-          f"噪声={final_report.get('dbscan', {}).get('n_noise', 0)}, "
+          f"(噪声={final_report.get('n_noise', 0)}, k*={final_report.get('chosen_k', 0)}, "
           f"silhouette={final_report.get('validation', {}).get('silhouette', 0):.4f})")
+    rv = final_report.get("reaction_validation", {})
+    if rv.get("available"):
+        print(f"     簇效验证: {rv.get('verdict')} "
+              f"(p={rv.get('p_anova')}, eta²={rv.get('eta2')})")
+
+    try:
+        cluster_analysis = analyze_clusters(tracker)
+        if cluster_analysis_file:
+            save_cluster_analysis(cluster_analysis, cluster_analysis_file)
+        else:
+            save_cluster_analysis(cluster_analysis)
+    except Exception as e:
+        print(f"     ⚠ 聚类安全分析失败: {e}")
 
     tracker.save(STATE_FILE)
 
@@ -920,13 +916,13 @@ def main():
     # ---- Phase 1 ----
     attack_summary = {}
     if args.phase in ("all", "1"):
-        # 如用户要求强制重训练，先重做前置树聚类再进入 Phase 1
+        # 如用户要求强制重训练，先重建特征缓存再进入 Phase 1
         if args.cluster_retrain_force:
-            print("  🔄 强制重训练树聚类 ...")
-            tracker.predictor.tree_fit(records)
+            print("  🔄 强制重建特征缓存 ...")
+            tracker.predictor.fit_features(records)
             _inject_predicted_elos(tracker, method_records)
             tracker.save(STATE_FILE)
-            print("  ✅ 强制重训练完成，已更新所有方法预测 Elo")
+            print("  ✅ 强制重建完成，已更新所有方法预测 Elo")
 
         attack_summary = run_attack_phase(
             records, target_client, judge, tracker,
