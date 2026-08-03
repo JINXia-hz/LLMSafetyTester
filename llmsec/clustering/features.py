@@ -155,14 +155,31 @@ def _first_reachable_hf_host() -> str | None:
 
 def _get_embedding_model():
     """
-    四层降级链：本地缓存 → HF 镜像/官方 → API embedding → TF-IDF。
+    降级链：显式 API 配置 → 本地缓存 → HF 镜像/官方 → TF-IDF。
 
-    关键修复：本地缓存优先——旧逻辑先预检网络，不可达就降级 TF-IDF，
-    即使模型已缓存也永远用不上。
+    显式配置优先：EMBEDDING_API_BASE/API_KEY/API_MODEL 三项齐全时直接走
+    API embedding（用户显式申请/部署的服务，如内网 bge-m3），探活失败才
+    回落本地缓存。本地缓存优先于 HF 下载——旧逻辑先预检网络，不可达就
+    降级 TF-IDF，即使模型已缓存也永远用不上。
     """
     global _embedding_model, _embedding_available, _embedding_source
     if _embedding_model is not None or not _embedding_available:
         return _embedding_model if _embedding_available else None
+
+    # 第 0 层：显式配置的 API embedding（OpenAI 兼容 /embeddings）
+    api_base = os.environ.get("EMBEDDING_API_BASE")
+    api_key = os.environ.get("EMBEDDING_API_KEY")
+    api_model = os.environ.get("EMBEDDING_API_MODEL")
+    if api_base and api_key and api_model:
+        try:
+            embedder = _ApiEmbedder(api_base, api_key, api_model)
+            embedder.encode(["ping"], batch_size=1)  # 探活
+            print(f"  [*] 使用 API embedding: {api_model} @ {api_base}")
+            _embedding_model = embedder
+            _embedding_source = "api"
+            return _embedding_model
+        except Exception as e:
+            print(f"  ⚠ API embedding 不可用: {e}")
 
     model_name = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
@@ -188,23 +205,8 @@ def _get_embedding_model():
         except Exception as e:
             print(f"  ⚠ embedding 模型下载/加载失败: {e}")
 
-    # 第 3 层：API embedding（OpenAI 兼容 /embeddings，企业网络兜底）
-    api_base = os.environ.get("EMBEDDING_API_BASE")
-    api_key = os.environ.get("EMBEDDING_API_KEY")
-    api_model = os.environ.get("EMBEDDING_API_MODEL")
-    if api_base and api_key and api_model:
-        try:
-            embedder = _ApiEmbedder(api_base, api_key, api_model)
-            embedder.encode(["ping"], batch_size=1)  # 探活
-            print(f"  [*] 使用 API embedding: {api_model} @ {api_base}")
-            _embedding_model = embedder
-            _embedding_source = "api"
-            return _embedding_model
-        except Exception as e:
-            print(f"  ⚠ API embedding 不可用: {e}")
-
-    # 第 4 层：TF-IDF 兜底
-    print("  ⚠ 无可用 embedding 通道（本地缓存 / HF镜像 / API）")
+    # 第 3 层：TF-IDF 兜底（API 已在第 0 层尝试过，此处不再重复）
+    print("  ⚠ 无可用 embedding 通道（API / 本地缓存 / HF镜像）")
     print("  🔄 降级为 TF-IDF 文本特征 (无需网络)")
     _embedding_available = False
     return None
@@ -234,8 +236,9 @@ def extract_text_embeddings(
         print(f"  [*] 编码完成 ({time.time() - t0:.1f}s), 原始维度 {embeddings.shape[1]}")
 
         # PCA 降维：避免 n-1 过拟合，target_dim 上限固定且随样本数缓慢增长
+        # （n=1 时 n-1=0，下限抬到 1：单样本 PCA(n_components=1) 合法）
         n = embeddings.shape[0]
-        target_dim = min(pca_dim, max(1, n // 3), n - 1, embeddings.shape[1])
+        target_dim = max(1, min(pca_dim, max(1, n // 3), n - 1, embeddings.shape[1]))
         if target_dim < embeddings.shape[1]:
             fit_pca = pca if pca is not None else PCA(n_components=target_dim, random_state=42)
             reduced = fit_pca.fit_transform(embeddings) if pca is None else fit_pca.transform(embeddings)
@@ -254,7 +257,8 @@ def extract_text_embeddings(
     fit_vectorizer = vectorizer if vectorizer is not None else TfidfVectorizer(
         max_features=TFIDF_FALLBACK_FEATURES,
         ngram_range=(1, 2),
-        max_df=0.9,
+        # 单文档时 max_df=0.9 会剔除全部词项（>0.9×1 篇即命中），放宽到 1.0
+        max_df=0.9 if len(cleaned_prompts) > 1 else 1.0,
         min_df=1,
         stop_words="english",
     )
@@ -264,9 +268,9 @@ def extract_text_embeddings(
         tfidf_matrix = fit_vectorizer.transform(cleaned_prompts)
     dense = tfidf_matrix.toarray()
 
-    # PCA 降维到目标维度：避免 n-1 过拟合
+    # PCA 降维到目标维度：避免 n-1 过拟合（n=1 时下限抬到 1，同上）
     n = dense.shape[0]
-    target_dim = min(pca_dim, max(1, n // 3), n - 1, dense.shape[1])
+    target_dim = max(1, min(pca_dim, max(1, n // 3), n - 1, dense.shape[1]))
     if dense.shape[1] > target_dim:
         fit_pca = pca if pca is not None else PCA(n_components=target_dim, random_state=42)
         reduced = fit_pca.fit_transform(dense) if pca is None else fit_pca.transform(dense)
@@ -352,12 +356,13 @@ def extract_technique_labels(records: list[dict]) -> tuple[dict[str, np.ndarray]
         vec = np.zeros(len(label_names))
 
         # 技术标签：检测 prompt 文本匹配
+        # 搜原文 + IGNORECASE：先 lower 再搜会让含大写的模式
+        # （DAN/STAN/ROT13/U\+200B/XML/JSON 等）永不命中（F3 修复）
         combined_text = " ".join(prompts)
-        combined_lower = combined_text.lower()
 
         for i, (label, patterns) in enumerate(TECHNIQUE_LABELS.items()):
             for pat in patterns:
-                if re.search(pat, combined_lower):
+                if re.search(pat, combined_text, re.IGNORECASE):
                     vec[i] = 1.0
                     break
 
@@ -389,7 +394,8 @@ def extract_intent_features(
 ) -> dict[str, np.ndarray]:
     """
     提取意图与对抗强度特征。
-    - 语义漂移量：同一方法内 prompt 之间的平均 cosine 距离
+    - 语义漂移量：同一方法内各 prompt 字符长度的归一化标准差
+      （std(长度) / max(长度)，字符长度方差作为 drift 代理，并非嵌入 cosine 距离）
     - 对抗性扰动检测：typo 比例、无意义填充文本比例
 
     返回: {method_name: np.ndarray}
@@ -399,11 +405,9 @@ def extract_intent_features(
         prompts = method_prompts.get(method, [""])
         feats = []
 
-        # 语义漂移量
+        # 语义漂移量（字符长度方差代理）
         if method in method_to_idx:
-            idx = method_to_idx[method]
-            emb = text_embeddings[idx]
-            # 组内所有 prompt 的嵌入均值与中心向量的 cosine 距离 (取各 prompt 的嵌入方差)
+            # 注：不使用嵌入 cosine 距离；text_embeddings 参数当前未参与计算
             drift = 0.0
             if len(prompts) > 1:
                 # 用每条 prompt 的字符级特征方差作为 drift 代理
@@ -590,7 +594,8 @@ def extract_all_features(
     embedding_pca_dim: int = EMBEDDING_PCA_DIM,
 ) -> tuple[dict, dict]:
     """
-    从攻击集和评估结果中提取 5 维特征。
+    从攻击集和评估结果中提取 7 块特征，其中 5 块（PRIOR_BLOCKS，见 clustering/space.py）
+    进入聚类度量；defense 与 cross_model 不参与距离度量。
 
     参数:
         attack_records: 攻击集 JSONL 记录列表
@@ -599,16 +604,41 @@ def extract_all_features(
 
     返回:
         features: {method_name: {
-            "textual": np.ndarray (15,),               # 文本统计
+            "textual": np.ndarray (12,),                # 文本统计
             "embedding": np.ndarray (pca_dim,),         # 语义 embedding
             "technique": np.ndarray (n_labels,),        # 技术多标签
             "intent": np.ndarray (3,),                  # 意图与对抗强度
+            "prior": np.ndarray (n_prior,),             # 名称先验
             "defense": np.ndarray (14,),                # 防御交互
             "cross_model": np.ndarray (0,),             # 跨模型 (占位)
         }}
         meta: {"method_names": [...], "method_to_idx": {...},
                "method_prompts": {method: 代表prompt}, ...}
     """
+
+    # 空输入短路：返回与正常路径同构的空结构（不触发 embedding 模型加载）
+    if not attack_records:
+        meta = {
+            "method_names": [],
+            "method_to_idx": {},
+            "method_prompts": {},
+            "textual_feature_names": TEXTUAL_FEATURE_NAMES,
+            "technique_label_names": [],
+            "intent_feature_names": INTENT_FEATURE_NAMES,
+            "prior_feature_names": PRIOR_FEATURE_NAMES,
+            "defense_feature_names": DEFENSE_FEATURE_NAMES,
+            "cross_model_feature_names": CROSS_MODEL_FEATURE_NAMES,
+            "has_eval_data": len(eval_results) > 0,
+            "has_embedding": _embedding_source is not None,
+            "embedding_source": _embedding_source,
+            "embedding_artifacts": {
+                "vectorizer": None,
+                "pca": None,
+                "pca_dim": embedding_pca_dim,
+            },
+        }
+        print("[特征提取] 0 种攻击方法（空输入）")
+        return {}, meta
 
     # 按方法分组
     method_records = defaultdict(list)
@@ -696,7 +726,7 @@ def extract_all_features(
         },
     }
 
-    print(f"[特征提取] 完成: {n_methods} 种方法 × 6 维特征块")
+    print(f"[特征提取] 完成: {n_methods} 种方法 × 7 个特征块（5 块进入聚类度量）")
     return features, meta
 
 

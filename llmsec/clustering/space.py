@@ -19,7 +19,12 @@
 
 import numpy as np
 
-from llmsec.params import WHITEN_LAMBDA_W_REL, WHITEN_MAX_DIMS, WHITEN_VARIANCE_RATIO
+from llmsec.params import (
+    WHITEN_DAMP,
+    WHITEN_LAMBDA_W_REL,
+    WHITEN_MAX_DIMS,
+    WHITEN_VARIANCE_RATIO,
+)
 
 # 参与度量的先验特征块；defense（后验）明确排除
 PRIOR_BLOCKS = ("textual", "embedding", "technique", "intent", "prior")
@@ -84,7 +89,7 @@ def build_whitened_space(
     variance_ratio: float = WHITEN_VARIANCE_RATIO,
     max_dims: int = WHITEN_MAX_DIMS,
     lambda_w: float | None = None,
-    damp: float = 0.0,
+    damp: float = WHITEN_DAMP,
     blocks: tuple[str, ...] = PRIOR_BLOCKS,
     feature_weights: np.ndarray | None = None,
 ) -> dict:
@@ -93,7 +98,7 @@ def build_whitened_space(
 
     参数:
         lambda_w: 白化正则地板；None 时取谱拐点处的 σ²（拐点后噪声方向被抑制）
-        damp: 白化强度 ∈ [0,1]，默认 0（不白化，纯 PC 得分）。
+        damp: 白化强度 ∈ [0,1]，默认取 params.WHITEN_DAMP（当前为 0，不白化，纯 PC 得分）。
             实测本数据上白化是负优化：簇分离信号住在高方差方向，
             白化的方向级等权会稀释信号（同配置 damp=0 轮廓系数约为
             damp=0.5 的 2.8 倍）。保留参数仅供实验调参。
@@ -117,8 +122,6 @@ def build_whitened_space(
         methods = sorted(features.keys())
     n = len(methods)
     X = build_feature_matrix(features, methods, blocks=blocks)
-    if feature_weights is not None and X.shape[1] == len(feature_weights):
-        X = X * np.asarray(feature_weights, dtype=np.float64)
 
     if n == 0 or X.shape[1] == 0:
         return {
@@ -131,6 +134,11 @@ def build_whitened_space(
     x_mean = X.mean(axis=0)
     x_std = X.std(axis=0) + 1e-8
     X_scaled = (X - x_mean) / x_std
+
+    # 弱监督特征加权必须作用于标准化之后：w·X 的 z-score 为
+    # (w·X − w·μ)/(w·σ) = (X−μ)/σ，标准化前加权会被完全抵消（F2 修复）。
+    if feature_weights is not None and X.shape[1] == len(feature_weights):
+        X_scaled = X_scaled * np.asarray(feature_weights, dtype=np.float64)
 
     U, S, Vt = np.linalg.svd(X_scaled, full_matrices=False)
     var = S**2
@@ -183,8 +191,6 @@ def transform_to_space(space: dict, features: dict, methods: list[str]) -> np.nd
         return np.zeros((len(methods), 0))
     X = build_feature_matrix(features, methods)
     fw = space.get("feature_weights")
-    if fw is not None and X.shape[1] == len(fw):
-        X = X * np.asarray(fw, dtype=np.float64)
     # 对齐训练时的特征维度
     d_train = space["x_mean"].shape[0]
     if X.shape[1] < d_train:
@@ -192,10 +198,14 @@ def transform_to_space(space: dict, features: dict, methods: list[str]) -> np.nd
     elif X.shape[1] > d_train:
         X = X[:, :d_train]
     X_scaled = (X - space["x_mean"]) / space["x_std"]
+    # 与 build_whitened_space 一致：加权在标准化之后（F2 修复）
+    if fw is not None and X.shape[1] == len(fw):
+        X_scaled = X_scaled * np.asarray(fw, dtype=np.float64)
     # 新点 PC 得分 = X @ V_kᵀ；按训练时的 damp/λw 做相同的阻尼白化
     n_train = max(space["coords"].shape[0], 1)
     S = space["singular_values"][: space["n_dims"]]
-    damp = space.get("damp", 0.5)
+    # 旧工件无 damp 字段时兜底与 build_whitened_space 默认一致（不白化）
+    damp = space.get("damp", 0.0)
     raw_scale = S / np.sqrt(n_train)
     white_scale = np.sqrt(n_train) * S / np.sqrt(S**2 + space["lambda_w"])
     scale = (raw_scale ** (1 - damp)) * (white_scale ** damp)

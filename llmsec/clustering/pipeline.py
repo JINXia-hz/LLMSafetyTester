@@ -203,38 +203,56 @@ def build_cluster_profiles(
 
 
 def _export_matrix(labels: dict[str, int], features: dict, meta: dict):
-    """导出特征矩阵 CSV。"""
+    """
+    导出特征矩阵 CSV。
+
+    列序：method, cluster + 度量空间全量块（textual → embedding → technique →
+    intent → prior，顺序与 space.PRIOR_BLOCKS 一致，CSV 可按列区间复现聚类度量）
+    + 附加后验块（defense → cross_model，不参与度量，仅画像）。
+    embedding 块维度以实际特征向量为准（emb_0 .. emb_{d-1}）。
+    """
     methods = meta["method_names"]
     textual_names = meta.get("textual_feature_names", [])
-    intent_names = meta.get("intent_feature_names", [])
-    defense_names = meta.get("defense_feature_names", [])
     technique_names = meta.get("technique_label_names", [])
+    intent_names = meta.get("intent_feature_names", [])
+    prior_names = meta.get("prior_feature_names", [])
+    defense_names = meta.get("defense_feature_names", [])
+    cross_model_names = meta.get("cross_model_feature_names", [])
 
-    col_names = ["method", "cluster"] + textual_names + intent_names + defense_names + technique_names
+    # embedding 块无名列表，按实际维度生成 emb_i 列名
+    emb_dim = 0
+    for m in methods:
+        vec = features.get(m, {}).get("embedding")
+        if vec is not None:
+            emb_dim = max(emb_dim, len(np.atleast_1d(vec)))
+    embedding_names = [f"emb_{i}" for i in range(emb_dim)]
+
+    # 度量空间块（PRIOR_BLOCKS 顺序）+ 附加后验块
+    metric_blocks = [
+        ("textual", textual_names),
+        ("embedding", embedding_names),
+        ("technique", technique_names),
+        ("intent", intent_names),
+        ("prior", prior_names),
+    ]
+    extra_blocks = [
+        ("defense", defense_names),
+        ("cross_model", cross_model_names),
+    ]
+
+    col_names = ["method", "cluster"]
+    for _, names in metric_blocks + extra_blocks:
+        col_names += list(names)
+
     with open(CLUSTER_MATRIX_FILE, "w", encoding="utf-8") as f:
         f.write(",".join(f'"{c}"' for c in col_names) + "\n")
         for method in methods:
             row = [f'"{method}"', str(labels.get(method, -1))]
             feat = features.get(method, {})
-
-            # textual
-            tvec = feat.get("textual", np.zeros(len(textual_names)))
-            for i in range(len(textual_names)):
-                row.append(str(round(float(tvec[i]), 6) if i < len(tvec) else 0))
-
-            # intent
-            ivec = feat.get("intent", np.zeros(len(intent_names)))
-            for i in range(len(intent_names)):
-                row.append(str(round(float(ivec[i]), 6) if i < len(ivec) else 0))
-
-            # defense
-            dvec = feat.get("defense", np.zeros(len(defense_names)))
-            for i in range(len(defense_names)):
-                row.append(str(round(float(dvec[i]), 6) if i < len(dvec) else 0))
-
-            # technique
-            tecvec = feat.get("technique", np.zeros(len(technique_names)))
-            for i in range(len(technique_names)):
-                row.append(str(int(tecvec[i])) if i < len(tecvec) else "0")
-
+            for block, names in metric_blocks + extra_blocks:
+                vec = np.atleast_1d(feat.get(block, np.zeros(len(names))))
+                for i in range(len(names)):
+                    v = float(vec[i]) if i < len(vec) else 0.0
+                    # technique 等多标签块按整数写，其余保留 6 位小数
+                    row.append(str(int(v)) if block == "technique" else str(round(v, 6)))
             f.write(",".join(row) + "\n")

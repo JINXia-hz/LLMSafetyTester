@@ -814,14 +814,14 @@ class ClusterEloPredictor:
     def _build_technique_vector(self, record: dict, label_names: list[str]) -> np.ndarray:
         """为单条记录构造与 artifacts 中维度一致的技术标签向量。"""
         vec = np.zeros(len(label_names))
-        prompt = record.get("prompt", "").lower()
+        prompt = record.get("prompt", "")
 
-        # 技术标签
+        # 技术标签（搜原文 + IGNORECASE，lower 后搜会让大写模式永不命中，F3 修复）
         for i, (label, patterns) in enumerate(TECHNIQUE_LABELS.items()):
             if i >= len(label_names):
                 break
             for pat in patterns:
-                if re.search(pat, prompt):
+                if re.search(pat, prompt, re.IGNORECASE):
                     vec[i] = 1.0
                     break
 
@@ -853,11 +853,13 @@ class ClusterEloPredictor:
             dense = vectorizer.transform(cleaned).toarray()
             return pca.transform(dense) if pca is not None else dense
 
-        # sentence-transformers 路径
+        # 语义 embedding 路径：与训练侧共用同一降级链
+        # （显式 API → 本地缓存 → HF 镜像），保证训练/预测来源一致
         try:
-            from sentence_transformers import SentenceTransformer
-            model_name = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-            model = SentenceTransformer(model_name)
+            from llmsec.clustering.features import _get_embedding_model
+            model = _get_embedding_model()
+            if model is None:
+                raise RuntimeError("无可用 embedding 通道")
         except Exception as e:
             logger.warning("批量预测时加载 embedding 模型失败: %s", e)
             dim = pca.n_components if pca is not None else 384

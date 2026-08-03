@@ -12,11 +12,20 @@
 - 所有统计只用真实 ground truth；未测方法的预测值不参与（防特征-预测自相关）
 """
 
+import math
+
 import numpy as np
 
 from llmsec.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _finite(v: float, fallback: float) -> float:
+    """统计量兜底：nan/inf（如组内零方差时 f_oneway/kruskal 的输出）替换为有限值，
+    避免非法 JSON token（NaN/Infinity）写入报告。"""
+    v = float(v)
+    return v if math.isfinite(v) else fallback
 
 
 # ============================================================
@@ -168,15 +177,20 @@ def reaction_validation(
     arrays = list(testable.values())
     F, p_anova = stats.f_oneway(*arrays)
     H, p_kw = stats.kruskal(*arrays)
+    # 组内全同值（零方差）时 scipy 返回 nan/inf：p 值兜底 1.0（不显著），统计量兜底 0.0
+    F = _finite(F, 0.0)
+    p_anova = _finite(p_anova, 1.0)
+    H = _finite(H, 0.0)
+    p_kw = _finite(p_kw, 1.0)
 
     # 效应量：eta²（ANOVA）与 epsilon²（KW）
     all_vals = np.concatenate(arrays)
     grand = float(all_vals.mean())
     ss_between = sum(len(g) * (float(np.mean(g)) - grand) ** 2 for g in arrays)
     ss_total = float(((all_vals - grand) ** 2).sum())
-    eta2 = ss_between / ss_total if ss_total > 1e-12 else 0.0
+    eta2 = _finite(ss_between / ss_total if ss_total > 1e-12 else 0.0, 0.0)
     k, n = len(arrays), len(all_vals)
-    epsilon2 = max(0.0, (H - k + 1) / (n - k)) if n > k else 0.0
+    epsilon2 = _finite(max(0.0, (H - k + 1) / (n - k)) if n > k else 0.0, 0.0)
 
     # 判定：参数/非参数任一显著且效应量中等以上 → 特征有效
     significant = (p_anova < 0.05 or p_kw < 0.05)

@@ -59,6 +59,7 @@ def _report_config() -> GeneratorConfig:
         api_key=cfg.api_key or "",
         base_url=cfg.base_url or DEFAULT_BASE_URL,
         model=cfg.model or DEFAULT_MODEL,
+        timeout=cfg.timeout,
     )
 
 
@@ -67,19 +68,13 @@ def _report_config() -> GeneratorConfig:
 # ============================================================
 def load_all_results(output_dir) -> list[dict]:
     """
-    加载所有评估结果：
-    1. output/*_结果.jsonl（evaluator.py 生成）
-    2. output/runs/*/attack_results.jsonl（runner.py 生成，优先使用最新一次）
+    加载所有评估结果。两个数据来源互斥（避免同一批记录被重复计数、ASR 失真）：
+    1. output/runs/*/attack_results.jsonl（runner.py 生成）——存在即优先，取最新一次
+    2. output/*_结果.jsonl（evaluator.py 生成）——仅在没有 run 数据时回退
     """
-    all_results = []
     output_dir = Path(output_dir)
 
-    # evaluator 结果
-    for fname in os.listdir(output_dir):
-        if fname.endswith("_结果.jsonl"):
-            all_results.extend(read_jsonl(output_dir / fname))
-
-    # runner 结果（取最新一次，避免混入历史运行）
+    # runner 结果优先（按修改时间从新到旧，取第一个含 attack_results.jsonl 的 run）
     runs_dir = output_dir / "runs"
     if runs_dir.exists():
         run_dirs = sorted(
@@ -87,11 +82,20 @@ def load_all_results(output_dir) -> list[dict]:
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
-        if run_dirs:
-            attack_file = run_dirs[0] / "attack_results.jsonl"
+        for run_dir in run_dirs:
+            attack_file = run_dir / "attack_results.jsonl"
             if attack_file.exists():
-                all_results.extend(read_jsonl(attack_file))
+                results = read_jsonl(attack_file)
+                print(f"   数据来源: runner（{attack_file}）")
+                return results
 
+    # evaluator 结果（无 run 数据时的回退）
+    all_results = []
+    for fname in os.listdir(output_dir):
+        if fname.endswith("_结果.jsonl"):
+            all_results.extend(read_jsonl(output_dir / fname))
+    if all_results:
+        print("   数据来源: evaluator（*_结果.jsonl）")
     return all_results
 
 
@@ -224,22 +228,38 @@ def build_method_stats(results: list[dict], elo_ratings: dict,
     return method_stats
 
 
-def _load_elo_tracker() -> ELOTracker | None:
-    """加载完整 ELO 状态（攻击方+防御方），文件不存在返回 None。"""
-    if not STATE_FILE.exists():
-        return None
+def _load_elo_tracker(output_dir=None) -> ELOTracker | None:
+    """加载完整 ELO 状态（攻击方+防御方），文件不存在返回 None。
+
+    优先读 output_dir/state/state.json（与 --output-dir 保持一致）；
+    该文件不存在时回退全局 STATE_FILE（兼容旧行为）并打印提示。
+    """
+    state_file = None
+    if output_dir is not None:
+        candidate = Path(output_dir) / "state" / "state.json"
+        if candidate.exists():
+            state_file = candidate
+        else:
+            print(f"   ⚠ {candidate} 不存在，回退默认状态文件 {STATE_FILE}")
+    if state_file is None:
+        if not STATE_FILE.exists():
+            return None
+        state_file = STATE_FILE
     tracker = ELOTracker()
-    tracker.load(STATE_FILE)
+    tracker.load(state_file)
     return tracker
 
 
 def build_tree(method_stats: dict[str, dict], allergy_data: dict,
-               elo_ratings: dict, tax_info: dict | None = None) -> dict:
+               elo_ratings: dict, tax_info: dict | None = None,
+               output_dir=None) -> dict:
     """
     构建多维树形安全画像。
 
     tax_info: 可选，runner 的越狱税聚合块（含 baseline 对比），
               透传进 overall.jailbreak_tax 供报告/前端展示。
+    output_dir: 可选，输出目录；用于定位 state/state.json 计算 ELO 边界，
+                缺省时回退全局 STATE_FILE。
 
     返回:
     {
@@ -267,7 +287,7 @@ def build_tree(method_stats: dict[str, dict], allergy_data: dict,
     #   属无效死代码——即使能跑，没有防御方评分也算不出边界）
     boundary = {}
     surprises = {"weakness": [], "strength": []}
-    tracker = _load_elo_tracker()
+    tracker = _load_elo_tracker(output_dir)
     if tracker is not None and (tracker.attacker_ratings or tracker.defender_ratings):
         boundary = tracker.compute_security_boundary()
         surprises = tracker.find_surprises(min_elo_gap=0)
@@ -614,7 +634,7 @@ def generate_narrative(tree: dict, output_dir) -> str:
     tree_json = json.dumps(compact_tree, ensure_ascii=False, indent=2)
 
     cfg = _report_config()
-    client = create_openai_client(cfg.api_key, cfg.base_url)
+    client = create_openai_client(cfg.api_key, cfg.base_url, timeout=cfg.timeout)
 
     print("🧠 调用LLM生成叙事报告...")
     try:
@@ -747,7 +767,7 @@ def main():
     method_stats = build_method_stats(results, elo_ratings, metadata)
     print(f"   聚合为 {len(method_stats)} 种攻击方法")
 
-    tree = build_tree(method_stats, allergy_data, elo_ratings)
+    tree = build_tree(method_stats, allergy_data, elo_ratings, output_dir=output_dir)
 
     # 保存树数据
     tree_path = os.path.join(output_dir, "security_tree.json")

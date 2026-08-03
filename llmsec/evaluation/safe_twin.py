@@ -37,7 +37,7 @@ from llmsec.core.config import (
     TargetConfig,
 )
 from llmsec.core.io import load_done_ids, read_jsonl
-from llmsec.core.llm import create_openai_client
+from llmsec.core.llm import create_openai_client, retry_call
 from llmsec.core.logging import setup_console
 from llmsec.core.text import MATH_TAX_PATTERN
 from llmsec.evaluation.judge import FAST_REFUSAL_PATTERNS, Judge, create_judge_client
@@ -76,6 +76,7 @@ ALLERGY_REPORT_FILE = OUTPUT_DIR / "allergy_report.json"
 MAX_TOKENS = 1024
 API_DELAY = 1.0
 MAX_RETRIES = 3
+RETRY_DELAY = 2.0    # 重试间隔（秒）
 
 # ============================================================
 # 安全孪生生成
@@ -102,32 +103,32 @@ SAFE_TWIN_SYSTEM = """你是一个安全测试数据生成专家。你的任务�
 
 def generate_safe_twin(attack_prompt: str, client) -> Optional[dict]:
     """为一条攻击prompt生成安全孪生。"""
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = client.chat.completions.create(
-                model=SAFE_TWIN_MODEL,
-                messages=[
-                    {"role": "system", "content": SAFE_TWIN_SYSTEM},
-                    {"role": "user", "content": f"请改写以下攻击prompt为安全版本：\n\n{attack_prompt[:2000]}"},
-                ],
-                temperature=TEMPERATURE,
-                max_tokens=MAX_TOKENS,
-            )
-            raw = response.choices[0].message.content.strip()
-            m = re.search(r"\{.*\}", raw, re.DOTALL)
-            if m:
-                data = json.loads(m.group(0))
-                return {
-                    "safe_prompt": data.get("safe_prompt", "").strip(),
-                    "replacement": data.get("replacement", "").strip(),
-                }
-            return {"safe_prompt": raw, "replacement": "无法解析JSON"}
-        except Exception as e:
-            if attempt < MAX_RETRIES:
-                time.sleep(2)
-            else:
-                print(f"  ⚠ 安全孪生生成失败: {e}")
-                return None
+
+    def _gen():
+        response = client.chat.completions.create(
+            model=SAFE_TWIN_MODEL,
+            messages=[
+                {"role": "system", "content": SAFE_TWIN_SYSTEM},
+                {"role": "user", "content": f"请改写以下攻击prompt为安全版本：\n\n{attack_prompt[:2000]}"},
+            ],
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
+        )
+        raw = response.choices[0].message.content.strip()
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            data = json.loads(m.group(0))
+            return {
+                "safe_prompt": data.get("safe_prompt", "").strip(),
+                "replacement": data.get("replacement", "").strip(),
+            }
+        return {"safe_prompt": raw, "replacement": "无法解析JSON"}
+
+    try:
+        return retry_call(_gen, retries=MAX_RETRIES, delay=RETRY_DELAY)
+    except Exception as e:
+        print(f"  ⚠ 安全孪生生成失败: {e}")
+        return None
 
 
 def generate_all_twins():
@@ -356,22 +357,29 @@ def evaluate_allergy():
 # ============================================================
 # 主入口
 # ============================================================
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description="安全孪生生成与过敏检测")
-    parser.add_argument("--generate", action="store_true", default=True,
-                        help="生成安全孪生")
+    # 兼容保留：历史上 default=True 使该 flag 恒为 True 且无实际作用（M20 修复），
+    # 现改为显式开关，不传时默认同样进入生成阶段
+    parser.add_argument("--generate", action="store_true",
+                        help="生成安全孪生（默认行为，保留仅为兼容旧用法）")
+    parser.add_argument("--no-generate", action="store_true",
+                        help="跳过生成阶段（配合 --all 时仅评估已有孪生集）")
     parser.add_argument("--evaluate", action="store_true",
                         help="评估过敏")
     parser.add_argument("--all", action="store_true",
                         help="生成 + 评估")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.all:
-        generate_all_twins()
-        print("\n" + "=" * 60 + "\n")
+        if not args.no_generate:
+            generate_all_twins()
+            print("\n" + "=" * 60 + "\n")
         evaluate_allergy()
     elif args.evaluate:
         evaluate_allergy()
+    elif args.no_generate:
+        print("⚠ 已指定 --no-generate 且未指定 --evaluate/--all，无操作")
     else:
         generate_all_twins()
 

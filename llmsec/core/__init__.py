@@ -31,7 +31,7 @@ from llmsec.core.io import (
     read_jsonl,
     write_jsonl,
 )
-from llmsec.core.llm import chat_with_retry, create_openai_client
+from llmsec.core.llm import chat_with_retry, create_openai_client, retry_call
 from llmsec.core.logging import get_logger, setup_console
 from llmsec.core.text import (
     estimate_tokens,
@@ -52,7 +52,7 @@ __all__ = [
     # io
     "read_jsonl", "iter_jsonl", "write_jsonl", "append_jsonl", "load_done_ids",
     # llm
-    "create_openai_client", "chat_with_retry",
+    "create_openai_client", "chat_with_retry", "retry_call",
     # logging
     "setup_console", "get_logger",
     # text

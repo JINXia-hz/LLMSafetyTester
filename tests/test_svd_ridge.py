@@ -29,7 +29,7 @@ from llmsec.evaluation.elo_cluster import (
     build_prior_features,
 )
 
-_SYNTH_DIMS = {"textual": 15, "embedding": 8, "technique": 6, "intent": 3}
+_SYNTH_DIMS = {"textual": 12, "embedding": 8, "technique": 6, "intent": 3}
 
 
 def _make_synthetic(n_train: int = 25, n_test: int = 12, seed: int = 0):
@@ -351,7 +351,8 @@ def test_degenerate_column_variance_cap() -> int:
         if not np.isfinite(std):
             print(f"❌ {m} std 非有限值: {std}")
             return 1
-        if std > cap + 1e-6:
+        # std 输出前经 round(., 2)（elo_cluster.py predict_batch），封顶值上舍入最多 +0.005
+        if std > cap + 0.01:
             print(f"❌ {m} std={std:.1f} 爆炸（封顶 {cap:.1f}）")
             return 1
         if not (1000.0 <= p["elo"] <= 2000.0):

@@ -14,6 +14,7 @@ call_target(prompt) 为顶层便捷函数（惰性单例），保持原 targets.
 """
 
 import os
+import threading
 
 from llmsec.core.config import TargetConfig, load_env
 from llmsec.targets.base import TargetClient
@@ -78,11 +79,15 @@ def create_target_client(
 # 顶层便捷函数（惰性单例，保持原 targets.call_target 签名）
 # ------------------------------------------------------------
 _default_client: TargetClient | None = None
+_default_client_lock = threading.Lock()
 
 
 def call_target(prompt: str) -> dict:
     """按 TARGET_TYPE 路由调用目标模型，返回标准格式 dict（见 base 模块）。"""
     global _default_client
+    # 双重检查锁定：多线程并发首调也只创建一次 client
     if _default_client is None:
-        _default_client = create_target_client()
+        with _default_client_lock:
+            if _default_client is None:
+                _default_client = create_target_client()
     return _default_client.call(prompt)

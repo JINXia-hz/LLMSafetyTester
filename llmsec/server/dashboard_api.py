@@ -33,6 +33,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from llmsec.core.config import CLUSTER_ARTIFACTS_FILE, OUTPUT_DIR, RUNS_DIR, STATE_FILE
+from llmsec.params import ADAPTIVE_BATCH_MAX
 
 # ============================================================
 # 路径
@@ -384,8 +385,18 @@ async def api_attack_sets():
 # ============================================================
 # 聚类特征空间投影（PCA / t-SNE，按需计算 + 缓存）
 # ============================================================
+# 缓存大小上限：超出时按插入顺序淘汰最旧条目，防长期运行内存单调增长
+_CACHE_MAX_SIZE = 64
+
 _PROJECTION_CACHE: dict[tuple[str, float], dict] = {}
 _PROJECTION_BLOCKS = ("textual", "embedding", "technique", "intent")
+
+
+def _cache_put(cache: dict, key, value) -> None:
+    """写入缓存并维护 _CACHE_MAX_SIZE 上限（dict 保序，弹掉头一个即最旧条目）。"""
+    cache[key] = value
+    while len(cache) > _CACHE_MAX_SIZE:
+        cache.pop(next(iter(cache)))
 
 
 def _build_feature_matrix(features: dict, methods: list[str]):
@@ -492,7 +503,7 @@ async def api_cluster_projection(method: str = "pca"):
         })
 
     result["points"] = points
-    _PROJECTION_CACHE[cache_key] = result
+    _cache_put(_PROJECTION_CACHE, cache_key, result)
     return result
 
 
@@ -615,7 +626,7 @@ async def api_cluster_cut(k: int):
             for cid, members in sorted(clusters.items())
         ],
     }
-    _CUT_CACHE[cache_key] = result
+    _cache_put(_CUT_CACHE, cache_key, result)
     return result
 
 
@@ -628,17 +639,39 @@ TASKS: dict[str, dict] = {}
 class EvaluateRequest(BaseModel):
     phase: str = Field(default="all", pattern="^(all|1|2)$")
     input: str = "l1.jsonl"
-    batch_size: int = Field(default=10, ge=1, le=50)
+    # runner._adaptive_batch_size 会把 batch 压到 [ADAPTIVE_BATCH_MIN, ADAPTIVE_BATCH_MAX] 内，
+    # 上限与 runner 对齐，避免用户传 >ADAPTIVE_BATCH_MAX 时被静默压回；默认值随上限自适应
+    batch_size: int = Field(default=min(10, ADAPTIVE_BATCH_MAX), ge=1, le=ADAPTIVE_BATCH_MAX)
     max_rounds: int = Field(default=5, ge=1, le=50)
     sampler: str = Field(default="hybrid", pattern="^(gap|infogain|coordinate|hybrid)$")
 
 
-def _task_view(task_id: str, t: dict) -> dict:
+def _refresh_task_status(t: dict) -> None:
+    """刷新任务状态：子进程已结束但 status 仍为 running 时更新为 success/failed，
+    并关闭 log_file 句柄（置 None）。
+
+    子进程可能崩溃且无人轮询接口，若只在 _task_view 里更新状态，
+    TASKS 中会残留永久 running 的任务（导致 _start_task 的 409 检查误拒同类新任务），
+    log_file 句柄也随 TASKS 常驻泄漏。
+    """
+    if t["status"] != "running":
+        return
     proc: subprocess.Popen = t["proc"]
     rc = proc.poll()
-    status = "running" if rc is None else ("success" if rc == 0 else "failed")
-    t["status"] = status
+    if rc is None:
+        return
+    t["status"] = "success" if rc == 0 else "failed"
     t["returncode"] = rc
+    log_file = t.get("log_file")
+    if log_file is not None:
+        log_file.close()
+        t["log_file"] = None
+
+
+def _task_view(task_id: str, t: dict) -> dict:
+    _refresh_task_status(t)
+    status = t["status"]
+    rc = t.get("returncode")
     log_tail = ""
     log_path: Path = t["log_path"]
     if log_path.exists():
@@ -658,6 +691,10 @@ def _task_view(task_id: str, t: dict) -> dict:
 
 
 def _start_task(kind: str, argv: list[str]) -> dict:
+    # 先刷新所有 running 任务的真实状态，避免子进程崩溃后无人轮询
+    # 导致 status 永久 running（409 误拒同类新任务）与 log_file 句柄泄漏
+    for t in TASKS.values():
+        _refresh_task_status(t)
     for tid, t in TASKS.items():
         if t["kind"] == kind and t["status"] == "running":
             raise HTTPException(status_code=409, detail=f"{kind} 任务正在运行中 (id={tid})")

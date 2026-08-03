@@ -16,6 +16,7 @@ HarmBench 攻击集生成器（内置数据，测试与示范用，非项目核�
 """
 
 import csv
+import hashlib
 import json
 import random
 import re
@@ -191,6 +192,9 @@ def generate(
             entry = {
                 "id": record_id,
                 "category": f"harmbench-{functional}",
+                # 独立输出功能类别字段，供下游按 functional_category 分组（M7 修复：
+                # 此前只拼进 category 字符串，下游分组全部回落为 "standard"）
+                "functional_category": functional,
                 "method": method,
                 "harm_type": semantic,
                 "prompt": attack_prompt,
@@ -202,7 +206,9 @@ def generate(
                 "jailbreak_template_name": template_label,
                 "obfuscation": obf_method,
                 "variant": v,
-                "jailbreak_template_hash": abs(hash(jb_template)) % 10000,
+                # 跨进程可复现的模板指纹：内置 hash() 按 PYTHONHASHSEED 随机化，
+                # 每次运行都变，无法跨 run 关联/去重（F7 修复）
+                "jailbreak_template_hash": hashlib.md5(jb_template.encode("utf-8")).hexdigest()[:8],
             }
             entries.append(entry)
 

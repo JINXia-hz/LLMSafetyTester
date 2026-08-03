@@ -4,10 +4,11 @@ HDBSCAN 聚类主管线（post-test，整个测试流程结束后运行）。
 
 流程：
 1. 先验特征 → （可选弱监督特征权重）→ 阻尼白化空间（谱拐点截断）
-2. HDBSCAN 密度聚类 → flat labels（含噪声 -1）
-3. 聚类树 = single_linkage_tree_（scipy 兼容 linkage）
+2. HDBSCAN 密度聚类 → flat labels（含噪声 -1，仅作密度视图旁挂）
+3. 主标签 = scipy Ward linkage 树（同一白化坐标；HDBSCAN 的
+   single_linkage_tree_ 链式合并会退化，无法用于切层）
    → 树层 sweep + argmax → 关键层 k* + top3（前端缩放预设停点）
-4. 全簇命名（含小簇；噪声组命名为"稀疏区"）
+4. 全簇命名（含小簇；密度视图噪声组命名为"稀疏区"）
 5. （可选）后验簇效验证 ANOVA / Kruskal-Wallis（posterior.py）
 
 本模块不直接解析 eval 数据；反应相关输入由 posterior.py 准备。
@@ -138,7 +139,8 @@ def run_hdbscan_clustering(
         "method_count": n,
         "clustering_method": "ward_autok+hdbscan",
         "n_clusters": k_best,
-        "n_noise": 0,
+        # ward 主标签无噪声概念；取 HDBSCAN 密度视图的真实噪声数（同嵌套 hdbscan.n_noise）
+        "n_noise": n_noise,
         "chosen_k": k_best,
         "k0_log_growth": log_growth_k0(n),
         "top_ks": top_ks,
@@ -168,7 +170,7 @@ def run_hdbscan_clustering(
     if write:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         with open(CLUSTER_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
+            json.dump(report, f, ensure_ascii=False, indent=2, allow_nan=False)
         _export_matrix(labels, features, meta)
 
         artifacts = {

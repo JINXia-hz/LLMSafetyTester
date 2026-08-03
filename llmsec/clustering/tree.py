@@ -29,8 +29,13 @@ logger = get_logger(__name__)
 # auto-k：log 增长 + 候选集
 # ============================================================
 def log_growth_k0(n: int, k_min: int = TREE_K_MIN, k_max: int = TREE_K_MAX) -> int:
-    """聚类量随数据规模 log 增长：n=100→7, n=1000→10, n=10000→14。"""
-    return max(k_min, min(int(math.ceil(math.log2(max(n, 2)))), k_max))
+    """聚类量随数据规模 log 增长：n=100→7, n=1000→10, n=10000→14。
+
+    小样本时 k_min 下限按 n//4 收缩（n<16 时 TREE_K_MIN=4 会恒把 k0 抬到 4，
+    失去 log 增长意义）；n>=16 时下限即 TREE_K_MIN，行为不变。
+    """
+    lo = min(k_min, max(2, n // 4))
+    return max(lo, min(int(math.ceil(math.log2(max(n, 2)))), k_max))
 
 
 def candidate_ks(n: int) -> list[int]:

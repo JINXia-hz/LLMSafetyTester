@@ -28,7 +28,7 @@ from llmsec.core.config import (
 )
 from llmsec.core.io import load_done_ids, read_jsonl
 from llmsec.core.logging import setup_console
-from llmsec.core.text import MATH_TAX_SUFFIX_TEMPLATE, gen_math
+from llmsec.core.text import MATH_TAX_SUFFIX_TEMPLATE, NO_MATH_TAX_SENTINEL, gen_math
 from llmsec.evaluation.elo import ELOTracker
 from llmsec.evaluation.judge import (
     FAST_REFUSAL_PATTERNS,
@@ -245,10 +245,11 @@ def evaluate_single(prompt_text: str, expected_answer: int | None, target_client
             "error": api_result["error"],
         }
 
-    if expected_answer:
+    if expected_answer is not None and expected_answer != NO_MATH_TAX_SENTINEL:
         math_score, actual_answer = compute_math_score(content, expected_answer)
     else:
         # 哨兵：该条不注入数学题，跳过税的计量
+        # （显式比较而非真值判断：避免历史 answer=0 与哨兵碰撞的 F1 类 bug 复现）
         math_score, actual_answer = None, None
 
     # 目标自身检测信号
@@ -631,19 +632,22 @@ def build_summary(records: list[dict], all_results: list[dict],
         },
         "multi_round_stability": multi_round_stability,
         "math_score_distribution": {
-            "score_2": math_scores.count(2),
-            "score_1": math_scores.count(1),
-            "score_0": math_scores.count(0),
+            "score_2": probed_scores.count(2),
+            "score_1": probed_scores.count(1),
+            "score_0": probed_scores.count(0),
         },
     }
     return summary, judge_stats
 
 
-def update_elo(all_results: list[dict], summary: dict) -> None:
-    """由全量结果更新 ELO，并把 ELO 区块挂到 summary（仅内存，不写入汇总文件）。"""
+def update_elo(all_results: list[dict], summary: dict,
+               defender_name: str | None = None) -> None:
+    """由全量结果更新 ELO，并把 ELO 区块挂到 summary（仅内存，不写入汇总文件）。
+    defender_name 缺省时回退 TARGET_MODEL；pcap 等非 openai 目标可显式传入。"""
     tracker = ELOTracker()
     tracker.load(STATE_FILE)
-    defender_name = TARGET_MODEL
+    if defender_name is None:
+        defender_name = TARGET_MODEL
     for r in all_results:
         method = r.get("method", "unknown")
         score = r.get("eval_score", 0)

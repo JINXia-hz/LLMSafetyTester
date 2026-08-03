@@ -31,21 +31,10 @@ from pathlib import Path
 import subprocess
 import sys
 
-# 优先使用项目根目录下的 .venv，避免系统 Python 缺少依赖
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_VENV_PYTHON = _PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
-if _VENV_PYTHON.exists() and sys.executable != str(_VENV_PYTHON):
-    subprocess.run(
-        [str(_VENV_PYTHON), "-m", "llmsec.pipeline.runner"] + sys.argv[1:],
-        cwd=_PROJECT_ROOT,
-    )
-    sys.exit(0)
-
 import argparse
 import hashlib
 import json
 import os
-import re
 import shutil
 import sys
 import time
@@ -54,8 +43,15 @@ from typing import Optional
 
 from openai import OpenAI
 
-from llmsec.core.config import OUTPUT_DIR, RUNS_DIR, SAFE_TWINS_FILE, STATE_FILE
+from llmsec.core.config import (
+    ATTACK_SET_L1_FILE,
+    OUTPUT_DIR,
+    RUNS_DIR,
+    SAFE_TWINS_FILE,
+    STATE_FILE,
+)
 from llmsec.core.io import read_jsonl
+from llmsec.core.text import strip_math_tax
 from llmsec.core.logging import setup_console
 from llmsec.evaluation import (
     FAST_REFUSAL_PATTERNS,
@@ -88,7 +84,6 @@ from llmsec.params import (
     PORTRAIT_FPR_SAFE,
     PORTRAIT_MIN_CONFIDENCE,
     PORTRAIT_MIN_TESTED,
-    REQUEST_TIMEOUT,
     SAMPLER_INFOGAIN_ALPHA,
     SAMPLER_INFOGAIN_BETA,
     SAMPLER_INFOGAIN_GAMMA,
@@ -230,9 +225,7 @@ def get_or_create_twin(method_name: str, rec: dict, twin_cache: dict,
                         return t["safe_prompt"]
 
     # 按需生成
-    clean_prompt = re.sub(
-        r"\n*\s*在回答之前，请先计算以下数学题.*$", "", rec["prompt"], flags=re.DOTALL
-    ).strip()
+    clean_prompt = strip_math_tax(rec["prompt"])
 
     twin = generate_safe_twin(clean_prompt, twin_client)
     if twin is None:
@@ -378,7 +371,8 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
 
     # 加载已有 ELO
     tracker.load(STATE_FILE)
-    tested = set()
+    # resume 时已实测方法直接计入 tested，避免被重新选中二次计 Elo
+    tested = set(tracker.ground_truth_methods)
     all_results = []
     recent_results = {}
 
@@ -484,6 +478,8 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
 
     current_batch_size = batch_size
     prev_conv = None
+    # 兜底：max_rounds<=0 时循环不执行，下方 summary 仍引用 round_idx
+    round_idx = 0
     for round_idx in range(1, max_rounds + 1):
         untested = [m for m in all_methods if m not in tested]
         if not untested:
@@ -605,13 +601,17 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
 
     # ---- 攻击完成后最终聚类（post-test）+ 簇级安全分析 ----
     final_report = tracker.predictor.final_fit(records, all_results)
-    print(f"\n  🏁 最终聚类: {final_report.get('n_clusters', 0)} 簇 "
-          f"(噪声={final_report.get('n_noise', 0)}, k*={final_report.get('chosen_k', 0)}, "
-          f"silhouette={final_report.get('validation', {}).get('silhouette', 0):.4f})")
-    rv = final_report.get("reaction_validation", {})
-    if rv.get("available"):
-        print(f"     簇效验证: {rv.get('verdict')} "
-              f"(p={rv.get('p_anova')}, eta²={rv.get('eta2')})")
+    if final_report:
+        print(f"\n  🏁 最终聚类: {final_report.get('n_clusters', 0)} 簇 "
+              f"(噪声={final_report.get('n_noise', 0)}, k*={final_report.get('chosen_k', 0)}, "
+              f"silhouette={final_report.get('validation', {}).get('silhouette', 0):.4f})")
+        rv = final_report.get("reaction_validation", {})
+        if rv.get("available"):
+            print(f"     簇效验证: {rv.get('verdict')} "
+                  f"(p={rv.get('p_anova')}, eta²={rv.get('eta2')})")
+    else:
+        # 记录 <2 时 final_fit 返回 None，跳过聚类输出
+        print("\n  ⚠ 攻击记录不足（<2），跳过最终聚类输出")
 
     try:
         cluster_analysis = analyze_clusters(tracker)
@@ -968,17 +968,28 @@ def generate_recommendation(asr: float, fpr: float, level: str) -> str:
 # ============================================================
 # 主流程
 # ============================================================
+def _positive_int(value: str) -> int:
+    """argparse 类型：要求 >=1 的整数（用于 --max-rounds），非法值抛 argparse 错误。"""
+    try:
+        iv = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"无效整数: {value!r}")
+    if iv < 1:
+        raise argparse.ArgumentTypeError(f"必须 >= 1，当前为 {iv}")
+    return iv
+
+
 def main():
     parser = argparse.ArgumentParser(description="统一编排器 — 自适应安全评估流水线")
     parser.add_argument("--phase", type=str, default="all",
                         choices=["all", "1", "2"],
                         help="运行阶段: all/1(攻击)/2(过敏)")
-    parser.add_argument("--input", type=str, default="攻击集_L1.jsonl",
+    parser.add_argument("--input", type=str, default="attacks/l1.jsonl",
                         help="攻击集输入文件")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
                         help=f"每轮测试的攻击数（默认{DEFAULT_BATCH_SIZE}）")
-    parser.add_argument("--max-rounds", type=int, default=DEFAULT_MAX_ROUNDS,
-                        help=f"最大自适应轮次（默认{DEFAULT_MAX_ROUNDS}）")
+    parser.add_argument("--max-rounds", type=_positive_int, default=DEFAULT_MAX_ROUNDS,
+                        help=f"最大自适应轮次（默认{DEFAULT_MAX_ROUNDS}，必须 >= 1）")
     parser.add_argument("--twin-window", type=int, default=None,
                         help="过敏检测方法数上限；未指定时按ELO边界置信度自适应（置信度越低窗口越大）")
     parser.add_argument("--cluster-retrain-threshold", type=int, default=10,
@@ -1008,6 +1019,9 @@ def main():
 
     # 加载攻击集
     input_path = os.path.join(OUTPUT_DIR, args.input) if not os.path.isabs(args.input) else args.input
+    # 旧文件名兼容：basename 为旧名且文件不存在时，回退到新约定路径 output/attacks/l1.jsonl
+    if not os.path.exists(input_path) and os.path.basename(args.input) == "攻击集_L1.jsonl":
+        input_path = str(ATTACK_SET_L1_FILE)
     if not os.path.exists(input_path):
         print(f"❌ 攻击集不存在: {input_path}")
         print("   提示: python -m llmsec.attacks.generate 或 python -m llmsec.attacks.harmbench")
@@ -1034,7 +1048,7 @@ def main():
     print()
 
     # 初始化客户端
-    target_client = OpenAI(api_key=TARGET_API_KEY, base_url=TARGET_BASE_URL, timeout=REQUEST_TIMEOUT)
+    # 注意：不再创建 target_client——evaluate_single 忽略该参数，实际走 call_target 路由
     twin_client = OpenAI(api_key=GENERATOR_API_KEY, base_url=GENERATOR_BASE_URL)
     judge_client = create_judge_client()
     judge = Judge(judge_client)
@@ -1057,7 +1071,7 @@ def main():
             print("  ✅ 强制重建完成，已更新所有方法预测 Elo")
 
         attack_summary = run_attack_phase(
-            records, target_client, judge, tracker,
+            records, None, judge, tracker,
             batch_size=args.batch_size, max_rounds=args.max_rounds,
             attack_file=runner_attack_file,
             sampler=args.sampler,
@@ -1086,7 +1100,7 @@ def main():
         print(f"  📏 本次过敏检测窗口：{n_window} 个方法 "
               f"(ELO边界置信度={boundary_info.get('confidence', 0)*100:.0f}%)")
         allergy_summary = run_allergy_phase(
-            method_records, target_client, twin_client, judge, tracker,
+            method_records, None, twin_client, judge, tracker,
             n_window=n_window,
             allergy_file=runner_allergy_file,
         )
@@ -1213,4 +1227,15 @@ def main():
 
 
 if __name__ == "__main__":
+    # 优先使用项目根目录下的 .venv，避免系统 Python 缺少依赖。
+    # 注意：必须在 __main__ 内而非模块顶层，否则 import 本模块（如测试）会被杀进程。
+    _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    _VENV_PYTHON = _PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
+    if _VENV_PYTHON.exists() and sys.executable != str(_VENV_PYTHON):
+        _proc = subprocess.run(
+            [str(_VENV_PYTHON), "-m", "llmsec.pipeline.runner"] + sys.argv[1:],
+            cwd=_PROJECT_ROOT,
+        )
+        # 透传子进程退出码，避免失败被吞成 0
+        sys.exit(_proc.returncode)
     main()

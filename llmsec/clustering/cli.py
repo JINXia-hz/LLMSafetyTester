@@ -2,8 +2,8 @@
 """
 攻击聚类分析 CLI 入口（post-test 设计：聚类在测试流程结束后运行）
 
-流程：features 提取 → （可选弱监督特征权重）→ 阻尼白化 → HDBSCAN
-→ single-linkage 树关键层 auto-k → 全簇命名 → ANOVA 簇效验证。
+流程：features 提取 → （可选弱监督特征权重）→ 阻尼白化 → HDBSCAN 密度视图
+→ Ward 树关键层 auto-k（主标签）→ 全簇命名 → ANOVA 簇效验证。
 
 用法:
     python -m llmsec.clustering.cli                     # HDBSCAN 聚类
@@ -73,7 +73,7 @@ def main():
                 else:
                     serializable[m][block_name] = list(block_data) if hasattr(block_data, "__iter__") else float(block_data)
         with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(serializable, f, ensure_ascii=False, indent=2)
+            json.dump(serializable, f, ensure_ascii=False, indent=2, allow_nan=False)
         print(f"\n📁 特征导出: {out_path}")
         return
 

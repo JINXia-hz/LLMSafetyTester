@@ -28,9 +28,10 @@ from llmsec.core import (
     append_jsonl,
     create_openai_client,
     load_done_ids,
+    retry_call,
     setup_console,
 )
-from llmsec.core.text import MATH_TAX_PATTERN, MATH_TAX_SUFFIX_TEMPLATE, gen_math
+from llmsec.core.text import inject_math_tax
 
 # 修复Windows CMD GBK编码导致emoji/Unicode输出报错
 setup_console()
@@ -51,13 +52,19 @@ TEMPERATURE = 0.9      # 较高温度增加多样性
 MAX_TOKENS = 4096
 API_DELAY = 1.0        # 每次API调用间隔(秒)，避免触发速率限制
 MAX_RETRIES = 3        # 失败重试次数
+RETRY_DELAY = 2.0      # 重试间隔（秒）：内容类失败（JSON解析失败/初稿条数不符）
+RETRY_DELAY_API = 5.0  # 重试间隔（秒）：API 类失败（含 429 限流），间隔更长
+
+
+class _DraftMismatchError(Exception):
+    """初稿条数与 harm_types 不符（内容类失败），触发重试。"""
 
 # ============================================================
 # 有害类别定义
 # ============================================================
 # ============================================================
 # 数学题生成（越狱税探针）——实现已移至 llmsec.core.text，
-# 此处经上方 import 复用 gen_math / inject_math_tax，保持行为一致。
+# 此处经上方 import 复用 inject_math_tax（内部调 gen_math 并剥离旧探针），保持行为一致。
 # ============================================================
 
 
@@ -223,75 +230,111 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
     """
     两轮生成：初稿 → 自我审查重写 → 返回最终版本。
     """
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            # ---- 第1轮：生成初稿 ----
-            gen_prompt = build_gen_prompt(method, harm_types)
-            resp1 = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_ROLE},
-                    {"role": "user", "content": gen_prompt},
-                ],
-                temperature=TEMPERATURE,
-                max_tokens=MAX_TOKENS,
-            )
-            raw1 = resp1.choices[0].message.content.strip()
-            m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw1, re.DOTALL)
-            if m:
-                raw1 = m.group(1)
-            drafts = json.loads(raw1)
-            if not (isinstance(drafts, list) and len(drafts) == len(harm_types)):
-                print(f"  ⚠ 初稿条数不符，重试...")
-                time.sleep(2)
-                continue
 
-            # ---- 第2轮：审查重写 ----
-            time.sleep(0.5)
-            critique_prompt = build_critique_prompt(drafts, method)
-            resp2 = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_ROLE},
-                    {"role": "user", "content": critique_prompt},
-                ],
-                temperature=TEMPERATURE,
-                max_tokens=MAX_TOKENS,
-            )
-            raw2 = resp2.choices[0].message.content.strip()
-            m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw2, re.DOTALL)
-            if m:
-                raw2 = m.group(1)
-            reviewed = json.loads(raw2)
-            if not (isinstance(reviewed, list) and len(reviewed) == len(harm_types)):
-                # 审查返回异常则退回初稿
-                print(f"  ⚠ 审查轮返回异常，使用初稿")
-                return drafts
+    def _two_round():
+        # ---- 第1轮：生成初稿 ----
+        gen_prompt = build_gen_prompt(method, harm_types)
+        resp1 = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYSTEM_ROLE},
+                {"role": "user", "content": gen_prompt},
+            ],
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
+        )
+        raw1 = resp1.choices[0].message.content.strip()
+        m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw1, re.DOTALL)
+        if m:
+            raw1 = m.group(1)
+        drafts = json.loads(raw1)
+        if not (isinstance(drafts, list) and len(drafts) == len(harm_types)):
+            raise _DraftMismatchError()
 
-            # 从审查结果提取prompt
-            final_records = []
-            for i, item in enumerate(reviewed):
-                final_records.append({
-                    "harm_type": harm_types[i],
-                    "prompt": item.get("prompt", drafts[i]["prompt"]),
-                })
-            return final_records
+        # ---- 第2轮：审查重写 ----
+        time.sleep(0.5)
+        critique_prompt = build_critique_prompt(drafts, method)
+        resp2 = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYSTEM_ROLE},
+                {"role": "user", "content": critique_prompt},
+            ],
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
+        )
+        raw2 = resp2.choices[0].message.content.strip()
+        m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw2, re.DOTALL)
+        if m:
+            raw2 = m.group(1)
+        reviewed = json.loads(raw2)
+        if not (isinstance(reviewed, list) and len(reviewed) == len(harm_types)):
+            # 审查返回异常则退回初稿
+            print(f"  ⚠ 审查轮返回异常，使用初稿")
+            return drafts
 
-        except json.JSONDecodeError as e:
+        # 从审查结果提取prompt
+        final_records = []
+        for i, item in enumerate(reviewed):
+            final_records.append({
+                "harm_type": harm_types[i],
+                "prompt": item.get("prompt", drafts[i]["prompt"]),
+            })
+        return final_records
+
+    def _on_retry(attempt, e):
+        # 内容类失败（条数不符/JSON解析）短间隔；API 类失败（含 429）长间隔
+        if isinstance(e, _DraftMismatchError):
+            print(f"  ⚠ 初稿条数不符，重试...")
+            return RETRY_DELAY
+        if isinstance(e, json.JSONDecodeError):
             print(f"  ⚠ JSON解析失败 (第{attempt}轮): {e}")
-            if attempt < MAX_RETRIES:
-                time.sleep(2)
-        except Exception as e:
-            print(f"  ⚠ API调用失败 (第{attempt}轮): {e}")
-            if attempt < MAX_RETRIES:
-                time.sleep(5)
+            return RETRY_DELAY
+        print(f"  ⚠ API调用失败 (第{attempt}轮): {e}")
+        return RETRY_DELAY_API
 
-    return None
+    try:
+        return retry_call(
+            _two_round,
+            retries=MAX_RETRIES,
+            delay=RETRY_DELAY,
+            on_retry=_on_retry,
+        )
+    except Exception:
+        return None
 
 
 # ============================================================
 # 主流程
 # ============================================================
+def build_entries(method, records, harm_types):
+    """
+    将一个方法的 API 生成记录转为 JSONL entry 列表。
+    每条记录独立调用 inject_math_tax 出题注入（M6 修复：同方法多条记录
+    不再共用同一道题，避免探针高度相关导致统计上独立样本数塌缩）。
+    """
+    entries = []
+    for j, rec in enumerate(records):
+        record_id = f"{method['id']}-{j+1:03d}"
+        # 将数学题嵌入到prompt末尾（AI不感知，脚本静默处理）
+        base_prompt = rec.get("prompt", "").strip()
+        # inject_math_tax 内部会先剥离旧探针（含 AI 可能自行附加的数学题文本），
+        # 再随机出新题追加，无需在此预清理
+        full_prompt, math_problem, expected_answer = inject_math_tax(base_prompt)
+        entries.append({
+            "id": record_id,
+            "category": method["category"],
+            "category_name": method["category_name"],
+            "method": method["method"],
+            "harm_type": rec.get("harm_type", harm_types[j]),
+            "prompt": full_prompt,
+            "math_problem": math_problem,
+            "expected_answer": expected_answer,
+            "build_difficulty": "L1",
+        })
+    return entries
+
+
 def main():
     parser = argparse.ArgumentParser(description="生成L1级LLM攻击集")
     parser.add_argument(
@@ -391,32 +434,11 @@ def main():
             print(f"         ❌ 生成失败（已重试{MAX_RETRIES}次）\n")
             continue
 
-        # 生成数学题（每种方法一道题，5条prompt共用）
-        math_problem, expected_answer = gen_math()
-
-        # 写入JSONL
+        # 写入JSONL（每条记录独立出题注入，见 build_entries）
         generated_ids = []
-        for j, rec in enumerate(records):
-            record_id = f"{mid}-{j+1:03d}"
-            # 将数学题嵌入到prompt末尾（AI不感知，脚本静默处理）
-            base_prompt = rec.get("prompt", "").strip()
-            # 清理AI可能自行附加的任何数学题文本（inject_math_tax 内部也会剥离，双保险）
-            base_prompt = MATH_TAX_PATTERN.sub("", base_prompt).strip()
-            # 复用已生成的同一道题（5条共用），不走 inject_math_tax 的随机出题
-            full_prompt = f"{base_prompt}\n\n{MATH_TAX_SUFFIX_TEMPLATE.format(problem=math_problem)}"
-            entry = {
-                "id": record_id,
-                "category": method["category"],
-                "category_name": method["category_name"],
-                "method": method["method"],
-                "harm_type": rec.get("harm_type", harm_types[j]),
-                "prompt": full_prompt,
-                "math_problem": math_problem,
-                "expected_answer": expected_answer,
-                "build_difficulty": "L1",
-            }
+        for entry in build_entries(method, records, harm_types):
             append_jsonl(output_file, entry)
-            generated_ids.append(record_id)
+            generated_ids.append(entry["id"])
 
         done_ids.add(mid)
         success_count += 1

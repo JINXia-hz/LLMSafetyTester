@@ -16,6 +16,7 @@ import requests
 import urllib3
 
 from llmsec.core.config import load_env
+from llmsec.core.llm import retry_call
 from llmsec.core.text import estimate_tokens, strip_math_tax
 from llmsec.targets.base import TargetClient
 
@@ -26,6 +27,8 @@ load_env()
 
 # ============================================================
 # 配置（与原 targets.py 一致：env 覆盖，内网地址为默认值）
+# 注意：以下常量是 import 期固化的默认值；实际使用处（建客户端/发请求）
+# 会重新读 env，保证 dashboard 等长跑进程运行期改 os.environ 也生效。
 # ============================================================
 PCAP_JUDGE_URL = os.getenv(
     "PCAP_JUDGE_URL",
@@ -36,6 +39,16 @@ PCAP_PROMPT_KEY = os.getenv("PCAP_PROMPT_KEY", "custom:dev")
 
 REQUEST_TIMEOUT = 90.0   # PCAP 判读较慢
 MAX_RETRIES = 3
+RETRY_DELAY = 3.0        # 重试间隔（秒）
+
+
+class _PcapHttpError(Exception):
+    """PCAP API 返回 5xx/429（瞬时故障）；携带响应与耗时，供重试耗尽后构造错误结果。"""
+
+    def __init__(self, resp, latency: float):
+        super().__init__(f"HTTP {resp.status_code}")
+        self.resp = resp
+        self.latency = latency
 
 # 模板请求体（与原 targets.py / probe_victim.py 一致，只改 log 字段）
 BASE_PAYLOAD = {
@@ -83,6 +96,12 @@ def build_pcap_log(prompt_text: str, strip_math: bool = True) -> str:
 def build_pcap_payload(prompt_text: str, strip_math: bool = True) -> dict:
     """基于 BASE_PAYLOAD 模板构造完整请求体，log 字段嵌入攻击 prompt。"""
     payload = dict(BASE_PAYLOAD)
+    # env 惰性读取：model/prompt_key 以模块常量为默认，运行期改 os.environ 生效
+    # （注意整体替换 model_config，避免就地修改 BASE_PAYLOAD 的共享子 dict）
+    payload["model_config"] = {
+        "version_name": os.getenv("PCAP_MODEL_VERSION", PCAP_MODEL_VERSION),
+    }
+    payload["pcap_judge_prompt_key"] = os.getenv("PCAP_PROMPT_KEY", PCAP_PROMPT_KEY)
     payload["log"] = build_pcap_log(prompt_text, strip_math=strip_math)
     return payload
 
@@ -97,78 +116,90 @@ class PcapJudgeTargetClient(TargetClient):
 
     def __init__(
         self,
-        url: str = PCAP_JUDGE_URL,
+        url: str | None = None,
         timeout: float = REQUEST_TIMEOUT,
         max_retries: int = MAX_RETRIES,
     ):
-        self.url = url
+        # env 惰性读取：url 缺省时以模块常量为默认，长跑进程运行期改 env 生效
+        self.url = url or os.getenv("PCAP_JUDGE_URL", PCAP_JUDGE_URL)
         self.timeout = timeout
         self.max_retries = max_retries
 
     def call(self, prompt: str) -> dict:
         payload = build_pcap_payload(prompt)
 
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                t0 = time.perf_counter()
-                resp = requests.post(
-                    self.url,
-                    json=payload,
-                    timeout=self.timeout,
-                    verify=False,
-                )
-                latency = (time.perf_counter() - t0) * 1000
+        def _do_request():
+            t0 = time.perf_counter()
+            resp = requests.post(
+                self.url,
+                json=payload,
+                timeout=self.timeout,
+                verify=False,
+            )
+            latency = (time.perf_counter() - t0) * 1000
 
-                if resp.status_code != 200:
-                    return {
-                        "content": "",
-                        "latency_ms": round(latency, 1),
-                        "tokens_prompt": estimate_tokens(prompt),
-                        "tokens_completion": 0,
-                        "error": f"HTTP {resp.status_code}: {resp.text[:200]}",
-                        "target_refused": False,
-                        "meta": {"backend": self.backend_name, "status": resp.status_code},
-                    }
+            if resp.status_code != 200:
+                # 5xx/429 视为瞬时故障，抛出后由 retry_call 按固定间隔重试；
+                # 其余 4xx 是确定性错误，立即返回不重试
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    raise _PcapHttpError(resp, latency)
+                return self._http_error_result(prompt, resp, latency)
 
-                data = resp.json()
-                pred = data.get("pred", "")
-                target_refused = pred == "攻击"
-                text = data.get("text", "")
+            data = resp.json()
+            pred = data.get("pred", "")
+            target_refused = pred == "攻击"
+            text = data.get("text", "")
 
-                if data.get("error_code", -1) != 0:
-                    return {
-                        "content": text,
-                        "latency_ms": round(latency, 1),
-                        "tokens_prompt": estimate_tokens(prompt),
-                        "tokens_completion": estimate_tokens(text),
-                        "error": f"API error_code={data.get('error_code')}",
-                        "target_refused": target_refused,
-                        "meta": {
-                            "backend": self.backend_name,
-                            "pred": pred,
-                            "error_code": data.get("error_code"),
-                        },
-                    }
-
+            if data.get("error_code", -1) != 0:
                 return {
                     "content": text,
                     "latency_ms": round(latency, 1),
                     "tokens_prompt": estimate_tokens(prompt),
                     "tokens_completion": estimate_tokens(text),
-                    "error": None,
+                    "error": f"API error_code={data.get('error_code')}",
                     "target_refused": target_refused,
                     "meta": {
                         "backend": self.backend_name,
                         "pred": pred,
-                        "threat_type": data.get("threat_type"),
-                        "attack_result": data.get("attack_result"),
+                        "error_code": data.get("error_code"),
                     },
                 }
 
-            except Exception as e:
-                if attempt >= self.max_retries:
-                    return self._error_result(
-                        f"{type(e).__name__}: {e}",
-                        {"backend": self.backend_name, "attempts": attempt},
-                    )
-                time.sleep(3)
+            return {
+                "content": text,
+                "latency_ms": round(latency, 1),
+                "tokens_prompt": estimate_tokens(prompt),
+                "tokens_completion": estimate_tokens(text),
+                "error": None,
+                "target_refused": target_refused,
+                "meta": {
+                    "backend": self.backend_name,
+                    "pred": pred,
+                    "threat_type": data.get("threat_type"),
+                    "attack_result": data.get("attack_result"),
+                },
+            }
+
+        try:
+            return retry_call(_do_request, retries=self.max_retries, delay=RETRY_DELAY)
+        except _PcapHttpError as e:
+            # 5xx/429 重试耗尽：返回结构与单次非 200 一致
+            return self._http_error_result(prompt, e.resp, e.latency)
+        except Exception as e:
+            return self._error_result(
+                f"{type(e).__name__}: {e}",
+                {"backend": self.backend_name, "attempts": self.max_retries},
+            )
+
+    def _http_error_result(self, prompt: str, resp, latency: float) -> dict:
+        """非 200 响应的统一错误结果（4xx 立即返回 / 5xx/429 重试耗尽共用）。"""
+        return {
+            "content": "",
+            "latency_ms": round(latency, 1),
+            "tokens_prompt": estimate_tokens(prompt),
+            # 与 error_code/成功分支一致：按返回体估算 token，而非硬编码 0
+            "tokens_completion": estimate_tokens(resp.text),
+            "error": f"HTTP {resp.status_code}: {resp.text[:200]}",
+            "target_refused": False,
+            "meta": {"backend": self.backend_name, "status": resp.status_code},
+        }
