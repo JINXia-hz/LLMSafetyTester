@@ -234,9 +234,12 @@ def _load_elo_tracker() -> ELOTracker | None:
 
 
 def build_tree(method_stats: dict[str, dict], allergy_data: dict,
-               elo_ratings: dict) -> dict:
+               elo_ratings: dict, tax_info: dict | None = None) -> dict:
     """
     构建多维树形安全画像。
+
+    tax_info: 可选，runner 的越狱税聚合块（含 baseline 对比），
+              透传进 overall.jailbreak_tax 供报告/前端展示。
 
     返回:
     {
@@ -452,6 +455,7 @@ def build_tree(method_stats: dict[str, dict], allergy_data: dict,
             "jailbreak_tax_mean": (
                 round(sum(taxed_means) / len(taxed_means), 2) if taxed_means else None
             ),
+            "jailbreak_tax": tax_info,
         },
         "dimensions": dimensions,
         "top_threats": top_threats,
@@ -638,6 +642,18 @@ def generate_narrative(tree: dict, output_dir) -> str:
     return generate_fallback_report(tree)
 
 
+def _fallback_tax_line(overall: dict) -> str:
+    """fallback 报告的越狱税行：有基线对比数据时对比式呈现。"""
+    tax = overall.get("jailbreak_tax") or {}
+    if tax.get("baseline_accuracy") is not None:
+        return (f"- 越狱税: 基线正确率 {tax['baseline_accuracy']*100:.0f}% → "
+                f"攻击下 {tax['attack_accuracy']*100:.0f}%"
+                f"（退化 {tax['accuracy_drop']*100:.0f}%）")
+    if overall.get("jailbreak_tax_mean") is not None:
+        return f"- 越狱税均值: {overall['jailbreak_tax_mean']:.2f}（无基线对照）"
+    return "- 越狱税: 未测试（攻击集无数学探针）"
+
+
 def generate_fallback_report(tree: dict) -> str:
     """当LLM不可用时的fallsback纯文本报告。"""
     o = tree["overall"]
@@ -652,8 +668,7 @@ def generate_fallback_report(tree: dict) -> str:
         f"- FPR (误杀率): {o['fpr']*100:.1f}%",
         f"- ELO安全边界: {o['elo_boundary']:.0f} (置信度 {o['elo_confidence']*100:.0f}%)",
         f"- 测试方法数: {o['total_methods']}，总测试次数: {o['total_tests']}",
-        f"- 越狱税均值: {o['jailbreak_tax_mean']:.2f}" if o.get('jailbreak_tax_mean') is not None
-        else "- 越狱税: 未测试（攻击集无数学探针）",
+        _fallback_tax_line(o),
         "",
         "## 高威胁攻击 (TOP 10，按 surprise_score / max_weakness_gap 降序)",
         "*真正危险的是：ELO 不高，却成功突破了防御的攻击方法。*",

@@ -75,14 +75,21 @@ async function loadOverview() {
     $('ov_boundary').textContent = fmtNum(d.boundary_elo, 0);
     $('ov_conf').textContent = fmtPct(d.boundary_confidence);
     $('ov_tested').textContent = `${d.total_tested}/${d.total_methods}`;
-    $('ov_above').textContent = d.methods_above_boundary;
+    $('ov_above').textContent = d.predicted_above_boundary != null
+      ? `${d.methods_above_boundary} (实测${d.tested_above_boundary}/预测${d.predicted_above_boundary})`
+      : d.methods_above_boundary;
 
-    // 越狱税：null = 该批未测（攻击集无数学探针）
-    if (d.jailbreak_tax_mean != null) {
+    // 越狱税：优先基线对比呈现；null = 该批未测（攻击集无数学探针）
+    if (d.jailbreak_tax_baseline_accuracy != null && d.jailbreak_tax_attack_accuracy != null) {
+      $('ov_tax').textContent = `${fmtPct(d.jailbreak_tax_baseline_accuracy)} → ${fmtPct(d.jailbreak_tax_attack_accuracy)}`;
+      const drop = d.jailbreak_tax_drop != null ? `退化 ${fmtPct(d.jailbreak_tax_drop)}` : '';
+      const probed = d.jailbreak_tax_probed != null ? `探针 ${d.jailbreak_tax_probed} 条` : '';
+      $('ov_tax_sub').textContent = [drop, probed].filter(Boolean).join(' · ');
+    } else if (d.jailbreak_tax_mean != null) {
       $('ov_tax').textContent = fmtNum(d.jailbreak_tax_mean, 2);
       const hi = d.jailbreak_tax_high_ratio != null ? `高税占比 ${fmtPct(d.jailbreak_tax_high_ratio)}` : '';
       const probed = d.jailbreak_tax_probed != null ? `探针 ${d.jailbreak_tax_probed} 条` : '';
-      $('ov_tax_sub').textContent = [hi, probed].filter(Boolean).join(' · ');
+      $('ov_tax_sub').textContent = ['无基线对照', hi, probed].filter(Boolean).join(' · ');
     } else {
       $('ov_tax').textContent = '未测试';
       $('ov_tax_sub').textContent = '攻击集无数学探针';

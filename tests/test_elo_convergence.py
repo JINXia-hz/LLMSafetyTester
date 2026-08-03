@@ -186,6 +186,42 @@ def test_convergence_true_positive() -> int:
     return 0
 
 
+def test_boundary_split_tested_predicted() -> int:
+    """compute_security_boundary 应按实测/预测拆分边界以上统计。"""
+    tracker = ELOTracker()
+    defender = "test-model"
+    tracker.defender_ratings[defender] = 1500.0
+
+    # 2 个实测方法（1 个在边界上）、2 个预测方法（1 个在边界上）
+    tracker.attacker_ratings = {
+        "tested_high": 1600.0,
+        "tested_low": 1400.0,
+        "pred_high": 1600.0,
+        "pred_low": 1400.0,
+    }
+    tracker.predictor.ground_truth = {
+        "tested_high": {"elo": 1600.0},
+        "tested_low": {"elo": 1400.0},
+    }
+    tracker.ground_truth_methods = {"tested_high", "tested_low"}
+
+    b = tracker.compute_security_boundary(defender)
+    if b.get("tested_above_boundary") != 1:
+        print(f"❌ tested_above_boundary={b.get('tested_above_boundary')}, expected 1")
+        return 1
+    if b.get("predicted_above_boundary") != 1:
+        print(f"❌ predicted_above_boundary={b.get('predicted_above_boundary')}, expected 1")
+        return 1
+    if b.get("methods_above_boundary") != 2:
+        print(f"❌ methods_above_boundary={b.get('methods_above_boundary')}, expected 2")
+        return 1
+    if b["tested_above_boundary"] + b["predicted_above_boundary"] != b["methods_above_boundary"]:
+        print("❌ 拆分之和 != 总数")
+        return 1
+    print("✅ 边界以上实测/预测拆分通过")
+    return 0
+
+
 def main() -> int:
     tests = [
         test_strip_variant_suffix,
@@ -194,6 +230,7 @@ def main() -> int:
         test_predict_base_variant_fallback,
         test_convergence_resists_false_positive,
         test_convergence_true_positive,
+        test_boundary_split_tested_predicted,
     ]
     for t in tests:
         if t() != 0:

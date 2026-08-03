@@ -103,7 +103,14 @@ def _discover_runs() -> list[dict]:
     return runs
 
 
-def _load_state() -> dict:
+def _load_state(run: str | None = None) -> dict:
+    """加载 Elo state。指定 run 时优先读 run 目录内的快照（runner 结束时保存），
+    避免全局 state 漂移导致历史批次的实测/预测标记错配；无快照则回退全局。"""
+    run_dir = _run_dir(run)
+    if run_dir is not None:
+        snapshot = load_json(run_dir / "state.json")
+        if snapshot:
+            return snapshot
     return load_json(STATE_FILE)
 
 
@@ -152,7 +159,7 @@ async def api_overview(run: str | None = None):
     report = load_json(run_dir / "runner_report.json")
     tree = load_json(run_dir / "security_tree.json")
     overall = tree.get("overall", {})
-    state = _load_state()
+    state = _load_state(run)
 
     attack = report.get("attack_phase", {})
     elo = report.get("elo", {})
@@ -167,7 +174,7 @@ async def api_overview(run: str | None = None):
     conv_score = _convergence_score(state)
 
     # 越狱税：优先 runner_report 的聚合块（新 run），回退 security_tree.overall（旧 run）
-    tax_info = attack.get("jailbreak_tax") or {}
+    tax_info = attack.get("jailbreak_tax") or overall.get("jailbreak_tax") or {}
     tax_mean = tax_info.get("tax_mean")
     if tax_mean is None:
         tax_mean = overall.get("jailbreak_tax_mean")
@@ -206,12 +213,17 @@ async def api_overview(run: str | None = None):
         "boundary_elo": overall.get("elo_boundary", elo.get("boundary_elo")),
         "boundary_confidence": round(confidence, 4),
         "methods_above_boundary": elo.get("methods_above_boundary", 0),
+        "tested_above_boundary": elo.get("tested_above_boundary", 0),
+        "predicted_above_boundary": elo.get("predicted_above_boundary", 0),
         "total_methods": total_methods,
         "allergy_tested": allergy.get("total_tested", 0),
         "allergic_count": allergy.get("allergic_count", 0),
         "jailbreak_tax_mean": tax_mean,
         "jailbreak_tax_high_ratio": tax_high_ratio,
         "jailbreak_tax_probed": tax_probed,
+        "jailbreak_tax_attack_accuracy": tax_info.get("attack_accuracy"),
+        "jailbreak_tax_baseline_accuracy": tax_info.get("baseline_accuracy"),
+        "jailbreak_tax_drop": tax_info.get("accuracy_drop"),
         "radar": radar,
         "harm_type_asr": harm_type_asr,
     }
@@ -224,7 +236,7 @@ async def api_threats(run: str | None = None):
         return {"available": False}
 
     tree = load_json(run_dir / "security_tree.json")
-    state = _load_state()
+    state = _load_state(run)
     ratings = state.get("attacker_ratings", {})
     pred_std = state.get("attacker_pred_std", {})
     ground_truth = set(state.get("ground_truth", {}).keys())
@@ -257,8 +269,8 @@ async def api_threats(run: str | None = None):
 
 
 @app.get("/api/elo")
-async def api_elo():
-    state = _load_state()
+async def api_elo(run: str | None = None):
+    state = _load_state(run)
     ratings = state.get("attacker_ratings", {})
     pred_std = state.get("attacker_pred_std", {})
     ground_truth = set(state.get("ground_truth", {}).keys())

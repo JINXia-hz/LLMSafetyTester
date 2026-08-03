@@ -188,11 +188,79 @@ def test_runner_aggregation() -> int:
     rc |= _check(abs(s["high_tax_ratio"] - round(1 / 3, 4)) < 1e-9, "高税(tax>1)占比 1/3")
     rc |= _check(s["math_dist"] == {"correct": 1, "wrong": 1, "no_format": 2},
                  "math_dist 三档分布")
+    rc |= _check(s["attack_accuracy"] == 0.25, "attack_accuracy = 1/4")
+    rc |= _check(s["baseline_accuracy"] is None and s["accuracy_drop"] is None,
+                 "无 baseline 时对比字段为 None")
+
+    # 带基线：呈现为对比（基线 80% → 攻击下 25%，退化 55%）
+    s2 = summarize_jailbreak_tax(results, baseline={"samples": 10, "accuracy": 0.8,
+                                                    "wrong": 2, "no_format": 0})
+    rc |= _check(s2["baseline_accuracy"] == 0.8, "baseline_accuracy 透传")
+    rc |= _check(abs(s2["accuracy_drop"] - 0.55) < 1e-9, "accuracy_drop = 基线 − 攻击下")
 
     empty = summarize_jailbreak_tax([{"math_score": None, "is_harmful": True,
                                       "jailbreak_tax": None}])
     rc |= _check(empty["probed"] == 0 and empty["tax_mean"] is None,
                  "全无探针 → probed=0, tax_mean=None")
+    return rc
+
+
+def test_measure_baseline_mock() -> int:
+    rc = 0
+    from llmsec.evaluation import evaluator as ev2
+
+    # 模拟：6 对、3 错、1 无格式、2 次 API 错误（不计入）
+    answers = iter([2, 2, 2, 2, 2, 2, 1, 1, 1, 0])
+    calls = {"n": 0}
+
+    def fake_call_target(prompt):
+        calls["n"] += 1
+        if calls["n"] > 10:  # 最后两次模拟 API 错误（n=10 道题 + 2 错误 → 共调 12 次）
+            return {"content": "", "error": "boom", "latency_ms": 0,
+                    "tokens_prompt": 0, "tokens_completion": 0, "meta": {}}
+        s = next(answers)
+        content = {2: "[MATH:999] 过程略", 1: "[MATH:1] 过程略", 0: "没有格式"}[s]
+        return {"content": content, "error": None, "latency_ms": 1,
+                "tokens_prompt": 1, "tokens_completion": 1, "meta": {}}
+
+    orig_ct, orig_gm = ev2.call_target, ev2.gen_math
+    try:
+        ev2.call_target = fake_call_target
+        ev2.gen_math = lambda: ("(1 × 1) = ?", 999)  # 答 999 即对
+        b = ev2.measure_math_baseline(10)
+    finally:
+        ev2.call_target, ev2.gen_math = orig_ct, orig_gm
+
+    rc |= _check(b["samples"] == 10, "API 错误的探针不计入 samples")
+    rc |= _check(b["accuracy"] == 0.6, "baseline accuracy = 6/10")
+    rc |= _check(b["wrong"] == 3 and b["no_format"] == 1, "错误构成正确")
+    return rc
+
+
+def test_gen_math_difficulty() -> int:
+    rc = 0
+    import re
+    from llmsec.params import MATH_TAX_DIV_K_MAX, MATH_TAX_MUL_MAX, MATH_TAX_SUB_MAX
+    pat = re.compile(r"\(\((\d+) × (\d+)\) \+ \((\d+) ÷ (\d+)\)\) - (\d+) = \?")
+    for _ in range(50):
+        problem, answer = gen_math()
+        m = pat.fullmatch(problem)
+        a, b, c, d, e = map(int, m.groups())
+        if not (3 <= a <= MATH_TAX_MUL_MAX and 3 <= b <= MATH_TAX_MUL_MAX
+                and c % d == 0 and 3 <= c // d <= MATH_TAX_DIV_K_MAX
+                and 2 <= e <= MATH_TAX_SUB_MAX):
+            rc |= _check(False, f"题目参数越界: {problem}")
+            break
+        if ((a * b) + (c // d)) - e != answer:
+            rc |= _check(False, f"答案不可复算: {problem} → {answer}")
+            break
+    else:
+        print("✅ gen_math 50 题参数范围与答案复算全部正确")
+    # CoT 模板含过程提示，且剥离前缀仍兼容
+    from llmsec.core.text import MATH_TAX_SUFFIX_TEMPLATE
+    rc |= _check("可展示计算过程" in MATH_TAX_SUFFIX_TEMPLATE, "模板允许展示计算过程(CoT)")
+    rc |= _check(MATH_TAX_SUFFIX_TEMPLATE.startswith("在回答之前，请先计算以下数学题"),
+                 "模板前缀与 MATH_TAX_PATTERN 剥离规则兼容")
     return rc
 
 
@@ -204,6 +272,8 @@ def main() -> int:
     rc |= test_evaluate_single_sentinel()
     rc |= test_harmbench_generation()
     rc |= test_runner_aggregation()
+    rc |= test_measure_baseline_mock()
+    rc |= test_gen_math_difficulty()
     print()
     if rc == 0:
         print("🎉 全部越狱税测试通过")

@@ -27,6 +27,7 @@ from llmsec.evaluation.evaluator import (
     compute_math_score,
     evaluate_single,
     extract_math_answer,
+    measure_math_baseline,
 )
 from llmsec.evaluation.judge import (
     FAST_HARMFUL_SIGNALS,
@@ -54,7 +55,7 @@ __all__ = [
     "analyze_clusters", "save_cluster_analysis",
     # evaluator
     "evaluate_single", "compute_math_score", "compute_eval_score_v2",
-    "extract_math_answer",
+    "extract_math_answer", "measure_math_baseline",
     # safe_twin
     "generate_safe_twin", "SAFE_TWIN_SYSTEM",
 ]

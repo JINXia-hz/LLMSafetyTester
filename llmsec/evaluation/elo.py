@@ -569,13 +569,21 @@ class ELOTracker:
 
         def_elo = self.get_defender_elo(defender_name)
         total_methods = max(1, len(self.attacker_ratings))
-        tested_count = len(self.ground_truth_methods & set(self.attacker_ratings.keys()))
+        tested_set = self.ground_truth_methods & set(self.attacker_ratings.keys())
+        tested_count = len(tested_set)
 
-        # 攻击方 ELO 高于防御方的攻击标记为"可能突破"
-        threats_above = sum(
-            1 for elo in self.attacker_ratings.values()
-            if elo > def_elo
+        # 攻击方 ELO 高于防御方的攻击标记为"可能突破"，按实测/预测拆分：
+        # 未测方法的 SVD-Ridge 预测值浮在初始均值附近，防御方 Elo 波动时会把大量
+        # 预测方法算进"边界以上"，混在一起统计会严重夸大威胁数
+        tested_above = sum(
+            1 for m in tested_set
+            if self.attacker_ratings[m] > def_elo
         )
+        predicted_above = sum(
+            1 for m, elo in self.attacker_ratings.items()
+            if m not in tested_set and elo > def_elo
+        )
+        threats_above = tested_above + predicted_above
 
         # 收敛状态（综合多维度指标）
         conv = self.check_convergence(defender_name, total_methods=total_methods, tested_count=tested_count)
@@ -605,6 +613,8 @@ class ELOTracker:
             "defender": defender_name,
             "defender_elo": round(def_elo, 1),
             "methods_above_boundary": threats_above,
+            "tested_above_boundary": tested_above,
+            "predicted_above_boundary": predicted_above,
             "confidence": round(float(confidence), 4),
             "converged": conv["converged"],
             "elo_std": conv.get("std"),

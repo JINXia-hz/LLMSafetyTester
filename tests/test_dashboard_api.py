@@ -194,6 +194,63 @@ def test_run_endpoints_post_only() -> int:
     return rc
 
 
+def test_state_snapshot_priority() -> int:
+    """run 目录内有 state.json 快照时，/api/threats 应优先用快照判定实测/预测；
+    无快照时回退全局 state（历史批次行为不变）。"""
+    import json
+    import shutil
+
+    from llmsec.core.config import RUNS_DIR
+
+    rc = 0
+    run_name = "2099-01-01_000000"
+    run_dir = RUNS_DIR / run_name
+    if run_dir.exists():
+        print(f"⚠️ 测试目录已存在，跳过: {run_dir}")
+        return 0
+
+    tree = {
+        "top_threats": [{"method": "snapshot_only_method", "elo": 1600.0}],
+        "strong_defenses": [],
+        "upsets": {},
+    }
+    snapshot_state = {
+        "attacker_ratings": {"snapshot_only_method": 1600.0},
+        "attacker_pred_std": {},
+        "ground_truth": {"snapshot_only_method": {"elo": 1600.0}},
+    }
+    try:
+        # 1) 无快照：回退全局 state（全局不含该方法 → 标 svd_ridge）
+        run_dir.mkdir(parents=True)
+        (run_dir / "security_tree.json").write_text(
+            json.dumps(tree, ensure_ascii=False), encoding="utf-8")
+        r = client.get(f"/api/threats?run={run_name}")
+        rc |= _check(r.status_code == 200, "/api/threats 无快照 200")
+        threats = r.json().get("top_threats", [])
+        rc |= _check(
+            bool(threats) and threats[0]["tested"] is False
+            and threats[0]["source"] == "svd_ridge",
+            "无快照时回退全局 state（标 svd_ridge）")
+
+        # 2) 写入快照：应优先用快照 → 标 ground_truth
+        (run_dir / "state.json").write_text(
+            json.dumps(snapshot_state, ensure_ascii=False), encoding="utf-8")
+        r = client.get(f"/api/threats?run={run_name}")
+        rc |= _check(r.status_code == 200, "/api/threats 有快照 200")
+        threats = r.json().get("top_threats", [])
+        rc |= _check(
+            bool(threats) and threats[0]["tested"] is True
+            and threats[0]["source"] == "ground_truth",
+            "有快照时优先快照（标 ground_truth）")
+        rc |= _check(threats[0]["elo"] == 1600.0, "快照 Elo 生效")
+    finally:
+        shutil.rmtree(run_dir, ignore_errors=True)
+
+    if rc == 0:
+        print("✅ state 快照优先级通过")
+    return rc
+
+
 def main() -> int:
     tests = [
         test_index_and_data_apis,
@@ -204,6 +261,7 @@ def main() -> int:
         test_task_lifecycle,
         test_cluster_projection,
         test_cluster_tree_and_cut,
+        test_state_snapshot_priority,
     ]
     for t in tests:
         if t() != 0:
