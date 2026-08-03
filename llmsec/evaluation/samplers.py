@@ -18,6 +18,13 @@ from collections import defaultdict
 import numpy as np
 
 from llmsec.evaluation.elo import ELOTracker
+from llmsec.params import (
+    SAMPLER_COORD_MIN_PER_CLUSTER,
+    SAMPLER_HYBRID_EXPLORE_ROUNDS,
+    SAMPLER_INFOGAIN_ALPHA,
+    SAMPLER_INFOGAIN_BETA,
+    SAMPLER_INFOGAIN_GAMMA,
+)
 
 
 class AttackSampler(ABC):
@@ -126,9 +133,9 @@ class InfoGainSampler(AttackSampler):
 
     def __init__(
         self,
-        alpha: float = 20.0,
-        beta: float = 5.0,
-        gamma: float = 10.0,
+        alpha: float = SAMPLER_INFOGAIN_ALPHA,
+        beta: float = SAMPLER_INFOGAIN_BETA,
+        gamma: float = SAMPLER_INFOGAIN_GAMMA,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -197,7 +204,7 @@ class CoordinateDescentSampler(AttackSampler):
     def __init__(
         self,
         min_tests_per_method: int = 1,
-        min_tests_per_cluster: int = 3,
+        min_tests_per_cluster: int = SAMPLER_COORD_MIN_PER_CLUSTER,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -341,12 +348,12 @@ class HybridSampler(AttackSampler):
 
     def __init__(
         self,
-        explore_rounds: int = 2,
-        info_gain_alpha: float = 20.0,
-        info_gain_beta: float = 5.0,
-        info_gain_gamma: float = 10.0,
+        explore_rounds: int = SAMPLER_HYBRID_EXPLORE_ROUNDS,
+        info_gain_alpha: float = SAMPLER_INFOGAIN_ALPHA,
+        info_gain_beta: float = SAMPLER_INFOGAIN_BETA,
+        info_gain_gamma: float = SAMPLER_INFOGAIN_GAMMA,
         coordinate_min_tests_per_method: int = 1,
-        coordinate_min_tests_per_cluster: int = 3,
+        coordinate_min_tests_per_cluster: int = SAMPLER_COORD_MIN_PER_CLUSTER,
         **kwargs,
     ):
         super().__init__(**kwargs)

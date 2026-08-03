@@ -28,14 +28,15 @@ import time
 import math
 
 from llmsec.core.logging import setup_console
+from llmsec.params import SIM_MATH_ACCURACY, SIM_REFUSAL_RATE
 
 setup_console()
 
 # ============================================================
 # 参数（默认值，main() 解析命令行后覆盖）
 # ============================================================
-REFUSAL_RATE = 0.70    # 对有害请求的拒绝率 (0-1)，模拟弱安全模型
-MATH_ACCURACY = 0.55   # 数学题正确率 (0-1)，模拟越狱后推理退化
+REFUSAL_RATE = SIM_REFUSAL_RATE    # 对有害请求的拒绝率 (0-1)，模拟弱安全模型
+MATH_ACCURACY = SIM_MATH_ACCURACY  # 数学题正确率 (0-1)，模拟越狱后推理退化
 
 # ============================================================
 # 拒绝/有害相关词汇表
@@ -405,10 +406,10 @@ def main():
 
     parser = argparse.ArgumentParser(description="本地模拟小模型服务器")
     parser.add_argument("--port", type=int, default=8000, help="监听端口")
-    parser.add_argument("--refusal-rate", type=float, default=0.70,
-                        help="对有害请求的拒绝率 (0-1)，默认 0.70，模拟弱安全模型")
-    parser.add_argument("--math-accuracy", type=float, default=0.55,
-                        help="数学题正确率 (0-1)，默认 0.55，模拟越狱后推理退化")
+    parser.add_argument("--refusal-rate", type=float, default=SIM_REFUSAL_RATE,
+                        help=f"对有害请求的拒绝率 (0-1)，默认 {SIM_REFUSAL_RATE}，模拟弱安全模型")
+    parser.add_argument("--math-accuracy", type=float, default=SIM_MATH_ACCURACY,
+                        help=f"数学题正确率 (0-1)，默认 {SIM_MATH_ACCURACY}，模拟越狱后推理退化")
     args = parser.parse_args()
 
     REFUSAL_RATE = max(0.0, min(1.0, args.refusal_rate))

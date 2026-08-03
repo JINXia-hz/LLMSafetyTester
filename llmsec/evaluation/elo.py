@@ -35,20 +35,22 @@ from llmsec.core.config import INITIAL_ELO, STATE_FILE
 from llmsec.core.io import iter_jsonl
 from llmsec.core.logging import setup_console
 from llmsec.evaluation.elo_cluster import ClusterEloPredictor
+from llmsec.params import (
+    CONFIDENCE_W_COVERAGE,
+    CONFIDENCE_W_REL_STD,
+    CONFIDENCE_W_ROUNDS,
+    CONFIDENCE_W_STD,
+    CONVERGENCE_THRESHOLD,
+    CONVERGENCE_WINDOW,
+    ELO_SCALE,
+    K_FACTOR,
+    MIN_COVERAGE_ABSOLUTE,
+    MIN_COVERAGE_RATIO,
+    RELATIVE_STD_THRESHOLD,
+    ROUND_CONVERGENCE_WINDOW,
+)
 
 setup_console()
-
-# ============================================================
-# ELO 配置
-# ============================================================
-K_FACTOR = 32          # 标准 ELO K 值
-ELO_SCALE = 400        # 标准 ELO 缩放因子
-CONVERGENCE_WINDOW = 5  # 每次 update 的滑动窗口大小（兼容旧逻辑）
-CONVERGENCE_THRESHOLD = 10.0  # 每次 update 的滑动标准差阈值（兼容旧逻辑）
-ROUND_CONVERGENCE_WINDOW = 3   # 收敛判断使用最近 N 轮结束时的防御方 Elo
-RELATIVE_STD_THRESHOLD = 0.02  # 相对标准差阈值
-MIN_COVERAGE_RATIO = 0.20      # 最小覆盖率（相对所有方法）
-MIN_COVERAGE_ABSOLUTE = 20     # 最小覆盖方法数
 
 
 class ELOTracker:
@@ -591,10 +593,10 @@ class ELOTracker:
 
         # 相对标准差比绝对标准差更能反映真实波动，权重相应上调
         confidence = (
-            0.30 * std_score
-            + 0.35 * rel_std_score
-            + 0.20 * coverage_score
-            + 0.15 * rounds_score
+            CONFIDENCE_W_STD * std_score
+            + CONFIDENCE_W_REL_STD * rel_std_score
+            + CONFIDENCE_W_COVERAGE * coverage_score
+            + CONFIDENCE_W_ROUNDS * rounds_score
         )
         confidence = min(confidence, 0.99)  # 永不达到 100%，保留统计不确定性
 

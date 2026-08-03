@@ -16,17 +16,19 @@ import math
 import numpy as np
 
 from llmsec.core.logging import get_logger
+from llmsec.params import (
+    KNEE_FLATTEN_RATIO,  # 边界上升判定：末尾增益高于最大增益的该比例即视为"仍在上升"
+    TREE_K_MAX,
+    TREE_K_MIN,
+)
 
 logger = get_logger(__name__)
-
-# 边界上升判定：末尾增益高于最大增益的该比例即视为"仍在上升"
-KNEE_FLATTEN_RATIO = 0.2
 
 
 # ============================================================
 # auto-k：log 增长 + 候选集
 # ============================================================
-def log_growth_k0(n: int, k_min: int = 4, k_max: int = 20) -> int:
+def log_growth_k0(n: int, k_min: int = TREE_K_MIN, k_max: int = TREE_K_MAX) -> int:
     """聚类量随数据规模 log 增长：n=100→7, n=1000→10, n=10000→14。"""
     return max(k_min, min(int(math.ceil(math.log2(max(n, 2)))), k_max))
 

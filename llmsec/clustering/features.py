@@ -32,6 +32,7 @@ from llmsec.core import (
     read_jsonl,
     strip_math_tax,
 )
+from llmsec.params import EMBEDDING_PCA_DIM, TFIDF_FALLBACK_FEATURES
 
 # ============================================================
 # 工具函数
@@ -211,7 +212,7 @@ def _get_embedding_model():
 
 def extract_text_embeddings(
     prompts: list[str],
-    pca_dim: int = 50,
+    pca_dim: int = EMBEDDING_PCA_DIM,
     vectorizer=None,
     pca=None,
 ) -> tuple[np.ndarray, object, object]:
@@ -251,7 +252,7 @@ def extract_text_embeddings(
     cleaned_prompts = [strip_math_tax(p) for p in prompts]
 
     fit_vectorizer = vectorizer if vectorizer is not None else TfidfVectorizer(
-        max_features=200,
+        max_features=TFIDF_FALLBACK_FEATURES,
         ngram_range=(1, 2),
         max_df=0.9,
         min_df=1,
@@ -544,8 +545,12 @@ def extract_defense_features(
             for level in "ABCDE":
                 feats.append(cl_dist.get(level, 0) / n)
 
-            # 格式丧失率
-            format_loss = sum(1 for r in items if r.get("math_score", -1) == 0) / n
+            # 格式丧失率（仅统计带税探针的记录；math_score=None 表示无探针，不参与）
+            probed = [r for r in items if r.get("math_score") is not None]
+            format_loss = (
+                sum(1 for r in probed if r["math_score"] == 0) / len(probed)
+                if probed else 0.0
+            )
             feats.append(format_loss)
 
             # 状态分布
@@ -582,7 +587,7 @@ CROSS_MODEL_FEATURE_NAMES: list[str] = []
 def extract_all_features(
     attack_records: list[dict],
     eval_results: list[dict],
-    embedding_pca_dim: int = 50,
+    embedding_pca_dim: int = EMBEDDING_PCA_DIM,
 ) -> tuple[dict, dict]:
     """
     从攻击集和评估结果中提取 5 维特征。

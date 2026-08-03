@@ -19,12 +19,14 @@
 
 import numpy as np
 
+from llmsec.params import WHITEN_LAMBDA_W_REL, WHITEN_MAX_DIMS, WHITEN_VARIANCE_RATIO
+
 # 参与度量的先验特征块；defense（后验）明确排除
 PRIOR_BLOCKS = ("textual", "embedding", "technique", "intent", "prior")
 
 # 白化正则地板（相对谱峰）：σᵢ < 0.1·σ₁ 的噪声方向被抑制而非放大，
 # 强信号方向仍保持单位方差（截断正则化马氏距离）
-LAMBDA_W_REL = 0.01
+LAMBDA_W_REL = WHITEN_LAMBDA_W_REL
 
 
 def _spectral_knee(S: np.ndarray) -> int:
@@ -79,8 +81,8 @@ def build_feature_matrix(
 def build_whitened_space(
     features: dict,
     methods: list[str] | None = None,
-    variance_ratio: float = 0.95,
-    max_dims: int = 50,
+    variance_ratio: float = WHITEN_VARIANCE_RATIO,
+    max_dims: int = WHITEN_MAX_DIMS,
     lambda_w: float | None = None,
     damp: float = 0.0,
     blocks: tuple[str, ...] = PRIOR_BLOCKS,

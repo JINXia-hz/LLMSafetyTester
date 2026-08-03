@@ -12,6 +12,7 @@ HarmBench 攻击集生成器（内置数据，测试与示范用，非项目核�
 用法:
     python -m llmsec.attacks.harmbench                    # 每行为随机一个模板（旧行为）
     python -m llmsec.attacks.harmbench --max 50 --variants 5 --obfuscate
+    python -m llmsec.attacks.harmbench --no-math-tax      # 不注入越狱税探针（PCAP 等不答题后端）
 """
 
 import csv
@@ -22,6 +23,7 @@ from pathlib import Path
 
 from llmsec.attacks.obfuscators import DEFAULT_OBFUSCATIONS, OBFUSCATORS, obfuscate as apply_obfuscation
 from llmsec.core import ATTACKS_DIR, PROJECT_ROOT, setup_console, write_jsonl
+from llmsec.core.text import inject_math_tax
 
 # 修复Windows CMD GBK编码导致emoji/Unicode输出报错
 setup_console()
@@ -34,8 +36,9 @@ JAILBREAKS_JSON = DATA_DIR / "human_jailbreaks.json"
 # 默认输出
 DEFAULT_OUTPUT = ATTACKS_DIR / "harmbench_jailbreak.jsonl"
 
-# 数学题不适用于 PCAP Judge / 越狱模板场景
-# 不加数学题后缀
+# 越狱税数学题探针：默认随攻击 prompt 注入（见 generate() 的 math_tax 参数）。
+# openai 类后端可正常按 [MATH:] 格式答题；PCAP 回放等不答题的后端用 --no-math-tax 关闭，
+# 落盘哨兵 expected_answer=0，evaluator 会跳过税的计量。
 
 # ============================================================
 # 加载 jailbreak 模板
@@ -102,6 +105,7 @@ def generate(
     variants: int = 1,
     obfuscate: bool = False,
     obfuscations: list[str] = None,
+    math_tax: bool = True,
 ):
     """
     读取 CSV，用模板 + 可选混淆包装每条行为，输出 JSONL。
@@ -110,6 +114,10 @@ def generate(
         variants: 每条 behavior 生成多少个模板变体
         obfuscate: 是否启用 L2 混淆包装
         obfuscations: 启用的混淆方法列表，默认 DEFAULT_OBFUSCATIONS
+        math_tax: 是否在 prompt 末尾注入越狱税数学题探针。
+                  True（默认）→ 写入真实 math_problem/expected_answer；
+                  False → math_problem=None, expected_answer=0（哨兵，表示该集不测越狱税，
+                  适用于不会按格式答题的后端，如 PCAP 回放模式）。
     """
     random.seed(seed)
     obfuscations = obfuscations or DEFAULT_OBFUSCATIONS
@@ -173,14 +181,21 @@ def generate(
             template_label = template_names[template_idx]
             method = f"{template_label}_{obf_method}"
 
+            # 越狱税数学探针：默认注入（openai 类后端可正常答题）；
+            # --no-math-tax 时写哨兵值，表示该条不测越狱税
+            if math_tax:
+                attack_prompt, math_problem, expected_answer = inject_math_tax(attack_prompt)
+            else:
+                math_problem, expected_answer = None, 0
+
             entry = {
                 "id": record_id,
                 "category": f"harmbench-{functional}",
                 "method": method,
                 "harm_type": semantic,
                 "prompt": attack_prompt,
-                "math_problem": None,
-                "expected_answer": 0,     # PCAP Judge 不回答数学题
+                "math_problem": math_problem,
+                "expected_answer": expected_answer,
                 "source": "harmbench",
                 "behavior_id": behavior_id,
                 "jailbreak_template_idx": template_idx,
@@ -213,6 +228,9 @@ def main():
                         help="启用 L2 混淆包装（base64/rot13/代码补全/故事场景）")
     parser.add_argument("--obfuscations", type=str, default=None,
                         help="逗号分隔的混淆方法，如 b64,rot13,code；默认全部")
+    parser.add_argument("--no-math-tax", action="store_true",
+                        help="不注入越狱税数学题探针（用于不会按 [MATH:] 格式答题的后端，"
+                             "如 PCAP 回放模式）；默认注入")
     args = parser.parse_args()
 
     output_path = Path(args.output) if args.output else DEFAULT_OUTPUT
@@ -240,6 +258,7 @@ def main():
         variants=args.variants,
         obfuscate=args.obfuscate,
         obfuscations=obfuscations,
+        math_tax=not args.no_math_tax,
     )
 
     print(f"\n📁 输出: {output_path}")

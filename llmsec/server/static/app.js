@@ -77,6 +77,17 @@ async function loadOverview() {
     $('ov_tested').textContent = `${d.total_tested}/${d.total_methods}`;
     $('ov_above').textContent = d.methods_above_boundary;
 
+    // 越狱税：null = 该批未测（攻击集无数学探针）
+    if (d.jailbreak_tax_mean != null) {
+      $('ov_tax').textContent = fmtNum(d.jailbreak_tax_mean, 2);
+      const hi = d.jailbreak_tax_high_ratio != null ? `高税占比 ${fmtPct(d.jailbreak_tax_high_ratio)}` : '';
+      const probed = d.jailbreak_tax_probed != null ? `探针 ${d.jailbreak_tax_probed} 条` : '';
+      $('ov_tax_sub').textContent = [hi, probed].filter(Boolean).join(' · ');
+    } else {
+      $('ov_tax').textContent = '未测试';
+      $('ov_tax_sub').textContent = '攻击集无数学探针';
+    }
+
     // 雷达图（闭合）
     const r = d.radar;
     Plotly.newPlot('chart_radar', [{
@@ -142,6 +153,7 @@ async function loadThreats() {
       tr.innerHTML = `<td class="py-2 pr-4 font-mono text-xs">${t.method}</td>
         <td class="py-2 pr-4 font-semibold">${fmtNum(t.elo)}</td>
         <td class="py-2 pr-4">${t.asr != null ? fmtPct(t.asr) : '-'}</td>
+        <td class="py-2 pr-4">${t.mean_jailbreak_tax != null ? fmtNum(t.mean_jailbreak_tax, 2) : '-'}</td>
         <td class="py-2 pr-4">${badge}</td><td class="py-2 text-xs">${ci}</td>`;
       tbody.appendChild(tr);
     });

@@ -166,6 +166,14 @@ async def api_overview(run: str | None = None):
     coverage = min(total_tested / total_methods, 1.0)
     conv_score = _convergence_score(state)
 
+    # 越狱税：优先 runner_report 的聚合块（新 run），回退 security_tree.overall（旧 run）
+    tax_info = attack.get("jailbreak_tax") or {}
+    tax_mean = tax_info.get("tax_mean")
+    if tax_mean is None:
+        tax_mean = overall.get("jailbreak_tax_mean")
+    tax_high_ratio = tax_info.get("high_tax_ratio")
+    tax_probed = tax_info.get("probed")
+
     radar = {
         "labels": ["防线强度", "低误杀", "边界置信度", "测试覆盖率", "收敛稳定"],
         "values": [
@@ -201,6 +209,9 @@ async def api_overview(run: str | None = None):
         "total_methods": total_methods,
         "allergy_tested": allergy.get("total_tested", 0),
         "allergic_count": allergy.get("allergic_count", 0),
+        "jailbreak_tax_mean": tax_mean,
+        "jailbreak_tax_high_ratio": tax_high_ratio,
+        "jailbreak_tax_probed": tax_probed,
         "radar": radar,
         "harm_type_asr": harm_type_asr,
     }

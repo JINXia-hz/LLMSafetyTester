@@ -39,6 +39,7 @@ from llmsec.clustering.tree import (
 )
 from llmsec.core.config import CLUSTER_ARTIFACTS_FILE, CLUSTER_REPORT_FILE, OUTPUT_DIR
 from llmsec.core.logging import get_logger
+from llmsec.params import HDBSCAN_MIN_CLUSTER_DIV
 
 logger = get_logger(__name__)
 
@@ -88,7 +89,7 @@ def run_hdbscan_clustering(
     # 2. HDBSCAN 密度视图（flat labels + 稀疏区）
     # min_samples=1 放宽互达距离，集中空间里显著降低噪声率；
     # min_cluster_size 随规模温和增长
-    min_cluster_size = max(3, n // 40)
+    min_cluster_size = max(3, n // HDBSCAN_MIN_CLUSTER_DIV)
     clf = hdbscan.HDBSCAN(
         min_cluster_size=min_cluster_size,
         min_samples=1,

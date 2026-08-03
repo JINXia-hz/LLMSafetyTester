@@ -33,7 +33,12 @@ from llmsec.core.io import (
 )
 from llmsec.core.llm import chat_with_retry, create_openai_client
 from llmsec.core.logging import get_logger, setup_console
-from llmsec.core.text import estimate_tokens, strip_math_tax
+from llmsec.core.text import (
+    estimate_tokens,
+    gen_math,
+    inject_math_tax,
+    strip_math_tax,
+)
 
 __all__ = [
     # config
@@ -51,5 +56,5 @@ __all__ = [
     # logging
     "setup_console", "get_logger",
     # text
-    "strip_math_tax", "estimate_tokens",
+    "strip_math_tax", "estimate_tokens", "gen_math", "inject_math_tax",
 ]

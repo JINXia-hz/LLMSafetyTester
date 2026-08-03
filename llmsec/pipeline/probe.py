@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 """
-受害者 API 探测脚本（原根目录 probe_victim.py）
+目标 API 探测脚本（原根目录 probe_victim.py）
 
-发送一条无害测试请求到 PCAP Judge API，dump 完整 JSON 响应。
-payload 模板与日志构造复用 llmsec.targets.pcap（原脚本内的重复实现已删除）。
+按 TARGET_TYPE 路由探测当前配置的目标后端：
+  - openai / local_sim：经 llmsec.targets.call_target 发送一条测试 prompt，
+    打印后端、延迟、响应内容（用于确认 openai 类后端连通性与模型行为）。
+  - pcap_judge：发送一条无害测试请求到 PCAP Judge API，dump 完整 JSON 响应
+    （payload 模板与日志构造复用 llmsec.targets.pcap）。
 """
 
 import argparse
 import json
+import os
 import time
 
 import requests
 import urllib3
 
+from llmsec.core.config import load_env
 from llmsec.core.logging import setup_console
+from llmsec.targets import call_target
 from llmsec.targets.pcap import PCAP_JUDGE_URL, build_pcap_payload
 
 setup_console()
@@ -25,7 +31,40 @@ TIMEOUT = 60.0
 
 
 def probe(test_text: str):
-    """发送探测请求并 dump 完整响应。"""
+    """按 TARGET_TYPE 路由探测目标后端。"""
+    load_env()  # 先加载 .env，再读 TARGET_TYPE
+    target_type = os.getenv("TARGET_TYPE", "openai")
+    if target_type == "pcap_judge":
+        probe_pcap(test_text)
+    else:
+        probe_openai(test_text, target_type)
+
+
+def probe_openai(test_text: str, target_type: str):
+    """openai / local_sim 后端探测：走统一路由，打印响应概要。"""
+    print(f"📡 探测目标后端: TARGET_TYPE={target_type}")
+    print(f"   测试文本: {test_text}")
+    print()
+
+    result = call_target(test_text)
+
+    meta = result.get("meta", {})
+    print(f"   backend : {meta.get('backend', target_type)}")
+    print(f"   latency : {result['latency_ms']:.0f}ms")
+    print(f"   tokens  : prompt={result['tokens_prompt']}, completion={result['tokens_completion']}")
+    if result["error"]:
+        print(f"❌ 调用失败: {result['error']}")
+        print("   提示: 检查 TARGET_BASE_URL / TARGET_API_KEY / TARGET_MODEL 配置与目标可达性")
+        return
+    if result.get("target_refused"):
+        print("   ⚠ 目标侧主动拒绝了该请求（target_refused=True）")
+    print()
+    print("✅ 连接成功，响应内容:")
+    print(result["content"][:2000])
+
+
+def probe_pcap(test_text: str):
+    """发送探测请求到 PCAP Judge API 并 dump 完整响应。"""
     # strip_math=False：探测文本原样嵌入，不做数学题越狱税剥离
     payload = build_pcap_payload(test_text, strip_math=False)
 
@@ -93,7 +132,7 @@ def scan_for_text_fields(data, prefix=""):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="受害者 API 探测")
+    parser = argparse.ArgumentParser(description="目标 API 探测（按 TARGET_TYPE 路由）")
     parser.add_argument("--text", type=str,
                         default="请用一句话介绍人工智能。",
                         help="测试文本 (默认: 请用一句话介绍人工智能。)")
