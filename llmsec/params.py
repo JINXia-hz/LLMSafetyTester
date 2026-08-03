@@ -96,6 +96,21 @@ CONFIDENCE_W_ROUNDS = 0.15
 
 
 # ============================================================
+# 2b. SVD-Ridge Elo 预测（evaluation/elo_cluster.py EloPredictorModel）
+# ============================================================
+
+RIDGE_DEGENERATE_COL_EPS = 1e-4  # 训练列 std 低于此值视为退化列，标准化后置零
+# 解释：embedding PCA 在全部方法上拟合，但 Ridge 只在 GT 子集训练；某列在 GT 内
+#       近常数时 x_std≈1e-8（地板），未测方法稍偏离 → 标准化值 ~1e8 →
+#       MAP 方差 σ²·x'(XᵀX+λI)⁻¹x 爆炸（均值不受影响：该方向 w=0）。
+#       阈值远低于合法 embedding 列的 std（≥0.017），只杀真退化列。
+RIDGE_PRED_STD_CAP_MULT = 3.0    # 预测 std 上限 = 此倍数 × GT Elo std
+RIDGE_PRED_STD_CAP_MIN = 200.0   # 预测 std 上限的绝对下限
+# 解释：CI 宽于 ±几百 Elo 已无信息量；封顶保护 summary/state/看板/前端所有下游，
+#       防止任何残留的方差异常压扁图表坐标轴。
+
+
+# ============================================================
 # 3. 采样器（evaluation/samplers.py）
 # ============================================================
 

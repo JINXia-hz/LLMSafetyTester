@@ -7,6 +7,7 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
   <style>
     :root {
       --c-bg: #f5f4f1;
@@ -98,7 +99,7 @@
             <div class="text-sm mt-2 opacity-90" id="ov_recommendation"></div>
           </div>
 
-          <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
+          <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-3 mb-5">
             <div class="card"><div class="metric-label">ASR 攻击成功率</div><div class="metric-value" id="ov_asr">-</div></div>
             <div class="card"><div class="metric-label">FPR 误杀率</div><div class="metric-value" id="ov_fpr">-</div></div>
             <div class="card"><div class="metric-label">ELO 安全边界</div><div class="metric-value" id="ov_boundary">-</div></div>

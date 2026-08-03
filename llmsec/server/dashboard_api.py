@@ -320,7 +320,11 @@ async def api_report_md(run: str | None = None):
 async def api_clusters(run: str | None = None):
     run_dir = _run_dir(run)
     analysis = load_json(run_dir / "cluster_security_analysis.json") if run_dir else {}
-    report = load_json(OUTPUT_DIR / "cluster_report.json")
+    # validation/簇效验证/密度视图优先读 run 内 cluster_report 快照（runner 结束时保存），
+    # 无快照回退全局最近产物（旧 run 行为不变）
+    report = load_json(run_dir / "cluster_report.json") if run_dir else {}
+    if not report:
+        report = load_json(OUTPUT_DIR / "cluster_report.json")
 
     if not analysis and not report:
         return {"available": False}

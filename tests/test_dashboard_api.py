@@ -243,6 +243,23 @@ def test_state_snapshot_priority() -> int:
             and threats[0]["source"] == "ground_truth",
             "有快照时优先快照（标 ground_truth）")
         rc |= _check(threats[0]["elo"] == 1600.0, "快照 Elo 生效")
+
+        # 3) cluster_report 快照优先级：/api/clusters 的 validation 等块
+        r = client.get(f"/api/clusters?run={run_name}")
+        rc |= _check(r.status_code == 200, "/api/clusters 200")
+        rc |= _check(
+            r.json().get("validation", {}).get("sentinel") is not True,
+            "无 cluster_report 快照时回退全局报告")
+        (run_dir / "cluster_report.json").write_text(
+            json.dumps({"validation": {"silhouette": 0.9999, "sentinel": True}},
+                       ensure_ascii=False), encoding="utf-8")
+        r = client.get(f"/api/clusters?run={run_name}")
+        rc |= _check(
+            r.json().get("validation", {}).get("sentinel") is True,
+            "有 cluster_report 快照时优先快照")
+        rc |= _check(
+            r.json().get("validation", {}).get("silhouette") == 0.9999,
+            "快照 validation 内容生效")
     finally:
         shutil.rmtree(run_dir, ignore_errors=True)
 

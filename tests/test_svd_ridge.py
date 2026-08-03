@@ -324,6 +324,58 @@ def test_kfold_lambda_stability() -> int:
     return 0
 
 
+def test_degenerate_column_variance_cap() -> int:
+    """GT 内常数、GT 外偏移的退化列不应使预测方差爆炸（回归：std=9.6e8 事故）。"""
+    from llmsec.params import RIDGE_PRED_STD_CAP_MIN, RIDGE_PRED_STD_CAP_MULT
+
+    predictor, test_methods, method_records, elos, features = _make_predictor()
+    gt_methods = sorted(predictor.ground_truth.keys())
+
+    # 注入退化列：GT 全为 1.0（std=0 → 触发 1e-8 地板），未测方法全为 0.0
+    # 旧行为：标准化值 ~-1e8 → MAP 方差爆炸，所有未测方法 std 相同且天文数字
+    for m in gt_methods:
+        features[m]["textual"] = np.append(features[m]["textual"], 1.0)
+    for m in test_methods:
+        features[m]["textual"] = np.append(features[m]["textual"], 0.0)
+
+    preds = predictor.predict_batch(method_records)
+    y_std = float(np.std([g["elo"] for g in predictor.ground_truth.values()]))
+    cap = max(RIDGE_PRED_STD_CAP_MULT * y_std, RIDGE_PRED_STD_CAP_MIN)
+
+    for m in test_methods:
+        p = preds[m]
+        if p.get("source") != "svd_ridge":
+            print(f"❌ {m} 未使用 SVD-Ridge: source={p.get('source')}")
+            return 1
+        std = p["std"]
+        if not np.isfinite(std):
+            print(f"❌ {m} std 非有限值: {std}")
+            return 1
+        if std > cap + 1e-6:
+            print(f"❌ {m} std={std:.1f} 爆炸（封顶 {cap:.1f}）")
+            return 1
+        if not (1000.0 <= p["elo"] <= 2000.0):
+            print(f"❌ {m} 均值被退化列带飞: elo={p['elo']}")
+            return 1
+
+    # 退化列确实被识别并置零
+    if predictor.model.col_keep is None or predictor.model.col_keep.all():
+        print("❌ 退化列未被标记（col_keep 全为 True）")
+        return 1
+
+    # 预测方差含不可约噪声项：std >= sqrt(σ²)（封顶截断时除外）
+    sigma2 = predictor.model.sigma2
+    floor = min(float(np.sqrt(sigma2)), cap)
+    for m in test_methods:
+        if preds[m]["std"] < floor - 1e-6:
+            print(f"❌ {m} 预测方差缺少不可约 σ² 项: std={preds[m]['std']:.2f} < {floor:.2f}")
+            return 1
+
+    print(f"✅ 退化列方差防爆通过 (std 封顶={cap:.1f}, σ²={sigma2:.2f}, "
+          f"退化列数={int((~predictor.model.col_keep).sum())})")
+    return 0
+
+
 def main() -> int:
     tests = [
         test_pcap_defender_name,
@@ -332,6 +384,7 @@ def main() -> int:
         test_first_round_convergence,
         test_kfold_lambda_stability,
         test_model_cache,
+        test_degenerate_column_variance_cap,
     ]
     for t in tests:
         if t() != 0:

@@ -24,6 +24,16 @@ async function api(path) {
 function runQuery() { return currentRun ? `?run=${encodeURIComponent(currentRun)}` : ''; }
 function setStatus(msg) { $('status').textContent = msg || ''; }
 
+// HTML 转义：服务器字符串插入 innerHTML 前统一过这道
+const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// markdown → 安全 HTML（marked 不过滤原始 HTML，必须过 DOMPurify）
+const mdSafe = md => DOMPurify.sanitize(marked.parse(md || ''));
+// 清空图表：切到无数据批次时避免上一批次的图残留
+function clearCharts(ids) {
+  ids.forEach(id => { const el = $(id); if (el) { Plotly.purge(el); el.innerHTML = ''; } });
+}
+
 // ---------- 导航 ----------
 document.querySelectorAll('#nav .nav-item').forEach(el => {
   el.addEventListener('click', () => {
@@ -63,7 +73,17 @@ $('refreshBtn').addEventListener('click', async () => { await loadRuns(); invali
 async function loadOverview() {
   try {
     const d = await api('/api/overview' + runQuery());
-    if (!d.available) { $('ov_verdict').textContent = '暂无运行数据'; return; }
+    if (!d.available) {
+      $('ov_banner').className = 'banner mb-5 level-inconclusive';
+      $('ov_target').textContent = '目标模型: -';
+      $('ov_verdict').textContent = '暂无运行数据';
+      $('ov_recommendation').textContent = '';
+      ['ov_asr', 'ov_fpr', 'ov_boundary', 'ov_conf', 'ov_tested', 'ov_above', 'ov_tax']
+        .forEach(id => { $(id).textContent = '-'; });
+      $('ov_tax_sub').textContent = '';
+      clearCharts(['chart_radar', 'chart_harm']);
+      return;
+    }
     const level = d.security_level || 'inconclusive';
     $('ov_banner').className = 'banner mb-5 level-' + level;
     $('ov_target').textContent = `目标模型: ${d.target_model || '-'}  ·  批次 ${d.run}`;
@@ -111,19 +131,30 @@ async function loadOverview() {
     }, PLOT_CFG);
 
     const harm = Object.entries(d.harm_type_asr || {}).sort((a, b) => b[1] - a[1]);
-    Plotly.newPlot('chart_harm', [{
-      x: harm.map(i => i[0]), y: harm.map(i => i[1]), type: 'bar',
-      text: harm.map(i => fmtPct(i[1])), textposition: 'auto',
-      marker: { color: C.accent },
-    }], { yaxis: { tickformat: '.0%', range: [0, 1] }, margin: { t: 10 }, font: PLOT_FONT }, PLOT_CFG);
+    if (!harm.length) {
+      clearCharts(['chart_harm']);
+      $('chart_harm').innerHTML = '<div class="text-xs py-8 text-center" style="color: var(--c-muted);">该批次无类别统计数据</div>';
+    } else {
+      Plotly.newPlot('chart_harm', [{
+        x: harm.map(i => i[0]), y: harm.map(i => i[1]), type: 'bar',
+        text: harm.map(i => fmtPct(i[1])), textposition: 'auto',
+        marker: { color: C.accent },
+      }], { yaxis: { tickformat: '.0%', range: [0, 1] }, margin: { t: 10 }, font: PLOT_FONT }, PLOT_CFG);
+    }
   } catch (e) { setStatus('总览加载失败: ' + e.message); }
 }
 
 // ---------- 威胁看板 ----------
 async function loadThreats() {
   try {
-    const [d, elo] = await Promise.all([api('/api/threats' + runQuery()), api('/api/elo')]);
-    if (!d.available) return;
+    const [d, elo] = await Promise.all([api('/api/threats' + runQuery()), api('/api/elo' + runQuery())]);
+    if (!d.available) {
+      clearCharts(['chart_top_threats', 'chart_convergence']);
+      $('threatTable').innerHTML = '';
+      $('defenseList').innerHTML = '<span style="color: var(--c-muted);">无数据</span>';
+      $('upsetList').innerHTML = '<span style="color: var(--c-muted);">无数据</span>';
+      return;
+    }
 
     const top = (d.top_threats || []).slice(0, 10);
     Plotly.newPlot('chart_top_threats', [{
@@ -157,7 +188,7 @@ async function loadThreats() {
         ? '<span class="badge badge-gt">实测</span>'
         : '<span class="badge badge-pred">预测</span>';
       const ci = t.ci95 ? `[${fmtNum(t.ci95[0], 0)}, ${fmtNum(t.ci95[1], 0)}]` : '-';
-      tr.innerHTML = `<td class="py-2 pr-4 font-mono text-xs">${t.method}</td>
+      tr.innerHTML = `<td class="py-2 pr-4 font-mono text-xs">${esc(t.method)}</td>
         <td class="py-2 pr-4 font-semibold">${fmtNum(t.elo)}</td>
         <td class="py-2 pr-4">${t.asr != null ? fmtPct(t.asr) : '-'}</td>
         <td class="py-2 pr-4">${t.mean_jailbreak_tax != null ? fmtNum(t.mean_jailbreak_tax, 2) : '-'}</td>
@@ -169,7 +200,7 @@ async function loadThreats() {
     const dl = $('defenseList');
     dl.innerHTML = '';
     (d.strong_defenses || []).slice(0, 8).forEach(t => {
-      dl.innerHTML += `<div class="flex justify-between"><span class="font-mono text-xs">${t.method}</span>
+      dl.innerHTML += `<div class="flex justify-between"><span class="font-mono text-xs">${esc(t.method)}</span>
         <span style="color: var(--c-safe); font-weight:600;">ELO ${fmtNum(t.elo, 0)}</span></div>`;
     });
     if (!dl.innerHTML) dl.innerHTML = '<span style="color: var(--c-muted);">无数据</span>';
@@ -181,7 +212,7 @@ async function loadThreats() {
     if (!Array.isArray(upsets)) upsets = upsets.weakness || [];
     upsets.slice(0, 8).forEach(u => {
       ul.innerHTML += `<div class="flex justify-between">
-        <span class="font-mono text-xs">${u.attacker || u.method || ''}</span>
+        <span class="font-mono text-xs">${esc(u.attacker || u.method || '')}</span>
         <span style="color: var(--c-warn); font-weight:600;">gap ${fmtNum(u.elo_gap ?? u.surprise, 0)}</span></div>`;
     });
     if (!ul.innerHTML) ul.innerHTML = '<span style="color: var(--c-muted);">无数据</span>';
@@ -202,17 +233,17 @@ async function loadReport() {
     const chunks = d.markdown.split(/^## /m);
     const head = chunks[0];
     const headTitle = (head.match(/^# (.+)$/m) || [])[1] || '安全评估报告';
-    body.innerHTML += `<div class="card report-body"><h1>${headTitle}</h1>${marked.parse(head.replace(/^# .+$/m, ''))}</div>`;
+    body.innerHTML += `<div class="card report-body"><h1>${esc(headTitle)}</h1>${mdSafe(head.replace(/^# .+$/m, ''))}</div>`;
     chunks.slice(1).forEach((chunk, i) => {
       const nl = chunk.indexOf('\n');
       const title = nl > 0 ? chunk.slice(0, nl).trim() : chunk.trim();
       const content = nl > 0 ? chunk.slice(nl + 1) : '';
       const anchor = `rep-${i}`;
-      nav.innerHTML += `<a href="#${anchor}" class="block px-2 py-1 rounded hover:bg-stone-100" style="color: var(--c-primary);">${title}</a>`;
+      nav.innerHTML += `<a href="#${anchor}" class="block px-2 py-1 rounded hover:bg-stone-100" style="color: var(--c-primary);">${esc(title)}</a>`;
       const div = document.createElement('div');
       div.className = 'card report-body';
       div.id = anchor;
-      div.innerHTML = `<h2>${title}</h2>${marked.parse(content)}`;
+      div.innerHTML = `<h2>${esc(title)}</h2>${mdSafe(content)}`;
       body.appendChild(div);
     });
   } catch (e) { setStatus('报告加载失败: ' + e.message); }
@@ -255,7 +286,7 @@ async function loadProjection(method) {
     const meta = method === 'pca' && d.explained_variance
       ? `两维解释方差 ${(d.explained_variance[0] * 100).toFixed(1)}% + ${(d.explained_variance[1] * 100).toFixed(1)}%`
       : method === 'tsne' ? `perplexity=${d.perplexity}` : '';
-    $('projMeta').textContent = `（${d.n} 种方法 · ${meta} · 实心=实测 空心=预测）`;
+    $('projMeta').textContent = `（${d.n} 种方法 · ${meta} · 实心=实测 空心=预测 · 数据来自最近一次聚类，全局）`;
 
     Plotly.newPlot('chart_projection', traces, {
       margin: { t: 10 }, height: 520, font: PLOT_FONT,
@@ -271,7 +302,16 @@ async function loadClusters() {
     loadProjection(projMethod);
     loadClusterTree();
     const d = await api('/api/clusters' + runQuery());
-    if (!d.available) return;
+    if (!d.available) {
+      ['cl_methods', 'cl_n', 'cl_sil', 'cl_db'].forEach(id => { $(id).textContent = '-'; });
+      $('rvBanner').className = 'banner level-inconclusive mb-3';
+      $('rvBanner').style.padding = '12px 16px';
+      $('rvVerdict').textContent = '暂无聚类数据';
+      $('rvStats').textContent = '';
+      $('clusterCards').innerHTML = '';
+      clearCharts(['chart_cluster_cover', 'chart_rv']);
+      return;
+    }
     $('cl_methods').textContent = d.n_methods ?? '-';
     $('cl_n').textContent = d.n_clusters ?? '-';
     $('cl_sil').textContent = fmtNum(d.validation?.silhouette, 4);
@@ -341,10 +381,10 @@ async function loadClusters() {
       div.innerHTML = `
         <div class="flex items-center justify-between">
           <div class="font-semibold text-sm">
-            <span class="cluster-tag" style="background:#eceae5;color:#6b7276;">稀疏区</span> ${sparseName}</div>
+            <span class="cluster-tag" style="background:#eceae5;color:#6b7276;">稀疏区</span> ${esc(sparseName)}</div>
           <div class="text-xs" style="color: var(--c-muted);">${hdb.n_noise} 种方法 · HDBSCAN 密度视图（共 ${hdb.n_clusters} 个密度簇）</div>
         </div>
-        <div class="text-xs mt-2 truncate" style="color: var(--c-muted);">${sparseMembers.slice(0, 24).join('、')}${sparseMembers.length > 24 ? ' …' : ''}</div>`;
+        <div class="text-xs mt-2 truncate" style="color: var(--c-muted);">${esc(sparseMembers.slice(0, 24).join('、'))}${sparseMembers.length > 24 ? ' …' : ''}</div>`;
       wrap.appendChild(div);
     }
 
@@ -359,12 +399,12 @@ async function loadClusters() {
       div.style.background = bg;
       div.innerHTML = `
         <div class="flex items-center justify-between">
-          <div class="font-semibold text-sm">${c.name} ${tag}</div>
+          <div class="font-semibold text-sm">${esc(c.name)} ${tag}</div>
           <div class="text-xs" style="color: var(--c-muted);">
             ${c.size} 种方法 · 覆盖 ${fmtPct(c.test_coverage)} · 平均 ELO ${fmtNum(c.mean_elo, 0)} · ASR ${fmtPct(c.asr)}
           </div>
         </div>
-        <div class="text-xs mt-2 truncate" style="color: var(--c-muted);">${(c.members || []).slice(0, 24).join('、')}${(c.members || []).length > 24 ? ' …' : ''}</div>`;
+        <div class="text-xs mt-2 truncate" style="color: var(--c-muted);">${esc((c.members || []).slice(0, 24).join('、'))}${(c.members || []).length > 24 ? ' …' : ''}</div>`;
       wrap.appendChild(div);
     });
   } catch (e) { setStatus('聚类分析加载失败: ' + e.message); }
@@ -393,7 +433,7 @@ async function loadClusterTree() {
     treeData = d;
     treeK = d.chosen_k;
     $('treeK').textContent = treeK;
-    $('treeMeta').textContent = `（${d.n} 种方法 · auto-k=${d.chosen_k}）`;
+    $('treeMeta').textContent = `（${d.n} 种方法 · auto-k=${d.chosen_k} · 数据来自最近一次聚类，全局）`;
     const presets = $('treePresets');
     presets.innerHTML = '';
     (d.top_ks || []).forEach(k => {
@@ -450,10 +490,10 @@ function renderCutClusters(d) {
     div.innerHTML = `
       <div class="flex items-center justify-between">
         <div class="font-semibold text-sm">
-          <span class="cluster-tag" style="background:${color}22;color:${color};">k=${d.k}</span> ${c.name}</div>
+          <span class="cluster-tag" style="background:${color}22;color:${color};">k=${d.k}</span> ${esc(c.name)}</div>
         <div class="text-xs" style="color: var(--c-muted);">${c.size} 种方法 · 平均 ELO ${fmtNum(c.mean_elo, 0)}</div>
       </div>
-      <div class="text-xs mt-2 truncate" style="color: var(--c-muted);">${c.members.slice(0, 24).join('、')}${c.members.length > 24 ? ' …' : ''}</div>`;
+      <div class="text-xs mt-2 truncate" style="color: var(--c-muted);">${esc(c.members.slice(0, 24).join('、'))}${c.members.length > 24 ? ' …' : ''}</div>`;
     wrap.appendChild(div);
   });
 }
@@ -466,7 +506,11 @@ async function resetTreeCut() {
 async function loadModel() {
   try {
     const d = await api('/api/model' + runQuery());
-    if (!d.available) { $('modelEmpty').classList.remove('hidden'); $('modelBody').classList.add('hidden'); return; }
+    if (!d.available) {
+      $('modelEmpty').classList.remove('hidden'); $('modelBody').classList.add('hidden');
+      clearCharts(['chart_regpath', 'chart_pca', 'chart_importance', 'chart_pred_ci']);
+      return;
+    }
     $('modelEmpty').classList.add('hidden'); $('modelBody').classList.remove('hidden');
     const s = d.svd_ridge;
 
@@ -523,14 +567,19 @@ async function loadModel() {
       .map(([m, p]) => ({ method: m, ...p }))
       .sort((a, b) => a.elo - b.elo);
     if (preds.length) {
+      // x 轴标签截断防拥挤，hover 显示全名
+      const shortName = m => (m.length > 24 ? m.slice(0, 22) + '…' : m);
       Plotly.newPlot('chart_pred_ci', [{
-        x: preds.map(p => p.method),
+        x: preds.map(p => shortName(p.method)),
         y: preds.map(p => p.elo),
         type: 'scatter', mode: 'markers',
+        text: preds.map(p => p.method),
+        hovertemplate: '%{text}<br>预测 ELO %{y:.0f}<extra></extra>',
         error_y: {
           type: 'data', symmetric: false,
-          array: preds.map(p => p.ci95 ? p.ci95[1] - p.elo : 0),
-          arrayminus: preds.map(p => p.ci95 ? p.elo - p.ci95[0] : 0),
+          // 钳制到 ±800：历史脏数据（std 爆炸的旧 run）不再压扁 y 轴
+          array: preds.map(p => p.ci95 ? Math.min(p.ci95[1] - p.elo, 800) : 0),
+          arrayminus: preds.map(p => p.ci95 ? Math.min(p.elo - p.ci95[0], 800) : 0),
           color: C.muted, thickness: 1.2, width: 3,
         },
         marker: { size: 7, color: C.primary },
@@ -542,15 +591,31 @@ async function loadModel() {
 
 // ---------- 运行控制 ----------
 async function loadRunSection() {
-  const sets = await api('/api/attack-sets');
-  const sel = $('evalInput');
-  sel.innerHTML = '';
-  sets.files.forEach(f => {
-    const opt = document.createElement('option');
-    opt.value = f; opt.textContent = f;
-    sel.appendChild(opt);
-  });
-  await loadTasks();
+  try {
+    const sets = await api('/api/attack-sets');
+    const sel = $('evalInput');
+    sel.innerHTML = '';
+    sets.files.forEach(f => {
+      const opt = document.createElement('option');
+      opt.value = f; opt.textContent = f;
+      sel.appendChild(opt);
+    });
+    await loadTasks();
+  } catch (e) { setStatus('运行控制加载失败: ' + e.message); }
+}
+
+// 任务完成监听：启动后轮询至终态，自动刷新批次列表与当前页数据
+function watchTask(taskId) {
+  const timer = setInterval(async () => {
+    try {
+      const t = await api('/api/tasks/' + taskId);
+      if (t.status === 'running') return;
+      clearInterval(timer);
+      setStatus(`任务 ${t.kind} ${t.status === 'success' ? '已完成' : '失败'}，数据已刷新`);
+      await loadRuns();
+      invalidate();
+    } catch (e) { clearInterval(timer); }
+  }, 3000);
 }
 
 async function startTask(kind) {
@@ -560,7 +625,9 @@ async function startTask(kind) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || res.status);
     }
+    const view = await res.json();
     setStatus(`${kind} 任务已启动`);
+    if (view.id) watchTask(view.id);
     await loadTasks();
   } catch (e) { setStatus(`启动失败: ${e.message}`); }
 }
@@ -582,7 +649,9 @@ async function startEvaluate() {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || res.status);
     }
+    const view = await res.json();
     setStatus('评估任务已启动');
+    if (view.id) watchTask(view.id);
     await loadTasks();
   } catch (e) { setStatus(`启动失败: ${e.message}`); }
 }
@@ -610,11 +679,11 @@ async function loadTasks() {
       div.innerHTML = `
         <div class="flex items-center justify-between mb-1">
           <div><span class="cluster-tag" style="${style}">${label}</span>
-            <span class="font-semibold ml-2">${t.kind}</span>
+            <span class="font-semibold ml-2">${esc(t.kind)}</span>
             <span class="text-xs ml-2" style="color: var(--c-muted);">${t.started_at?.slice(11, 19) || ''}</span></div>
-          <div class="text-xs font-mono" style="color: var(--c-muted);">${t.cmd}</div>
+          <div class="text-xs font-mono" style="color: var(--c-muted);">${esc(t.cmd)}</div>
         </div>
-        <div class="log-box mt-2">${(t.log_tail || '(暂无输出)').replace(/</g, '&lt;')}</div>`;
+        <div class="log-box mt-2">${esc(t.log_tail || '(暂无输出)')}</div>`;
       wrap.appendChild(div);
     });
   } catch (e) { /* 静默 */ }

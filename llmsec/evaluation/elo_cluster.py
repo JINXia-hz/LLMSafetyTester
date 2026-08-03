@@ -46,6 +46,11 @@ from llmsec.clustering.features import (
 )
 from llmsec.core.config import INITIAL_ELO
 from llmsec.core.logging import get_logger
+from llmsec.params import (
+    RIDGE_DEGENERATE_COL_EPS,
+    RIDGE_PRED_STD_CAP_MIN,
+    RIDGE_PRED_STD_CAP_MULT,
+)
 
 logger = get_logger(__name__)
 
@@ -59,7 +64,7 @@ class EloPredictorModel:
     - 用 K-Fold 交叉验证在正则化路径 λ ∈ logspace(-3, 4, 24) 上选择最优 λ。
     - SVD 同时提供主成分视角：解释方差比与有效自由度 df(λ) 由 get_pca_summary 输出。
     - 贝叶斯解释：Ridge 等价于高斯先验的 MAP；
-      预测均值 E = y_mean + X_test @ w，预测方差 σ² · diag(X_test (X^T X + λI)^(-1) X_test^T)。
+      预测均值 E = y_mean + X_test @ w，预测方差 σ² · (1 + diag(X_test (X^T X + λI)^(-1) X_test^T))。
     """
 
     BLOCK_ORDER = ("textual", "embedding", "technique", "intent", "prior")
@@ -72,6 +77,10 @@ class EloPredictorModel:
         self.w: np.ndarray | None = None
         self.x_mean: np.ndarray | None = None
         self.x_std: np.ndarray | None = None
+        # 退化列掩码：True=保留。GT 子集内近常数的列（x_std 触地板）在子集外稍偏离
+        # 就会产生 ~1e8 的标准化值，使 MAP 方差爆炸；fit/predict 时这些列置零
+        self.col_keep: np.ndarray | None = None
+        self.y_std: float = 0.0  # GT Elo 标准差（预测 std 封顶用）
         self.y_mean: float = 0.0
         self.lambda_opt: float | None = None
         self.sigma2: float | None = None
@@ -161,9 +170,16 @@ class EloPredictorModel:
 
         # X 标准化 + y 中心化（截距项：否则零均值的 X_scaled @ w 无法表达 ~1500 的基准 Elo）
         self.x_mean = X.mean(axis=0)
-        self.x_std = X.std(axis=0) + 1e-8
+        raw_std = X.std(axis=0)
+        # 退化列：GT 子集内近常数（std 触 1e-8 地板）的列在子集外稍偏离就会产生
+        # ~1e8 的标准化值，MAP 方差随之爆炸（均值不受影响：该方向 w=0）。
+        # 标准化后置零：w 与杠杆都不再有贡献。已知合法 embedding 列 std ≥ 0.017，阈值安全。
+        self.col_keep = raw_std >= RIDGE_DEGENERATE_COL_EPS
+        self.x_std = raw_std + 1e-8
         X_scaled = (X - self.x_mean) / self.x_std
+        X_scaled[:, ~self.col_keep] = 0.0
         self.y_mean = float(y.mean())
+        self.y_std = float(y.std())
         y_c = y - self.y_mean
 
         n = len(X_scaled)
@@ -261,9 +277,14 @@ class EloPredictorModel:
         # 严格按训练时的块维度对齐，避免维度不匹配导致静默失败
         X, _ = self._features_to_matrix(features_dict, methods, block_dims=self.block_dims)
         X_scaled = (X - self.x_mean) / self.x_std
+        if self.col_keep is not None:
+            X_scaled[:, ~self.col_keep] = 0.0
 
         means = self.y_mean + X_scaled @ self.w
-        variances = self.sigma2 * np.sum((X_scaled @ self.xtx_inv) * X_scaled, axis=1)
+        # 预测方差 = 不可约噪声 σ² + 参数不确定 σ²·x'(XᵀX+λI)⁻¹x
+        variances = self.sigma2 * (
+            1.0 + np.sum((X_scaled @ self.xtx_inv) * X_scaled, axis=1)
+        )
         return means, variances
 
     def get_regularization_path(self) -> dict:
@@ -662,8 +683,11 @@ class ClusterEloPredictor:
         means, variances = self.model.predict(test_features, methods)
 
         results = {}
+        # std 封顶：CI 宽于 ±几百 Elo 已无信息量；保护 summary/state/看板/前端所有下游
+        y_std = self.model.y_std if self.model.y_std is not None else 0.0
+        std_cap = max(RIDGE_PRED_STD_CAP_MULT * y_std, RIDGE_PRED_STD_CAP_MIN)
         for m, mean, var in zip(methods, means, variances):
-            std = float(np.sqrt(max(float(var), 0.0)))
+            std = min(float(np.sqrt(max(float(var), 0.0))), std_cap)
             elo = round(float(mean), 2)
             results[m] = {
                 "elo": elo,

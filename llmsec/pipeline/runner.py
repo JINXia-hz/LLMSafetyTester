@@ -46,6 +46,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -1112,6 +1113,12 @@ def main():
     # run 内 state 快照：dashboard 按 run 查看历史时优先读快照，
     # 避免全局 state 漂移（换攻击集/换模型/手动恢复）导致实测标记错配
     tracker.save(runs_dir / "state.json")
+
+    # cluster_report.json 同理：/api/clusters 的 validation/簇效验证/密度视图
+    # 默认读全局最近产物，历史批次会与 run 内 analysis 错配，快照一份进 run 目录
+    global_cluster_report = OUTPUT_DIR / "cluster_report.json"
+    if global_cluster_report.exists():
+        shutil.copy2(global_cluster_report, runs_dir / "cluster_report.json")
 
     # ---- 生成树形 + 叙事报告（仅使用 runner 自己的数据） ----
     # 加载 runner 自身的攻击结果（避免混入 evaluate.py 的旧数据）
