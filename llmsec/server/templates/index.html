@@ -218,7 +218,17 @@
               <div class="card"><h3 class="font-semibold mb-2 text-sm">主成分解释方差</h3><div id="chart_pca"></div></div>
             </div>
             <div class="card mb-4"><h3 class="font-semibold mb-2 text-sm">特征重要性 Top 20（|Ridge 系数|）</h3><div id="chart_importance"></div></div>
-            <div class="card"><h3 class="font-semibold mb-2 text-sm">未测方法预测 Elo 与 95% 置信区间</h3><div id="chart_pred_ci"></div></div>
+            <div class="card">
+              <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+                <h3 class="font-semibold text-sm">未测方法预测 Elo 与 95% 置信区间</h3>
+                <div class="flex items-center gap-2">
+                  <input id="predCiSearch" type="text" placeholder="🔍 搜索方法名…" class="text-xs" style="min-width: 180px;">
+                  <span id="predCiInfo" class="text-xs" style="color: var(--c-muted);"></span>
+                </div>
+              </div>
+              <div class="text-xs mb-1" style="color: var(--c-muted);">框选放大 · 双击复位 · hover 查看方法全名</div>
+              <div id="chart_pred_ci"></div>
+            </div>
           </div>
         </section>
 

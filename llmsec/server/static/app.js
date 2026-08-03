@@ -503,11 +503,64 @@ async function resetTreeCut() {
 }
 
 // ---------- 预测模型 ----------
+// 预测 CI 图数据缓存（搜索高亮重绘用）
+let predCiData = [];
+
+function predCiTrace(items, marker) {
+  return {
+    x: items.map(p => p.rank),
+    y: items.map(p => p.elo),
+    type: 'scatter', mode: 'markers',
+    text: items.map(p => p.method),
+    hovertemplate: '%{text}<br>预测 ELO %{y:.0f}<extra></extra>',
+    error_y: {
+      type: 'data', symmetric: false,
+      // 钳制到 ±800：历史脏数据（std 爆炸的旧 run）不再压扁 y 轴
+      array: items.map(p => p.ci95 ? Math.min(p.ci95[1] - p.elo, 800) : 0),
+      arrayminus: items.map(p => p.ci95 ? Math.min(p.elo - p.ci95[0], 800) : 0),
+      color: C.muted, thickness: 1.2, width: 3,
+    },
+    marker,
+  };
+}
+
+function drawPredCi(filter) {
+  const info = $('predCiInfo');
+  if (!predCiData.length) { if (info) info.textContent = ''; return; }
+  const data = predCiData.map((p, i) => ({ ...p, rank: i + 1 }));
+  const q = (filter || '').trim().toLowerCase();
+  let traces;
+  if (!q) {
+    if (info) info.textContent = `${data.length} 个未测方法`;
+    traces = [predCiTrace(data, { size: 7, color: C.primary })];
+  } else {
+    const hit = data.filter(p => p.method.toLowerCase().includes(q));
+    const miss = data.filter(p => !p.method.toLowerCase().includes(q));
+    traces = [];
+    if (miss.length) traces.push(predCiTrace(miss, { size: 4, color: C.muted, opacity: 0.25 }));
+    if (hit.length) traces.push(predCiTrace(hit, { size: 11, color: C.accent }));
+    if (info) {
+      info.innerHTML = hit.length
+        ? `匹配 ${hit.length} 个：` + hit.slice(0, 8).map(p => `${esc(p.method)} (${fmtNum(p.elo, 0)})`).join('、') + (hit.length > 8 ? ' …' : '')
+        : '无匹配方法';
+    }
+  }
+  Plotly.newPlot('chart_pred_ci', traces, {
+    margin: { t: 10 }, height: 380, font: PLOT_FONT, showlegend: false,
+    dragmode: 'zoom',  // 框选放大，双击复位
+    xaxis: { showticklabels: false, title: '方法（按预测 Elo 升序）' },
+    yaxis: { title: '预测 ELO ± 1.96σ' },
+  }, PLOT_CFG);
+}
+
+$('predCiSearch').addEventListener('input', e => drawPredCi(e.target.value));
+
 async function loadModel() {
   try {
     const d = await api('/api/model' + runQuery());
     if (!d.available) {
       $('modelEmpty').classList.remove('hidden'); $('modelBody').classList.add('hidden');
+      predCiData = [];
       clearCharts(['chart_regpath', 'chart_pca', 'chart_importance', 'chart_pred_ci']);
       return;
     }
@@ -562,30 +615,11 @@ async function loadModel() {
     }], { margin: { t: 10, l: 10 }, height: 480, font: PLOT_FONT,
           xaxis: { title: '|系数|（青=正向，橙=负向）' } }, PLOT_CFG);
 
-    // 预测 CI 散点
-    const preds = Object.entries(s.predictions || {})
+    // 预测 CI 散点：整数序号 x 轴（标签不可读且截断会撞名叠点），搜索高亮 + 框选缩放
+    predCiData = Object.entries(s.predictions || {})
       .map(([m, p]) => ({ method: m, ...p }))
       .sort((a, b) => a.elo - b.elo);
-    if (preds.length) {
-      // x 轴标签截断防拥挤，hover 显示全名
-      const shortName = m => (m.length > 24 ? m.slice(0, 22) + '…' : m);
-      Plotly.newPlot('chart_pred_ci', [{
-        x: preds.map(p => shortName(p.method)),
-        y: preds.map(p => p.elo),
-        type: 'scatter', mode: 'markers',
-        text: preds.map(p => p.method),
-        hovertemplate: '%{text}<br>预测 ELO %{y:.0f}<extra></extra>',
-        error_y: {
-          type: 'data', symmetric: false,
-          // 钳制到 ±800：历史脏数据（std 爆炸的旧 run）不再压扁 y 轴
-          array: preds.map(p => p.ci95 ? Math.min(p.ci95[1] - p.elo, 800) : 0),
-          arrayminus: preds.map(p => p.ci95 ? Math.min(p.elo - p.ci95[0], 800) : 0),
-          color: C.muted, thickness: 1.2, width: 3,
-        },
-        marker: { size: 7, color: C.primary },
-      }], { margin: { t: 10 }, height: 380, font: PLOT_FONT,
-            xaxis: { tickfont: { size: 9 } }, yaxis: { title: '预测 ELO ± 1.96σ' } }, PLOT_CFG);
-    }
+    drawPredCi($('predCiSearch').value);
   } catch (e) { setStatus('预测模型加载失败: ' + e.message); }
 }
 
