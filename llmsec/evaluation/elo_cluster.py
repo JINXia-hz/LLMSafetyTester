@@ -29,7 +29,8 @@ import joblib
 import numpy as np
 
 from llmsec.clustering import (
-    CLUSTER_ARTIFACTS_FILE,
+    CLUSTER_RESULT_FILE,
+    FEATURE_CACHE_FILE,
     extract_all_features,
     extract_intent_features,
     extract_textual_features,
@@ -46,6 +47,7 @@ from llmsec.clustering.features import (
 )
 from llmsec.core.config import INITIAL_ELO
 from llmsec.core.logging import get_logger
+from llmsec.core.seed import get_global_seed as _global_seed
 from llmsec.params import (
     RIDGE_DEGENERATE_COL_EPS,
     RIDGE_PRED_STD_CAP_MIN,
@@ -198,9 +200,12 @@ class EloPredictorModel:
             else:
                 # K-Fold 交叉验证选择 λ
                 indices = np.arange(n)
-                rng = np.random.default_rng(42)
+                rng = np.random.default_rng(_global_seed())
                 rng.shuffle(indices)
+                # H-9 修复：余数均衡分配到前 r 折（原代码全部堆入最后一折，
+                # n=9,k=5 → fold 尺寸 1,1,1,1,5，小 GT 时 CV 严重不均衡、偏选大 λ）
                 fold_size = n // k
+                remainder = n % k
 
                 best_lambda = None
                 best_error = float("inf")
@@ -209,8 +214,8 @@ class EloPredictorModel:
                 for lam in self.lambda_candidates:
                     errors = []
                     for i in range(k):
-                        start = i * fold_size
-                        end = (i + 1) * fold_size if i < k - 1 else n
+                        start = i * fold_size + min(i, remainder)
+                        end = start + fold_size + (1 if i < remainder else 0)
                         test_idx = indices[start:end]
                         train_idx = np.concatenate([indices[:start], indices[end:]])
 
@@ -369,30 +374,47 @@ class ClusterEloPredictor:
 
     # ============================================================
     # artifacts 持久化（ground truth 已由 ELOTracker 统一保存）
+    # ------------------------------------------------------------
+    # 按写者拆分两个文件（修原 cluster_artifacts.pkl 双写者不同 schema 互覆盖）：
+    #   feature_cache.pkl — 先验特征缓存，仅 fit_features 经 _save_artifacts 写
+    #   cluster_result.pkl — 完整聚类产物，hdb 写、final_fit 增补（见 final_fit）
     # ============================================================
     def _load_artifacts(self):
-        """从磁盘加载聚类 artifacts（labels/features 覆盖全部方法，含未测方法）。"""
-        if CLUSTER_ARTIFACTS_FILE.exists():
+        """从磁盘恢复特征缓存（features/meta 供 ridge / D-optimal 使用）。
+
+        优先读 feature_cache.pkl；缺失则回退 cluster_result.pkl（同样含 features）。
+        聚类拟合元信息（last_fit_gt_count/last_fit_at）从 cluster_result.pkl 恢复。
+        """
+        self.artifacts = None
+        for p in (FEATURE_CACHE_FILE, CLUSTER_RESULT_FILE):
+            if p.exists():
+                try:
+                    a = joblib.load(p)
+                    a.pop("dist_matrix", None)  # 丢弃训练期完整距离矩阵，省内存
+                    if "features" in a:
+                        self.artifacts = a
+                        break
+                except Exception as e:
+                    logger.warning("加载 %s 失败: %s", p.name, e)
+
+        # 拟合元信息从聚类结果文件恢复（决定是否触发重聚类）
+        if CLUSTER_RESULT_FILE.exists():
             try:
-                self.artifacts = joblib.load(CLUSTER_ARTIFACTS_FILE)
-                # 丢弃训练期使用的完整 dist_matrix，节省内存
-                self.artifacts.pop("dist_matrix", None)
+                cr = joblib.load(CLUSTER_RESULT_FILE)
                 self.last_fit_gt_count = int(
-                    self.artifacts.get("ground_truth_count", self.last_fit_gt_count)
+                    cr.get("ground_truth_count", self.last_fit_gt_count)
                 )
-                self.last_fit_at = self.artifacts.get("generated_at", self.last_fit_at)
-            except Exception as e:
-                logger.warning("加载 cluster artifacts 失败: %s", e)
-                self.artifacts = None
+                self.last_fit_at = cr.get("generated_at", self.last_fit_at)
+            except Exception:
+                pass
 
     def _save_artifacts(self):
-        """保存聚类 artifacts（不含 dist_matrix）。"""
+        """保存先验特征缓存到 feature_cache.pkl（仅 feature_cache 形态）。"""
         if self.artifacts is None:
             return
-        # 确保不保存完整 dist_matrix
-        self.artifacts.pop("dist_matrix", None)
-        os.makedirs(os.path.dirname(CLUSTER_ARTIFACTS_FILE) or ".", exist_ok=True)
-        joblib.dump(self.artifacts, CLUSTER_ARTIFACTS_FILE)
+        self.artifacts.pop("dist_matrix", None)  # 不保存完整距离矩阵
+        os.makedirs(os.path.dirname(FEATURE_CACHE_FILE) or ".", exist_ok=True)
+        joblib.dump(self.artifacts, FEATURE_CACHE_FILE)
 
     # ============================================================
     # ground truth 管理
@@ -448,6 +470,8 @@ class ClusterEloPredictor:
         features, meta = extract_all_features(attack_records, eval_results=[])
 
         self.artifacts = {
+            "schema_version": 1,
+            "kind": "feature_cache",
             "features": features,
             "meta": meta,
             "method_set_hash": _compute_method_set_hash(sorted(features.keys())),
@@ -488,7 +512,7 @@ class ClusterEloPredictor:
                 extra = self._extract_features_for_methods(missing, method_records, meta)
             except Exception as e:
                 logger.warning("种子特征提取失败，回退随机采样: %s", e)
-                random.shuffle(candidates)
+                random.Random(_global_seed()).shuffle(candidates)
                 return candidates[:n]
 
         def _vec(m: str) -> dict:
@@ -531,58 +555,71 @@ class ClusterEloPredictor:
         """
         labels = self.artifacts.get("labels", {}) if self.artifacts else {}
         cid = int(labels.get(method, -1)) if method in labels else -1
+        gt_count = self.ground_truth_count()
+
+        # H-10 修复：所有分支统一经 _make_result 构造，保证 schema 一致（含 std/ci95）。
+        # 原回退分支缺 std/ci95，下游 predict_batch 复用时访问会 KeyError。
 
         if method in self.ground_truth:
-            return {
-                "elo": self.ground_truth[method]["elo"],
-                "source": "ground_truth",
-                "cluster_id": None,
-                "confidence": 1.0,
-                "based_on_gt_count": self.ground_truth_count(),
-            }
+            # GT 真实 Elo，不确定性为 0
+            return self._make_result(
+                self.ground_truth[method]["elo"], "ground_truth", None, 1.0, gt_count, std=0.0
+            )
 
         if not self.ground_truth:
-            return {
-                "elo": float(INITIAL_ELO),
-                "source": "predicted",
-                "cluster_id": None,
-                "confidence": 0.0,
-                "based_on_gt_count": 0,
-            }
+            return self._make_result(
+                float(INITIAL_ELO), "predicted", None, 0.0, 0,
+                std=self._fallback_std(),
+            )
 
         # ---- 1. 同后缀变体兜底（如 *_rot13 / *_b64 / *_code / *_story） ----
         suffix_gt = self._find_suffix_variant_ground_truth(method)
         if suffix_gt:
             avg = sum(self.ground_truth[m]["elo"] for m in suffix_gt) / len(suffix_gt)
-            return {
-                "elo": round(avg, 2),
-                "source": "predicted_suffix_variant",
-                "cluster_id": cid,
-                "confidence": round(min(len(suffix_gt) / 3, 1.0), 4),
-                "based_on_gt_count": self.ground_truth_count(),
-            }
+            conf = round(min(len(suffix_gt) / 3, 1.0), 4)
+            return self._make_result(
+                round(avg, 2), "predicted_suffix_variant", cid, conf, gt_count,
+                std=self._fallback_std(),
+            )
 
         # ---- 2. 同基底变体兜底 ----
         variant_gt = self._find_variant_ground_truth(method)
         if variant_gt:
             avg = sum(self.ground_truth[m]["elo"] for m in variant_gt) / len(variant_gt)
-            return {
-                "elo": round(avg, 2),
-                "source": "predicted_variant",
-                "cluster_id": cid,
-                "confidence": round(min(len(variant_gt) / 2, 1.0), 4),
-                "based_on_gt_count": self.ground_truth_count(),
-            }
+            conf = round(min(len(variant_gt) / 2, 1.0), 4)
+            return self._make_result(
+                round(avg, 2), "predicted_variant", cid, conf, gt_count,
+                std=self._fallback_std(),
+            )
 
         # ---- 3. 全局简单平均 ----
         avg = sum(g["elo"] for g in self.ground_truth.values()) / len(self.ground_truth)
+        conf = round(min(gt_count / 10, 0.5), 4)
+        return self._make_result(
+            round(avg, 2), "predicted_global", cid, conf, gt_count,
+            std=self._fallback_std(),
+        )
+
+    @staticmethod
+    def _make_result(elo, source, cluster_id, confidence, based_on_gt_count, std=None):
+        """构造预测结果 dict，保证 schema 一致（含 std/ci95，防下游 KeyError）。"""
+        if std is None:
+            std = float(RIDGE_PRED_STD_CAP_MIN)
+        ci95 = [round(elo - 1.96 * std, 2), round(elo + 1.96 * std, 2)]
         return {
-            "elo": round(avg, 2),
-            "source": "predicted_global",
-            "cluster_id": cid,
-            "confidence": round(min(self.ground_truth_count() / 10, 0.5), 4),
-            "based_on_gt_count": self.ground_truth_count(),
+            "elo": elo,
+            "source": source,
+            "cluster_id": cluster_id,
+            "std": round(std, 2),
+            "ci95": ci95,
+            "confidence": confidence,
+            "based_on_gt_count": based_on_gt_count,
         }
+
+    @staticmethod
+    def _fallback_std() -> float:
+        """回退分支的保守 std（无模型方差可用时的高不确定性标记）。"""
+        return float(RIDGE_PRED_STD_CAP_MIN)
 
     # ============================================================
     # SVD-Ridge 批量预测
@@ -785,7 +822,9 @@ class ClusterEloPredictor:
             write=True,
         )
 
-        self.artifacts = joblib.load(CLUSTER_ARTIFACTS_FILE)
+        self.artifacts = joblib.load(CLUSTER_RESULT_FILE)
+        self.artifacts["schema_version"] = 1
+        self.artifacts["kind"] = "cluster_result"
         self.artifacts["is_final_cluster"] = True
         self.artifacts["ground_truth_count"] = self.ground_truth_count()
         self.artifacts["ground_truth_methods"] = sorted(self.ground_truth.keys())
@@ -794,7 +833,9 @@ class ClusterEloPredictor:
         )
         self.last_fit_gt_count = self.ground_truth_count()
         self.last_fit_at = datetime.now().isoformat()
-        self._save_artifacts()
+        # 写回聚类结果文件（不走 _save_artifacts——那会把聚类结果错投进 feature_cache）
+        os.makedirs(os.path.dirname(CLUSTER_RESULT_FILE) or ".", exist_ok=True)
+        joblib.dump(self.artifacts, CLUSTER_RESULT_FILE)
 
         rv = report.get("reaction_validation", {})
         logger.info(

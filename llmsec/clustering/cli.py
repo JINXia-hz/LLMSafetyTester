@@ -34,7 +34,7 @@ setup_console()
 
 def main():
     parser = argparse.ArgumentParser(description="攻击方法聚类分析（HDBSCAN + 关键层 auto-k）")
-    parser.add_argument("--input", type=str, default="攻击集_L1.jsonl",
+    parser.add_argument("--input", type=str, default="attacks/l1.jsonl",
                         help="攻击集输入文件")
     parser.add_argument("--result-file", type=str, default=None,
                         help="评估结果文件（提供时启用弱监督加权与 ANOVA 簇效验证）")

@@ -8,7 +8,7 @@ targets.openai_backend — 标准 OpenAI /v1/chat/completions 后端
 import time
 
 from llmsec.core.config import TargetConfig
-from llmsec.core.llm import create_openai_client, retry_call
+from llmsec.core.llm import create_openai_client, is_retryable_error, retry_call
 from llmsec.targets.base import TargetClient
 
 # 重试间隔（秒），与原 targets.py 的 _call_openai 一致
@@ -55,7 +55,11 @@ class OpenAITargetClient(TargetClient):
             }
 
         try:
-            return retry_call(_call, retries=cfg.max_retries, delay=RETRY_DELAY)
+            # H-7 修复：4xx 确定性错误不重试（原代码对所有异常重试）
+            return retry_call(
+                _call, retries=cfg.max_retries, delay=RETRY_DELAY,
+                retry_on=is_retryable_error,
+            )
         except Exception as e:
             return self._error_result(
                 str(e),

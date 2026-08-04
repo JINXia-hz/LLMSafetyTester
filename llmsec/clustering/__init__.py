@@ -48,6 +48,8 @@ from llmsec.core.config import (
     CLUSTER_FEATURES_FILE,
     CLUSTER_MATRIX_FILE,
     CLUSTER_REPORT_FILE,
+    CLUSTER_RESULT_FILE,
+    FEATURE_CACHE_FILE,
 )
 
 __all__ = [
@@ -69,5 +71,5 @@ __all__ = [
     "cut_tree", "candidate_ks", "sweep_candidates", "select_knee", "log_growth_k0",
     # 路径常量
     "CLUSTER_REPORT_FILE", "CLUSTER_MATRIX_FILE", "CLUSTER_FEATURES_FILE",
-    "CLUSTER_ARTIFACTS_FILE",
+    "CLUSTER_ARTIFACTS_FILE", "FEATURE_CACHE_FILE", "CLUSTER_RESULT_FILE",
 ]

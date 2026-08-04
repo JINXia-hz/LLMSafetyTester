@@ -1,0 +1,105 @@
+"""
+experiments.metrics — 从 trial 产物提取科学度量。
+
+核心度量 conv_rounds（HPO 目标）：优先读 runner_report.elo.conv_rounds；
+缺失则从 state.json 的轮次轨迹回放 check_convergence 重算（含未收敛惩罚）。
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+
+
+def load_json(p: Path):
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def extract_metrics(work_dir: Path, max_rounds: int | None = None) -> dict:
+    """
+    从一个 trial 的 work_dir 提取度量字典。
+
+    返回（至少含 conv_rounds、defender_elo、asr、ci_half、coverage、fpr、tested）。
+    """
+    report = load_json(work_dir / "runner_report.json")
+    metrics: dict = {"work_dir": str(work_dir)}
+
+    if report:
+        elo = report.get("elo", {}) or {}
+        atk = report.get("attack_phase", {}) or {}
+        alg = report.get("allergy", {}) or {}
+        metrics.update({
+            "defender_elo": elo.get("boundary_elo"),
+            "confidence": elo.get("boundary_confidence"),
+            "ci_half": elo.get("ci_half"),
+            "drift": elo.get("drift"),
+            "converged": elo.get("converged"),
+            "coverage": elo.get("coverage"),
+            "conv_rounds": elo.get("conv_rounds"),
+            "asr": atk.get("asr"),
+            "rounds_run": atk.get("rounds"),
+            "tested": atk.get("total_tested"),
+            "fpr": alg.get("fpr"),
+        })
+
+    # conv_rounds 兜底：从 state 回放重算（runner_report 缺失或为 None 时）
+    if metrics.get("conv_rounds") is None:
+        cr = _conv_rounds_from_state(work_dir, max_rounds)
+        if cr is not None:
+            metrics["conv_rounds"] = cr
+    return metrics
+
+
+def _conv_rounds_from_state(work_dir: Path, max_rounds: int | None) -> int | float | None:
+    """从 state.json 轮次轨迹回放 check_convergence，返回首个收敛轮数；未收敛给惩罚值。"""
+    state = load_json(work_dir / "state.json")
+    if not state:
+        return None
+    import sys
+    root = str(Path(__file__).resolve().parents[2])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from llmsec.evaluation.elo import ELOTracker
+        from llmsec.params import CONV_CI_TARGET
+        tracker = ELOTracker()
+        tracker.load(str(work_dir / "state.json"))
+        defender = state.get("defender_ratings") and next(iter(state["defender_ratings"]))
+        if not defender:
+            return None
+        total = max(1, len(state.get("attacker_ratings", {})))
+        n_gt = len(state.get("ground_truth", {}))
+        rounds = state.get("round_defender_elos", {}).get(defender, [])
+        mr = max_rounds or (len(rounds) or 1)
+        for r in range(1, len(rounds) + 1):
+            saved = tracker._round_defender_elos[defender]
+            tracker._round_defender_elos[defender] = rounds[:r]
+            conv = tracker.check_convergence(defender, total_methods=total, tested_count=n_gt)
+            tracker._round_defender_elos[defender] = saved
+            if conv.get("converged"):
+                return r
+        # 未收敛 → 惩罚：mr + (ci_half/target)，近收敛者排名更高
+        final = tracker.check_convergence(defender, total_methods=total, tested_count=n_gt)
+        ci = final.get("ci_half") or CONV_CI_TARGET
+        return mr + float(ci) / float(CONV_CI_TARGET)
+    except Exception:
+        return None
+
+
+def aggregate(values: list[float], mode: str) -> float:
+    """跨 repeats 聚合目标值。"""
+    vals = [v for v in values if v is not None and math.isfinite(v)]
+    if not vals:
+        return float("inf")
+    mean = sum(vals) / len(vals)
+    if mode == "mean_minus_std":
+        if len(vals) >= 2:
+            std = math.sqrt(sum((v - mean) ** 2 for v in vals) / (len(vals) - 1))
+        else:
+            std = 0.0
+        return mean - std  # 最小化方向下，偏好低且稳
+    return mean

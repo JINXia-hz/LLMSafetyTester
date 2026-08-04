@@ -48,9 +48,10 @@ from llmsec.core.config import (
     OUTPUT_DIR,
     RUNS_DIR,
     SAFE_TWINS_FILE,
+    STATE_DIR,
     STATE_FILE,
 )
-from llmsec.core.io import read_jsonl
+from llmsec.core.io import append_jsonl, iter_jsonl, read_json, read_jsonl, write_json, write_jsonl
 from llmsec.core.text import strip_math_tax
 from llmsec.core.logging import setup_console
 from llmsec.evaluation import (
@@ -62,6 +63,8 @@ from llmsec.evaluation import (
     measure_math_baseline,
     ELOTracker,
     generate_safe_twin,
+    maybe_migrate_legacy,
+    publish_tracker,
     SAFE_TWIN_SYSTEM,
 )
 from llmsec.evaluation.cluster_analysis import (
@@ -72,10 +75,7 @@ from llmsec.evaluation.samplers import build_sampler
 from llmsec.params import (
     ADAPTIVE_BATCH_MAX,
     ADAPTIVE_BATCH_MIN,
-    ADAPTIVE_BATCH_STD_HIGH,
-    ADAPTIVE_BATCH_STD_LOW,
     API_DELAY,
-    CONFIDENCE_TARGET,
     DEFAULT_BATCH_SIZE,
     DEFAULT_MAX_ROUNDS,
     MAX_TWIN_WINDOW,
@@ -194,14 +194,8 @@ def adaptive_twin_window(
 # 辅助函数
 # ============================================================
 def load_prompt_records(filepath) -> list[dict]:
-    """加载攻击prompt的JSONL文件。"""
-    records = []
-    with open(filepath, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
-    return records
+    """加载攻击prompt的JSONL文件（委托 core.io.read_jsonl）。"""
+    return read_jsonl(filepath)
 
 
 def get_or_create_twin(method_name: str, rec: dict, twin_cache: dict,
@@ -214,15 +208,10 @@ def get_or_create_twin(method_name: str, rec: dict, twin_cache: dict,
         return twin_cache[method_name]
 
     # 尝试从已有孪生文件加载
-    if os.path.exists(SAFE_TWINS_FILE):
-        with open(SAFE_TWINS_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    t = json.loads(line)
-                    if t.get("method") == method_name:
-                        twin_cache[method_name] = t["safe_prompt"]
-                        return t["safe_prompt"]
+    for t in iter_jsonl(SAFE_TWINS_FILE):
+        if t.get("method") == method_name:
+            twin_cache[method_name] = t["safe_prompt"]
+            return t["safe_prompt"]
 
     # 按需生成
     clean_prompt = strip_math_tax(rec["prompt"])
@@ -234,18 +223,16 @@ def get_or_create_twin(method_name: str, rec: dict, twin_cache: dict,
     twin_cache[method_name] = twin["safe_prompt"]
 
     # 追加写入孪生文件
-    os.makedirs(os.path.dirname(SAFE_TWINS_FILE), exist_ok=True)
-    with open(SAFE_TWINS_FILE, "a", encoding="utf-8") as f:
-        entry = {
-            "original_id": rec["id"],
-            "category": rec["category"],
-            "method": rec["method"],
-            "harm_type": rec["harm_type"],
-            "original_prompt": clean_prompt[:300],
-            "safe_prompt": twin["safe_prompt"],
-            "replacement": twin["replacement"],
-        }
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    entry = {
+        "original_id": rec["id"],
+        "category": rec["category"],
+        "method": rec["method"],
+        "harm_type": rec["harm_type"],
+        "original_prompt": clean_prompt[:300],
+        "safe_prompt": twin["safe_prompt"],
+        "replacement": twin["replacement"],
+    }
+    append_jsonl(SAFE_TWINS_FILE, entry)
 
     return twin["safe_prompt"]
 
@@ -303,37 +290,16 @@ def _adaptive_batch_size(
     max_batch: int = ADAPTIVE_BATCH_MAX,
 ) -> tuple[int, str]:
     """
-    根据上一轮收敛指标自适应调整 batch_size。
+    返回下一轮 batch_size。
 
-    规则：
-    - round_std > 30：波动过大，减小 batch（更精细探索）
-    - round_std < 10 且连续 2 轮稳定：增大 batch（加速覆盖）
-    - round_std < 5 且覆盖率 > 50%：提前收敛信号，保持当前 batch
-    - 无历史数据：保持当前 batch
+    设计变更：batch 不再跟随 Elo 波动（旧逻辑"std 大→减小 batch"把"漂移"
+    误当"噪声"，反而拖慢收敛）。Elo 稳定性现已由 K 衰减 + CI 收敛判据负责，
+    batch 仅作覆盖率/预算旋钮——恒定保持用户设定值，受 [min_batch, max_batch] 钳位。
     """
-    if conv is None or conv.get("std") is None:
-        return current_batch, "无历史数据，保持初始 batch"
-
-    std = conv["std"]
-    coverage = conv.get("coverage", 0)
-    n_rounds = conv.get("n_rounds", 0)
-
-    if std > ADAPTIVE_BATCH_STD_HIGH:
-        new_batch = max(min_batch, current_batch - 1)
-        if new_batch != current_batch:
-            return new_batch, f"波动大(std={std:.1f}>{ADAPTIVE_BATCH_STD_HIGH:.0f})，减小 batch 至 {new_batch}"
-        return current_batch, f"波动大(std={std:.1f}>{ADAPTIVE_BATCH_STD_HIGH:.0f})，batch 已达下限"
-
-    if std < ADAPTIVE_BATCH_STD_LOW and n_rounds >= 2:
-        new_batch = min(max_batch, current_batch + 1)
-        if new_batch != current_batch:
-            return new_batch, f"趋于稳定(std={std:.1f}<{ADAPTIVE_BATCH_STD_LOW:.0f})，增大 batch 至 {new_batch}"
-        return current_batch, f"趋于稳定(std={std:.1f}<{ADAPTIVE_BATCH_STD_LOW:.0f})，batch 已达上限"
-
-    if std < 5 and coverage > 0.5:
-        return current_batch, f"接近收敛(std={std:.1f}<5, coverage={coverage:.0%})，保持 batch"
-
-    return current_batch, f"波动适中(std={std:.1f})，保持 batch"
+    new_batch = max(min_batch, min(max_batch, current_batch))
+    if new_batch != current_batch:
+        return new_batch, f"batch 钳位至 [{min_batch},{max_batch}] 区间 → {new_batch}"
+    return current_batch, f"batch 固定({current_batch}，与 Elo 波动解耦)"
 
 
 # ============================================================
@@ -350,6 +316,8 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
                      coordinate_rounds: int = 2,
                      sampler_log_file: Path | None = None,
                      cluster_analysis_file: Path | None = None,
+                     skip_final_clustering: bool = False,
+                     state_file: Path | str | None = None,
                      ) -> dict:
     """
     自适应攻击测试：从ELO中档开始，逐轮二分搜索。
@@ -369,8 +337,9 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
 
     all_methods = sorted(method_records.keys())
 
-    # 加载已有 ELO
-    tracker.load(STATE_FILE)
+    # 加载已有 ELO（多目标时用 per-target state_file，避免跨模型 ground_truth 污染）
+    sf = str(state_file) if state_file else STATE_FILE
+    tracker.load(sf)
     # resume 时已实测方法直接计入 tested，避免被重新选中二次计 Elo
     tested = set(tracker.ground_truth_methods)
     all_results = []
@@ -390,8 +359,17 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
           f"(ground truth {len(tracker.ground_truth_methods)} 种)")
 
     # ---- 构造采样器 ----
+    # H-1 修复：Phase 1 期间聚类尚未运行（post-test），用特征缓存做快速预聚类
+    # 注入 sampler，否则 InfoGain/Coordinate 的簇覆盖特性完全不工作（build_sampler
+    # 默认 cluster_report=None → 所有方法被当做一个簇 → beta*visit_count 退化为全局惩罚）
+    pre_labels = _quick_precluster(tracker, all_methods)
+    pre_report = {"method_labels": pre_labels} if pre_labels else None
+    if pre_labels:
+        n_clusters_pre = len(set(pre_labels.values()))
+        print(f"  🔍 预聚类: {n_clusters_pre} 簇注入采样器（簇覆盖生效）")
     sampler_obj = build_sampler(
         sampler,
+        cluster_report=pre_report,
         alpha=sampler_alpha,
         beta=sampler_beta,
         gamma=sampler_gamma,
@@ -471,7 +449,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
         # 用 SVD-Ridge 重新预测剩余方法
         remaining_records = {m: r for m, r in method_records.items() if m not in tested}
         _inject_predicted_elos(tracker, remaining_records)
-        tracker.save(STATE_FILE)
+        tracker.save(sf)
         tracker.record_round_end(DEFENDER_NAME)
         print(f"  ✅ 种子阶段完成: 已建立 ground truth {len(tracker.ground_truth_methods)} 种，"
               f"剩余 {len(remaining_records)} 种使用 SVD-Ridge 预测 Elo")
@@ -559,12 +537,12 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
             time.sleep(API_DELAY)
 
         # 保存ELO进度
-        tracker.save(STATE_FILE)
+        tracker.save(sf)
 
         # SVD-Ridge 更新：基于新增 ground truth 刷新未测方法预测 Elo（聚类不重训）
         remaining_records = {m: r for m, r in method_records.items() if m not in tested}
         _inject_predicted_elos(tracker, remaining_records)
-        tracker.save(STATE_FILE)
+        tracker.save(sf)
         print(f"     🔄 预测已更新: {len(remaining_records)} 个未测方法的 SVD-Ridge 预测 Elo")
 
         # 记录本轮结束时的防御方 Elo，用于更稳健的收敛判断
@@ -585,22 +563,30 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
         prev_conv = conv
         boundary_info = tracker.compute_security_boundary(DEFENDER_NAME)
         confidence = boundary_info.get("confidence", 0)
-        if confidence >= CONFIDENCE_TARGET:
+        if boundary_info.get("converged"):
             print(f"\n  🎯 防御方 {DEFENDER_NAME} ELO 已收敛 "
-                  f"(置信度={confidence*100:.0f}% ≥ {CONFIDENCE_TARGET*100:.0f}%, "
-                  f"σ={conv['std']:.1f}, 覆盖率={conv['coverage']*100:.0f}%, "
+                  f"(置信度={confidence*100:.0f}%, "
+                  f"真值Elo 95%CI±{conv['ci_half']:.0f} (目标±{20:.0f}), "
+                  f"漂移={conv['drift']:+.1f}/轮, "
+                  f"覆盖率={conv['coverage']*100:.0f}%, "
                   f"ELO≈{conv['current_elo']:.0f}, "
                   f"已测{len(tested)}/{len(all_methods)}方法)")
             break
         else:
             notes = "; ".join(conv.get("notes", [])) if conv.get("notes") else "未收敛"
+            ci_disp = f"{conv['ci_half']:.0f}" if conv.get("ci_half") is not None else "N/A"
+            drift_disp = f"{conv['drift']:+.1f}" if conv.get("drift") is not None else "N/A"
             print(f"     📊 防御={DEFENDER_NAME} ELO≈{conv['current_elo']:.0f} "
-                  f"σ={conv['std']} 覆盖率={conv['coverage']*100:.0f}% "
+                  f"95%CI±{ci_disp} 漂移={drift_disp}/轮 "
+                  f"覆盖率={conv['coverage']*100:.0f}% "
                   f"置信度={confidence*100:.0f}% "
                   f"({notes})")
 
     # ---- 攻击完成后最终聚类（post-test）+ 簇级安全分析 ----
-    final_report = tracker.predictor.final_fit(records, all_results)
+    # 多目标模式下跳过（聚类是方法级、跨模型共享；由上层统一做一次，避免 N× embedding）
+    final_report = None
+    if not skip_final_clustering:
+        final_report = tracker.predictor.final_fit(records, all_results)
     if final_report:
         print(f"\n  🏁 最终聚类: {final_report.get('n_clusters', 0)} 簇 "
               f"(噪声={final_report.get('n_noise', 0)}, k*={final_report.get('chosen_k', 0)}, "
@@ -622,18 +608,14 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
     except Exception as e:
         print(f"     ⚠ 聚类安全分析失败: {e}")
 
-    tracker.save(STATE_FILE)
+    tracker.save(sf)
 
     # 保存攻击结果到专用文件（避免 Phase 3 读到旧数据）
-    with open(attack_file, "w", encoding="utf-8") as f:
-        for r in all_results:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    write_jsonl(attack_file, all_results)
 
     # 保存采样器决策日志
     if sampler_log_file:
-        with open(sampler_log_file, "w", encoding="utf-8") as f:
-            for entry in sampler_log:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        write_jsonl(sampler_log_file, sampler_log)
 
     boundary = tracker.compute_security_boundary(DEFENDER_NAME)
     ranking = tracker.get_attacker_ranking()
@@ -806,7 +788,8 @@ def run_allergy_phase(method_records: dict[str, dict], target_client: OpenAI,
             print(f"     ❌ {method_name[:30]} 孪生生成失败")
             continue
 
-        total += 1
+        # H-2 修复：total（FPR 分母）只在 API 成功获取 content 后计数。
+        # 原代码 total += 1 在 API 调用前，断网/限流时 FPR = refused/(成功+失败) 被系统性低估。
         try:
             api_result = call_target(safe_prompt)
             if api_result["error"]:
@@ -816,6 +799,7 @@ def run_allergy_phase(method_records: dict[str, dict], target_client: OpenAI,
         except Exception as e:
             print(f"     ❌ {method_name[:30]} API错误: {e}")
             continue
+        total += 1
 
         # 判定过敏：target_refused 信号优先，否则走 Judge
         target_refused = api_result.get("target_refused", False)
@@ -848,15 +832,14 @@ def run_allergy_phase(method_records: dict[str, dict], target_client: OpenAI,
     fpr = refused_count / total if total > 0 else 0
 
     # 保存过敏结果到专用文件
-    with open(allergy_file, "w", encoding="utf-8") as f:
-        json.dump({
-            "results": allergy_results,
-            "summary": {
-                "total": total, "allergic": refused_count,
-                "fpr": round(fpr, 4),
-                "false_positive_rate": round(fpr, 4),
-            },
-        }, f, ensure_ascii=False, indent=2)
+    write_json(allergy_file, {
+        "results": allergy_results,
+        "summary": {
+            "total": total, "allergic": refused_count,
+            "fpr": round(fpr, 4),
+            "false_positive_rate": round(fpr, 4),
+        },
+    })
 
     summary = {
         "total_tested": total,
@@ -873,6 +856,66 @@ def run_allergy_phase(method_records: dict[str, dict], target_client: OpenAI,
 # ============================================================
 # Phase 3: 综合评判
 # ============================================================
+def _quick_precluster(tracker: ELOTracker, all_methods: list[str]) -> dict[str, int] | None:
+    """用 tracker 的特征缓存做快速 KMeans 预聚类，返回 {method: label} 或 None。
+
+    H-1 修复：Phase 1 期间聚类尚未运行（post-test），sampler 的 InfoGain/Coordinate
+    簇覆盖特性需要预聚类标签才能工作。用 build_whitened_space + KMeans 做轻量预聚类。
+
+    失败时返回 None（sampler 退化为全局模式，与原行为一致，不崩溃）。
+    """
+    artifacts = getattr(tracker.predictor, "artifacts", None) or {}
+    features = artifacts.get("features")
+    if not features:
+        return None
+    methods = [m for m in all_methods if m in features]
+    if len(methods) < 4:
+        return None  # 太少不值得聚类
+    try:
+        from llmsec.clustering.space import build_whitened_space
+        from sklearn.cluster import KMeans
+
+        space = build_whitened_space(features, methods)
+        coords = space["coords"]
+        k = max(2, min(len(methods) // 3, 8))
+        km = KMeans(n_clusters=k, n_init=3, random_state=42)
+        raw = km.fit_predict(coords)
+        return {m: int(c) for m, c in zip(methods, raw)}
+    except Exception as e:
+        print(f"⚠️ 预聚类失败（sampler 将退化为全局模式）: {e}")
+        return None
+
+
+def _compute_conv_rounds(tracker: ELOTracker, defender: str, total_methods: int) -> int | None:
+    """
+    回放轮次轨迹，返回首个 converged=True 的轮数（1-indexed）；未收敛返回 None。
+
+    作为 HPO 的目标度量：越小说明该配置越快达到目标精度。
+    在 tracker 内存态轨迹上逐轮截断调用 check_convergence（drift/ci_half 随轮变化）；
+    coverage 用最终 GT 计数近似（单调，通常较早达标，非瓶颈约束）。
+    """
+    # H-3 修复：try/finally 保护轨迹恢复。
+    # 原代码恢复语句不在 finally 里，check_convergence 抛异常时轨迹永久留在截断态。
+    round_elos = tracker._round_defender_elos.get(defender, [])
+    n_gt = len(tracker.ground_truth_methods)
+    saved = tracker._round_defender_elos.get(defender)
+    try:
+        for r in range(1, len(round_elos) + 1):
+            tracker._round_defender_elos[defender] = round_elos[:r]
+            conv = tracker.check_convergence(
+                defender, total_methods=total_methods, tested_count=n_gt
+            )
+            if conv.get("converged"):
+                return r
+    except Exception as e:
+        print(f"⚠️ _compute_conv_rounds 失败: {e}")
+    finally:
+        # 无论正常返回还是异常，都恢复原始轨迹
+        if saved is not None:
+            tracker._round_defender_elos[defender] = saved
+    return None
+
+
 def generate_final_report(attack_summary: dict, allergy_summary: dict,
                           tracker: ELOTracker, report_file) -> dict:
     """
@@ -884,6 +927,10 @@ def generate_final_report(attack_summary: dict, allergy_summary: dict,
     ranking = tracker.get_attacker_ranking()
     tested_methods = attack_summary.get("total_attacks", 0)
     total_methods = len(tracker.attacker_ratings)
+
+    # 收敛轮次：回放轮次轨迹，找首个 converged=True 的轮数（实验 HPO 的目标度量）
+    from llmsec.params import CONV_CI_TARGET, CONV_WINDOW_MIN
+    conv_rounds = _compute_conv_rounds(tracker, DEFENDER_NAME, total_methods)
 
     # 置信度不足 → 不给出安全等级，提示需要更多数据
     confidence = boundary.get("confidence", 0)
@@ -921,6 +968,11 @@ def generate_final_report(attack_summary: dict, allergy_summary: dict,
         "elo": {
             "boundary_elo": boundary["boundary_elo"],
             "boundary_confidence": boundary["confidence"],
+            "converged": boundary.get("converged", False),
+            "ci_half": boundary.get("ci_half"),
+            "drift": boundary.get("drift"),
+            "conv_rounds": conv_rounds,
+            "coverage": boundary.get("coverage"),
             "methods_above_boundary": boundary.get("methods_above_boundary", 0),
             "tested_above_boundary": boundary.get("tested_above_boundary", 0),
             "predicted_above_boundary": boundary.get("predicted_above_boundary", 0),
@@ -966,6 +1018,183 @@ def generate_recommendation(asr: float, fpr: float, level: str) -> str:
 
 
 # ============================================================
+# 多目标编排（--targets）：逐目标 Phase 1 → 结果写入 R 矩阵 → 派生 Elo + 混合预测器
+# ============================================================
+def run_multi_target_phase(
+    args,
+    records: list[dict],
+    method_records: dict[str, dict],
+    runs_dir: Path,
+    judge,
+    twin_client=None,
+) -> dict:
+    """
+    多目标攻击编排。
+
+    对每个选定目标：set_active_target → 复用既有 run_attack_phase 跑 Phase 1 →
+    把该目标 tracker.history 镜像进结果矩阵 R。全部跑完后从 R 派生每模型 Elo
+    （derive_elo，不跨模型）、训练统一/模型双层混合预测器，输出跨模型汇总。
+
+    R 是唯一真相；STATE_FILE 仅保留最后一个目标的 legacy 视图（次要）。
+    """
+    from llmsec.core.results import ResultsMatrix, _coarse_status
+    from llmsec.evaluation.blend_predictor import BlendPredictor
+    from llmsec.targets import set_active_target, available_targets
+    global DEFENDER_NAME
+
+    declared = available_targets()
+    names = [n.strip() for n in args.targets.split(",") if n.strip()]
+    invalid = [n for n in names if n not in declared]
+    if invalid:
+        print(f"❌ 未声明的目标: {invalid}（可用: {sorted(declared)}）")
+        sys.exit(1)
+    print(f"\n🌐 多目标模式: {len(names)} 个目标 → {names}")
+
+    # 方法特征（方法级、跨模型共享）——提取一次复用
+    feat_tracker = ELOTracker()
+    feat_tracker.predictor.fit_features(records)
+    features = feat_tracker.predictor.artifacts.get("features", {})
+    catalog = list(method_records.keys())
+
+    # 载入/初始化结果矩阵 R（唯一真相）
+    R = ResultsMatrix.load()
+    R.set_method_catalog(catalog)
+
+    per_target: dict[str, dict] = {}
+    per_target_attack_files: dict[str, Path] = {}
+    trackers: dict[str, ELOTracker] = {}
+    do_phase1 = args.phase in ("all", "1")
+    do_phase2 = args.phase in ("all", "2")
+
+    # ---------------- Phase 1：逐目标自适应攻击 ----------------
+    for idx, name in enumerate(names, 1):
+        print(f"\n{'='*60}\n  🎯 目标 [{idx}/{len(names)}]: {name} (model={declared[name].model})\n{'='*60}")
+        set_active_target(name)
+        DEFENDER_NAME = name
+
+        tracker = ELOTracker()
+        tracker.predictor.threshold = args.cluster_retrain_threshold
+        if features:
+            tracker.predictor.artifacts = feat_tracker.predictor.artifacts
+
+        if do_phase1:
+            attack_file = runs_dir / f"attack_results__{name}.jsonl"
+            per_target_attack_files[name] = attack_file
+            try:
+                run_attack_phase(
+                    records, None, judge, tracker,
+                    batch_size=args.batch_size, max_rounds=args.max_rounds,
+                    attack_file=attack_file,
+                    sampler=args.sampler,
+                    sampler_alpha=args.sampler_alpha,
+                    sampler_beta=args.sampler_beta,
+                    sampler_gamma=args.sampler_gamma,
+                    coordinate_rounds=args.coordinate_rounds,
+                    sampler_log_file=runs_dir / f"sampler_log__{name}.jsonl",
+                    cluster_analysis_file=None,
+                    skip_final_clustering=True,
+                    state_file=STATE_DIR / f"state__{name}.json",
+                )
+            except Exception as e:
+                print(f"  ⚠ 目标 {name} 攻击阶段失败: {e}")
+                per_target[name] = {"error": str(e)}
+                continue
+            # R 唯一真相：把 live tracker 的结果发布进 R + Elo 派生缓存（含收敛轨迹）
+            publish_tracker(tracker, name)
+        else:
+            # 仅 Phase 2：从 per-target state 恢复 tracker（含 Elo/边界，供过敏窗口选取）
+            tracker.load(str(STATE_DIR / f"state__{name}.json"))
+
+        trackers[name] = tracker
+        live_conv = tracker.check_convergence(
+            name, total_methods=len(catalog), tested_count=len(tracker.ground_truth_methods))
+        per_target[name] = {
+            "defender_elo": round(tracker.get_defender_elo(name), 1),
+            "this_run_tested": len(tracker.ground_truth_methods),
+            "converged": live_conv["converged"],
+            "ci_half": live_conv["ci_half"],
+            "drift": live_conv["drift"],
+            "attack_file": str(per_target_attack_files.get(name, "")),
+        }
+        if do_phase1:
+            # publish_tracker 内部重载并存盘 R，此处刷新本地 R 视图供后续读取
+            R = ResultsMatrix.load()
+            R.set_method_catalog(catalog)
+            print(f"  💾 已写入 R 矩阵: {name} 本次 {len(tracker.ground_truth_methods)} 条，"
+                  f"R 累计 {R.n_for_model(name)} 条")
+
+    # ---------------- Phase 2：逐目标过敏检测（FPR）----------------
+    if do_phase2 and twin_client is not None:
+        print(f"\n{'='*60}\n  🤧 Phase 2: 多目标过敏检测\n{'='*60}")
+        for name in names:
+            tracker = trackers.get(name)
+            if tracker is None or not tracker.attacker_ratings:
+                print(f"  ⚠ {name}: 无 Elo 数据，跳过过敏检测"); continue
+            set_active_target(name)
+            DEFENDER_NAME = name
+            boundary_info = tracker.compute_security_boundary(name)
+            n_window = adaptive_twin_window(
+                boundary_info, len(method_records),
+                allergy_summary=None, user_window=args.twin_window)
+            allergy_file = runs_dir / f"allergy__{name}.json"
+            try:
+                asm = run_allergy_phase(
+                    method_records, None, twin_client, judge, tracker,
+                    n_window=n_window, allergy_file=allergy_file)
+            except Exception as e:
+                print(f"  ⚠ {name} 过敏检测失败: {e}")
+                asm = {"error": str(e)}
+            per_target.setdefault(name, {}).update({
+                "fpr": asm.get("fpr") if isinstance(asm, dict) else None,
+                "allergic": asm.get("allergic") if isinstance(asm, dict) else None,
+                "allergy_file": str(allergy_file),
+            })
+            fpr = asm.get("fpr") if isinstance(asm, dict) else None
+            print(f"  {name:28s} FPR={fpr}  过敏={asm.get('allergic') if isinstance(asm,dict) else '?'}"
+                  f"/{asm.get('total_tested') if isinstance(asm,dict) else '?'}")
+
+    set_active_target(None)
+
+    # ---- 跨模型汇总（Elo/收敛来自 live tracker；覆盖率按当前攻击集 catalog）----
+    print(f"\n{'='*60}\n  📊 跨模型汇总\n{'='*60}")
+    catalog_set = set(catalog)
+    for name in names:
+        info = per_target.get(name, {})
+        if not info or "error" in info:
+            print(f"  {name}: 失败/无结果 ({info.get('error', '')})"); continue
+        n_catalog = len(R.tested_methods(name) & catalog_set)  # 当前攻击集内的覆盖
+        n_total = R.n_for_model(name)                          # R 全量（含历史迁移）
+        print(f"  {name:28s} ELO≈{info['defender_elo']:6.0f}  "
+              f"本次覆盖{info['this_run_tested']}/{len(catalog)}  R累计{n_total}  "
+              f"CI±{info['ci_half']}  drift={info['drift']}/轮  "
+              f"收敛={'是' if info['converged'] else '否'}"
+              + (f"  FPR={info['fpr']}" if info.get("fpr") is not None else ""))
+        info["coverage_in_catalog"] = n_catalog
+        info["total_in_R"] = n_total
+
+    # ---- 混合预测器（统一 + 模型，自适应权重）----
+    bp_summary = {}
+    if features:
+        try:
+            from llmsec.evaluation.blend_predictor import load_or_fit_blend_predictor
+            bp = load_or_fit_blend_predictor(R, features, method_catalog=catalog)
+            bp_summary = bp.summary()
+            print(f"\n  🧠 混合预测器: unified={bp_summary['unified_trained']}  "
+                  f"models={bp_summary['models_trained']}")
+            for m, w in bp_summary["weights_per_model"].items():
+                print(f"     {m:28s} w_model={w['w_model']:.2f} w_unified={w['w_unified']:.2f}")
+        except Exception as e:
+            print(f"  ⚠ 混合预测器训练失败: {e}")
+
+    report = {"mode": "multi_target", "targets": names, "per_target": per_target,
+              "blend_predictor": bp_summary}
+    report_file = runs_dir / "multi_target_report.json"
+    write_json(report_file, report)
+    print(f"\n  📝 多目标报告: {report_file}")
+    return report
+
+
+# ============================================================
 # 主流程
 # ============================================================
 def _positive_int(value: str) -> int:
@@ -1007,10 +1236,38 @@ def main():
                         help=f"InfoGain 成功潜力权重（默认 {SAMPLER_INFOGAIN_GAMMA}）")
     parser.add_argument("--coordinate-rounds", type=int, default=2,
                         help="Hybrid 模式下前多少轮使用 InfoGain 探索（默认 2）")
+    parser.add_argument("--targets", type=str, default=None,
+                        help="多目标：逗号分隔的目标名子集（取自 .env TARGETS）；"
+                             "指定后 Phase 1 逐目标攻击，结果写入 results 矩阵 R，"
+                             "结束后派生每模型 Elo + 训练混合预测器。缺省=旧单目标流程")
+    parser.add_argument("--target", type=str, default=None,
+                        help="单目标：按名称选择一个 .env 声明的目标进行常规评估"
+                             "（走单目标流程，写入 STATE_FILE 供看板展示）。与 --targets 互斥")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="全局随机种子，贯穿 K-Fold/D-optimal/PCA（实验复现用，默认 42）")
+    parser.add_argument("--work-dir", type=str, default=None,
+                        help="实验隔离模式：state/results 写入该目录，不碰全局 STATE_FILE/"
+                             "results.json，且跳过聚类落盘。HPO trial 用")
     args = parser.parse_args()
+
+    # 全局种子注入（实验复现）
+    from llmsec.core.seed import set_global_seed
+    set_global_seed(args.seed)
+
+    # 实验隔离模式：重绑 results 路径到 work-dir，全局零污染
+    if args.work_dir:
+        from pathlib import Path
+        wd = Path(args.work_dir)
+        wd.mkdir(parents=True, exist_ok=True)
+        import llmsec.core.results as _res
+        _res.RESULTS_FILE = wd / "results.json"
+        print(f"🧪 实验隔离模式: work-dir={wd}（全局 state/results 不被触碰）")
 
     # 本次运行目录（原模块级 datetime.now() import 副作用移入 main）
     runs_dir = RUNS_DIR / datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    # 实验隔离模式：所有 per-run 产物（report/attack_results/state快照/...）直接写 work-dir
+    if args.work_dir:
+        runs_dir = Path(args.work_dir)
     runner_report_file = runs_dir / "runner_report.json"
     runner_attack_file = runs_dir / "attack_results.jsonl"
     runner_allergy_file = runs_dir / "allergy.json"
@@ -1028,6 +1285,10 @@ def main():
         sys.exit(1)
 
     records = load_prompt_records(input_path)
+
+    # R-cutover：首次升级时把旧 state.json 的 history 一次性迁进 R（幂等）
+    if maybe_migrate_legacy():
+        print("  🔄 已把旧 state.json 历史结果迁移进结果矩阵 R")
 
     # 按方法分组
     method_records = {}
@@ -1059,6 +1320,25 @@ def main():
 
     os.makedirs(runs_dir, exist_ok=True)
 
+    # ---- 多目标分支：--targets 指定时逐目标攻击，结果入 R 矩阵 ----
+    if args.targets:
+        if args.target:
+            print("❌ --target 与 --targets 互斥"); sys.exit(1)
+        return run_multi_target_phase(args, records, method_records, runs_dir, judge, twin_client)
+
+    # ---- 单目标命名分支：--target <name> 时切换 DEFENDER + ambient 路由 ----
+    # 走常规单目标流程（写 STATE_FILE 供看板展示该模型），call_target 经 ambient 自动路由
+    if args.target:
+        from llmsec.targets import set_active_target, available_targets
+        declared = available_targets()
+        if args.target not in declared:
+            print(f"❌ 未声明的目标: {args.target}（可用: {sorted(declared)}）")
+            sys.exit(1)
+        global DEFENDER_NAME
+        DEFENDER_NAME = args.target
+        set_active_target(args.target)
+        print(f"🎯 已选择目标: {args.target} (model={declared[args.target].model} @ {declared[args.target].base_url})")
+
     # ---- Phase 1 ----
     attack_summary = {}
     if args.phase in ("all", "1"):
@@ -1080,11 +1360,24 @@ def main():
             sampler_gamma=args.sampler_gamma,
             coordinate_rounds=args.coordinate_rounds,
             sampler_log_file=runner_sampler_log_file,
-            cluster_analysis_file=runner_cluster_analysis_file,
+            cluster_analysis_file=(None if args.work_dir else runner_cluster_analysis_file),
+            skip_final_clustering=bool(args.work_dir),  # 隔离模式跳过聚类落盘
+            state_file=(str(Path(args.work_dir) / "state.json") if args.work_dir
+                        else (str(STATE_DIR / f"state__{args.target}.json") if args.target else None)),
         )
+        # --target 命名目标：把本次结果镜像进跨模型矩阵 R（隔离模式不碰全局 R）
+        if args.target and not args.work_dir:
+            from llmsec.core.results import ResultsMatrix, _coarse_status
+            _R = ResultsMatrix.load()
+            _R.set_method_catalog(list(method_records.keys()))
+            for h in tracker.history:
+                _R.upsert(h["attacker"], h["defender"], h["eval_score"],
+                          status=_coarse_status(h["eval_score"]))
+            _R.save()
+            print(f"  💾 已镜像至 R 矩阵: {args.target} 累计 {_R.n_for_model(args.target)} 条")
     else:
-        # 仅过敏阶段时，ELO从文件加载
-        tracker.load(STATE_FILE)
+        # 仅过敏阶段时，ELO从文件加载（隔离模式读 work-dir）
+        tracker.load(str(Path(args.work_dir) / "state.json") if args.work_dir else STATE_FILE)
         if not tracker.attacker_ratings:
             print("⚠ 无ELO数据，请先运行 Phase 1")
             sys.exit(1)
@@ -1121,12 +1414,21 @@ def main():
                                    report_file=runner_report_file)
 
     # 保存简要报告
-    with open(runner_report_file, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
+    write_json(runner_report_file, report)
+
+    # R-cutover：把本次 live tracker 的结果发布进 R（唯一真相）+ Elo 派生缓存。
+    # 单目标 main 走此路径；state.json 仍写快照作 legacy 备份（收敛轨迹也供 dashboard）。
+    publish_tracker(tracker, DEFENDER_NAME)
 
     # run 内 state 快照：dashboard 按 run 查看历史时优先读快照，
     # 避免全局 state 漂移（换攻击集/换模型/手动恢复）导致实测标记错配
     tracker.save(runs_dir / "state.json")
+
+    # --target 命名目标：把该模型干净的 state 同步到全局 STATE_FILE，
+    # 使看板展示所选模型（tracker 仅含该模型，因其从 per-model state__<name>.json 加载）
+    # 实验隔离模式跳过（不污染全局）
+    if args.target and not args.work_dir:
+        tracker.save(STATE_FILE)
 
     # cluster_report.json 同理：/api/clusters 的 validation/簇效验证/密度视图
     # 默认读全局最近产物，历史批次会与 run 内 analysis 错配，快照一份进 run 目录
@@ -1141,10 +1443,7 @@ def main():
     elo_data = load_elo(OUTPUT_DIR)
 
     # 加载 runner 自身的过敏数据
-    allergy_data = {}
-    if os.path.exists(runner_allergy_file):
-        with open(runner_allergy_file, "r", encoding="utf-8") as f:
-            allergy_data = json.load(f)
+    allergy_data = read_json(runner_allergy_file, default={})
 
     metadata = load_prompt_metadata()
 
@@ -1158,15 +1457,14 @@ def main():
 
         # 保存树数据
         tree_path = runs_dir / "security_tree.json"
-        with open(tree_path, "w", encoding="utf-8") as f:
-            json.dump(tree, f, ensure_ascii=False, indent=2)
+        write_json(tree_path, tree)
         generated_files.append(tree_path)
 
         # 生成LLM叙事报告
         markdown = generate_narrative(tree, OUTPUT_DIR)
         md_path = runs_dir / "security_report.md"
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(markdown)
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.write_text(markdown, encoding="utf-8")
         generated_files.append(md_path)
 
     if os.path.exists(runner_attack_file):

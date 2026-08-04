@@ -319,6 +319,9 @@ class CoordinateDescentSampler(AttackSampler):
             stats = tracker.attacker_stats.get(method, {})
             n_tests = stats.get("n_matches", 0)
             # 未充分测试的方法优先；同测试次数下按 gap 排序
+            # M-11 修复：min_tests_per_method 真正生效——未达最小测试数的方法大幅降分优先
+            if n_tests < self.min_tests_per_method:
+                return n_tests - 10000 + gap / 1000.0
             return n_tests + gap / 1000.0
 
         cluster_methods.sort(key=method_score)

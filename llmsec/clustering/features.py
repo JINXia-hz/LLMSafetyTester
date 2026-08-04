@@ -32,6 +32,7 @@ from llmsec.core import (
     read_jsonl,
     strip_math_tax,
 )
+from llmsec.core.seed import get_global_seed as _global_seed
 from llmsec.params import EMBEDDING_PCA_DIM, TFIDF_FALLBACK_FEATURES
 
 # ============================================================
@@ -109,20 +110,50 @@ _DEFAULT_HF_HOSTS = ("https://hf-mirror.com", "https://huggingface.co")
 class _ApiEmbedder:
     """OpenAI 兼容 /embeddings 客户端（企业网络兜底），接口对齐 sentence-transformers。"""
 
-    def __init__(self, base_url: str, api_key: str, model: str, batch_size: int = 32):
+    def __init__(self, base_url: str, api_key: str, model: str,
+                 batch_size: int = 32, max_retries: int = 5):
         from openai import OpenAI
 
         self._client = OpenAI(base_url=base_url, api_key=api_key)
         self._model = model
         self._batch_size = batch_size
+        # 每次失败后退避时间指数翻倍、batch 减半；max_retries 为最大减半层数
+        self._max_retries = max_retries
+
+    def _encode_once(self, batch: list[str]) -> list[list[float]]:
+        resp = self._client.embeddings.create(model=self._model, input=batch)
+        return [item.embedding for item in resp.data]
+
+    def _encode_chunk(self, batch: list[str], depth: int = 0) -> list[list[float]]:
+        """
+        递归编码：单批失败则指数退避后 batch 减半重试。
+
+        - 指数退避: sleep = 2 ** depth (1, 2, 4, 8, ...)
+        - batch 减半: 32 → 16 → 8 → 4 → 2 → 1
+        - 终止条件: 单条仍失败、或已达 max_retries 层 → 抛出原异常
+        典型场景: 远端 GPU OOM 时大 batch 失败，减半后即恢复。
+        """
+        try:
+            return list(self._encode_once(batch))
+        except Exception as e:
+            if len(batch) <= 1 or depth >= self._max_retries:
+                raise
+            backoff = 2 ** depth
+            print(f"  ⚠ embedding 批次失败 (size={len(batch)}): "
+                  f"{type(e).__name__}; 退避 {backoff}s 后减半重试 "
+                  f"(depth={depth + 1}/{self._max_retries})")
+            time.sleep(backoff)
+            mid = len(batch) // 2
+            return (self._encode_chunk(batch[:mid], depth + 1)
+                    + self._encode_chunk(batch[mid:], depth + 1))
 
     def encode(self, sentences, show_progress_bar=False, batch_size=None, **kwargs):
         bs = batch_size or self._batch_size
-        embs = []
+        sentences = list(sentences)
+        embs: list[list[float]] = []
         for i in range(0, len(sentences), bs):
-            batch = list(sentences[i:i + bs])
-            resp = self._client.embeddings.create(model=self._model, input=batch)
-            embs.extend(item.embedding for item in resp.data)
+            batch = sentences[i:i + bs]
+            embs.extend(self._encode_chunk(batch))
         return np.array(embs, dtype=np.float64)
 
 
@@ -240,7 +271,7 @@ def extract_text_embeddings(
         n = embeddings.shape[0]
         target_dim = max(1, min(pca_dim, max(1, n // 3), n - 1, embeddings.shape[1]))
         if target_dim < embeddings.shape[1]:
-            fit_pca = pca if pca is not None else PCA(n_components=target_dim, random_state=42)
+            fit_pca = pca if pca is not None else PCA(n_components=target_dim, random_state=_global_seed())
             reduced = fit_pca.fit_transform(embeddings) if pca is None else fit_pca.transform(embeddings)
             print(f"  [*] PCA 降维: {embeddings.shape[1]} → {target_dim} "
                   f"(解释方差比: {fit_pca.explained_variance_ratio_.sum():.2%})")
@@ -272,7 +303,7 @@ def extract_text_embeddings(
     n = dense.shape[0]
     target_dim = max(1, min(pca_dim, max(1, n // 3), n - 1, dense.shape[1]))
     if dense.shape[1] > target_dim:
-        fit_pca = pca if pca is not None else PCA(n_components=target_dim, random_state=42)
+        fit_pca = pca if pca is not None else PCA(n_components=target_dim, random_state=_global_seed())
         reduced = fit_pca.fit_transform(dense) if pca is None else fit_pca.transform(dense)
         print(f"  [*] TF-IDF ({dense.shape[1]}d) → PCA → {target_dim}d "
               f"(解释方差比: {fit_pca.explained_variance_ratio_.sum():.2%})")
@@ -734,7 +765,7 @@ def extract_all_features(
 # 便捷函数：加载数据 + 提取特征
 # ============================================================
 def load_and_extract(
-    attack_file: str = "攻击集_L1.jsonl",
+    attack_file: str = "attacks/l1.jsonl",
     result_file: str | None = None,
 ) -> tuple[dict, dict]:
     """
@@ -749,7 +780,8 @@ def load_and_extract(
     # 加载攻击集
     attack_path = Path(attack_file)
     if not attack_path.is_absolute():
-        if attack_file == "攻击集_L1.jsonl":
+        # 兼容旧名 攻击集_L1.jsonl → output/attacks/l1.jsonl
+        if attack_file in ("攻击集_L1.jsonl", "attacks/l1.jsonl", "l1.jsonl"):
             attack_path = ATTACK_SET_L1_FILE
         else:
             attack_path = OUTPUT_DIR / attack_file
@@ -766,11 +798,15 @@ def load_and_extract(
         if not result_path.is_absolute():
             result_path = OUTPUT_DIR / result_file
     else:
-        # 自动查找：优先 runner_攻击结果.jsonl，否则 攻击集_L1_结果.jsonl
-        candidates = [
-            OUTPUT_DIR / "runner_攻击结果.jsonl",
-            OUTPUT_DIR / "攻击集_L1_结果.jsonl",
-        ]
+        # 自动查找最新一次 runner 评估结果（runs/<ts>/attack_results.jsonl）
+        candidates = []
+        runs_dir = OUTPUT_DIR / "runs"
+        if runs_dir.exists():
+            for d in sorted(runs_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                af = d / "attack_results.jsonl"
+                if af.exists():
+                    candidates.append(af)
+                    break
         result_path = None
         for c in candidates:
             if c.exists():

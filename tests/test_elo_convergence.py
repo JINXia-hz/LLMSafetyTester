@@ -5,8 +5,8 @@
 验证：
 1. predict 对同后缀变体优先使用同后缀 ground truth。
 2. predict 对同基底变体使用变体 ground truth（同后缀不存在时回退）。
-3. check_convergence 在 Elo 标准差不满足时不判收敛（抗假阳性）。
-4. check_convergence 在标准差小、覆盖率足够时判收敛。
+3. check_convergence 在 Elo 噪声大（95%CI 半宽超目标）时不判收敛（抗假阳性）。
+4. check_convergence 在噪声小、漂移小、覆盖率足够时判收敛。
 """
 
 import sys
@@ -141,13 +141,13 @@ def test_predict_base_variant_fallback() -> int:
 
 
 def test_convergence_resists_false_positive() -> int:
-    """Elo 标准差不满足时不应判收敛。"""
+    """Elo 噪声大（真值 Elo 95%CI 半宽超目标）时不应判收敛。"""
     tracker = ELOTracker()
     defender = "test-model"
 
-    # 模拟多轮，防御方 Elo 大幅波动（不满足 std < 10）
-    tracker._round_defender_elos[defender] = [1500.0, 1550.0, 1480.0]
-    tracker.defender_ratings[defender] = 1480.0
+    # 模拟多轮防御方 Elo 大幅波动（去趋势后噪声大 → CI 半宽远超 ±20 目标）
+    tracker._round_defender_elos[defender] = [1500.0, 1560.0, 1490.0, 1555.0, 1505.0]
+    tracker.defender_ratings[defender] = 1505.0
 
     # 构造足够的方法数以满足覆盖率
     for i in range(50):
@@ -157,20 +157,20 @@ def test_convergence_resists_false_positive() -> int:
 
     conv = tracker.check_convergence(defender, total_methods=50)
     if conv["converged"]:
-        print(f"❌ 假收敛未被拦截: std={conv['std']}, coverage={conv['coverage']}")
+        print(f"❌ 假收敛未被拦截: ci_half={conv['ci_half']}, drift={conv['drift']}, coverage={conv['coverage']}")
         return 1
-    print("✅ 抗假阳性收敛判定通过")
+    print(f"✅ 抗假阳性收敛判定通过 (ci_half={conv['ci_half']}, drift={conv['drift']})")
     return 0
 
 
 def test_convergence_true_positive() -> int:
-    """标准差小、覆盖率足够时应判收敛。"""
+    """噪声小、漂移小、覆盖率足够时应判收敛。"""
     tracker = ELOTracker()
     defender = "test-model"
 
-    # 让防御方 Elo 稳定在 1500 附近
-    tracker.defender_ratings[defender] = 1500.0
-    tracker._round_defender_elos[defender] = [1495.0, 1502.0, 1498.0]
+    # 防御方 Elo 稳定在 ~1500（低噪声 + 低漂移 → CI 半宽 < ±20）
+    tracker.defender_ratings[defender] = 1501.0
+    tracker._round_defender_elos[defender] = [1495.0, 1502.0, 1498.0, 1501.0]
 
     # 总方法 50，已测 15 => 覆盖率 30%
     for i in range(50):
@@ -182,7 +182,7 @@ def test_convergence_true_positive() -> int:
     if not conv["converged"]:
         print(f"❌ 真收敛未通过: {conv}")
         return 1
-    print("✅ 真收敛判定通过")
+    print(f"✅ 真收敛判定通过 (ci_half={conv['ci_half']}, drift={conv['drift']})")
     return 0
 
 

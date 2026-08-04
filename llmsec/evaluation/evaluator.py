@@ -12,7 +12,6 @@ LLM攻击评估器
 """
 
 import argparse
-import json
 import os
 import re
 import sys
@@ -23,10 +22,11 @@ from datetime import datetime
 from llmsec.core.config import (
     ATTACK_SET_L1_FILE,
     OUTPUT_DIR,
+    RUNS_DIR,
     STATE_FILE,
     TargetConfig,
 )
-from llmsec.core.io import load_done_ids, read_jsonl
+from llmsec.core.io import append_jsonl, load_done_ids, read_jsonl, write_json
 from llmsec.core.logging import setup_console
 from llmsec.core.text import MATH_TAX_SUFFIX_TEMPLATE, NO_MATH_TAX_SENTINEL, gen_math
 from llmsec.evaluation.elo import ELOTracker
@@ -290,8 +290,15 @@ def evaluate_single(prompt_text: str, expected_answer: int | None, target_client
             "error": None,
         }
 
+    judge_result = None
     if use_judge and judge is not None:
-        judge_result = judge.evaluate(prompt_text, content, skip_prescreen=skip_prescreen)
+        try:
+            judge_result = judge.evaluate(prompt_text, content, skip_prescreen=skip_prescreen)
+        except Exception as e:
+            # H-6 修复：Judge API 异常（重试耗尽/网络故障）降级到无 Judge 模式，
+            # 不中断整批评估（原代码会让异常沿 evaluate_single → run_evaluation → main 一路抛出）
+            print(f"⚠️ Judge 评估失败，降级到无 Judge 模式: {e}")
+    if judge_result is not None:
         is_refusal = judge_result["is_refusal"]
         is_harmful = judge_result["is_harmful"]
         eval_info = compute_eval_score_v2(judge_result, math_score, True)
@@ -411,83 +418,81 @@ def run_evaluation(records: list[dict], args: argparse.Namespace,
     fail_count = 0
     skipped_count = 0
 
-    with open(result_file, "a", encoding="utf-8") as out_f:
-        for rec in records:
-            mid = rec["id"]
-            prompt_text = rec["prompt"]
-            expected_answer = rec["expected_answer"]
-            method_name = rec["method"]
-            harm_type = rec["harm_type"]
-            category = rec["category"]
+    for rec in records:
+        mid = rec["id"]
+        prompt_text = rec["prompt"]
+        expected_answer = rec["expected_answer"]
+        method_name = rec["method"]
+        harm_type = rec["harm_type"]
+        category = rec["category"]
 
-            for round_i in range(args.repeat):
-                run_id = f"{mid}-r{round_i}" if args.repeat > 1 else mid
+        for round_i in range(args.repeat):
+            run_id = f"{mid}-r{round_i}" if args.repeat > 1 else mid
 
-                # 断点续传
-                if run_id in done_ids:
-                    skipped_count += 1
-                    continue
+            # 断点续传
+            if run_id in done_ids:
+                skipped_count += 1
+                continue
 
-                # 单条评估（核心逻辑统一在 evaluate_single）
-                result = evaluate_single(
-                    prompt_text, expected_answer, None, judge,
-                    use_judge=use_judge,
-                    skip_prescreen=args.skip_judge_prescreen,
-                )
+            # 单条评估（核心逻辑统一在 evaluate_single）
+            result = evaluate_single(
+                prompt_text, expected_answer, None, judge,
+                use_judge=use_judge,
+                skip_prescreen=args.skip_judge_prescreen,
+            )
 
-                if result["status"] == "api_error":
-                    fail_count += 1
-                    print(f"❌ {run_id} API错误: {result['error']}")
-                    continue
+            if result["status"] == "api_error":
+                fail_count += 1
+                print(f"❌ {run_id} API错误: {result['error']}")
+                continue
 
-                latency = result["latency_ms"]
-                tp = result["tokens_prompt"]
-                tc = result["tokens_completion"]
+            latency = result["latency_ms"]
+            tp = result["tokens_prompt"]
+            tc = result["tokens_completion"]
 
-                result_entry = {
-                    "id": run_id,
-                    "original_id": mid,
-                    "category": category,
-                    "method": method_name,
-                    "harm_type": harm_type,
-                    "round": round_i,
-                    "expected_answer": expected_answer,
-                    "actual_answer": result["actual_answer"],
-                    "math_score": result["math_score"],
-                    "is_refusal": result["is_refusal"],
-                    "is_harmful": result["is_harmful"],
-                    "eval_score": result["eval_score"],
-                    "jailbreak_tax": result["jailbreak_tax"],
-                    "status": result["status"],
-                    "compliance_level": result["compliance_level"],
-                    "latency_ms": latency,
-                    "tokens_prompt": tp,
-                    "tokens_completion": tc,
-                    "token_ratio": round(tc / max(tp, 1), 2),
-                    "response_preview": result["content"][:500],
-                    "timestamp": datetime.now().isoformat(),
-                }
-                # Judge 特有字段（仅 Judge 分支产生）
-                for key in ("judge_harmfulness", "judge_specificity",
-                            "judge_dangerousness", "judge_calls", "prescreen_result"):
-                    if key in result:
-                        result_entry[key] = result[key]
+            result_entry = {
+                "id": run_id,
+                "original_id": mid,
+                "category": category,
+                "method": method_name,
+                "harm_type": harm_type,
+                "round": round_i,
+                "expected_answer": expected_answer,
+                "actual_answer": result["actual_answer"],
+                "math_score": result["math_score"],
+                "is_refusal": result["is_refusal"],
+                "is_harmful": result["is_harmful"],
+                "eval_score": result["eval_score"],
+                "jailbreak_tax": result["jailbreak_tax"],
+                "status": result["status"],
+                "compliance_level": result["compliance_level"],
+                "latency_ms": latency,
+                "tokens_prompt": tp,
+                "tokens_completion": tc,
+                "token_ratio": round(tc / max(tp, 1), 2),
+                "response_preview": result["content"][:500],
+                "timestamp": datetime.now().isoformat(),
+            }
+            # Judge 特有字段（仅 Judge 分支产生）
+            for key in ("judge_harmfulness", "judge_specificity",
+                        "judge_dangerousness", "judge_calls", "prescreen_result"):
+                if key in result:
+                    result_entry[key] = result[key]
 
-                out_f.write(json.dumps(result_entry, ensure_ascii=False) + "\n")
-                out_f.flush()
-                done_ids.add(run_id)
-                success_count += 1
-                done_count += 1
+            append_jsonl(result_file, result_entry)
+            done_ids.add(run_id)
+            success_count += 1
+            done_count += 1
 
-                # 简洁进度
-                eval_score = result["eval_score"]
-                sym = "✅" if eval_score > 0 else ("🔶" if eval_score == 0 else "❌")
-                print(f"{sym} [{done_count}/{total}] {run_id} "
-                      f"math={result['math_score']} tax={result['jailbreak_tax']} "
-                      f"status={result['status']} "
-                      f"lat={latency:.0f}ms")
+            # 简洁进度
+            eval_score = result["eval_score"]
+            sym = "✅" if eval_score > 0 else ("🔶" if eval_score == 0 else "❌")
+            print(f"{sym} [{done_count}/{total}] {run_id} "
+                  f"math={result['math_score']} tax={result['jailbreak_tax']} "
+                  f"status={result['status']} "
+                  f"lat={latency:.0f}ms")
 
-                time.sleep(API_DELAY)
+            time.sleep(API_DELAY)
 
     if skipped_count:
         done_count += skipped_count
@@ -643,7 +648,13 @@ def build_summary(records: list[dict], all_results: list[dict],
 def update_elo(all_results: list[dict], summary: dict,
                defender_name: str | None = None) -> None:
     """由全量结果更新 ELO，并把 ELO 区块挂到 summary（仅内存，不写入汇总文件）。
-    defender_name 缺省时回退 TARGET_MODEL；pcap 等非 openai 目标可显式传入。"""
+    defender_name 缺省时回退 TARGET_MODEL；pcap 等非 openai 目标可显式传入。
+
+    R-cutover：结果同时发布进 R 矩阵（唯一真相）+ Elo 缓存；state.json 仍写，
+    作为 legacy 快照备份（后续可下线）。
+    """
+    from llmsec.evaluation.elo_access import publish_tracker
+
     tracker = ELOTracker()
     tracker.load(STATE_FILE)
     if defender_name is None:
@@ -653,6 +664,7 @@ def update_elo(all_results: list[dict], summary: dict,
         score = r.get("eval_score", 0)
         tracker.update(method, defender_name, score)
     tracker.save(STATE_FILE)
+    publish_tracker(tracker, defender_name)  # R 唯一真相 + 派生缓存
     elo_summary = tracker.get_summary()
     elo_boundary = tracker.compute_security_boundary(defender_name)
     summary["elo"] = {
@@ -736,10 +748,13 @@ def main():
         print("   提示: python -m llmsec.attacks.harmbench 或 python -m llmsec.attacks.generate")
         sys.exit(1)
 
-    # 根据输入文件名派生结果文件名
-    base_name = os.path.splitext(os.path.basename(input_file))[0]  # e.g. "攻击集_L1" or "harmbench_prompts"
-    result_file = OUTPUT_DIR / f"{base_name}_结果.jsonl"
-    summary_file = OUTPUT_DIR / f"{base_name}_汇总.json"
+    # 根据输入文件名派生结果文件名（W7：统一写 runs/<ts>/，与 runner 对齐）
+    base_name = os.path.splitext(os.path.basename(input_file))[0]  # e.g. "l1" or "harmbench_jailbreak"
+    from datetime import datetime as _dt
+    run_dir = RUNS_DIR / _dt.now().strftime("%Y-%m-%d_%H%M%S")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    result_file = run_dir / "attack_results.jsonl"
+    summary_file = run_dir / f"{base_name}_汇总.json"
 
     use_judge = not args.no_judge
     print(f"📂 输入: {os.path.basename(input_file)}")
@@ -761,8 +776,6 @@ def main():
     if done_ids:
         print(f"📋 已有 {len(done_ids)} 个测试用例已完成，将跳过\n")
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
     # ---- 初始化Judge ----
     judge = init_judge(args, use_judge)
 
@@ -783,8 +796,7 @@ def main():
 
     summary, judge_stats = build_summary(records, all_results, args, use_judge)
 
-    with open(summary_file, "w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
+    write_json(summary_file, summary)
 
     # ---- ELO更新（始终更新；elo 区块仅挂到内存中的 summary，与原版一致） ----
     update_elo(all_results, summary)

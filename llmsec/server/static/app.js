@@ -1,12 +1,29 @@
 /* LLMSEC 安全评估工作台前端逻辑 */
 
 // ---------- 全局状态与常量 ----------
+// 绢本金碧 · 唐化配色：石青主色、土红撞色、描金点缀
 const C = {
-  primary: '#5f8d8b', accent: '#c07a5a', warn: '#b0563f',
-  safe: '#6d8f6e', muted: '#8a8f93', text: '#3c4447',
+  primary: '#46586B', accent: '#A85B43', warn: '#A85B43',
+  safe: '#75876B', ochre: '#B98A44', deep: '#7A4A35', gold: '#BFA03C',
+  muted: '#8A8571', text: '#2F343B',
 };
 const PLOT_CFG = { responsive: true, displayModeBar: false };
 const PLOT_FONT = { family: 'ui-sans-serif, system-ui, sans-serif', color: C.text };
+
+// Plotly 默认白底与册页米白卡片冲突：统一透明底（一层包装，业务代码无需逐个改）
+const _newPlot = Plotly.newPlot.bind(Plotly);
+Plotly.newPlot = (id, traces, layout = {}, cfg) =>
+  _newPlot(id, traces, { paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', ...layout }, cfg);
+
+// 匾额等级印章：等级 → 印字
+const SEAL_CHARS = { safe: '安', allergic: '警', vulnerable: '伤', broken: '破', inconclusive: '?' };
+function setBanner(level) {
+  $('ov_banner').className = 'banner plaque mb-2 level-' + level;
+  const seal = $('ov_seal');
+  seal.className = 'seal level-' + level;
+  seal.textContent = SEAL_CHARS[level] || '?';
+  seal.classList.remove('seal-anim'); void seal.offsetWidth; seal.classList.add('seal-anim'); // 重触发盖印
+}
 
 let currentRun = '';           // '' = 最新
 let activeSection = 'overview';
@@ -35,11 +52,13 @@ function clearCharts(ids) {
 }
 
 // ---------- 导航 ----------
+const SECTIONS = ['overview', 'threats', 'report', 'clusters', 'model', 'run'];
 document.querySelectorAll('#nav .nav-item').forEach(el => {
   el.addEventListener('click', () => {
     document.querySelectorAll('#nav .nav-item').forEach(n => n.classList.remove('active'));
     el.classList.add('active');
     activeSection = el.dataset.section;
+    history.replaceState(null, '', '#' + activeSection);  // 板块可直达/可收藏
     document.querySelectorAll('.section').forEach(s => s.classList.remove('visible'));
     $('sec-' + activeSection).classList.add('visible');
     loadSection(activeSection);
@@ -74,7 +93,7 @@ async function loadOverview() {
   try {
     const d = await api('/api/overview' + runQuery());
     if (!d.available) {
-      $('ov_banner').className = 'banner mb-5 level-inconclusive';
+      setBanner('inconclusive');
       $('ov_target').textContent = '目标模型: -';
       $('ov_verdict').textContent = '暂无运行数据';
       $('ov_recommendation').textContent = '';
@@ -85,7 +104,7 @@ async function loadOverview() {
       return;
     }
     const level = d.security_level || 'inconclusive';
-    $('ov_banner').className = 'banner mb-5 level-' + level;
+    setBanner(level);
     $('ov_target').textContent = `目标模型: ${d.target_model || '-'}  ·  批次 ${d.run}`;
     $('ov_verdict').textContent = d.overall_verdict || level.toUpperCase();
     $('ov_recommendation').textContent = d.recommendation ? '💡 ' + d.recommendation : '';
@@ -122,12 +141,12 @@ async function loadOverview() {
       r: [...r.values, r.values[0]],
       theta: [...r.labels, r.labels[0]],
       fill: 'toself',
-      fillcolor: 'rgba(95,141,139,0.18)',
+      fillcolor: 'rgba(70,88,107,0.18)',
       line: { color: C.primary, width: 2 },
       marker: { size: 6, color: C.primary },
     }], {
       polar: { radialaxis: { range: [0, 1], tickformat: '.0%', tickfont: { size: 10 } } },
-      margin: { t: 20, b: 20, l: 40, r: 40 }, font: PLOT_FONT, showlegend: false,
+      margin: { t: 24, b: 24, l: 62, r: 62 }, font: PLOT_FONT, showlegend: false,
     }, PLOT_CFG);
 
     const harm = Object.entries(d.harm_type_asr || {}).sort((a, b) => b[1] - a[1]);
@@ -163,7 +182,7 @@ async function loadThreats() {
       type: 'bar', orientation: 'h',
       text: top.map(t => fmtNum(t.elo, 0)).reverse(), textposition: 'auto',
       marker: { color: top.map(t => t.tested ? C.warn : C.muted).reverse() },
-    }], { margin: { t: 10, l: 10 }, height: 380, font: PLOT_FONT,
+    }], { margin: { t: 10 }, height: 380, font: PLOT_FONT,
           xaxis: { title: 'ELO（红=实测，灰=预测）' } }, PLOT_CFG);
 
     // 收敛曲线
@@ -183,7 +202,7 @@ async function loadThreats() {
     tbody.innerHTML = '';
     (d.top_threats || []).forEach(t => {
       const tr = document.createElement('tr');
-      tr.style.borderTop = '1px solid #efede8';
+      tr.style.borderTop = '1px solid #E3D8B8';
       const badge = t.tested
         ? '<span class="badge badge-gt">实测</span>'
         : '<span class="badge badge-pred">预测</span>';
@@ -251,8 +270,8 @@ async function loadReport() {
 
 // ---------- 聚类分析 ----------
 const CLUSTER_COLORS = [
-  '#5f8d8b', '#c07a5a', '#7a8f6d', '#8a7ba8', '#b39b54', '#5a7186', '#b0563f',
-  '#6d8fa8', '#a87b7b', '#7ba89a', '#96896f', '#845f8d', '#63855a', '#a8948a',
+  '#46586B', '#A85B43', '#75876B', '#B98A44', '#7A4A35', '#8a7ba8', '#BFA03C',
+  '#5f8d8b', '#a87b7b', '#96896f', '#845f8d', '#63855a', '#c07a5a', '#a8948a',
 ];
 let projMethod = 'pca';
 
@@ -377,11 +396,11 @@ async function loadClusters() {
         .filter(([, c]) => c === -1).map(([m]) => m);
       const div = document.createElement('div');
       div.className = 'card';
-      div.style.background = '#f7f6f4';
+      div.style.background = '#F2EBD8';
       div.innerHTML = `
         <div class="flex items-center justify-between">
           <div class="font-semibold text-sm">
-            <span class="cluster-tag" style="background:#eceae5;color:#6b7276;">稀疏区</span> ${esc(sparseName)}</div>
+            <span class="cluster-tag" style="background:#EAE2CC;color:#7C7663;">稀疏区</span> ${esc(sparseName)}</div>
           <div class="text-xs" style="color: var(--c-muted);">${hdb.n_noise} 种方法 · HDBSCAN 密度视图（共 ${hdb.n_clusters} 个密度簇）</div>
         </div>
         <div class="text-xs mt-2 truncate" style="color: var(--c-muted);">${esc(sparseMembers.slice(0, 24).join('、'))}${sparseMembers.length > 24 ? ' …' : ''}</div>`;
@@ -389,11 +408,11 @@ async function loadClusters() {
     }
 
     (d.clusters || []).forEach(c => {
-      let tag = '', bg = '#fff';
-      if (String(c.id) === '-1') { tag = '<span class="cluster-tag" style="background:#eceae5;color:#6b7276;">稀疏区</span>'; bg = '#f7f6f4'; }
-      else if (riskSet.has(c.id)) { tag = '<span class="cluster-tag" style="background:#f3ded8;color:#9a4a35;">高风险</span>'; bg = '#faf3f1'; }
-      else if (blindSet.has(c.id)) { tag = '<span class="cluster-tag" style="background:#f5e8dc;color:#a0663f;">盲区</span>'; bg = '#faf6f1'; }
-      else if (stableSet.has(c.id)) { tag = '<span class="cluster-tag" style="background:#e3ede4;color:#4f7351;">稳定</span>'; bg = '#f4f7f4'; }
+      let tag = '', bg = '#F6EFDE';
+      if (String(c.id) === '-1') { tag = '<span class="cluster-tag" style="background:#EAE2CC;color:#7C7663;">稀疏区</span>'; bg = '#F2EBD8'; }
+      else if (riskSet.has(c.id)) { tag = '<span class="cluster-tag" style="background:#F0DBCF;color:#9a4a35;">高风险</span>'; bg = '#F6E9E0'; }
+      else if (blindSet.has(c.id)) { tag = '<span class="cluster-tag" style="background:#F1E4CC;color:#a0663f;">盲区</span>'; bg = '#F6EFE0'; }
+      else if (stableSet.has(c.id)) { tag = '<span class="cluster-tag" style="background:#DFE5D4;color:#4f7351;">稳定</span>'; bg = '#EDF0E4'; }
       const div = document.createElement('div');
       div.className = 'card';
       div.style.background = bg;
@@ -612,7 +631,7 @@ async function loadModel() {
       x: imp.map(f => f.abs_coef).reverse(),
       type: 'bar', orientation: 'h',
       marker: { color: imp.map(f => f.coef >= 0 ? C.primary : C.accent).reverse() },
-    }], { margin: { t: 10, l: 10 }, height: 480, font: PLOT_FONT,
+    }], { margin: { t: 10 }, height: 480, font: PLOT_FONT,
           xaxis: { title: '|系数|（青=正向，橙=负向）' } }, PLOT_CFG);
 
     // 预测 CI 散点：整数序号 x 轴（标签不可读且截断会撞名叠点），搜索高亮 + 框选缩放
@@ -626,7 +645,7 @@ async function loadModel() {
 // ---------- 运行控制 ----------
 async function loadRunSection() {
   try {
-    const sets = await api('/api/attack-sets');
+    const [sets, tgts] = await Promise.all([api('/api/attack-sets'), api('/api/targets')]);
     const sel = $('evalInput');
     sel.innerHTML = '';
     sets.files.forEach(f => {
@@ -634,6 +653,16 @@ async function loadRunSection() {
       opt.value = f; opt.textContent = f;
       sel.appendChild(opt);
     });
+    // 目标模型下拉（单选，来自 .env TARGETS）
+    const tsel = $('evalTarget');
+    if (tsel) {
+      tsel.innerHTML = '<option value="">（.env 默认）</option>';
+      (tgts.targets || []).forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = t.name; opt.textContent = t.name;
+        tsel.appendChild(opt);
+      });
+    }
     await loadTasks();
   } catch (e) { setStatus('运行控制加载失败: ' + e.message); }
 }
@@ -677,6 +706,7 @@ async function startEvaluate() {
         batch_size: parseInt($('evalBatch').value, 10) || 10,
         max_rounds: parseInt($('evalRounds').value, 10) || 5,
         sampler: $('evalSampler').value,
+        target: ($('evalTarget') && $('evalTarget').value) || null,
       }),
     });
     if (!res.ok) {
@@ -691,9 +721,9 @@ async function startEvaluate() {
 }
 
 const TASK_STATUS = {
-  running: ['运行中', 'background:#e4e9ee;color:#5a7186;'],
-  success: ['完成', 'background:#e3ede4;color:#4f7351;'],
-  failed: ['失败', 'background:#f3ded8;color:#9a4a35;'],
+  running: ['运行中', 'background:rgba(70,88,107,.14);color:#46586B;'],
+  success: ['完成', 'background:rgba(117,135,107,.20);color:#55694B;'],
+  failed: ['失败', 'background:#F0DBCF;color:#9a4a35;'],
 };
 
 async function loadTasks() {
@@ -725,4 +755,15 @@ async function loadTasks() {
 setInterval(() => { if (activeSection === 'run') loadTasks(); }, 2000);
 
 // ---------- 启动 ----------
-(async () => { await loadRuns(); loadSection('overview'); loadRunSection(); })();
+(async () => {
+  await loadRuns();
+  // hash 直达：#threats 等；默认总览
+  const h = location.hash.slice(1);
+  const start = SECTIONS.includes(h) ? h : 'overview';
+  if (start !== 'overview') {
+    document.querySelector(`#nav .nav-item[data-section="${start}"]`)?.click();
+  } else {
+    loadSection('overview');
+  }
+  loadRunSection();
+})();

@@ -1,5 +1,7 @@
 # 内置攻击数据
 
+> [English](Explication.en.md) | 中文
+
 本目录包含从 HarmBench 提取的静态数据，供 `llmsec.attacks.harmbench` 生成**测试与示范用**攻击集（非项目核心；用户可从任意来源自带攻击集，见项目 README「攻击集从哪来」）。
 
 | 文件 | 内容 | 用途 |

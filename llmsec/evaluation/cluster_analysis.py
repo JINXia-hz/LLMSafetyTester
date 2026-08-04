@@ -21,7 +21,13 @@ from pathlib import Path
 import joblib
 import numpy as np
 
-from llmsec.core.config import CLUSTER_ARTIFACTS_FILE, CLUSTER_REPORT_FILE, OUTPUT_DIR
+from llmsec.core.config import (
+    CLUSTER_REPORT_FILE,
+    CLUSTER_RESULT_FILE,
+    CLUSTER_SECURITY_ANALYSIS_FILE,
+    OUTPUT_DIR,
+)
+from llmsec.core.io import read_json, write_json
 from llmsec.evaluation.elo import ELOTracker
 
 
@@ -29,9 +35,9 @@ from llmsec.evaluation.elo import ELOTracker
 # 数据加载
 # ============================================================
 def load_cluster_artifacts(path: Path | str | None = None) -> dict | None:
-    """加载 cluster artifacts pickle 文件。"""
+    """加载聚类产物 pickle（cluster_result.pkl，完整 schema）。"""
     if path is None:
-        path = CLUSTER_ARTIFACTS_FILE
+        path = CLUSTER_RESULT_FILE
     path = Path(path)
     if not path.exists():
         return None
@@ -45,14 +51,7 @@ def load_cluster_report(path: Path | str | None = None) -> dict | None:
     """加载 cluster_report.json。"""
     if path is None:
         path = CLUSTER_REPORT_FILE
-    path = Path(path)
-    if not path.exists():
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
+    return read_json(path)
 
 
 # ============================================================
@@ -204,6 +203,11 @@ def analyze_clusters(
         "stable_clusters": stable,
     }
 
+    # H-12 修复：透传聚类后验簇效验证（ANOVA/Kruskal-Wallis），让下游知道簇间差异
+    # 是否有统计显著性。原模块只做描述性统计，结论无统计支撑。
+    if cluster_report and "reaction_validation" in cluster_report:
+        analysis["reaction_validation"] = cluster_report["reaction_validation"]
+
     # SVD-Ridge 预测模型诊断（正则化路径 / 最优 λ / 特征重要性 / 预测置信区间）
     try:
         svd_summary = build_svd_ridge_summary(tracker)
@@ -289,11 +293,9 @@ def save_cluster_analysis(
 ):
     """保存聚类安全分析结果到 JSON。"""
     if output_path is None:
-        output_path = OUTPUT_DIR / "cluster_security_analysis.json"
+        output_path = CLUSTER_SECURITY_ANALYSIS_FILE
     output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(analysis, f, ensure_ascii=False, indent=2)
+    write_json(output_path, analysis)
     return output_path
 
 

@@ -38,7 +38,7 @@ from llmsec.clustering.tree import (
     select_knee,
     sweep_candidates,
 )
-from llmsec.core.config import CLUSTER_ARTIFACTS_FILE, CLUSTER_REPORT_FILE, OUTPUT_DIR
+from llmsec.core.config import CLUSTER_REPORT_FILE, CLUSTER_RESULT_FILE, OUTPUT_DIR
 from llmsec.core.logging import get_logger
 from llmsec.params import HDBSCAN_MIN_CLUSTER_DIV
 
@@ -64,7 +64,7 @@ def run_hdbscan_clustering(
         meta: extract_all_features 元信息
         feature_weights: posterior.learn_supervised_weights 的输出（可选）
         reactions: posterior.compute_method_reactions 的输出（可选，提供时做簇效验证）
-        write: 是否写 cluster_report.json / cluster_artifacts.pkl
+        write: 是否写 cluster_report.json / cluster_result.pkl
 
     返回: 聚类报告 dict。
     """
@@ -174,6 +174,8 @@ def run_hdbscan_clustering(
         _export_matrix(labels, features, meta)
 
         artifacts = {
+            "schema_version": 1,
+            "kind": "cluster_result",
             "features": features,
             "meta": meta,
             "labels": labels,
@@ -200,7 +202,7 @@ def run_hdbscan_clustering(
             "hdbscan_report": report,
             "generated_at": report["generated_at"],
         }
-        joblib.dump(artifacts, CLUSTER_ARTIFACTS_FILE)
+        joblib.dump(artifacts, CLUSTER_RESULT_FILE)
         logger.info(
             "✅ 聚类完成: 关键层 k*=%d, 密度视图 %d 簇+%d 噪声, silhouette=%.4f",
             k_best, n_flat, n_noise, validation.get("silhouette", 0.0),

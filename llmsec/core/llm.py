@@ -59,6 +59,21 @@ def retry_call(
     raise last_error
 
 
+def is_retryable_error(e: Exception) -> bool:
+    """判定异常是否值得重试。
+
+    H-7 修复：排除 4xx 确定性错误（认证失败/参数错误/权限拒绝/资源不存在），
+    保留 429 限流、5xx 服务端错误、网络错误。原代码对所有异常重试，
+    错误 API Key 跑 500 条 prompt 会白等 75 分钟。
+
+    用 status_code 属性判定（不依赖具体异常类，跨 OpenAI 版本健壮）。
+    """
+    status = getattr(e, "status_code", None)
+    if status is not None and 400 <= status < 500 and status != 429:
+        return False  # 4xx（非 429）= 确定性错误，重试无意义
+    return True
+
+
 def chat_with_retry(
     client: OpenAI,
     *,
@@ -72,6 +87,7 @@ def chat_with_retry(
     带重试的 chat.completions.create 封装。
 
     失败时 sleep(delay) 后重试；最后一次尝试仍失败则抛出原异常。
+    H-7 修复：4xx 确定性错误（认证/参数/权限/404）不重试，直接抛出。
     额外参数（temperature、max_tokens 等）经 **kwargs 透传。
     返回 openai 的 ChatCompletion 响应对象。
     """
@@ -83,4 +99,5 @@ def chat_with_retry(
         ),
         retries=max_retries,
         delay=delay,
+        retry_on=is_retryable_error,
     )

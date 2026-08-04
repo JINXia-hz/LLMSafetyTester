@@ -23,14 +23,13 @@ import re
 from pathlib import Path
 
 from llmsec.attacks.obfuscators import DEFAULT_OBFUSCATIONS, OBFUSCATORS, obfuscate as apply_obfuscation
-from llmsec.core import ATTACKS_DIR, PROJECT_ROOT, setup_console, write_jsonl
+from llmsec.core import ATTACKS_DIR, DATA_DIR, PROJECT_ROOT, setup_console, write_jsonl
 from llmsec.core.text import inject_math_tax
 
 # 修复Windows CMD GBK编码导致emoji/Unicode输出报错
 setup_console()
 
-# 内置数据路径（随仓库分发，见 llmsec/data/README.md）
-DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+# 内置数据路径（随仓库分发，见 llmsec/data/Explication.md）；DATA_DIR 由 core.config 统一定义
 BEHAVIORS_CSV = DATA_DIR / "harmbench_behaviors.csv"
 JAILBREAKS_JSON = DATA_DIR / "human_jailbreaks.json"
 

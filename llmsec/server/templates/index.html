@@ -10,63 +10,163 @@
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
   <style>
     :root {
-      --c-bg: #f5f4f1;
-      --c-sidebar: #2f3a3d;
-      --c-sidebar-active: #435457;
-      --c-primary: #5f8d8b;
-      --c-accent: #c07a5a;
-      --c-warn: #b0563f;
-      --c-safe: #6d8f6e;
-      --c-text: #3c4447;
-      --c-muted: #8a8f93;
+      --c-bg: #EFE6D2;          /* 绢米 */
+      --c-card: #F6EFDE;        /* 册页米白 */
+      --c-sidebar: #46586B;     /* 石青 */
+      --c-sidebar-deep: #3A495A;
+      --c-primary: #46586B;     /* 石青 */
+      --c-accent: #A85B43;      /* 土红 */
+      --c-warn: #A85B43;        /* 危险 · 土红 */
+      --c-safe: #75876B;        /* 安全 · 石绿 */
+      --c-ochre: #B98A44;       /* 警告 · 赭黄 */
+      --c-deep: #7A4A35;        /* 崩溃 · 深赭 */
+      --c-gold: #BFA03C;        /* 描金 */
+      --c-text: #2F343B;        /* 黛 */
+      --c-muted: #7C7663;
+      --c-line: #DCCFAE;
+      --c-on-seal: #F8EFD8;
+      --serif: "KaiTi", "STKaiti", "Kaiti SC", "SimSun", serif;
     }
     body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: var(--c-bg); color: var(--c-text); }
-    .card { background: #fff; border: 1px solid #e6e3dd; border-radius: 12px; padding: 16px; }
+
+    /* ---------- 卡片：方角小圆角 + 米白册页 ---------- */
+    .card { position: relative; background: var(--c-card); border: 1px solid var(--c-line); border-radius: 6px; padding: 16px; }
+    .card h3 { border-left: 6px solid var(--c-gold); padding-left: 8px; }
+    /* 指标卡角落的藻井暗纹（≈7%） */
+    .card:has(> .metric-value)::after {
+      content: ""; position: absolute; right: -10px; top: -10px; width: 56px; height: 56px; pointer-events: none;
+      background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56' viewBox='0 0 56 56'%3E%3Cg fill='none' stroke='%232F343B' stroke-width='1'%3E%3Crect x='16' y='16' width='24' height='24'/%3E%3Crect x='21' y='21' width='14' height='14' transform='rotate(45 28 28)'/%3E%3Ccircle cx='28' cy='28' r='3'/%3E%3C/g%3E%3C/svg%3E") no-repeat center / contain;
+      opacity: .07;
+    }
     .metric-value { font-size: 1.75rem; font-weight: 700; color: var(--c-text); line-height: 1.2; }
     .metric-label { font-size: 0.8rem; color: var(--c-muted); }
-    .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-radius: 10px; color: #c4cdd0; cursor: pointer; font-size: 0.9rem; transition: background .15s, color .15s; }
-    .nav-item:hover { background: var(--c-sidebar-active); color: #fff; }
-    .nav-item.active { background: var(--c-primary); color: #fff; }
+
+    /* ---------- 侧边栏：石青 + 金线锦地 ---------- */
+    aside { position: relative; }
+    aside::before {
+      content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .10;
+      background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'%3E%3Cg fill='none' stroke='%23BFA03C' stroke-width='0.7'%3E%3Cpath d='M10 0L20 10L10 20L0 10Z'/%3E%3C/g%3E%3C/svg%3E");
+    }
+    aside > * { position: relative; }
+    .brand-seal {
+      width: 26px; height: 26px; flex: none; background: var(--c-accent); color: var(--c-on-seal);
+      border-radius: 2px; font-family: var(--serif); font-size: 15px;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 0 0 1px rgba(0,0,0,.18), inset 0 0 0 1.5px rgba(248,239,216,.35);
+    }
+    .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-radius: 4px; color: #C5CBD2; cursor: pointer; font-size: 0.9rem; transition: background .15s, color .15s, box-shadow .15s; }
+    .nav-item:hover { background: var(--c-sidebar-deep); color: #F3E9CE; }
+    .nav-item.active { background: var(--c-sidebar-deep); color: #F3E9CE; box-shadow: inset 3px 0 0 var(--c-gold); }
+
     .section { display: none; }
-    .section.visible { display: block; animation: fadeIn .2s ease; }
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-    .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 600; }
-    .badge-gt { background: #e3ede4; color: #4f7351; }
-    .badge-pred { background: #e4e9ee; color: #5a7186; }
-    .btn { padding: 8px 16px; border-radius: 10px; font-size: 0.85rem; font-weight: 600; transition: opacity .15s; cursor: pointer; border: none; }
+    .section.visible { display: block; }
+    /* 卡片依次浮现：克制的繁复，delay 封顶 8 张 */
+    .section.visible .card { animation: cardIn .3s ease both; }
+    .section.visible .grid > .card:nth-child(2), .section.visible .space-y-4 > .card:nth-child(2) { animation-delay: .05s; }
+    .section.visible .grid > .card:nth-child(3), .section.visible .space-y-4 > .card:nth-child(3) { animation-delay: .10s; }
+    .section.visible .grid > .card:nth-child(4), .section.visible .space-y-4 > .card:nth-child(4) { animation-delay: .15s; }
+    .section.visible .grid > .card:nth-child(n+5), .section.visible .space-y-4 > .card:nth-child(n+5) { animation-delay: .20s; }
+    @keyframes cardIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+    /* ---------- 徽章：方切印章风 ---------- */
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 2px; font-size: 0.72rem; font-weight: 600; }
+    .badge-gt { background: rgba(117,135,107,.20); color: #55694B; }
+    .badge-pred { background: rgba(70,88,107,.14); color: #46586B; }
+
+    .btn { padding: 8px 16px; border-radius: 4px; font-size: 0.85rem; font-weight: 600; transition: opacity .15s; cursor: pointer; border: none; }
     .btn:hover { opacity: .88; }
     .btn:disabled { opacity: .45; cursor: not-allowed; }
-    .btn-primary { background: var(--c-primary); color: #fff; }
-    .btn-accent { background: var(--c-accent); color: #fff; }
-    .btn-plain { background: #eceae5; color: var(--c-text); }
-    .banner { border-radius: 14px; padding: 22px 26px; color: #fff; }
+    .btn-primary { background: var(--c-primary); color: #F3E9CE; }
+    .btn-accent { background: var(--c-accent); color: var(--c-on-seal); }
+    .btn-plain { background: #E7DDC2; color: var(--c-text); }
+
+    /* ---------- 横幅 ---------- */
+    .banner { border-radius: 6px; padding: 22px 26px; color: #F8EFD8; }
+    /* 等级语义色（唐化）：小型横幅用 */
     .level-safe { background: var(--c-safe); }
-    .level-allergic { background: #b39b54; }
+    .level-allergic { background: var(--c-ochre); }
     .level-vulnerable { background: var(--c-warn); }
-    .level-broken { background: var(--c-accent); }
+    .level-broken { background: var(--c-deep); }
     .level-inconclusive { background: #8a8f93; }
+    /* 总览匾额：恒石青底 + 金边 + 藻井团花 + 等级印章 */
+    .banner.plaque {
+      position: relative; overflow: hidden;
+      background: linear-gradient(160deg, var(--c-sidebar) 0%, var(--c-sidebar-deep) 100%);
+      border: 1px solid var(--c-sidebar-deep);
+      border-left: 3px solid var(--c-gold);
+      padding-right: 190px;
+    }
+    .medal { position: absolute; right: 96px; top: 50%; transform: translateY(-50%); width: 150px; height: 150px; color: var(--c-gold); opacity: .16; pointer-events: none; }
+    .medal svg { width: 100%; height: 100%; animation: spin 140s linear infinite; transform-origin: 50% 50%; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .seal {
+      position: absolute; right: 26px; top: 50%; transform: translateY(-50%);
+      width: 52px; height: 52px; display: flex; align-items: center; justify-content: center;
+      font-family: var(--serif); font-size: 26px; color: var(--c-on-seal);
+      background: var(--c-accent); border-radius: 3px;
+      box-shadow: 0 0 0 1px rgba(0,0,0,.2), inset 0 0 0 2.5px rgba(248,239,216,.4);
+    }
+    .seal.level-safe { background: var(--c-safe); }
+    .seal.level-allergic { background: var(--c-ochre); }
+    .seal.level-vulnerable { background: var(--c-warn); }
+    .seal.level-broken { background: var(--c-deep); }
+    .seal.level-inconclusive { background: #8a8f93; }
+    .seal-anim { animation: stamp .55s cubic-bezier(.2,1.3,.35,1); }
+    @keyframes stamp {
+      0% { transform: translateY(-50%) scale(1.7) rotate(-9deg); opacity: 0; }
+      60% { transform: translateY(-50%) scale(.95) rotate(1.5deg); opacity: 1; }
+      100% { transform: translateY(-50%) scale(1) rotate(0); }
+    }
+    /* 云气带：90s 缓漂移 */
+    .clouds {
+      height: 18px; margin: 6px 4px 14px; opacity: .06; pointer-events: none;
+      background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='18' viewBox='0 0 240 18'%3E%3Cg fill='none' stroke='%232F343B' stroke-width='1.1'%3E%3Cpath d='M8 13 q11 -12 24 -5 q-9 1 -7 7'/%3E%3Cpath d='M64 11 q13 -14 28 -6 q-10 1.5 -8 8'/%3E%3Cpath d='M128 13 q11 -12 24 -5 q-9 1 -7 7'/%3E%3Cpath d='M188 11 q13 -14 28 -6 q-10 1.5 -8 8'/%3E%3C/g%3E%3C/svg%3E") repeat-x left center / auto 18px;
+      animation: drift 90s linear infinite;
+    }
+    @keyframes drift { to { background-position-x: 240px; } }
+
+    /* ---------- 报告正文 ---------- */
     .report-body h1, .report-body h2, .report-body h3 { font-weight: 700; margin: 0.8em 0 0.4em; color: var(--c-text); }
-    .report-body h1 { font-size: 1.3rem; } .report-body h2 { font-size: 1.15rem; } .report-body h3 { font-size: 1rem; }
-    .report-body p, .report-body li { font-size: 0.9rem; line-height: 1.7; color: #4a5255; }
+    .report-body h1 { font-size: 1.3rem; font-family: var(--serif); }
+    .report-body h2 { font-size: 1.15rem; border-left: 4px solid var(--c-gold); padding-left: 8px; }
+    .report-body h3 { font-size: 1rem; }
+    .report-body p, .report-body li { font-size: 0.9rem; line-height: 1.7; color: #4A4638; }
     .report-body ul, .report-body ol { padding-left: 1.4em; margin: 0.4em 0; }
     .report-body ul { list-style: disc; } .report-body ol { list-style: decimal; }
     .report-body table { border-collapse: collapse; margin: 0.6em 0; font-size: 0.85rem; }
-    .report-body th, .report-body td { border: 1px solid #ddd9d2; padding: 5px 10px; }
-    .report-body th { background: #f0eeea; }
-    .report-body code { background: #f0eeea; border-radius: 4px; padding: 1px 5px; font-size: 0.82rem; }
-    .report-body blockquote { border-left: 3px solid var(--c-primary); padding-left: 12px; color: var(--c-muted); margin: 0.6em 0; }
-    .log-box { background: #232b2d; color: #b9c4c2; font-family: ui-monospace, Consolas, monospace; font-size: 0.75rem; border-radius: 10px; padding: 12px; height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
-    select, input[type="number"] { border: 1px solid #d8d4cc; border-radius: 8px; padding: 6px 10px; font-size: 0.85rem; background: #fff; color: var(--c-text); }
-    .cluster-tag { font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
+    .report-body th, .report-body td { border: 1px solid var(--c-line); padding: 5px 10px; }
+    .report-body th { background: #EFE7CE; }
+    .report-body code { background: #EFE7CE; border-radius: 3px; padding: 1px 5px; font-size: 0.82rem; }
+    .report-body blockquote { border-left: 3px solid var(--c-gold); padding-left: 12px; color: var(--c-muted); margin: 0.6em 0; }
+
+    .log-box { background: #262B30; color: #CDBE9C; font-family: ui-monospace, Consolas, monospace; font-size: 0.75rem; border-radius: 4px; border-top: 2px solid var(--c-gold); padding: 12px; height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+    select, input[type="number"], input[type="text"] { border: 1px solid var(--c-line); border-radius: 4px; padding: 6px 10px; font-size: 0.85rem; background: #FBF6E6; color: var(--c-text); }
+    .cluster-tag { font-size: 0.72rem; padding: 2px 8px; border-radius: 2px; font-weight: 600; }
+
+    /* ---------- 威胁表格：表头描金底线 ---------- */
+    #sec-threats thead tr { border-bottom: 2px solid var(--c-gold); }
+
+    /* ---------- 空状态：藻井水印 + 楷体 ---------- */
+    .empty-state { text-align: center; padding: 56px 24px; position: relative; overflow: hidden; }
+    .empty-state .empty-medal { width: 96px; height: 96px; margin: 0 auto 14px; color: var(--c-gold); opacity: .35; }
+    .empty-state .empty-title { font-family: var(--serif); font-size: 1.15rem; font-weight: 700; color: var(--c-text); }
+    .empty-state .empty-sub { font-size: 0.85rem; color: var(--c-muted); margin-top: 6px; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .medal svg, .clouds, .seal-anim, .section.visible .card { animation: none !important; }
+    }
   </style>
 </head>
 <body>
   <div class="flex min-h-screen">
     <!-- ============ 侧边栏 ============ -->
     <aside class="w-56 shrink-0 flex flex-col" style="background: var(--c-sidebar);">
-      <div class="px-5 py-5">
-        <div class="text-white font-bold text-lg">🛡️ LLMSEC</div>
-        <div class="text-xs mt-1" style="color: #93a1a4;">安全评估工作台</div>
+      <div class="px-5 py-5 flex items-center gap-3">
+        <div class="brand-seal">安</div>
+        <div>
+          <div class="text-white font-bold text-lg" style="font-family: var(--serif);">LLMSEC</div>
+          <div class="text-xs mt-1" style="color: #A9B2B8;">安全评估工作台</div>
+        </div>
       </div>
       <nav class="flex-1 px-3 space-y-1" id="nav">
         <div class="nav-item active" data-section="overview">📊 总览</div>
@@ -76,13 +176,13 @@
         <div class="nav-item" data-section="model">🤖 预测模型</div>
         <div class="nav-item" data-section="run">▶️ 运行控制</div>
       </nav>
-      <div class="px-5 py-4 text-xs" style="color: #6f7e81;">只读数据 + 子进程任务<br>绑定 127.0.0.1</div>
+      <div class="px-5 py-4 text-xs" style="color: #8A9499;">只读数据 + 子进程任务<br>绑定 127.0.0.1</div>
     </aside>
 
     <!-- ============ 主区域 ============ -->
     <main class="flex-1 min-w-0">
       <!-- 顶栏 -->
-      <div class="flex items-center gap-3 px-6 py-4" style="background: #eceae5;">
+      <div class="flex items-center gap-3 px-6 py-4" style="background: #EFE8D3; border-bottom: 1px solid var(--c-line);">
         <label class="text-sm font-medium">运行批次:</label>
         <select id="runSelect" class="min-w-[240px]"><option value="">最新</option></select>
         <button id="refreshBtn" class="btn btn-plain">🔄 刷新</button>
@@ -93,11 +193,16 @@
 
         <!-- ============ 总览 ============ -->
         <section id="sec-overview" class="section visible">
-          <div id="ov_banner" class="banner level-inconclusive mb-5">
-            <div class="text-sm opacity-80" id="ov_target">目标模型: -</div>
-            <div class="text-2xl font-bold mt-1" id="ov_verdict">暂无数据</div>
-            <div class="text-sm mt-2 opacity-90" id="ov_recommendation"></div>
+          <div id="ov_banner" class="banner plaque level-inconclusive mb-2">
+            <div class="medal" aria-hidden="true">
+              <svg viewBox="0 0 100 100"><g fill="none" stroke="currentColor" stroke-width="1.2"><rect x="12" y="12" width="76" height="76"/><rect x="24" y="24" width="52" height="52" transform="rotate(45 50 50)"/><rect x="33" y="33" width="34" height="34"/><circle cx="50" cy="50" r="10"/><path d="M50 40 L54 50 L50 60 L46 50 Z"/><path d="M40 50 L50 46 L60 50 L50 54 Z"/></g></svg>
+            </div>
+            <div class="text-sm" style="color: #C4B996;" id="ov_target">目标模型: -</div>
+            <div class="text-2xl font-bold mt-1" style="font-family: var(--serif);" id="ov_verdict">暂无数据</div>
+            <div class="text-sm mt-2" style="color: #D8CDA8;" id="ov_recommendation"></div>
+            <span class="seal level-inconclusive" id="ov_seal">?</span>
           </div>
+          <div class="clouds" aria-hidden="true"></div>
 
           <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-3 mb-5">
             <div class="card"><div class="metric-label">ASR 攻击成功率</div><div class="metric-value" id="ov_asr">-</div></div>
@@ -203,8 +308,10 @@
 
         <!-- ============ 预测模型 ============ -->
         <section id="sec-model" class="section">
-          <div id="modelEmpty" class="card text-sm hidden" style="color: var(--c-muted);">
-            该运行批次没有 SVD-Ridge 模型诊断数据（需用新版 pipeline 运行后生成）。
+          <div id="modelEmpty" class="card empty-state hidden">
+            <svg class="empty-medal" viewBox="0 0 100 100" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.2"><rect x="12" y="12" width="76" height="76"/><rect x="24" y="24" width="52" height="52" transform="rotate(45 50 50)"/><rect x="33" y="33" width="34" height="34"/><circle cx="50" cy="50" r="10"/></g></svg>
+            <div class="empty-title">暂无模型诊断数据</div>
+            <div class="empty-sub">该运行批次没有 SVD-Ridge 模型诊断数据（需用新版 pipeline 运行后生成）。</div>
           </div>
           <div id="modelBody">
             <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
@@ -243,6 +350,7 @@
             <div class="card">
               <h3 class="font-semibold text-sm mb-2">🗡️ 自适应评估</h3>
               <div class="space-y-2 text-xs mb-3">
+                <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">目标模型</span><select id="evalTarget" class="flex-1"><option value="">（.env 默认）</option></select></div>
                 <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">攻击集</span><select id="evalInput" class="flex-1"></select></div>
                 <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">阶段</span>
                   <select id="evalPhase" class="flex-1"><option value="all">全部</option><option value="1">仅攻击</option><option value="2">仅过敏</option></select></div>

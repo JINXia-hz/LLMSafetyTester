@@ -76,7 +76,9 @@ def _evaluate_cut(coords: np.ndarray, labels: dict[str, int], methods: list[str]
     y = np.array([labels[m] for m in methods])
     n_clusters = len(set(y.tolist()))
     if n_clusters < 2 or n_clusters >= len(methods):
-        return {"silhouette": 0.0, "calinski_harabasz": 0.0, "davies_bouldin": float("inf")}
+        # F-2 修复：用有限大值（1e6）替代 float("inf")，避免 inf 经 _norm → NaN
+        # 导致 json.dump(allow_nan=False) 崩溃整个聚类报告
+        return {"silhouette": 0.0, "calinski_harabasz": 0.0, "davies_bouldin": 1e6}
 
     def _safe(fn, default=0.0):
         try:
@@ -87,7 +89,8 @@ def _evaluate_cut(coords: np.ndarray, labels: dict[str, int], methods: list[str]
     return {
         "silhouette": round(_safe(silhouette_score), 4),
         "calinski_harabasz": round(_safe(calinski_harabasz_score), 4),
-        "davies_bouldin": round(_safe(davies_bouldin_score, default=float("inf")), 4),
+        # F-2 修复：DB 失败时用 1e6（有限大），不用 inf
+        "davies_bouldin": round(_safe(davies_bouldin_score, default=1e6), 4),
     }
 
 
@@ -112,6 +115,8 @@ def sweep_candidates(
     # 归一化：轮廓/CH 越高越好，DB 越低越好（取反）
     def _norm(key, invert=False):
         vals = np.array([e[key] for e in entries], dtype=float)
+        # F-2 修复：钳位非有限值（inf/nan），防止 (inf-lo)/(hi-lo) 产生 NaN 污染 score
+        vals = np.nan_to_num(vals, nan=0.0, posinf=1e6, neginf=-1e6)
         lo, hi = float(vals.min()), float(vals.max())
         if hi - lo < 1e-12:
             return [0.5] * len(entries)

@@ -253,7 +253,7 @@ def test_predict_batch_fallback() -> int:
 
 
 def test_first_round_convergence() -> int:
-    """第一轮后 check_convergence 的 std 不再为 None，且不判收敛。"""
+    """第一轮后不判收敛（轮次不足 CONV_WINDOW_MIN），置信度被压低。"""
     tracker = ELOTracker()
     defender = "test-model"
     tracker._round_defender_elos[defender] = [1500.0]
@@ -264,25 +264,20 @@ def test_first_round_convergence() -> int:
         tracker.ground_truth_methods.add(f"method_{i}")
 
     conv = tracker.check_convergence(defender, total_methods=50, tested_count=6)
-    if conv["std"] is None:
-        print(f"❌ 第一轮后 std 仍为 None: {conv}")
-        return 1
-    if conv["std"] <= 0.0:
-        print(f"❌ 单点 std 应按阈值保守处理（不能为 0，否则置信度虚高）: {conv['std']}")
-        return 1
+    # 单点无法拟合趋势 → ci_half=None，置信度应归零（避免虚高造成假收敛）
     if conv["converged"]:
         print(f"❌ 轮次不足时不应判收敛: {conv}")
         return 1
-    if not any("折扣" in n for n in conv["notes"]):
-        print(f"❌ 缺少轮次不足折扣提示: {conv['notes']}")
+    if not any("轮次不足" in n for n in conv["notes"]):
+        print(f"❌ 缺少轮次不足提示: {conv['notes']}")
         return 1
 
-    # 置信度应被折扣：不能越过收敛目标 0.8（否则第一轮就假收敛）
+    # 置信度应被压低：不能越过收敛目标 0.8（否则第一轮就假收敛）
     boundary = tracker.compute_security_boundary(defender)
     if boundary["confidence"] >= 0.8:
-        print(f"❌ 第一轮置信度未有效折扣: {boundary['confidence']}")
+        print(f"❌ 第一轮置信度未有效压低: {boundary['confidence']}")
         return 1
-    print(f"✅ 首轮收敛统计通过 (std={conv['std']}, 置信度={boundary['confidence']:.2f})")
+    print(f"✅ 首轮收敛统计通过 (ci_half={conv['ci_half']}, 置信度={boundary['confidence']:.2f})")
     return 0
 
 

@@ -32,7 +32,15 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
-from llmsec.core.config import CLUSTER_ARTIFACTS_FILE, OUTPUT_DIR, RUNS_DIR, STATE_FILE
+from llmsec.core.config import (
+    ATTACKS_DIR,
+    CLUSTER_RESULT_FILE,
+    OUTPUT_DIR,
+    RUNS_DIR,
+    STATE_FILE,
+    TASK_LOG_DIR,
+)
+from llmsec.core.io import read_json
 from llmsec.params import ADAPTIVE_BATCH_MAX
 
 # ============================================================
@@ -42,8 +50,7 @@ WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 SERVER_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = SERVER_DIR / "templates"
 STATIC_DIR = SERVER_DIR / "static"
-ATTACKS_DIR = OUTPUT_DIR / "attacks"
-TASK_LOG_DIR = OUTPUT_DIR / "tasks"
+# ATTACKS_DIR / TASK_LOG_DIR 由 core.config 统一定义（见 import）
 
 RUN_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{6}$")
 
@@ -57,13 +64,8 @@ if STATIC_DIR.exists():
 # 通用工具
 # ============================================================
 def load_json(path: Path | None) -> dict:
-    if path is None or not path.exists():
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
+    """加载 JSON 文件（委托 core.io.read_json，缺失/坏文件返回 {}）。"""
+    return read_json(path, default={}) if path is not None else {}
 
 
 def _validate_run(run: str) -> str:
@@ -106,13 +108,32 @@ def _discover_runs() -> list[dict]:
 
 def _load_state(run: str | None = None) -> dict:
     """加载 Elo state。指定 run 时优先读 run 目录内的快照（runner 结束时保存），
-    避免全局 state 漂移导致历史批次的实测/预测标记错配；无快照则回退全局。"""
+    避免全局 state 漂移导致历史批次的实测/预测标记错配。
+
+    R-cutover：无 run 快照时不再读易漂移的全局 state.json，而是从结果矩阵 R
+    派生活跃模型的 Elo（经 elo_access 缓存）；R 亦空时才回退全局 state.json。"""
     run_dir = _run_dir(run)
     if run_dir is not None:
         snapshot = load_json(run_dir / "state.json")
         if snapshot:
             return snapshot
+    # 无 run 快照：R 为真相
+    try:
+        from llmsec.evaluation.elo_access import active_model, elo_state_for
+        model = active_model()
+        if model is not None:
+            state = elo_state_for(model)
+            if state:
+                return state
+    except Exception:
+        pass
     return load_json(STATE_FILE)
+
+
+def _gt_set(state: dict) -> set:
+    """从 state 取 ground_truth 方法集合，兼容 dict（state.json 形态）与 list（派生缓存形态）。"""
+    gt = state.get("ground_truth", {})
+    return set(gt.keys() if isinstance(gt, dict) else gt)
 
 
 def _convergence_score(state: dict) -> float | None:
@@ -240,7 +261,7 @@ async def api_threats(run: str | None = None):
     state = _load_state(run)
     ratings = state.get("attacker_ratings", {})
     pred_std = state.get("attacker_pred_std", {})
-    ground_truth = set(state.get("ground_truth", {}).keys())
+    ground_truth = _gt_set(state)
 
     def _enrich(item: dict) -> dict:
         method = item.get("method", "")
@@ -274,7 +295,7 @@ async def api_elo(run: str | None = None):
     state = _load_state(run)
     ratings = state.get("attacker_ratings", {})
     pred_std = state.get("attacker_pred_std", {})
-    ground_truth = set(state.get("ground_truth", {}).keys())
+    ground_truth = _gt_set(state)
 
     ranking = [
         {
@@ -437,16 +458,16 @@ async def api_cluster_projection(method: str = "pca"):
 
     if method not in ("pca", "tsne"):
         raise HTTPException(status_code=400, detail=f"不支持的投影方法: {method!r}")
-    if not CLUSTER_ARTIFACTS_FILE.exists():
+    if not CLUSTER_RESULT_FILE.exists():
         return {"available": False}
 
-    mtime = CLUSTER_ARTIFACTS_FILE.stat().st_mtime
+    mtime = CLUSTER_RESULT_FILE.stat().st_mtime
     cache_key = (method, mtime)
     if cache_key in _PROJECTION_CACHE:
         return _PROJECTION_CACHE[cache_key]
 
     try:
-        artifacts = joblib.load(CLUSTER_ARTIFACTS_FILE)
+        artifacts = joblib.load(CLUSTER_RESULT_FILE)
     except Exception:
         return {"available": False}
 
@@ -517,10 +538,10 @@ def _load_tree_artifacts() -> dict | None:
     """加载含 linkage 的聚类 artifacts；不存在或缺 linkage 时返回 None。"""
     import joblib
 
-    if not CLUSTER_ARTIFACTS_FILE.exists():
+    if not CLUSTER_RESULT_FILE.exists():
         return None
     try:
-        artifacts = joblib.load(CLUSTER_ARTIFACTS_FILE)
+        artifacts = joblib.load(CLUSTER_RESULT_FILE)
     except Exception:
         return None
     if artifacts.get("linkage") is None:
@@ -581,7 +602,7 @@ async def api_cluster_cut(k: int):
     if k < 2 or k > n:
         raise HTTPException(status_code=400, detail=f"k 必须在 [2, {n}] 内")
 
-    mtime = CLUSTER_ARTIFACTS_FILE.stat().st_mtime
+    mtime = CLUSTER_RESULT_FILE.stat().st_mtime
     cache_key = (k, mtime)
     if cache_key in _CUT_CACHE:
         return _CUT_CACHE[cache_key]
