@@ -9,10 +9,8 @@
 """
 
 import os
-import sys
 import tempfile
 from pathlib import Path
-
 
 from llmsec.core.results import ResultsMatrix
 from llmsec.evaluation.elo import derive_elo

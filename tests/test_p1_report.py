@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 from llmsec.evaluation.elo import ELOTracker
 from llmsec.reporting import report
 
+
 def _write_jsonl(path: Path, records: list[dict]):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, 'w', encoding='utf-8') as f:
@@ -33,26 +34,27 @@ def test_h9_mutual_exclusion():
         _write_jsonl(out / 'run1_结果.jsonl', _eval_records(3, 'eval'))
         got = report.load_all_results(out)
         assert len(got) == 3, 'H9(a)：仅 *_结果.jsonl 时读 evaluator 数据（3 条）'
-        assert all((r['method'].startswith('eval_') for r in got)), 'H9(a)：记录来自 evaluator 文件'
+        assert all(r['method'].startswith('eval_') for r in got), 'H9(a)：记录来自 evaluator 文件'
     with tempfile.TemporaryDirectory() as td:
         out = Path(td)
         _write_jsonl(out / 'runs' / '20260801_120000' / 'attack_results.jsonl', _eval_records(5, 'run'))
         got = report.load_all_results(out)
         assert len(got) == 5, 'H9(b)：仅 run 目录时读 attack_results.jsonl（5 条）'
-        assert all((r['method'].startswith('run_') for r in got)), 'H9(b)：记录来自最新 run'
+        assert all(r['method'].startswith('run_') for r in got), 'H9(b)：记录来自最新 run'
     with tempfile.TemporaryDirectory() as td:
         out = Path(td)
         _write_jsonl(out / 'run1_结果.jsonl', _eval_records(3, 'eval'))
         _write_jsonl(out / 'runs' / '20260801_120000' / 'attack_results.jsonl', _eval_records(5, 'run'))
         got = report.load_all_results(out)
         assert len(got) == 5, 'H9(c)：两来源并存时记录数不翻倍（5 条而非 8 条）'
-        assert all((r['method'].startswith('run_') for r in got)), 'H9(c)：优先选择 runner 来源'
+        assert all(r['method'].startswith('run_') for r in got), 'H9(c)：优先选择 runner 来源'
     with tempfile.TemporaryDirectory() as td:
         out = Path(td)
         _write_jsonl(out / 'runs' / '20260801_120000' / 'attack_results.jsonl', _eval_records(4, 'run'))
         newer = out / 'runs' / '20260802_120000'
         newer.mkdir(parents=True)
-        import os, time
+        import os
+        import time
         future = time.time() + 10
         os.utime(newer, (future, future))
         got = report.load_all_results(out)

@@ -12,7 +12,9 @@ import csv
 import json
 import tempfile
 from pathlib import Path
+
 from llmsec.core.text import strip_math_tax
+
 
 def test_m6_generate_per_record_tax():
     """M6：同方法多条记录独立出题，不再共用同一道数学题。"""
@@ -57,7 +59,7 @@ def test_m7_harmbench_functional_category():
         generate(BEHAVIORS_CSV, ['Answer the following: {0}'], out, seed=42)
         entries = [json.loads(line) for line in out.read_text(encoding='utf-8').splitlines() if line.strip()]
     assert len(entries) == len(truth), '生成条数与 CSV behavior 数一致'
-    assert all(('functional_category' in e for e in entries)), '每条 entry 均含 functional_category 字段'
+    assert all('functional_category' in e for e in entries), '每条 entry 均含 functional_category 字段'
     bad = [e['id'] for e in entries if e.get('functional_category') != truth.get(e['behavior_id'])]
     assert not bad, f'functional_category 取值与 CSV 一致（异常 {len(bad)} 条）'
     bad_cat = [e['id'] for e in entries if e['category'] != f"harmbench-{e['functional_category']}"]

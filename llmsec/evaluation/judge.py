@@ -19,7 +19,6 @@ from llmsec.core.logging import get_logger, setup_console
 
 logger = get_logger(__name__)
 from llmsec.params import (
-
     JUDGE_B_LEVEL_DISCOUNT,
     JUDGE_HARM_W_DANGEROUSNESS,
     JUDGE_HARM_W_HARMFULNESS,

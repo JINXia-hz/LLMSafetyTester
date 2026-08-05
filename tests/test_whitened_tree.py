@@ -8,10 +8,11 @@
 4. run_hdbscan_clustering 端到端结构正确（含 ANOVA 簇效验证）。
 5. 弱监督特征权重放大相关特征；D-optimal 种子覆盖优于随机。
 """
-from pathlib import Path
 import numpy as np
+
 from llmsec.clustering.space import build_whitened_space
 from llmsec.clustering.tree import candidate_ks, cut_tree, log_growth_k0, select_knee, sweep_candidates
+
 
 def _make_blob_features(n_blobs=6, per_blob=15, seed=42):
     """合成 n_blobs 个高斯团簇的特征 dict。"""
@@ -32,10 +33,10 @@ def test_whitening_unit_variance():
     coords = space['coords']
     assert not (coords.shape[0] != len(methods) or coords.shape[1] < 2), f'❌ 白化坐标形状异常: {coords.shape}'
     S = space['singular_values'][:space['n_dims']]
-    strong = S ** 2 > 10 * space['lambda_w']
+    strong = 10 * space['lambda_w'] < S ** 2
     col_var = coords.var(axis=0)
     assert not (strong.sum() < 2 or not np.allclose(col_var[strong], 1.0, atol=0.15)), f'❌ 全白化后强方向方差不为 1: {col_var[strong][:5]}'
-    weak = S ** 2 < 0.1 * space['lambda_w']
+    weak = 0.1 * space['lambda_w'] > S ** 2
     assert not (weak.sum() > 0 and col_var[weak].max() > 0.5), f'❌ 噪声方向未被抑制: {col_var[weak][:5]}'
     space_d = build_whitened_space(features, methods)
     col_var_d = space_d['coords'].var(axis=0)
@@ -60,7 +61,7 @@ def test_auto_k_on_blobs():
     Z = linkage(space['coords'], method='ward')
     sweep = sweep_candidates(space['coords'], Z, methods)
     k_best, top3 = select_knee(sweep)
-    assert not not 4 <= k_best <= 8, f"❌ auto-k={k_best} 偏离真实簇数 6: sweep={[(s['k'], s['score']) for s in sweep]}"
+    assert 4 <= k_best <= 8, f"❌ auto-k={k_best} 偏离真实簇数 6: sweep={[(s['k'], s['score']) for s in sweep]}"
     labels = cut_tree(Z, methods, k_best)
     same = 0
     total = 0
@@ -96,7 +97,7 @@ def test_run_hdbscan_clustering_e2e():
     assert not (not hdb or 'n_clusters' not in hdb or 'method_labels' not in hdb), '❌ 缺少 hdbscan 密度视图段'
     assert not (not report.get('top_ks') or not report.get('candidate_sweep')), '❌ 缺少 top_ks / candidate_sweep'
     rv = report.get('reaction_validation', {})
-    assert not not rv.get('available'), f"❌ 簇效验证不可用: {rv.get('reason')}"
+    assert rv.get('available'), f"❌ 簇效验证不可用: {rv.get('reason')}"
     assert not (rv['p_anova'] > 0.05 and rv['p_kruskal'] > 0.05), f"❌ 强相关反应下簇效应应显著: p={rv['p_anova']}/{rv['p_kruskal']}"
     print(f"✅ 端到端聚类通过 (k={report['n_clusters']}, 最大簇占比={max_share:.0%}, 密度视图={hdb['n_clusters']}簇+{hdb['n_noise']}噪声, eta²={rv['eta2']})")
 
@@ -142,7 +143,7 @@ def test_d_optimal_coverage():
         return d_min
     d_opt = min_pairwise_dist(idx)
     rng = np.random.default_rng(0)
-    d_rand = max((min_pairwise_dist(rng.choice(len(methods), n_seeds, replace=False)) for _ in range(20)))
+    d_rand = max(min_pairwise_dist(rng.choice(len(methods), n_seeds, replace=False)) for _ in range(20))
     assert not d_opt < d_rand, f'❌ D-optimal 覆盖不如随机最优: {d_opt:.2f} < {d_rand:.2f}'
     gt_idx = list(range(10))
     M = X[gt_idx].T @ X[gt_idx] + 1.0 * np.eye(X.shape[1])
@@ -164,7 +165,6 @@ def test_select_knee_real_curve():
 
 def test_embedding_fallback_chain(monkeypatch):
     """embedding 降级链：API 未配置时本地缓存优先于 HF；env HF_ENDPOINT 覆盖预检列表。"""
-    import os
     import llmsec.clustering.features as F
     # 降级链为 API → 本地缓存 → HF → TF-IDF；清空 API 配置以聚焦"缓存 vs HF"
     for k in ("EMBEDDING_API_BASE", "EMBEDDING_API_KEY", "EMBEDDING_API_MODEL"):

@@ -18,10 +18,8 @@
 """
 
 import hashlib
-import json
 import os
 import re
-from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -49,13 +47,11 @@ from llmsec.core.io import save_artifact
 from llmsec.core.logging import get_logger
 from llmsec.core.seed import get_global_seed as _global_seed
 from llmsec.params import (
-
     RIDGE_DEGENERATE_COL_EPS,
     RIDGE_N_FOLDS,
     RIDGE_PRED_STD_CAP_MIN,
     RIDGE_PRED_STD_CAP_MULT,
 )
-
 
 # 特征提取代码版本：提取逻辑 / 特征块结构变更时 +1，使旧特征缓存与 ridge w 失效（M-5/M-6）
 FEATURE_EXTRACTION_VERSION = 1
@@ -101,9 +97,9 @@ def _cluster_files() -> tuple[Path, Path]:
     默认动态读 core.config；模块级别名被外部 patch（旧测试兼容路径）时以 patch 值为准。
     """
     fc, cr = config.FEATURE_CACHE_FILE, config.CLUSTER_RESULT_FILE
-    if FEATURE_CACHE_FILE != _IMPORT_TIME_PATHS[0]:
+    if _IMPORT_TIME_PATHS[0] != FEATURE_CACHE_FILE:
         fc = FEATURE_CACHE_FILE
-    if CLUSTER_RESULT_FILE != _IMPORT_TIME_PATHS[1]:
+    if _IMPORT_TIME_PATHS[1] != CLUSTER_RESULT_FILE:
         cr = CLUSTER_RESULT_FILE
     return fc, cr
 
@@ -291,7 +287,7 @@ class EloPredictorModel:
         # 用最优 λ 在全数据上训练最终模型（截断数值近零奇异值保证稳定）
         U, S, Vt = np.linalg.svd(X_scaled, full_matrices=False)
         s_max = S.max() if S.size else 0.0
-        keep = S > max(1e-10 * s_max, 1e-12)
+        keep = max(1e-10 * s_max, 1e-12) < S
         self.singular_values = S
         shrink = np.where(keep, S / (S**2 + self.lambda_opt), 0.0)
         self.w = Vt.T @ (shrink * (U.T @ y_c))
@@ -527,7 +523,7 @@ class ClusterEloPredictor:
             for b in EloPredictorModel.BLOCK_ORDER
         )
         fch = meta.get("feature_config_hash", "")
-        return hashlib.md5(f"{method_hash}|{dims}|{fch}".encode("utf-8")).hexdigest()
+        return hashlib.md5(f"{method_hash}|{dims}|{fch}".encode()).hexdigest()
 
     # ============================================================
     # 前置特征缓存 / D-optimality 种子 / 最终聚类（post-test）
@@ -718,7 +714,6 @@ class ClusterEloPredictor:
             self.last_predictions = {}
             return {}
 
-        gt_count = self.ground_truth_count()
         features = self.artifacts.get("features", {}) if self.artifacts else {}
         gt_methods = sorted(self.ground_truth.keys())
         # 过滤掉不在当前特征集中的 GT 方法（跨攻击集 resume 时的 stale GT 污染）：
@@ -963,7 +958,7 @@ class ClusterEloPredictor:
         prompt = record.get("prompt", "")
 
         # 技术标签（搜原文 + IGNORECASE，lower 后搜会让大写模式永不命中，F3 修复）
-        for i, (label, patterns) in enumerate(TECHNIQUE_LABELS.items()):
+        for i, (_label, patterns) in enumerate(TECHNIQUE_LABELS.items()):
             if i >= len(label_names):
                 break
             for pat in patterns:

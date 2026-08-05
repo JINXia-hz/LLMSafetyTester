@@ -1,0 +1,30 @@
+# LLM 红队攻击测试工具——直接依赖（运行时 + 测试）
+# 锁定的完整依赖树见 requirements.txt（pip-compile 生成）
+
+# 核心：目标/裁判/生成模型 API 与配置
+openai>=2,<3
+python-dotenv>=1,<2
+requests>=2,<3
+urllib3>=2,<3
+
+# 本地模拟模型服务器 + Web 面板
+fastapi>=0.100,<1
+uvicorn>=0.20,<1
+pydantic>=2,<3
+jinja2>=3,<4
+pandas>=2,<4
+
+# 聚类分析
+numpy>=1.24
+scikit-learn>=1.3
+scipy>=1.10
+hdbscan>=0.8,<0.9
+sentence-transformers>=2
+tiktoken>=0.5
+
+# 实验框架
+optuna>=3,<4
+
+# 测试框架
+pytest>=8,<9
+pytest-xdist>=3

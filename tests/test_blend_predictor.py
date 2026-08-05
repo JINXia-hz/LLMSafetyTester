@@ -9,15 +9,14 @@
 4. 自适应权重：样本越少越偏向统一预测（贝叶斯收缩）。
 """
 
-import sys
 
 
 import numpy as np
 
 from llmsec.core.results import ResultsMatrix
 from llmsec.evaluation.blend_predictor import BlendPredictor
-from llmsec.params import BLEND_PRIOR_K
 from llmsec.evaluation.elo_cluster import EloPredictorModel
+from llmsec.params import BLEND_PRIOR_K
 
 BLOCKS = EloPredictorModel.BLOCK_ORDER
 

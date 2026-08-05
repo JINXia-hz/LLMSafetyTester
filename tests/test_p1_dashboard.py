@@ -10,8 +10,17 @@
 """
 import tempfile
 from pathlib import Path
+
 from llmsec.params import ADAPTIVE_BATCH_MAX
-from llmsec.server.dashboard_api import _CACHE_MAX_SIZE, TASKS, EvaluateRequest, _cache_put, _refresh_task_status, _start_task
+from llmsec.server.dashboard_api import (
+    _CACHE_MAX_SIZE,
+    TASKS,
+    EvaluateRequest,
+    _cache_put,
+    _refresh_task_status,
+    _start_task,
+)
+
 
 class _StubProc:
     """假子进程：poll() 直接返回预设退出码。"""

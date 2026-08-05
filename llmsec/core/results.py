@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import sys
 from contextlib import contextmanager
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from llmsec.core.config import RESULTS_FILE
@@ -62,7 +62,7 @@ def _file_lock(filepath: Path, timeout: float = 10.0):
                     fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     acquired = True
                     break
-            except (OSError, IOError):
+            except OSError:
                 time.sleep(0.05)
         yield  # 拿到锁（或超时放行）后执行临界区
     finally:
@@ -104,7 +104,7 @@ class MatchResult:
         return d
 
     @classmethod
-    def from_store(cls, method: str, model: str, d: dict) -> "MatchResult":
+    def from_store(cls, method: str, model: str, d: dict) -> MatchResult:
         # R-3 修复：eval_score 用 .get 防御半残 JSON 缺该键（其他字段都已用 .get，唯此处不一致）
         score = d.get("eval_score")
         if score is None:
@@ -207,7 +207,7 @@ class ResultsMatrix:
         """该模型列按 ts 升序的结果——Elo 回放的时序输入。"""
         # M/robustness：ts 可能混有 int/str（旧迁移数据），裸比较抛 TypeError。
         # 数字 ts 数值序在前，非数字按字符串序在后，None 永远最后。
-        def _key(r: "MatchResult"):
+        def _key(r: MatchResult):
             t = r.ts
             if t is None:
                 return (2, 0)
@@ -235,7 +235,7 @@ class ResultsMatrix:
         return filepath
 
     @classmethod
-    def load(cls, filepath: str | Path | None = None) -> "ResultsMatrix":
+    def load(cls, filepath: str | Path | None = None) -> ResultsMatrix:
         # F-3 修复：权威存储用 strict 模式，损坏时备份残文件 + 警告（不静默清零）
         filepath = Path(filepath) if filepath else RESULTS_FILE
         try:

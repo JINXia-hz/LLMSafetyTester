@@ -23,7 +23,6 @@ from llmsec.experiments.metrics import aggregate
 from llmsec.experiments.schema import StudyConfig
 from llmsec.experiments.search import build_search
 
-
 logger = get_logger(__name__)
 STUDIES_DIR = OUTPUT_DIR / "experiments"
 
@@ -203,7 +202,7 @@ def run_study(config: StudyConfig) -> dict:
                 if t.get("search_fp") == search_fp and t.get("status") == "success"]
         vals = [float(v) for v in vals if isinstance(v, (int, float))]
         if not vals:
-            logger.warning(f"   ⚠ 无有效目标值，跳过该 config 的 tell")
+            logger.warning("   ⚠ 无有效目标值，跳过该 config 的 tell")
             obj = float("inf") if config.objective.direction == "minimize" else float("-inf")
         else:
             obj = aggregate(vals, config.objective.aggregate)
@@ -213,11 +212,7 @@ def run_study(config: StudyConfig) -> dict:
         if abort_study or (wall_cap_s and (datetime.now() - started_at).total_seconds() > wall_cap_s):
             break
 
-        if len(_done_units(completed, search_fp)) >= units_per_config:
-            if search_fp not in counted_fps:
-                counted_fps.add(search_fp)
-                configs_done += 1
-        elif not ran_any:
+        if len(_done_units(completed, search_fp)) >= units_per_config or not ran_any:
             if search_fp not in counted_fps:
                 counted_fps.add(search_fp)
                 configs_done += 1
@@ -253,7 +248,7 @@ def summarize(config: StudyConfig) -> dict:
         by_fp.setdefault(fp, []).append(t)
 
     rows = []
-    for fp, ts in by_fp.items():
+    for _fp, ts in by_fp.items():
         succ = [t for t in ts if t.get("status") == "success"]
         if not succ:
             continue

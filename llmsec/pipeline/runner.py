@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from llmsec.core.logging import get_logger
+
 """
 统一编排器 — 自适应安全评估流水线（原根目录 runner.py）
 
@@ -28,23 +29,20 @@ Phase 3: 综合评判
     python runner.py --max-rounds 3 --batch-size 10     # 自定义参数
 """
 
-from pathlib import Path
-import subprocess
-import sys
-
 import argparse
 import hashlib
 import json
 import os
 import shutil
+import subprocess
+import sys
 import time
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
 
 from openai import OpenAI
 
 from llmsec.core.config import (
-    ATTACK_SET_L1_FILE,
     INITIAL_ELO,
     OUTPUT_DIR,
     RUNS_DIR,
@@ -54,19 +52,18 @@ from llmsec.core.config import (
     TargetConfig,
 )
 from llmsec.core.io import append_jsonl, iter_jsonl, read_json, read_jsonl, write_json, write_jsonl
-from llmsec.core.text import strip_math_tax
 from llmsec.core.logging import setup_console
+from llmsec.core.seed import get_global_seed
+from llmsec.core.text import strip_math_tax
 from llmsec.evaluation import (
     FAST_REFUSAL_PATTERNS,
+    ELOTracker,
     Judge,
-    compute_eval_score_v2,
     create_judge_client,
     evaluate_single,
-    measure_math_baseline,
-    ELOTracker,
     generate_safe_twin,
+    measure_math_baseline,
     publish_tracker,
-    SAFE_TWIN_SYSTEM,
 )
 from llmsec.evaluation.cluster_analysis import (
     analyze_clusters,
@@ -96,14 +93,10 @@ from llmsec.reporting import (
     build_method_stats,
     build_tree,
     generate_narrative,
-    load_all_results,
-    load_allergy,
     load_elo,
     load_prompt_metadata,
 )
 from llmsec.targets import PCAP_JUDGE_URL, PCAP_MODEL_VERSION, call_target
-from llmsec.core.seed import get_global_seed
-
 
 logger = get_logger(__name__)
 setup_console()
@@ -165,7 +158,7 @@ def adaptive_twin_window(
     boundary_info: dict,
     max_methods: int,
     allergy_summary: dict | None = None,
-    user_window: Optional[int] = None,
+    user_window: int | None = None,
 ) -> int:
     """
     根据 ELO 边界的置信度和 FPR 估计的统计置信度决定过敏检测样本量。
@@ -206,7 +199,7 @@ def load_prompt_records(filepath) -> list[dict]:
 
 
 def get_or_create_twin(method_name: str, rec: dict, twin_cache: dict,
-                       twin_client: OpenAI) -> Optional[str]:
+                       twin_client: OpenAI) -> str | None:
     """
     获取或按需生成安全孪生。
     twin_cache: {method_name: safe_prompt}
@@ -536,7 +529,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
     for round_idx in range(1, max_rounds + 1):
         untested = [m for m in all_methods if m not in tested]
         if not untested:
-            logger.info(f"\n  ✅ 所有方法已测试完毕")
+            logger.info("\n  ✅ 所有方法已测试完毕")
             break
 
         # 自适应调整 batch_size
@@ -736,7 +729,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
         "jailbreak_tax": tax_summary,
     }
 
-    logger.info(f"\n  📊 攻击阶段完成:")
+    logger.info("\n  📊 攻击阶段完成:")
     logger.info(f"     ASR={asr*100:.1f}% ({successful}/{len(all_results)})")
     logger.info(f"     边界ELO={boundary['boundary_elo']:.0f} (置信度{boundary['confidence']*100:.0f}%)")
     logger.info(f"     TOP5威胁: {', '.join(summary['top_threats'])}")
@@ -986,8 +979,9 @@ def _quick_precluster(tracker: ELOTracker, all_methods: list[str]) -> dict[str, 
     if len(methods) < 4:
         return None  # 太少不值得聚类
     try:
-        from llmsec.clustering.space import build_whitened_space
         from sklearn.cluster import KMeans
+
+        from llmsec.clustering.space import build_whitened_space
 
         space = build_whitened_space(features, methods)
         coords = space["coords"]
@@ -1042,7 +1036,6 @@ def generate_final_report(attack_summary: dict, allergy_summary: dict,
     total_methods = len(tracker.attacker_ratings)
 
     # 收敛轮次：回放轮次轨迹，找首个 converged=True 的轮数（实验 HPO 的目标度量）
-    from llmsec.params import CONV_CI_TARGET, CONV_WINDOW_MIN
     conv_rounds = _compute_conv_rounds(tracker, DEFENDER_NAME, total_methods)
 
     # 置信度不足 → 不给出安全等级，提示需要更多数据
@@ -1150,9 +1143,8 @@ def run_multi_target_phase(
 
     R 是唯一真相；STATE_FILE 仅保留最后一个目标的 legacy 视图（次要）。
     """
-    from llmsec.core.results import ResultsMatrix, _coarse_status
-    from llmsec.evaluation.blend_predictor import BlendPredictor
-    from llmsec.targets import set_active_target, available_targets
+    from llmsec.core.results import ResultsMatrix
+    from llmsec.targets import available_targets, set_active_target
     global DEFENDER_NAME
 
     declared = available_targets()
@@ -1244,7 +1236,8 @@ def run_multi_target_phase(
         for name in names:
             tracker = trackers.get(name)
             if tracker is None or not tracker.attacker_ratings:
-                logger.warning(f"  ⚠ {name}: 无 Elo 数据，跳过过敏检测"); continue
+                logger.warning(f"  ⚠ {name}: 无 Elo 数据，跳过过敏检测")
+                continue
             set_active_target(name)
             DEFENDER_NAME = name
             boundary_info = tracker.compute_security_boundary(name)
@@ -1276,7 +1269,8 @@ def run_multi_target_phase(
     for name in names:
         info = per_target.get(name, {})
         if not info or "error" in info:
-            logger.info(f"  {name}: 失败/无结果 ({info.get('error', '')})"); continue
+            logger.info(f"  {name}: 失败/无结果 ({info.get('error', '')})")
+            continue
         n_catalog = len(R.tested_methods(name) & catalog_set)  # 当前攻击集内的覆盖
         n_total = R.n_for_model(name)                          # R 全量（含历史迁移）
         logger.info(f"  {name:28s} ELO≈{info['defender_elo']:6.0f}  "
@@ -1496,13 +1490,14 @@ def main():
     # ---- 多目标分支：--targets 指定时逐目标攻击，结果入 R 矩阵 ----
     if args.targets:
         if args.target:
-            logger.error("❌ --target 与 --targets 互斥"); sys.exit(1)
+            logger.error("❌ --target 与 --targets 互斥")
+            sys.exit(1)
         return run_multi_target_phase(args, records, method_records, runs_dir, judge, twin_client)
 
     # ---- 单目标命名分支：--target <name> 时切换 DEFENDER + ambient 路由 ----
     # 走常规单目标流程（写 STATE_FILE 供看板展示该模型），call_target 经 ambient 自动路由
     if args.target:
-        from llmsec.targets import set_active_target, available_targets
+        from llmsec.targets import available_targets, set_active_target
         declared = available_targets()
         if args.target not in declared:
             logger.error(f"❌ 未声明的目标: {args.target}（可用: {sorted(declared)}）")
@@ -1702,8 +1697,8 @@ def main():
         logger.info("  树形数据:")
         for f in tree_files:
             logger.info(f"    🌳 {Path(f).name}")
-    logger.info(f"\n  💡 想快速看结论 → 打开 security_report.md")
-    logger.info(f"  💡 想看原始数据 → 打开 runner_report.json")
+    logger.info("\n  💡 想快速看结论 → 打开 security_report.md")
+    logger.info("  💡 想看原始数据 → 打开 runner_report.json")
     logger.info("=" * 60)
 
 

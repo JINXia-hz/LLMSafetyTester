@@ -15,12 +15,7 @@ Fresh review 修复回归测试。
   FR-11 elo.py load() 返回 self（非 None）
   FR-12 study.py sample_cf 死代码已删（空搜索空间不崩）
 """
-import json
-import math
-import tempfile
-from pathlib import Path
 
-import numpy as np
 
 from llmsec.evaluation.elo import ELOTracker
 
@@ -35,6 +30,7 @@ def test_fr1_write_jsonl_before_save():
     （源码级断言，防未来重构时顺序回退。）
     """
     import inspect
+
     from llmsec.pipeline import runner
     src = inspect.getsource(runner.run_attack_phase)
     # 找到所有 write_jsonl 和 tracker.save 的位置
@@ -79,6 +75,7 @@ def test_fr3_svd_ridge_filters_stale_gt():
     验证方式：检查源码中 fit() 调用传入的是 train_gt 而非 self.ground_truth。
     """
     import inspect
+
     from llmsec.evaluation.elo_cluster import ClusterEloPredictor
     src = inspect.getsource(ClusterEloPredictor._predict_batch_svd_ridge)
     # 确保有 train_gt 的定义
@@ -99,6 +96,7 @@ def test_fr3_svd_ridge_filters_stale_gt():
 def test_fr4_stale_attacker_ratings_cleaned():
     """resume 时 stale attacker_ratings / history 被同步清理。"""
     import inspect
+
     from llmsec.pipeline import runner
     src = inspect.getsource(runner.run_attack_phase)
     # 确认清理逻辑包含 attacker_ratings.pop
@@ -159,6 +157,7 @@ def test_fr7_evaluator_update_elo_has_round_end():
     不含 "尚无完整轮次"（n_rounds==0 时的特征消息）。
     """
     import inspect
+
     from llmsec.evaluation.evaluator import update_elo
     src = inspect.getsource(update_elo)
     assert 'record_round_end' in src, 'FR-7: update_elo 源码含 record_round_end 调用'
@@ -275,6 +274,7 @@ def test_fr11_load_returns_self_on_corrupt(tmp_path):
 def test_fr12_no_sample_cf_dead_code():
     """study.py 不再包含 sample_cf 死代码。"""
     import inspect
+
     from llmsec.experiments import study
     src = inspect.getsource(study)
     assert 'sample_cf' not in src, 'FR-12: study.py 不应再包含 sample_cf 死代码'
@@ -286,6 +286,7 @@ def test_fr12_no_sample_cf_dead_code():
 def test_fr13_single_target_main_has_try_except():
     """单目标 main() 的报告/publish/save 链有 try/except 保护。"""
     import inspect
+
     from llmsec.pipeline import runner
     src = inspect.getsource(runner.main)
     # 确认关键调用被 try 包裹

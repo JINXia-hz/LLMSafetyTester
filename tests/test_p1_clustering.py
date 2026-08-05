@@ -13,13 +13,15 @@ P1 聚类修复回归测试。
 import inspect
 import json
 import math
-from pathlib import Path
+
 import numpy as np
+
 from llmsec.clustering import features as feat_mod
 from llmsec.clustering.posterior import reaction_validation
 from llmsec.clustering.space import build_whitened_space, transform_to_space
 from llmsec.clustering.tree import log_growth_k0
 from llmsec.params import WHITEN_DAMP
+
 
 def _float_fields_finite(obj, path=''):
     """收集 obj 中所有非有限浮点字段的路径（应为空）。"""

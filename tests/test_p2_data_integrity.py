@@ -16,17 +16,17 @@ import os
 import random
 import tempfile
 from pathlib import Path
-from llmsec.core import io as io_mod
+
 from llmsec.core.config import _resolve_target_prefixes, load_targets, target_backend
 from llmsec.core.io import CorruptedFileError, read_json, write_json
 from llmsec.core.results import ResultsMatrix
 from llmsec.evaluation.elo import ELOTracker
 
+
 def test_f1_nan_does_not_pollute():
     """NaN eval_score 不应污染 attacker_ratings（原来会级联损坏所有对手）。"""
     tr = ELOTracker()
     tr.update('good', 'def', 3.0)
-    good_elo_before = tr.get_attacker_elo('good')
     tr.update('bad', 'def', float('nan'))
     assert math.isfinite(tr.get_attacker_elo('bad')), 'F1: NaN eval_score 后 bad 方法 Elo 仍有限'
     assert tr.get_attacker_elo('bad') != float('nan'), 'F1: bad 方法 Elo 非 NaN'
@@ -286,16 +286,17 @@ def test_f5_refusal_rate_actually_takes_effect():
         srv.MATH_ACCURACY = 1.0
         srv.REFUSAL_RATE = 1.0
         random.seed(0)
-        refusals = sum((1 for _ in range(20) if any((t in srv.generate_response('x') for t in srv.SAFE_REFUSAL_TEMPLATES[:1])) or srv.generate_response('x') in srv.SAFE_REFUSAL_TEMPLATES))
+        for _ in range(20):
+            srv.generate_response('x')  # warm up seed-0 sequence
         random.seed(1)
-        all_refused = all((srv.generate_response('x') in srv.SAFE_REFUSAL_TEMPLATES for _ in range(10)))
+        all_refused = all(srv.generate_response('x') in srv.SAFE_REFUSAL_TEMPLATES for _ in range(10))
         assert all_refused, 'F5: REFUSAL_RATE=1.0 时含探针的高威胁攻击 100% 被拒绝'
         srv.REFUSAL_RATE = 0.0
         random.seed(2)
         responses = [srv.generate_response('x') for _ in range(10)]
-        all_not_refused = all((r not in srv.SAFE_REFUSAL_TEMPLATES for r in responses))
+        all_not_refused = all(r not in srv.SAFE_REFUSAL_TEMPLATES for r in responses)
         assert all_not_refused, 'F5: REFUSAL_RATE=0.0 时含探针的高威胁攻击 100% 越狱（无拒绝）'
-        all_have_math = all(('[MATH:' in r for r in responses))
+        all_have_math = all('[MATH:' in r for r in responses)
         assert all_have_math, 'F5: 越狱响应含 [MATH:]（越狱成功才答数学，证明走了越狱分支）'
     finally:
         srv.evaluate_harmfulness = orig_harm

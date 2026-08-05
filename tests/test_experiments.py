@@ -4,14 +4,12 @@
 """
 
 import json
-import sys
 import tempfile
 from pathlib import Path
 
-
-from llmsec.experiments.schema import StudyConfig, resolve_trial
-from llmsec.experiments.search import build_search, GridSearch, RandomSearch, BayesianSearch
 from llmsec.experiments.metrics import aggregate
+from llmsec.experiments.schema import StudyConfig, resolve_trial
+from llmsec.experiments.search import build_search
 
 
 def test_schema_and_resolve():
@@ -94,7 +92,7 @@ def test_bayesian_ask_tell():
         v = 10.0 + (p["K_FACTOR"] - 40) ** 2 / 100  # 假目标：K=40 附近最优
         b.tell(p, v)
         vals.append(v)
-    assert not (not vals), "❌ bayesian 未跑完"
+    assert vals, "❌ bayesian 未跑完"
 
 
 def test_aggregate():

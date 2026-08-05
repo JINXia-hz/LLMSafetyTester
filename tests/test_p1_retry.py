@@ -14,8 +14,9 @@ P1 冒烟测试：统一重试辅助 retry_call（M5）。
    - safe_twin      3 次 / 2s，耗尽返回 None
 """
 import time
-from pathlib import Path
+
 from llmsec.core.llm import chat_with_retry, retry_call
+
 
 class _SleepRecorder:
     """替换全局 time.sleep，记录每次间隔（不真正等待）。"""

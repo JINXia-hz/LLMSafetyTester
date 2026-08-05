@@ -26,9 +26,8 @@ def _cmd_run(study_yaml: str) -> int:
 
 
 def _cmd_report(name: str) -> int:
+
     from llmsec.experiments.study import study_dir, summarize
-    import json
-    from pathlib import Path
     sd = study_dir(name)
     cfg_path = sd / "study.yaml"
     if not cfg_path.exists():
@@ -41,7 +40,7 @@ def _cmd_report(name: str) -> int:
 
 
 def _cmd_trials(name: str) -> int:
-    from llmsec.experiments.study import study_dir, _load_trials
+    from llmsec.experiments.study import _load_trials, study_dir
 
     trials = _load_trials(study_dir(name) / "trials.jsonl")
     if not trials:

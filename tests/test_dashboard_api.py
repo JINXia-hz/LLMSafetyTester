@@ -9,9 +9,11 @@
 5. 任务运行器能启动/跟踪/完成一个轻量子进程。
 """
 import time
-from pathlib import Path
+
 from fastapi.testclient import TestClient
+
 from llmsec.server.dashboard_api import TASKS, _start_task, app
+
 client = TestClient(app)
 
 def test_index_and_data_apis():
@@ -25,7 +27,7 @@ def test_index_and_data_apis():
     if d.get('available'):
         assert len(d.get('radar', {}).get('labels', [])) == 5, '雷达图五维'
         assert len(d.get('radar', {}).get('values', [])) == 5, '雷达图五值'
-        assert all((0 <= v <= 1 for v in d['radar']['values'])), '雷达值域 [0,1]'
+        assert all(0 <= v <= 1 for v in d['radar']['values']), '雷达值域 [0,1]'
     for path in ['/api/threats', '/api/elo', '/api/report-md', '/api/clusters', '/api/model', '/api/attack-sets', '/api/tasks']:
         r = client.get(path)
         assert r.status_code == 200, f'{path} 200'
@@ -82,7 +84,7 @@ def test_cluster_projection():
         assert d['n'] == len(d['points']), 'pca 点数与方法数一致'
         assert 'explained_variance' in d and len(d['explained_variance']) == 2, 'pca 含两维解释方差'
         p0 = d['points'][0]
-        assert all((k in p0 for k in ('method', 'x', 'y', 'cluster', 'tested'))), 'pca 点字段完整'
+        assert all(k in p0 for k in ('method', 'x', 'y', 'cluster', 'tested')), 'pca 点字段完整'
         assert isinstance(p0['x'], float) and isinstance(p0['y'], float), 'pca 坐标为数值'
     r = client.get('/api/cluster-projection?method=tsne')
     assert r.status_code == 200, 'tsne 投影 200'
@@ -107,8 +109,8 @@ def test_cluster_tree_and_cut():
         c = r.json()
         if c.get('available'):
             assert len(c['clusters']) == min(5, n - 1), '切割簇数 == k'
-            assert all(('name' in cl and 'members' in cl for cl in c['clusters'])), '切割簇字段完整'
-            total = sum((cl['size'] for cl in c['clusters']))
+            assert all('name' in cl and 'members' in cl for cl in c['clusters']), '切割簇字段完整'
+            total = sum(cl['size'] for cl in c['clusters'])
             assert total == n, '切割覆盖全部方法'
         r = client.get('/api/cluster-cut?k=99999')
         assert r.status_code == 400, '非法 k 被 400 拦截'
@@ -125,6 +127,7 @@ def test_state_snapshot_priority(monkeypatch, tmp_path):
     短暂成为"最新批次"污染同机看板。
     """
     import json
+
     import llmsec.server.dashboard_api as api
     fake_runs = tmp_path / "runs"
     fake_runs.mkdir()

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from llmsec.core.logging import get_logger
+
 """
 攻击特征提取模块
 
@@ -34,7 +35,6 @@ from llmsec.core import (
 )
 from llmsec.core.seed import get_global_seed as _global_seed
 from llmsec.params import EMBEDDING_PCA_DIM, TFIDF_FALLBACK_FEATURES
-
 
 logger = get_logger(__name__)
 # ============================================================
@@ -393,7 +393,7 @@ def extract_technique_labels(records: list[dict]) -> tuple[dict[str, np.ndarray]
         # （DAN/STAN/ROT13/U\+200B/XML/JSON 等）永不命中（F3 修复）
         combined_text = " ".join(prompts)
 
-        for i, (label, patterns) in enumerate(TECHNIQUE_LABELS.items()):
+        for i, (_label, patterns) in enumerate(TECHNIQUE_LABELS.items()):
             for pat in patterns:
                 if re.search(pat, combined_text, re.IGNORECASE):
                     vec[i] = 1.0

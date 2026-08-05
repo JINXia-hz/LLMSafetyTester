@@ -20,6 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 from llmsec.pipeline import runner
 
+
 def test_h2_no_toplevel_reexec():
     """H2: re-exec 不在模块顶层；__main__ 块内保留 re-exec 且透传退出码。"""
     assert 'llmsec.pipeline.runner' in sys.modules, 'import llmsec.pipeline.runner 未触发 re-exec 杀进程'

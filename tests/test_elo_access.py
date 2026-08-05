@@ -11,9 +11,9 @@
 import llmsec.core.config as cfg
 import llmsec.core.results as results_mod
 from llmsec.core.results import ResultsMatrix
+from llmsec.evaluation import elo_access as ea
 from llmsec.evaluation.blend_predictor import load_or_fit_blend_predictor
 from llmsec.evaluation.elo import ELOTracker
-from llmsec.evaluation import elo_access as ea
 
 
 def _setup(tmp_path, monkeypatch):
@@ -76,7 +76,6 @@ def test_blend_predictor_cache_reuse(tmp_path, monkeypatch):
 
     load_or_fit_blend_predictor(R, features, method_catalog=catalog)
     load_or_fit_blend_predictor(R, features, method_catalog=catalog)  # 二次命中缓存
-    from pathlib import Path
     assert any((tmp_path / "predictors").glob("blend_*.pkl"))
 
     R.upsert("extra", "qwen9b", 1.0, ts=4)  # R 变动 → 新缓存

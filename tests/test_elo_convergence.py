@@ -9,7 +9,6 @@
 4. check_convergence 在噪声小、漂移小、覆盖率足够时判收敛。
 """
 
-import sys
 
 
 from llmsec.evaluation.elo import ELOTracker
@@ -148,7 +147,7 @@ def test_convergence_true_positive():
         tracker.ground_truth_methods.add(f"method_{i}")
 
     conv = tracker.check_convergence(defender, total_methods=50)
-    assert not (not conv["converged"]), f"❌ 真收敛未通过: {conv}"
+    assert conv["converged"], f"❌ 真收敛未通过: {conv}"
 
 
 def test_boundary_split_tested_predicted():

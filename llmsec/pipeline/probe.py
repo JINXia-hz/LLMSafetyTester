@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from llmsec.core.logging import get_logger
+
 """
 目标 API 探测脚本（原根目录 probe_victim.py）
 
@@ -22,8 +23,6 @@ from llmsec.core.config import load_env
 from llmsec.core.logging import setup_console
 from llmsec.targets import call_target
 from llmsec.targets.pcap import PCAP_JUDGE_URL, build_pcap_payload
-
-
 
 logger = get_logger(__name__)
 setup_console()
@@ -74,7 +73,7 @@ def probe_pcap(test_text: str):
 
     logger.info(f"📡 发送探测请求到: {PCAP_JUDGE_URL}")
     logger.info(f"   测试文本: {test_text}")
-    logger.info(f"   请求体:")
+    logger.info("   请求体:")
     logger.info(json.dumps(payload, ensure_ascii=False, indent=2))
     logger.info("")
 

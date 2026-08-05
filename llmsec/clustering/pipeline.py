@@ -18,11 +18,8 @@ from collections import Counter, defaultdict
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-from llmsec.core import CLUSTER_MATRIX_FILE, get_logger
+from llmsec.core import CLUSTER_MATRIX_FILE
 from llmsec.core.logging import get_logger
-
-
-
 
 logger = get_logger(__name__)
 # ============================================================

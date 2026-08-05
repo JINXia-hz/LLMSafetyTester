@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from llmsec.core.logging import get_logger
+
 """
 攻击聚类分析 CLI 入口（post-test 设计：聚类在测试流程结束后运行）
 
@@ -14,11 +15,8 @@ from llmsec.core.logging import get_logger
 
 import argparse
 import json
-import os
 import sys
 
-from llmsec.core.config import OUTPUT_DIR
-from llmsec.core.logging import setup_console
 from llmsec.clustering import (
     CLUSTER_MATRIX_FILE,
     CLUSTER_REPORT_FILE,
@@ -28,8 +26,9 @@ from llmsec.clustering import (
     run_hdbscan_clustering,
 )
 from llmsec.clustering.space import build_feature_matrix
+from llmsec.core.config import OUTPUT_DIR
 from llmsec.core.io import read_jsonl
-
+from llmsec.core.logging import setup_console
 
 logger = get_logger(__name__)
 setup_console()
@@ -62,7 +61,7 @@ def main():
         logger.info(f"📂 评估结果: {resolved_result} ({len(eval_results)} 条)")
         if not eval_results:
             # 读回 0 条时弱监督加权与 ANOVA 簇效验证会静默失效——显式提醒，防"以为带了评估"
-            logger.warning(f"  ⚠ 评估结果读回 0 条（文件缺失或全为空行）——弱监督加权与簇效验证将被跳过")
+            logger.warning("  ⚠ 评估结果读回 0 条（文件缺失或全为空行）——弱监督加权与簇效验证将被跳过")
     features, meta = load_and_extract(
         attack_file=args.input,
         result_file=resolved_result,
@@ -103,7 +102,7 @@ def main():
         weights = learn_supervised_weights(X, methods, y)
         logger.info(f"   弱监督: {len(y)} 个已测方法参与特征加权")
 
-    logger.info(f"\n⏳ HDBSCAN 聚类")
+    logger.info("\n⏳ HDBSCAN 聚类")
     report = run_hdbscan_clustering(
         features, meta, feature_weights=weights, reactions=reactions,
     )
@@ -113,7 +112,7 @@ def main():
         sys.exit(1)
 
     logger.info(f"\n{'='*60}")
-    logger.info(f"📊 聚类分析结果")
+    logger.info("📊 聚类分析结果")
     logger.info(f"{'='*60}")
     logger.info(f"  簇数: {report['n_clusters']} (+ {report['n_noise']} 噪声)")
     logger.info(f"  关键层: k*={report.get('chosen_k')} (top3 {report.get('top_ks', [])})")
@@ -129,7 +128,7 @@ def main():
         logger.info(f"    p_anova={rv['p_anova']}, p_kruskal={rv['p_kruskal']}, "
               f"eta²={rv['eta2']}, ε²={rv['epsilon2']}")
 
-    logger.info(f"\n  簇命名:")
+    logger.info("\n  簇命名:")
     for cid, name in sorted(report.get("cluster_names", {}).items(), key=lambda x: int(x[0])):
         tag = "🟡 稀疏区" if cid == "-1" else f"簇{cid}"
         members = [m for m, c in report.get("method_labels", {}).items() if str(c) == str(cid)]

@@ -25,8 +25,8 @@ ELO 评分模块 — 双边 ELO（连续成绩映射 + K 动力学）+ 自适应
     defense = tracker.get_defender_ranking()
 """
 
-from collections import defaultdict
 import logging
+from collections import defaultdict
 
 import numpy as np
 from scipy.stats import t as _t_dist

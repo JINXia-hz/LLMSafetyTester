@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from llmsec.core.logging import get_logger
+
 """
 过敏判断模块 — 安全孪生生成与误杀率检测
 
@@ -26,7 +27,7 @@ import os
 import re
 import sys
 import time
-from typing import Optional
+from pathlib import Path
 
 from llmsec.core.config import (
     ATTACK_SET_L1_FILE,
@@ -43,18 +44,17 @@ from llmsec.core.llm import create_openai_client, is_retryable_error, retry_call
 from llmsec.core.logging import setup_console
 from llmsec.core.text import strip_math_tax
 from llmsec.evaluation.judge import FAST_REFUSAL_PATTERNS, Judge, create_judge_client
-from llmsec.targets import PCAP_MODEL_VERSION
-from pathlib import Path
-
 from llmsec.params import (
-
     MIN_TWIN_WINDOW,
     PORTRAIT_ASR_SAFE,
     PORTRAIT_FPR_SAFE,
-    TWIN_GEN_TEMPERATURE as TEMPERATURE,
     TWIN_SEVERITY_FPR_LOW,
     TWIN_SEVERITY_FPR_MED,
 )
+from llmsec.params import (
+    TWIN_GEN_TEMPERATURE as TEMPERATURE,
+)
+from llmsec.targets import PCAP_MODEL_VERSION
 
 setup_console()
 
@@ -101,7 +101,7 @@ def _allergy_report_file(model: str):
     return OUTPUT_DIR / f"allergy__{safe}.json"
 
 
-def _asr_from_results(model: str) -> Optional[float]:
+def _asr_from_results(model: str) -> float | None:
     """从结果矩阵 R 派生指定模型的攻击成功率（ASR）。
 
     R 是评估的唯一真相：eval_score > 0 视为攻击成功。无 R 文件或该模型无
@@ -141,7 +141,7 @@ SAFE_TWIN_SYSTEM = """你是一个安全测试数据生成专家。你的任务�
 {"safe_prompt": "改写后的安全prompt", "replacement": "简要说明将什么替换成了什么"}"""
 
 
-def generate_safe_twin(attack_prompt: str, client) -> Optional[dict]:
+def generate_safe_twin(attack_prompt: str, client) -> dict | None:
     """为一条攻击prompt生成安全孪生。"""
 
     def _gen():
@@ -281,7 +281,7 @@ def evaluate_allergy():
     judge_client = create_judge_client()
     judge = Judge(judge_client)
 
-    for i, twin in enumerate(twins):
+    for _i, twin in enumerate(twins):
         oid = twin["original_id"]
         if oid in done_ids:
             continue
@@ -401,7 +401,7 @@ def evaluate_allergy():
     write_json(report_file, report)
 
     logger.info(f"\n{'='*60}")
-    logger.info(f"🤧 过敏检测报告")
+    logger.info("🤧 过敏检测报告")
     logger.info(f"{'='*60}")
     logger.info(f"  测试安全孪生: {n_results} 条")
     logger.info(f"  被误杀 (过敏): {allergic_total} 条 ({fpr*100:.1f}%)")

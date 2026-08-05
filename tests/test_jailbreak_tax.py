@@ -13,9 +13,11 @@
 import json
 import tempfile
 from pathlib import Path
+
 from llmsec.core.text import gen_math, inject_math_tax, strip_math_tax
 from llmsec.evaluation import evaluator as ev
 from llmsec.pipeline.runner import summarize_jailbreak_tax
+
 
 def test_injection_roundtrip():
     problem, answer = gen_math()
@@ -127,6 +129,7 @@ def test_measure_baseline_mock():
 
 def test_gen_math_difficulty():
     import re
+
     from llmsec.params import MATH_TAX_DIV_K_MAX, MATH_TAX_MUL_MAX, MATH_TAX_SUB_MAX
     pat = re.compile('\\(\\((\\d+) × (\\d+)\\) \\+ \\((\\d+) ÷ (\\d+)\\)\\) - (\\d+) = \\?')
     for _ in range(50):

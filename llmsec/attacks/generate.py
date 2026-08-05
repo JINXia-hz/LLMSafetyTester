@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from llmsec.core.logging import get_logger
+
 """
 LLM攻击集生成器 - L1级别
 读取攻击分析.md，提取所有L1攻击方法，调用生成模型API逐方法生成5条攻击prompt，
@@ -33,8 +34,6 @@ from llmsec.core import (
     setup_console,
 )
 from llmsec.core.text import inject_math_tax
-
-
 
 logger = get_logger(__name__)
 # 修复Windows CMD GBK编码导致emoji/Unicode输出报错
@@ -101,7 +100,7 @@ def parse_md(filepath) -> list[dict]:
     返回 list[dict]，每个dict包含：
       id, category, category_name, method, description
     """
-    with open(filepath, "r", encoding="utf-8") as f:
+    with open(filepath, encoding="utf-8") as f:
         lines = f.readlines()
 
     methods = []
@@ -274,7 +273,7 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
         reviewed = json.loads(raw2)
         if not (isinstance(reviewed, list) and len(reviewed) == len(harm_types)):
             # 审查返回异常则退回初稿
-            logger.warning(f"  ⚠ 审查轮返回异常，使用初稿")
+            logger.warning("  ⚠ 审查轮返回异常，使用初稿")
             return drafts
 
         # 从审查结果提取prompt
@@ -289,7 +288,7 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
     def _on_retry(attempt, e):
         # 内容类失败（条数不符/JSON解析）短间隔；API 类失败（含 429）长间隔
         if isinstance(e, _DraftMismatchError):
-            logger.warning(f"  ⚠ 初稿条数不符，重试...")
+            logger.warning("  ⚠ 初稿条数不符，重试...")
             return RETRY_DELAY
         if isinstance(e, json.JSONDecodeError):
             logger.warning(f"  ⚠ JSON解析失败 (第{attempt}轮): {e}")
@@ -454,7 +453,7 @@ def main():
 
     # ---- 汇总 ----
     logger.info("=" * 70)
-    logger.info(f"🎉 生成完毕！")
+    logger.info("🎉 生成完毕！")
     logger.info(f"   成功: {success_count} 种方法")
     logger.info(f"   跳过: {skip_count} 种方法")
     logger.info(f"   失败: {fail_count} 种方法")

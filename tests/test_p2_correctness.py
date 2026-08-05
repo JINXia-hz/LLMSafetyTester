@@ -13,12 +13,14 @@ P1 正确性回归测试（批次 A）。
 import json
 import math
 import tempfile
-from pathlib import Path
+
 import numpy as np
+
 from llmsec.clustering.tree import _evaluate_cut, sweep_candidates
 from llmsec.evaluation.elo import ELOTracker
 from llmsec.evaluation.elo_cluster import ClusterEloPredictor
 from llmsec.params import PORTRAIT_MIN_TESTED
+
 
 def test_f2_evaluate_cut_degenerate_returns_finite():
     """全单点簇（n_clusters == n）→ 早期返回，davies_bouldin 应为 1e6（非 inf）。"""
@@ -38,7 +40,7 @@ def test_f2_sweep_no_nan_in_score():
     methods = ['a', 'b', 'c', 'd']
     sweep = sweep_candidates(coords, Z, methods, ks=[1, 2, 3])
     scores = [s['score'] for s in sweep]
-    assert all((math.isfinite(s) for s in scores)), f'F2: sweep scores 全有限（实得 {scores}）'
+    assert all(math.isfinite(s) for s in scores), f'F2: sweep scores 全有限（实得 {scores}）'
     try:
         json.dumps(sweep, allow_nan=False)
         assert True, 'F2: sweep 结果 json.dumps(allow_nan=False) 不抛'
@@ -55,6 +57,7 @@ def test_f2_evaluate_cut_zero_variance_cluster():
 def test_h3_trajectory_restored_on_exception():
     """check_convergence 抛异常时，_compute_conv_rounds 传播异常但 finally 恢复轨迹。"""
     import pytest as _pytest
+
     from llmsec.pipeline.runner import _compute_conv_rounds
     tr = ELOTracker()
     tr._round_defender_elos['def'] = [1500.0, 1510.0, 1520.0]

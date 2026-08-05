@@ -9,7 +9,7 @@ core.config — 统一配置入口
 """
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv

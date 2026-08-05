@@ -11,7 +11,8 @@
 
 from llmsec.core.config import JudgeConfig
 from llmsec.evaluation.evaluator import extract_math_answer
-from llmsec.evaluation.judge import Judge, fast_prescreen, parse_compliance_level as pcl
+from llmsec.evaluation.judge import Judge, fast_prescreen
+from llmsec.evaluation.judge import parse_compliance_level as pcl
 
 
 def test_compliance_level_no_broad_fallback():

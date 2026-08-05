@@ -18,7 +18,6 @@ import numpy as np
 
 from llmsec.core.logging import get_logger
 from llmsec.params import (
-
     RV_ALPHA,
     RV_EFFECT_THRESHOLD,
     RV_MIN_GROUP,
@@ -26,9 +25,6 @@ from llmsec.params import (
     SUPERVISED_WEIGHT_CLIP,
     SUPERVISED_WEIGHT_MIN_SAMPLES,
 )
-
-
-
 
 logger = get_logger(__name__)
 

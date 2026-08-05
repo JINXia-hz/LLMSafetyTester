@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from llmsec.core.logging import get_logger
+
 """
 LLM攻击评估器
 读取攻击集 jsonl，逐条向目标LLM发送攻击prompt，收集响应并评分。
@@ -19,6 +20,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from datetime import datetime
+from pathlib import Path
 
 from llmsec.core.config import (
     ATTACK_SET_L1_FILE,
@@ -39,8 +41,6 @@ from llmsec.evaluation.judge import (
 )
 from llmsec.params import API_DELAY, MATH_TAX_BASELINE_SAMPLES, NO_JUDGE_MIN_LEN, TAX_PENALTY_DIVISOR
 from llmsec.targets import PCAP_MODEL_VERSION, call_target
-from pathlib import Path
-
 
 logger = get_logger(__name__)
 setup_console()
@@ -759,7 +759,7 @@ def print_summary(summary: dict, judge_stats: dict | None,
     asr = core["asr"]
 
     logger.info(f"\n{'='*60}")
-    logger.info(f"📊 评估汇总")
+    logger.info("📊 评估汇总")
     logger.info(f"{'='*60}")
     logger.info(f"  总运行: {total_runs} 次")
     logger.info(f"  有害产出: {harmful_count} ({asr*100:.1f}%)")
@@ -776,14 +776,14 @@ def print_summary(summary: dict, judge_stats: dict | None,
         logger.info(f"  多轮一致性: {multi_round_stability['consistent_ratio']*100:.1f}%")
     # Judge额外输出
     if judge_stats:
-        logger.info(f"\n  🧑‍⚖️ Judge 统计:")
+        logger.info("\n  🧑‍⚖️ Judge 统计:")
         logger.info(f"    合规分布: {judge_stats['compliance_distribution']}")
         logger.info(f"    有害度均值: H={judge_stats['harmfulness_mean']} S={judge_stats['specificity_mean']} D={judge_stats['dangerousness_mean']}")
         logger.info(f"    预筛命中率: {judge_stats['prescreen_hit_rate']*100:.1f}%")
         logger.info(f"    Judge API调用: {judge_stats['total_judge_api_calls']} 次")
         summary["judge_statistics"] = judge_stats
 
-    logger.info(f"\n  按有害类别ASR:")
+    logger.info("\n  按有害类别ASR:")
     harm_type_asr = summary["cross_category"]["harm_type_asr"]
     for ht in sorted(harm_type_asr):
         logger.info(f"    {ht}: {harm_type_asr[ht]*100:.1f}%")
@@ -792,7 +792,7 @@ def print_summary(summary: dict, judge_stats: dict | None,
         elo_s = summary["elo"]["summary"]
         elo_b = summary["elo"]["security_boundary"]
         upsets = summary["elo"].get("upsets", [])
-        logger.info(f"\n  🎯 ELO 评分:")
+        logger.info("\n  🎯 ELO 评分:")
         logger.info(f"    方法数: {elo_s.get('total_methods', 0)}")
         logger.info(f"    ELO范围: {elo_s.get('min_elo', 0)} ~ {elo_s.get('max_elo', 0)}")
         logger.info(f"    TOP5攻击方: {', '.join(t['method'] for t in elo_s.get('top_threats', []))}")
@@ -800,7 +800,7 @@ def print_summary(summary: dict, judge_stats: dict | None,
             logger.info(f"    安全边界: {elo_b['boundary_elo']} (置信度 {elo_b['confidence']*100:.0f}%)")
             logger.info(f"    边界以上威胁: {elo_b.get('methods_above_boundary', 0)} 种")
         if upsets:
-            logger.warning(f"\n  ⚠️ 意外盲区（低 ELO 成功）TOP5:")
+            logger.warning("\n  ⚠️ 意外盲区（低 ELO 成功）TOP5:")
             for u in upsets[:5]:
                 logger.info(f"      {u['attacker']} (ELO={u['att_elo']}) 击败 {u['defender']} (ELO={u['def_elo']}) gap={u['elo_gap']}")
 
@@ -844,7 +844,7 @@ def main():
     if use_judge:
         logger.info(f"🧑‍⚖️  使用 LLM-as-Judge 评分 (预筛: {'关闭' if args.skip_judge_prescreen else '开启'})")
     else:
-        logger.warning(f"⚠️  使用旧版关键词检测")
+        logger.warning("⚠️  使用旧版关键词检测")
     logger.info("")
 
     # ---- 加载已有结果（断点续传）----

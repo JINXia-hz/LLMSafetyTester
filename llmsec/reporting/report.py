@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from llmsec.core.logging import get_logger
+
 """
 层级报告生成器 — 树形分解 + LLM叙事润色
 
@@ -29,7 +30,6 @@ import argparse
 import json
 import os
 import re
-import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -37,10 +37,7 @@ from pathlib import Path
 from llmsec.core.config import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
-    METHOD_REGISTRY_FILE,
     OUTPUT_DIR,
-    REPORT_FILE,
-    TREE_FILE,
     GeneratorConfig,
 )
 from llmsec.core.io import iter_jsonl, read_json, read_jsonl, write_json
@@ -48,7 +45,6 @@ from llmsec.core.llm import chat_with_retry, create_openai_client
 from llmsec.core.logging import setup_console
 from llmsec.evaluation.elo import ELOTracker
 from llmsec.params import (
-
     PORTRAIT_ASR_SAFE,
     PORTRAIT_FPR_SAFE,
     PORTRAIT_MIN_CONFIDENCE,
@@ -307,8 +303,8 @@ def _load_elo_tracker(output_dir=None) -> ELOTracker | None:
     # 从 R 派生
     try:
         from llmsec.core.results import ResultsMatrix
-        from llmsec.evaluation.elo_access import active_model
         from llmsec.evaluation.elo import derive_elo
+        from llmsec.evaluation.elo_access import active_model
 
 
         R = ResultsMatrix.load()
@@ -866,7 +862,7 @@ def main():
     # 终端摘要
     o = tree["overall"]
     logger.info(f"\n{'='*60}")
-    logger.info(f"📋 报告摘要")
+    logger.info("📋 报告摘要")
     logger.info(f"{'='*60}")
     logger.info(f"  安全等级: {o['security_level'].upper()}")
     logger.info(f"  ASR={o['asr']*100:.1f}%  FPR={o['fpr']*100:.1f}%")

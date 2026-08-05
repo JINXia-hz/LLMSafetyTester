@@ -1,0 +1,61 @@
+[project]
+name = "llmsec"
+version = "1.0.0"
+description = "LLM 红队攻击测试工具——自适应评估、聚类分析、ELO 收敛"
+requires-python = ">=3.11"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = [".venv", "output", "__pycache__"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes (unused imports, undefined names, etc.)
+    "W",    # pycodestyle warnings
+    "I",    # isort (import sorting)
+    "UP",   # pyupgrade (modernize syntax)
+    "B",    # bugbear (common bug patterns)
+    "SIM",  # simplify (redundant code)
+]
+ignore = [
+    "E501",   # line too long（120 行宽已设，超长行多为中文注释/字符串）
+    "E402",   # module import not at top（llmsec 大量函数内 lazy import 防循环依赖）
+    "B008",   # do not perform function call in argument defaults（FastAPI Depends 模式）
+    "B904",   # raise without from（except 块内 raise 包装，部分需 from None）
+    "B905",   # zip without explicit strict（项目内 zip 语义清晰）
+    "B027",   # empty method without abstract decorator（ABC 模式，非强制）
+    "SIM103", # needless-bool（可读性优先）
+    "SIM108", # if-else-block-instead-of-if-exp（多行注释需要 if-else 块）
+    "SIM117", # nested with（io.py 的锁+文件句柄需要嵌套）
+    "SIM112", # uncapitalized environment variables（TARGET_x_* 是故意的 nm.lower() 约定）
+    "SIM102", # collapsible-if（合并后可读性下降）
+    "SIM105", # suppressible-exception（contextlib.suppress 会吞掉栈信息，调试不便）
+    "SIM115", # open-file-with-context-manager（文件锁需要手动控制生命周期）
+    "SIM116", # if-else-block-instead-of-dict-lookup（中文文案 if-else 更可读）
+    "SIM118", # in-dict-keys（dict.keys() 在迭代场景更明确）
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "E402",   # 测试中 mock 后再 import
+    "E702",   # print+return 单行（旧式测试 helper）
+    "E741",   # 模糊变量名 l（list comprehension 中常用）
+    "B007",   # 未使用循环变量 i（enumerate 常见）
+    "B011",   # assert False（测试中故意触发失败）
+    "SIM105", # try/except/pass（测试中验证异常路径）
+    "SIM201", # not x == y 风格（测试断言习惯）
+    "SIM202", # not x != y 风格（测试断言习惯）
+    "SIM108", # if-else vs if-exp（测试可读性优先）
+    "SIM115", # open file without context manager（测试临时文件）
+    "UP031",  # printf-style % 格式（旧式测试）
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["llmsec"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "--tb=short"

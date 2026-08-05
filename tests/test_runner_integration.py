@@ -4,9 +4,6 @@ stub 掉 evaluate_single / call_target / generate_safe_twin（不触网），跑
 run_attack_phase / run_allergy_phase / get_or_create_twin / run_multi_target_phase。
 """
 
-import json
-import tempfile
-from pathlib import Path
 from types import SimpleNamespace as NS
 
 import llmsec.core.config as cfg

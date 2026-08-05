@@ -79,15 +79,15 @@ def build_pcap_log(prompt_text: str, strip_math: bool = True) -> str:
         "Host: 127.0.0.1\r\n"
         "Content-Type: text/plain\r\n"
         "User-Agent: Mozilla/5.0\r\n"
-        "Content-Length: {}\r\n"
+        f"Content-Length: {len(body_bytes)}\r\n"
         "\r\n"
-        "{}\r\n"
+        f"{body}\r\n"
         "【RESPONSE】\r\n"
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/plain\r\n"
         "\r\n"
         "success"
-    ).format(len(body_bytes), body)
+    )
 
 
 def build_pcap_payload(prompt_text: str, strip_math: bool = True) -> dict:

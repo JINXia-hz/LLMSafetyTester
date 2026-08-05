@@ -17,13 +17,10 @@ import numpy as np
 
 from llmsec.core.logging import get_logger
 from llmsec.params import (
-
     KNEE_FLATTEN_RATIO,  # 边界上升判定：末尾增益高于最大增益的该比例即视为"仍在上升"
     TREE_K_MAX,
     TREE_K_MIN,
 )
-
-
 
 # ============================================================
 # auto-k：log 增长 + 候选集

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from llmsec.core.logging import get_logger
+
 """
 HarmBench 攻击集生成器（内置数据，测试与示范用，非项目核心）
 
@@ -23,10 +24,10 @@ import random
 import re
 from pathlib import Path
 
-from llmsec.attacks.obfuscators import DEFAULT_OBFUSCATIONS, OBFUSCATORS, obfuscate as apply_obfuscation
+from llmsec.attacks.obfuscators import DEFAULT_OBFUSCATIONS, OBFUSCATORS
+from llmsec.attacks.obfuscators import obfuscate as apply_obfuscation
 from llmsec.core import ATTACKS_DIR, DATA_DIR, PROJECT_ROOT, setup_console, write_jsonl
 from llmsec.core.text import inject_math_tax
-
 
 logger = get_logger(__name__)
 # 修复Windows CMD GBK编码导致emoji/Unicode输出报错
@@ -52,7 +53,7 @@ def load_jailbreaks(path=None) -> list[str]:
     if not path.exists():
         logger.warning(f"⚠ 未找到模板文件: {path}，使用内置简化模板")
         return _fallback_jailbreaks()
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         jailbreaks = json.load(f)
     logger.info(f"  ✅ 加载 {len(jailbreaks)} 个越狱模板")
     return jailbreaks
@@ -133,7 +134,7 @@ def generate(
         raise FileNotFoundError(f"行为数据集不存在: {behaviors_csv}")
 
     rows = []
-    with open(behaviors_csv, "r", encoding="utf-8") as f:
+    with open(behaviors_csv, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             rows.append(row)

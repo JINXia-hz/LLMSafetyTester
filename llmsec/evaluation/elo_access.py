@@ -20,7 +20,6 @@ evaluation.elo_access — Elo 派生访问层（R-cutover 的读取统一入口�
 from __future__ import annotations
 
 import hashlib
-from typing import Optional
 
 from llmsec.core import config
 from llmsec.core.io import read_json, write_json
@@ -33,7 +32,7 @@ _CACHE_VERSION = 2  # v2：ground_truth 统一 {m: {elo: ...}} 形态 + 补 atta
 # ============================================================
 # 指纹 / 缓存底层
 # ============================================================
-def _model_fingerprint(R: ResultsMatrix, model: str) -> Optional[str]:
+def _model_fingerprint(R: ResultsMatrix, model: str) -> str | None:
     """该模型列的内容指纹（方法 + 分数 + ts 的确定性哈希）。无结果返回 None。"""
     col = R.model_column(model)
     if not col:
@@ -105,7 +104,7 @@ def attacker_ratings_for(model: str) -> dict:
     return elo_state_for(model).get("attacker_ratings", {})
 
 
-def active_model() -> Optional[str]:
+def active_model() -> str | None:
     """R 中最新活跃的模型（按其结果最大 ts）。R 空→None。"""
     R = ResultsMatrix.load()
     best, best_ts = None, None

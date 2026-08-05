@@ -6,8 +6,6 @@
 3. M-33：extract_all_features 对缺 method/prompt 字段的自带攻击集不崩。
 """
 
-import tempfile
-from pathlib import Path
 
 import llmsec.clustering.features as fm
 from llmsec.clustering.features import extract_all_features, load_and_extract

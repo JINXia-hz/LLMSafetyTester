@@ -22,8 +22,8 @@ import json
 import logging
 import os
 import shutil
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +51,8 @@ def iter_jsonl(path) -> Iterator[dict]:
     if not path.exists():
         return
     bad_count = 0
-    with open(path, "r", encoding="utf-8") as f:
-        for lineno, line in enumerate(f, 1):
+    with open(path, encoding="utf-8") as f:
+        for _lineno, line in enumerate(f, 1):
             line = line.strip()
             if not line:
                 continue
@@ -125,7 +125,7 @@ def read_json(path, default=None, *, strict: bool = False):
     if not path.exists():
         return default
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         if strict:
@@ -228,7 +228,7 @@ def read_csv(path) -> list[dict]:
     path = Path(path)
     if not path.exists():
         return []
-    with open(path, "r", encoding="utf-8", newline="") as f:
+    with open(path, encoding="utf-8", newline="") as f:
         return list(csv.DictReader(f))
 
 

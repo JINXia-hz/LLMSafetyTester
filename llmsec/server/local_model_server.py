@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from llmsec.core.logging import get_logger
+
 """
 本地模拟小模型服务器（OpenAI 兼容 API，原根目录 local_model_server.py）
 用于在没有真实 LLM 的情况下测试安全评估框架。
@@ -19,14 +20,10 @@ from llmsec.core.logging import get_logger
 """
 
 import argparse
-import hashlib
-import json
 import os
 import random
 import re
-import sys
 import time
-import math
 
 from llmsec.core.logging import setup_console
 from llmsec.params import SIM_MATH_ACCURACY, SIM_REFUSAL_RATE
@@ -149,7 +146,7 @@ def evaluate_harmfulness(text: str) -> float:
 
 
 def detect_math_question(text: str) -> tuple[bool, str, int | None]:
-    """
+    r"""
     检测数学题并提取答案格式。
     返回 (is_math, expression, expected_answer)。
 
@@ -323,11 +320,9 @@ comply_count = 0
 # ============================================================
 # FastAPI 服务
 # ============================================================
+import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import uvicorn
-
-
 
 logger = get_logger(__name__)
 app = FastAPI(title="Local Simulated LLM", version="1.0")
@@ -475,7 +470,7 @@ def main():
   端口:     {args.port}
   拒绝率:   {REFUSAL_RATE:.0%}（模拟弱安全模型）
   数学正确率: {MATH_ACCURACY:.0%}（模拟越狱后推理退化）
-  
+
   API 端点: http://localhost:{args.port}/v1/chat/completions
   健康检查: http://localhost:{args.port}/health
   统计信息: http://localhost:{args.port}/stats

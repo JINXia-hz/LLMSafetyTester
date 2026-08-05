@@ -42,6 +42,7 @@ from llmsec.core.config import (
 from llmsec.core.io import read_json
 from llmsec.core.logging import get_logger
 from llmsec.core.seed import get_global_seed as _get_seed
+
 _SEED = _get_seed()
 from llmsec.params import ADAPTIVE_BATCH_MAX
 
@@ -812,7 +813,6 @@ async def api_cluster_tree():
 @app.get("/api/cluster-cut")
 async def api_cluster_cut(k: int):
     """在层次树上切出 k 个簇（fcluster O(n)），返回该层簇结构与命名。"""
-    import joblib
 
     artifacts = _load_tree_artifacts()
     if artifacts is None:
@@ -1132,7 +1132,7 @@ async def api_task_stream(task_id: str):
             try:
                 size = log_path.stat().st_size
                 head = max(0, size - 2048)
-                with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                with open(log_path, encoding="utf-8", errors="replace") as f:
                     f.seek(head)
                     if head > 0:
                         f.readline()  # 丢弃起始半行
@@ -1151,7 +1151,7 @@ async def api_task_stream(task_id: str):
                     size = offset
                 if size > offset:
                     try:
-                        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                        with open(log_path, encoding="utf-8", errors="replace") as f:
                             f.seek(offset)
                             chunk = f.read(size - offset)
                         offset = size

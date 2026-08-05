@@ -12,11 +12,9 @@
 - HybridSampler：前若干轮用 InfoGain 快速覆盖，之后切换到 CoordinateDescent 精细搜索。
 """
 
+import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict
-import warnings
-
-import numpy as np
 
 from llmsec.evaluation.elo import ELOTracker
 from llmsec.params import (
@@ -256,7 +254,6 @@ class CoordinateDescentSampler(AttackSampler):
         defender_name: str,
     ) -> int:
         """选择下一个要探索的簇。优先选测试少、邻近边界、高风险的簇。"""
-        labels = (self.cluster_report or {}).get("method_labels", {})
         def_elo = tracker.get_defender_elo(defender_name)
 
         if not self._cluster_queue:

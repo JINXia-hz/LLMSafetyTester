@@ -16,8 +16,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 import numpy as np
+
 from llmsec.evaluation.elo import ELOTracker
-from llmsec.evaluation.elo_cluster import ClusterEloPredictor, EloPredictorModel, PRIOR_FEATURE_NAMES, build_prior_features
+from llmsec.evaluation.elo_cluster import (
+    PRIOR_FEATURE_NAMES,
+    ClusterEloPredictor,
+    EloPredictorModel,
+    build_prior_features,
+)
+
 _SYNTH_DIMS = {'textual': 12, 'embedding': 8, 'technique': 6, 'intent': 3}
 
 def _make_synthetic(n_train: int=25, n_test: int=12, seed: int=0):
@@ -82,7 +89,7 @@ def test_predict_batch_svd_ridge():
         assert not p.get('source') != 'svd_ridge', f"❌ {m} 未使用 SVD-Ridge: source={p.get('source')}"
         assert not (p.get('std') is None or p['std'] < 0), f'❌ {m} 缺少 MAP 不确定性: {p}'
         lo, hi = p['ci95']
-        assert not not lo <= p['elo'] <= hi, f'❌ {m} 置信区间不含均值: {p}'
+        assert lo <= p['elo'] <= hi, f'❌ {m} 置信区间不含均值: {p}'
     pred_elos = [preds[m]['elo'] for m in test_methods]
     true_elos = [elos[m] for m in test_methods]
     corr_true = _pearson(pred_elos, true_elos)
@@ -156,7 +163,7 @@ def test_first_round_convergence():
         tracker.ground_truth_methods.add(f'method_{i}')
     conv = tracker.check_convergence(defender, total_methods=50, tested_count=6)
     assert not conv['converged'], f'❌ 轮次不足时不应判收敛: {conv}'
-    assert not not any(('轮次不足' in n for n in conv['notes'])), f"❌ 缺少轮次不足提示: {conv['notes']}"
+    assert any('轮次不足' in n for n in conv['notes']), f"❌ 缺少轮次不足提示: {conv['notes']}"
     boundary = tracker.compute_security_boundary(defender)
     assert not boundary['confidence'] >= 0.8, f"❌ 第一轮置信度未有效压低: {boundary['confidence']}"
     print(f"✅ 首轮收敛统计通过 (ci_half={conv['ci_half']}, 置信度={boundary['confidence']:.2f})")
@@ -199,9 +206,9 @@ def test_degenerate_column_variance_cap():
         p = preds[m]
         assert not p.get('source') != 'svd_ridge', f"❌ {m} 未使用 SVD-Ridge: source={p.get('source')}"
         std = p['std']
-        assert not not np.isfinite(std), f'❌ {m} std 非有限值: {std}'
+        assert np.isfinite(std), f'❌ {m} std 非有限值: {std}'
         assert not std > cap + 0.01, f'❌ {m} std={std:.1f} 爆炸（封顶 {cap:.1f}）'
-        assert not not 1000.0 <= p['elo'] <= 2000.0, f"❌ {m} 均值被退化列带飞: elo={p['elo']}"
+        assert 1000.0 <= p['elo'] <= 2000.0, f"❌ {m} 均值被退化列带飞: elo={p['elo']}"
     assert not (predictor.model.col_keep is None or predictor.model.col_keep.all()), '❌ 退化列未被标记（col_keep 全为 True）'
     sigma2 = predictor.model.sigma2
     floor = min(float(np.sqrt(sigma2)), cap)

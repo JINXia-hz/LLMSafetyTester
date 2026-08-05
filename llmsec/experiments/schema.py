@@ -9,7 +9,6 @@ experiments.schema — 实验配置（study.yaml）的数据模型与因子解�
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,7 +39,7 @@ class FactorSpec:
     choices: list | None = None
 
     @classmethod
-    def from_dict(cls, d: dict) -> "FactorSpec":
+    def from_dict(cls, d: dict) -> FactorSpec:
         t = str(d.get("type", "float")).lower()
         # 容错：写成 {int, 16..64} 这种简写时 type 可能被吃成 "int16..64"——这里只取字母前缀
         pure = "".join(c for c in t if c.isalpha())
@@ -61,7 +60,7 @@ class ObjectiveSpec:
     aggregate: str = "mean"         # 跨 repeats 聚合：mean | mean_plus_std
 
     @classmethod
-    def from_dict(cls, d: dict | None) -> "ObjectiveSpec":
+    def from_dict(cls, d: dict | None) -> ObjectiveSpec:
         d = d or {}
         return cls(metric=d.get("metric", "conv_rounds"),
                    direction=d.get("direction", "minimize"),
@@ -85,7 +84,7 @@ class StudyConfig:
     max_concurrent: int = 1           # 跨目标/seed 并发 trial 数（不同目标端点天然可并行）
 
     @classmethod
-    def from_dict(cls, d: dict) -> "StudyConfig":
+    def from_dict(cls, d: dict) -> StudyConfig:
         budget = d.get("budget", {}) or {}
         space_raw = d.get("space", {}) or {}
         # 兼容简写 {type, ...} 或裸 {low, high}（默认 float）
@@ -125,9 +124,9 @@ class StudyConfig:
         )
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "StudyConfig":
+    def from_yaml(cls, path: str | Path) -> StudyConfig:
         import yaml
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             cfg = cls.from_dict(yaml.safe_load(f))
         cfg._source_path = str(path)  # 供 run_study 拷贝配置进 study 目录
         return cfg

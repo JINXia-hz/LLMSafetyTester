@@ -14,7 +14,6 @@
     analysis = analyze_clusters(tracker)
 """
 
-import json
 from collections import defaultdict
 from pathlib import Path
 
@@ -25,13 +24,11 @@ from llmsec.core.config import (
     CLUSTER_REPORT_FILE,
     CLUSTER_RESULT_FILE,
     CLUSTER_SECURITY_ANALYSIS_FILE,
-    OUTPUT_DIR,
 )
 from llmsec.core.io import read_json, write_json
 from llmsec.core.logging import get_logger
 from llmsec.evaluation.elo import ELOTracker
 from llmsec.params import (
-
     CLUSTER_BLIND_SPOT_ELO_MARGIN,
     CLUSTER_BLIND_SPOT_MAX_COVERAGE,
     CLUSTER_HIGH_RISK_ELO_MARGIN,
@@ -39,8 +36,6 @@ from llmsec.params import (
     CLUSTER_STABLE_MAX_ELO_STD,
     CLUSTER_STABLE_MIN_COVERAGE,
 )
-
-
 
 # ============================================================
 # 数据加载
@@ -360,8 +355,8 @@ if __name__ == "__main__":
     # 旧实现只读 state.json：只有 results.json 的部署会用全初始 Elo 生成"所有簇都是盲区"
     # 的误导性分析并落盘。
     from llmsec.core.results import ResultsMatrix
-    from llmsec.evaluation.elo_access import active_model
     from llmsec.evaluation.elo import derive_elo
+    from llmsec.evaluation.elo_access import active_model
 
 
     R = ResultsMatrix.load()

@@ -8,7 +8,7 @@
 
 import base64
 import codecs
-from typing import Callable
+from collections.abc import Callable
 
 
 # ------------------------------------------------------------

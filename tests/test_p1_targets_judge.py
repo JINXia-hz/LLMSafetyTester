@@ -14,12 +14,13 @@ import inspect
 import os
 import threading
 import time
-from pathlib import Path
+
 import llmsec.targets as targets
 import llmsec.targets.pcap as pcap
 from llmsec.core.text import estimate_tokens
 from llmsec.evaluation import evaluator as ev
 from llmsec.evaluation import judge as judge_mod
+
 
 class _FakeResp:
     """模拟 requests.Response（仅 pcap 用到的字段/方法）。"""
@@ -213,9 +214,9 @@ def test_m19_update_elo_defender_name():
         used_names.clear()
         ev.update_elo(results, summary, defender_name='test-pcap-model')
         assert 'elo' in summary, 'M19: elo 区块仍挂到 summary'
-        assert bool(used_names) and all((n == 'test-pcap-model' for n in used_names)), 'M19: 显式 defender_name 时全部使用传入名（pcap 场景）'
+        assert bool(used_names) and all(n == 'test-pcap-model' for n in used_names), 'M19: 显式 defender_name 时全部使用传入名（pcap 场景）'
         used_names.clear()
         ev.update_elo(results, {})
-        assert bool(used_names) and all((n == ev.TARGET_MODEL for n in used_names)), f'M19: 缺省回退 TARGET_MODEL（当前 {ev.TARGET_MODEL!r}）'
+        assert bool(used_names) and all(n == ev.TARGET_MODEL for n in used_names), f'M19: 缺省回退 TARGET_MODEL（当前 {ev.TARGET_MODEL!r}）'
     finally:
         ev.ELOTracker = old_tracker

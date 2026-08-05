@@ -55,7 +55,7 @@ class BlendPredictor:
         results: ResultsMatrix,
         features: dict,
         method_catalog: list[str] | None = None,
-    ) -> "BlendPredictor":
+    ) -> BlendPredictor:
         """
         从 R + 方法特征训练统一/模型双层预测器。
 
@@ -241,7 +241,7 @@ class BlendPredictor:
         })
 
     @classmethod
-    def load(cls, path) -> "BlendPredictor | None":
+    def load(cls, path) -> BlendPredictor | None:
         data = load_artifact(path)
         if not data:
             return None

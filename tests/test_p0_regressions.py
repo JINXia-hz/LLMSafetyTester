@@ -16,14 +16,17 @@ import json
 import re
 import tempfile
 from pathlib import Path
+
 import numpy as np
+
 from llmsec.core.text import NO_MATH_TAX_SENTINEL, gen_math, inject_math_tax
+
 
 def test_f1_gen_math_never_zero():
     answers = [gen_math()[1] for _ in range(300)]
-    assert all((a > 0 for a in answers)), 'F1: gen_math 300 题答案全部 > 0（不会碰撞哨兵 0）'
-    assert all((isinstance(a, int) for a in answers)), 'F1: 答案均为整数'
-    assert 3 * 3 + 6 // 2 - 12 == NO_MATH_TAX_SENTINEL, 'F1: 复算确认旧公式可产出 answer=0（bug 前提成立）'
+    assert all(a > 0 for a in answers), 'F1: gen_math 300 题答案全部 > 0（不会碰撞哨兵 0）'
+    assert all(isinstance(a, int) for a in answers), 'F1: 答案均为整数'
+    assert NO_MATH_TAX_SENTINEL == 3 * 3 + 6 // 2 - 12, 'F1: 复算确认旧公式可产出 answer=0（bug 前提成立）'
     assert min(answers) >= 1, 'F1: 答案下界 >= 1'
 
 def test_f1_evaluator_explicit_sentinel():
@@ -120,7 +123,6 @@ def test_f4_build_summary():
         summary, _ = ev.build_summary(records=[{}, {}, {}, {}, {}], all_results=results, args=args, use_judge=False)
     except NameError as e:
         assert False, f'F4: build_summary 抛 NameError: {e}'
-        return rc
     dist = summary['math_score_distribution']
     assert dist == {'score_2': 2, 'score_1': 1, 'score_0': 1}, f'F4: math_score_distribution 统计正确（{dist}）'
 
@@ -142,6 +144,7 @@ def test_f5_detect_math_question():
 def test_f5_sim_tax_signal_alive():
     """端到端：sim 对注入探针的响应必须带 [MATH:x]（修复前恒缺失 → tax 恒 2.0）。"""
     import random as _random
+
     from llmsec.evaluation import evaluator as ev
     from llmsec.server import local_model_server as sim
     _random.seed(123)

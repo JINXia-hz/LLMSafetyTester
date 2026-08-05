@@ -7,7 +7,6 @@ run_trial(config, seed, work_dir, study_config) → trial 记录 dict。
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from datetime import datetime
