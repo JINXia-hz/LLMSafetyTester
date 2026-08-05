@@ -770,6 +770,8 @@ class ClusterEloPredictor:
             return feat
 
         train_features = {m: _with_prior(m) for m in gt_methods}
+        # 仅用有特征的 GT 方法训练（与上方 gt_methods 过滤一致，防 stale GT 全零特征混入）
+        train_gt = {m: self.ground_truth[m] for m in gt_methods}
         test_features = {m: _with_prior(m) for m in methods}
 
         feature_name_blocks = {
@@ -803,13 +805,13 @@ class ClusterEloPredictor:
             and 0 < gt_count - self._model_cv_gt_count < self.ridge_refit_threshold
         ):
             self.model.fit(
-                train_features, self.ground_truth, feature_name_blocks,
+                train_features, train_gt, feature_name_blocks,
                 lambda_override=self.model.lambda_opt,
             )
             logger.info("SVD-Ridge 快速 refit (λ*=%.4f 复用, ground truth %d)",
                         self.model.lambda_opt, gt_count)
         else:
-            self.model.fit(train_features, self.ground_truth, feature_name_blocks)
+            self.model.fit(train_features, train_gt, feature_name_blocks)
             self._model_cv_gt_count = gt_count
         self._model_gt_hash = gt_hash
         self._model_feature_sig = feat_sig

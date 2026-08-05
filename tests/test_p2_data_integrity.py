@@ -222,13 +222,14 @@ def test_f4_load_targets_and_backend_consistent():
         _restore_target_env(snap)
 
 def test_f4_name_prefix_fallback():
-    """name 前缀形式（TARGET_<name>_*）仍工作。"""
+    """name 前缀形式（TARGET_<name.lower>_*）仍工作。"""
     snap = _clear_all_target_env()
     try:
         os.environ['TARGETS'] = 'x,y'
-        os.environ['TARGET_X_BASE_URL'] = 'http://x'
-        os.environ['TARGET_X_TYPE'] = 'local_sim'
-        os.environ['TARGET_Y_BASE_URL'] = 'http://y'
+        # _resolve_target_prefixes 用 nm.lower() 查 env var，故设小写键
+        os.environ['TARGET_x_BASE_URL'] = 'http://x'
+        os.environ['TARGET_x_TYPE'] = 'local_sim'
+        os.environ['TARGET_y_BASE_URL'] = 'http://y'
         os.environ['TARGET_TYPE'] = 'openai'
         t = load_targets()
         assert set(t.keys()) == {'x', 'y'}, f'F4: name 前缀形式返回 x/y（实得 {set(t.keys())}）'

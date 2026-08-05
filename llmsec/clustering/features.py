@@ -601,7 +601,7 @@ def extract_defense_features(
             resp_lens = [len(r.get("response_preview", "")) for r in items]
             mean_rl = sum(resp_lens) / n
             feats.append(mean_rl)
-            prompt_lens = [r.get("tokens_prompt", 50) for r in items if r.get("tokens_prompt", 0) > 0]
+            prompt_lens = [r.get("tokens_prompt", 50) for r in items if (r.get("tokens_prompt") or 0) > 0]
             mean_pl = sum(prompt_lens) / len(prompt_lens) if prompt_lens else 50
             feats.append(mean_rl / max(mean_pl, 1))
         else:

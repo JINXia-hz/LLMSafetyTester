@@ -157,8 +157,8 @@ def write_json(path, obj, indent: int = 2, *, atomic: bool = True, backup: bool 
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, path)
-        except OSError:
-            # 清理残留 tmp（os.replace 失败时）
+        except Exception:
+            # 清理残留 tmp（os.replace 失败或 json.dump 序列化错误时）
             try:
                 tmp.unlink()
             except OSError:

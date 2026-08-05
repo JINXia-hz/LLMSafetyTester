@@ -190,6 +190,9 @@ def test_m19_update_elo_defender_name():
         def update(self, method, defender, score):
             used_names.append(defender)
 
+        def record_round_end(self, defender):
+            pass
+
         def save(self, path):
             pass
 

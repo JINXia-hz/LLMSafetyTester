@@ -280,7 +280,8 @@ def _dedup_attack_results(rows: list[dict]) -> list[dict]:
     merged: dict[tuple, dict] = {}
     order: list[tuple] = []
     for row in rows:
-        key = (row.get("id"), row.get("method"))
+        # 缺 id/method 的记录用 id(row) 兜底防 (None, method) 错误合并丢数据
+        key = (row.get("id", id(row)), row.get("method", id(row)))
         if key not in merged:
             order.append(key)
         merged[key] = row
@@ -396,7 +397,16 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
         for m in _stale_gt:
             tracker.ground_truth_methods.discard(m)
             tracker.predictor.ground_truth.pop(m, None)
-        logger.info(f"  🧹 过滤 {len(_stale_gt)} 个跨攻击集 stale GT 方法（保留 {len(tracker.ground_truth_methods)} 个）")
+            # 同步清理 attacker_ratings / pred_std / history，
+            # 否则 compute_security_boundary 的 total_methods 膨胀（覆盖率偏低、永不收敛）、
+            # predicted_above 虚高、stale history 经 publish_tracker 污染 R 矩阵
+            tracker.attacker_ratings.pop(m, None)
+            tracker.attacker_pred_std.pop(m, None)
+        tracker.history = [h for h in tracker.history
+                           if h.get("attacker") in _current_methods
+                           or h.get("attacker") is None]
+        logger.info(f"  🧹 过滤 {len(_stale_gt)} 个跨攻击集 stale 方法"
+              f"（GT/attacker_ratings/history 已同步清理，保留 {len(tracker.ground_truth_methods)} 个）")
     # resume 时已实测方法直接计入 tested，避免被重新选中二次计 Elo
     tested = set(tracker.ground_truth_methods)
     # M-11：resume 回读已有 attack_file 预载历史明细——此前续跑首轮 write_jsonl 整体覆写
@@ -508,12 +518,15 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
 
             time.sleep(API_DELAY)
 
+        # 明细先于 state 落盘（同主循环顺序，防崩溃窗口丢数据）
+        write_jsonl(attack_file, all_results)
+        tracker.record_round_end(DEFENDER_NAME)
+
         # 用 SVD-Ridge 重新预测剩余方法
         remaining_records = {m: r for m, r in method_records.items() if m not in tested}
         _inject_predicted_elos(tracker, remaining_records)
         if sf:
             tracker.save(sf)
-        tracker.record_round_end(DEFENDER_NAME)
         logger.info(f"  ✅ 种子阶段完成: 已建立 ground truth {len(tracker.ground_truth_methods)} 种，"
               f"剩余 {len(remaining_records)} 种使用 SVD-Ridge 预测 Elo")
 
@@ -596,6 +609,14 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
 
             time.sleep(API_DELAY)
 
+        # 落盘顺序：明细先于 state——若 state.json 已含本轮 GT 但 attack_results.jsonl
+        # 还没写时崩溃，resume 会把本轮方法标为"已测"但明细永久丢失（ASR/税/threats 全失真）。
+        # 明细先写则最坏情况是重测本轮（多花 API 预算），永不丢数据。
+        write_jsonl(attack_file, all_results)
+
+        # 记录本轮结束时的防御方 Elo（在 tracker.save 之前，确保轨迹点被持久化）
+        tracker.record_round_end(DEFENDER_NAME)
+
         # 保存ELO进度
         if sf:
             tracker.save(sf)
@@ -607,12 +628,8 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
             tracker.save(sf)
         logger.info(f"     🔄 预测已更新: {len(remaining_records)} 个未测方法的 SVD-Ridge 预测 Elo")
 
-        # 记录本轮结束时的防御方 Elo，用于更稳健的收敛判断
-        tracker.record_round_end(DEFENDER_NAME)
-
-        # M-11/M-12：每轮增量落盘攻击明细 + 同步发布进 R（唯一真相）。
+        # M-12：每轮同步发布进 R（唯一真相）。
         # publish_tracker 写 R 失败 = 真相源损坏，不可静默——重抛让调用方感知。
-        write_jsonl(attack_file, all_results)
         publish_tracker(tracker, DEFENDER_NAME)
 
         # 记录采样器决策日志
@@ -1522,16 +1539,8 @@ def main():
                               else str(runs_dir / "state.json"))),  # per-run 快照（不再写全局 STATE_FILE）
             no_early_stop=args.no_early_stop,
         )
-        # --target 命名目标：把本次结果镜像进跨模型矩阵 R（隔离模式不碰全局 R）
-        if args.target and not args.work_dir:
-            from llmsec.core.results import ResultsMatrix, _coarse_status
-            _R = ResultsMatrix.load()
-            _R.set_method_catalog(list(method_records.keys()))
-            for h in tracker.history:
-                _R.upsert(h["attacker"], h["defender"], h["eval_score"],
-                          status=_coarse_status(h["eval_score"]))
-            _R.save()
-            logger.info(f"  💾 已镜像至 R 矩阵: {args.target} 累计 {_R.n_for_model(args.target)} 条")
+        # publish_tracker 在 run_attack_phase 每轮已调用（写 R + elo_cache），
+        # main() 末尾再次 publish 做最终同步——此处不再重复镜像 R。
     else:
         # 仅过敏阶段：从 per-run/per-target 快照或 R 派生加载 ELO。
         if args.work_dir:
@@ -1576,63 +1585,70 @@ def main():
     tax_block = attack_summary.get("jailbreak_tax", {})
     if tax_block.get("probed", 0) > 0:
         logger.info("  📐 测量越狱税基线（裸数学探针对照）...")
-        baseline = measure_math_baseline()
-        if baseline.get("accuracy") is not None and tax_block.get("attack_accuracy") is not None:
-            tax_block["baseline_accuracy"] = baseline["accuracy"]
-            tax_block["accuracy_drop"] = round(
-                baseline["accuracy"] - tax_block["attack_accuracy"], 4)
-            tax_block["baseline"] = baseline
+        try:
+            baseline = measure_math_baseline()
+            if baseline.get("accuracy") is not None and tax_block.get("attack_accuracy") is not None:
+                tax_block["baseline_accuracy"] = baseline["accuracy"]
+                tax_block["accuracy_drop"] = round(
+                    baseline["accuracy"] - tax_block["attack_accuracy"], 4)
+                tax_block["baseline"] = baseline
+        except Exception as e:
+            logger.warning(f"  ⚠ 越狱税基线测量失败（跳过基线对照）: {e}")
 
-    report = generate_final_report(attack_summary, allergy_summary, tracker,
-                                   report_file=runner_report_file)
+    # ---- 生成报告 + 发布 ----
+    # 单目标 main 的报告/publish/save 链各自独立 try，某一步失败不阻止后续产物落盘
+    try:
+        report = generate_final_report(attack_summary, allergy_summary, tracker,
+                                       report_file=runner_report_file)
+        write_json(runner_report_file, report)
+    except Exception as e:
+        logger.warning(f"  ⚠ 最终报告生成失败: {e}")
 
-    # 保存简要报告
-    write_json(runner_report_file, report)
+    try:
+        # R-cutover：把本次 live tracker 的结果发布进 R（唯一真相）+ Elo 派生缓存。
+        publish_tracker(tracker, DEFENDER_NAME)
+    except Exception as e:
+        logger.warning(f"  ⚠ publish_tracker（写 R 矩阵）失败: {e}")
 
-    # R-cutover：把本次 live tracker 的结果发布进 R（唯一真相）+ Elo 派生缓存。
-    # 单目标 main 走此路径；state.json 仍写快照作 legacy 备份（收敛轨迹也供 dashboard）。
-    publish_tracker(tracker, DEFENDER_NAME)
+    try:
+        # run 内 state 快照：dashboard 按 run 查看历史时优先读快照
+        tracker.save(runs_dir / "state.json")
+    except Exception as e:
+        logger.warning(f"  ⚠ state 快照保存失败: {e}")
 
-    # run 内 state 快照：dashboard 按 run 查看历史时优先读快照，
-    # 避免全局 state 漂移（换攻击集/换模型/手动恢复）导致实测标记错配
-    tracker.save(runs_dir / "state.json")
-
-    # cluster_report.json 同理：/api/clusters 的 validation/簇效验证/密度视图
-    # 默认读全局最近产物，历史批次会与 run 内 analysis 错配，快照一份进 run 目录
+    # cluster_report.json 快照
     global_cluster_report = OUTPUT_DIR / "cluster_report.json"
     if global_cluster_report.exists():
-        shutil.copy2(global_cluster_report, runs_dir / "cluster_report.json")
+        try:
+            shutil.copy2(global_cluster_report, runs_dir / "cluster_report.json")
+        except Exception as e:
+            logger.warning(f"  ⚠ cluster_report 快照失败: {e}")
 
     # ---- 生成树形 + 叙事报告（仅使用 runner 自己的数据） ----
-    # 加载 runner 自身的攻击结果（避免混入 evaluate.py 的旧数据）
     results = read_jsonl(runner_attack_file)
-
     elo_data = load_elo(OUTPUT_DIR)
-
-    # 加载 runner 自身的过敏数据
     allergy_data = read_json(runner_allergy_file, default={})
-
     metadata = load_prompt_metadata()
 
-    generated_files = [runner_report_file, runs_dir / "state.json"]  # 必定生成
+    generated_files = [runner_report_file, runs_dir / "state.json"]
 
     if results:
-        logger.info("🌳 生成层级安全报告...")
-        ms = build_method_stats(results, elo_data, metadata)
-        tree = build_tree(ms, allergy_data, elo_data,
-                          tax_info=attack_summary.get("jailbreak_tax"))
+        try:
+            logger.info("🌳 生成层级安全报告...")
+            ms = build_method_stats(results, elo_data, metadata)
+            tree = build_tree(ms, allergy_data, elo_data,
+                              tax_info=attack_summary.get("jailbreak_tax"))
+            tree_path = runs_dir / "security_tree.json"
+            write_json(tree_path, tree)
+            generated_files.append(tree_path)
 
-        # 保存树数据
-        tree_path = runs_dir / "security_tree.json"
-        write_json(tree_path, tree)
-        generated_files.append(tree_path)
-
-        # 生成LLM叙事报告
-        markdown = generate_narrative(tree, OUTPUT_DIR)
-        md_path = runs_dir / "security_report.md"
-        md_path.parent.mkdir(parents=True, exist_ok=True)
-        md_path.write_text(markdown, encoding="utf-8")
-        generated_files.append(md_path)
+            markdown = generate_narrative(tree, OUTPUT_DIR)
+            md_path = runs_dir / "security_report.md"
+            md_path.parent.mkdir(parents=True, exist_ok=True)
+            md_path.write_text(markdown, encoding="utf-8")
+            generated_files.append(md_path)
+        except Exception as e:
+            logger.warning(f"  ⚠ 树形/叙事报告生成失败: {e}")
 
     if Path(runner_attack_file).exists():
         generated_files.append(runner_attack_file)
@@ -1650,11 +1666,11 @@ def main():
     logger.info("  📋 输出文件")
     logger.info("=" * 60)
     # 按类别分组
-    reports = [f for f in generated_files if f.endswith(".md")]
-    data = [f for f in generated_files if f.endswith(".json") and "elo" not in f.lower() and "allergy" not in f.lower()]
+    reports = [f for f in generated_files if f.endswith(".md") or "runner_report" in f]
+    data = [f for f in generated_files if f.endswith(".json") and "state" not in f.lower() and "allergy" not in f.lower() and "tree" not in f.lower() and "runner_report" not in f]
     jsonl_files = [f for f in generated_files if f.endswith(".jsonl") and "attack_results" not in f]
     allergy = [f for f in generated_files if "allergy" in f.lower()]
-    state = [f for f in generated_files if "elo" in f.lower()]
+    state = [f for f in generated_files if "state" in f.lower()]
     tree_files = [f for f in generated_files if "tree" in f.lower()]
     detail = [f for f in generated_files if ("攻击结果" in f or "attack_results" in f)]
 

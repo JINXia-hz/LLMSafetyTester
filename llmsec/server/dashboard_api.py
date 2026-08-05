@@ -40,9 +40,12 @@ from llmsec.core.config import (
     TASK_LOG_DIR,
 )
 from llmsec.core.io import read_json
+from llmsec.core.logging import get_logger
 from llmsec.core.seed import get_global_seed as _get_seed
 _SEED = _get_seed()
 from llmsec.params import ADAPTIVE_BATCH_MAX
+
+logger = get_logger(__name__)
 
 # ============================================================
 # 路径

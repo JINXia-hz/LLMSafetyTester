@@ -670,6 +670,14 @@ class ELOTracker:
                 "predicted_above_boundary": 0,
                 "confidence": 0.0,
                 "converged": False,
+                "ci_half": None,
+                "drift": None,
+                "noise": None,
+                "n_eff": 0,
+                "recent_success_rate": 0.0,
+                "coverage": 0.0,
+                "coverage_ok": False,
+                "convergence_notes": [],
             }
 
         def_elo = self.get_defender_elo(defender_name)
@@ -758,9 +766,9 @@ class ELOTracker:
                 shutil.copy2(filepath, filepath + ".corrupt.bak")
             except OSError:
                 pass
-            return
+            return self
         if not data:
-            return
+            return self
         self.attacker_ratings = data.get("attacker_ratings", {})
         self.defender_ratings = data.get("defender_ratings", {})
         self.history = data.get("history", [])
@@ -801,6 +809,7 @@ class ELOTracker:
             )
         # self.k 保持 __init__ 的运行时 K_FACTOR（不覆盖）
         self.initial = config.get("initial_elo", INITIAL_ELO)
+        return self
 
 
 def derive_elo(

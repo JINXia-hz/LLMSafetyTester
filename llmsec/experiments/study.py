@@ -93,7 +93,6 @@ def run_study(config: StudyConfig) -> dict:
     counted_fps: set[str] = set()
     configs_done = 0
     # 估算每 config 的单元总数（单目标时 targets 取 fixed.target）
-    sample_cf = {**config.fixed, **(next(iter(config.space)) and {})}
     n_targets = len(config.targets) if config.targets else (1 if config.fixed.get("target") else 0)
     units_per_config = max(1, n_targets) * config.repeats
     for fp in done_search_fps:
@@ -186,18 +185,17 @@ def run_study(config: StudyConfig) -> dict:
                     if consecutive_failures >= _FAIL_ABORT:
                         logger.warning(f"⚠ 连续 {consecutive_failures} 个 trial 失败/超时，中止 study（疑似系统性故障）")
                         abort_study = True
-                        break
                     # wall-clock 检查（repeat 单元内部）：原仅在 config 边界检查，
                     # max_concurrent=1 顺序 repeats 时可能在下一个边界检查前已超时仍空转烧 API
                     if wall_cap_s and (datetime.now() - started_at).total_seconds() > wall_cap_s:
                         logger.info(f"⏰ 墙钟上限触发：已运行 {config.budget_max_wall_minutes} 分钟，"
                               f"中止（已完成 {configs_done} config，当前 config 部分完成）")
                         abort_study = True
-                        break
-                # 中止时取消尚未开始的 pending futures（已提交但排队中的）
-                if abort_study:
-                    for fut in futures:
-                        fut.cancel()
+                    # 中止时取消尚未开始的 pending futures（已提交但排队中的）。
+                    # 不 break：仍在运行的 trial 结果照常收集，防在途 API 成本白花、续跑重跑
+                    if abort_study:
+                        for f in futures:
+                            f.cancel()
 
         # 目标值 = 跨所有成功单元聚合（多目标时为跨模型均值）
         vals = [(t.get("metrics") or {}).get(config.objective.metric)

@@ -62,6 +62,66 @@ const $ = id => document.getElementById(id);
 const fmtPct = v => (v == null ? 'N/A' : (v * 100).toFixed(1) + '%');
 const fmtNum = (v, d = 1) => (v == null ? 'N/A' : Number(v).toFixed(d));
 
+// ---------- 动效基础设施 ----------
+const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// 数字滚动：值变化时 500ms rAF 插值（ease-out cubic）；null/初设/未变化/reduced-motion 直接写终值
+function setMetric(id, num, fmt) {
+  const el = $(id);
+  if (!el) return;
+  const prev = el._v;
+  el._v = num;
+  if (num == null || prev == null || prev === num || REDUCED_MOTION) {
+    el.textContent = fmt(num);
+    return;
+  }
+  cancelAnimationFrame(el._raf);
+  const t0 = performance.now(), dur = 500;
+  const step = t => {
+    if (el._v !== num) return;                     // 已被更新的值取代，旧动画静默终止
+    const k = Math.min(1, (t - t0) / dur);
+    const e = 1 - Math.pow(1 - k, 3);
+    el.textContent = fmt(prev + (num - prev) * e);
+    if (k < 1) el._raf = requestAnimationFrame(step);
+  };
+  el._raf = requestAnimationFrame(step);
+}
+
+// 盖印开卷 splash 收尾：淡出后移除节点；每会话标记在播完时才写入
+function dismissSplash() {
+  const sp = $('splash');
+  if (!sp) return;
+  try { sessionStorage.setItem('llmsec-splashed', '1'); } catch (e) { /* 隐私模式 */ }
+  sp.classList.add('splash-out');
+  setTimeout(() => sp.remove(), 350);
+}
+window.addEventListener('load', () => setTimeout(dismissSplash, 4000));  // 兜底：防 API 挂起死白屏
+
+// 骨架屏：section 数据拉取期间给指标卡数值位/图表容器铺描金呼吸块
+const SECTION_SKELETONS = {
+  overview: { metrics: ['ov_asr', 'ov_fpr', 'ov_boundary', 'ov_conf', 'ov_tested', 'ov_above', 'ov_tax'], charts: ['chart_radar', 'chart_harm'] },
+  threats: { metrics: [], charts: ['chart_top_threats', 'chart_convergence'] },
+  clusters: { metrics: ['cl_methods', 'cl_n', 'cl_sil', 'cl_db'], charts: ['chart_projection', 'chart_dendrogram', 'chart_rv', 'chart_cluster_cover'] },
+  model: { metrics: ['md_lambda', 'md_sigma', 'md_df', 'md_gt'], charts: ['chart_regpath', 'chart_pca', 'chart_importance', 'chart_pred_ci'] },
+};
+function toggleSkeletons(sec, on) {
+  const cfg = SECTION_SKELETONS[sec];
+  if (!cfg) return;
+  cfg.metrics.forEach(id => $(id)?.classList.toggle('loading', on));
+  cfg.charts.forEach(id => {
+    const el = $(id);
+    if (!el) return;
+    el.classList.toggle('chart-loading', on);
+    if (on) el.style.height = '';   // 清掉上次钉住的高度，让本次渲染重新测量
+    // 修复"图表被下方内容覆盖"：chart-loading 的 min-height 会让 Plotly 把容器当作
+    // 已定高（不设内联高度），撤骨架后容器坍缩（Plotly 的 svg 是绝对定位）。
+    // 撤骨架时若已渲染，按 Plotly 计算高度把容器钉住。
+    if (!on && el.classList.contains('js-plotly-plot') && !el.style.height) {
+      el.style.height = (el._fullLayout?.height || 450) + 'px';
+    }
+  });
+}
+
 async function api(path) {
   const res = await fetch(path);
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
@@ -82,23 +142,41 @@ function clearCharts(ids) {
 
 // ---------- 导航 ----------
 const SECTIONS = ['overview', 'threats', 'report', 'clusters', 'model', 'run'];
+let _secToken = 0;   // 翻页过渡令牌：快速连点时作废旧过渡
 document.querySelectorAll('#nav .nav-item').forEach(el => {
   el.addEventListener('click', () => {
+    const target = el.dataset.section;
     document.querySelectorAll('#nav .nav-item').forEach(n => n.classList.remove('active'));
     el.classList.add('active');
-    activeSection = el.dataset.section;
-    history.replaceState(null, '', '#' + activeSection);  // 板块可直达/可收藏
-    document.querySelectorAll('.section').forEach(s => s.classList.remove('visible'));
-    $('sec-' + activeSection).classList.add('visible');
-    loadSection(activeSection);
+    history.replaceState(null, '', '#' + target);  // 板块可直达/可收藏
+    const next = $('sec-' + target);
+    if (target === activeSection && next.classList.contains('visible')) return;
+    activeSection = target;
+    const cur = document.querySelector('.section.visible');
+    const tok = ++_secToken;
+    const show = () => {
+      if (tok !== _secToken) return;               // 已被更新的点击作废
+      document.querySelectorAll('.section').forEach(s => s.classList.remove('visible', 'section-enter', 'section-exit'));
+      next.classList.add('visible', 'section-enter');
+      next.addEventListener('animationend', () => next.classList.remove('section-enter'), { once: true });
+      loadSection(target);
+    };
+    if (REDUCED_MOTION || !cur || cur === next) {
+      show();
+    } else {
+      cur.classList.add('section-exit');           // 先退出（.14s），再进场
+      setTimeout(show, 140);
+    }
   });
 });
 
 function loadSection(name) {
   if (loaded[name] === currentRun) return;
   loaded[name] = currentRun;
-  ({ overview: loadOverview, threats: loadThreats, report: loadReport,
-     clusters: loadClusters, model: loadModel, run: loadRunSection })[name]();
+  toggleSkeletons(name, true);
+  Promise.resolve(({ overview: loadOverview, threats: loadThreats, report: loadReport,
+     clusters: loadClusters, model: loadModel, run: loadRunSection })[name]())
+    .finally(() => toggleSkeletons(name, false));   // 渲染（含空数据分支）完成后撤骨架
 }
 function invalidate() { for (const k in loaded) delete loaded[k]; loadSection(activeSection); }
 
@@ -110,7 +188,7 @@ function applyTheme(t, rerender = true) {
   const tc = THEME_CHART[t];
   PLOT_FONT.color = tc.text;
   C.primary = tc.primary; C.muted = tc.muted;   // 图表系列色随主题微调
-  $('themeBtn').textContent = t === 'dark' ? '☀️ 纸日' : '🌙 夜色';
+  $('themeBtn').textContent = t === 'dark' ? '昼' : '夜';   // 楷体单字（印章语言），title 已说明含义
   if (rerender) invalidate();                    // 重绘当前板块图表
 }
 $('themeBtn').addEventListener('click', () => applyTheme(theme === 'dark' ? 'light' : 'dark'));
@@ -151,7 +229,7 @@ async function loadOverview() {
       $('ov_verdict').textContent = d.message || '暂无运行数据';
       $('ov_recommendation').textContent = '';
       ['ov_asr', 'ov_fpr', 'ov_boundary', 'ov_conf', 'ov_tested', 'ov_above', 'ov_tax']
-        .forEach(id => { $(id).textContent = '-'; });
+        .forEach(id => { $(id).textContent = '-'; $(id)._v = null; });
       $('ov_tax_sub').textContent = '';
       clearCharts(['chart_radar', 'chart_harm']);
       return;
@@ -162,14 +240,14 @@ async function loadOverview() {
     setBanner(level);
     $('ov_target').textContent = `目标模型: ${d.target_model || '-'}  ·  批次 ${d.run}`;
     $('ov_verdict').textContent = d.overall_verdict || level.toUpperCase();
-    $('ov_recommendation').textContent = d.recommendation ? '💡 ' + d.recommendation : '';
+    $('ov_recommendation').textContent = d.recommendation ? '按：' + d.recommendation : '';
     // stale_report 提示：存在更新批次时展示；切回最新批次（无 message）时清除旧文案
     setStatus(d.message || '');
 
-    $('ov_asr').textContent = fmtPct(d.asr);
-    $('ov_fpr').textContent = fmtPct(d.fpr);
-    $('ov_boundary').textContent = fmtNum(d.boundary_elo, 0);
-    $('ov_conf').textContent = fmtPct(d.boundary_confidence);
+    setMetric('ov_asr', d.asr, fmtPct);
+    setMetric('ov_fpr', d.fpr, fmtPct);
+    setMetric('ov_boundary', d.boundary_elo, v => fmtNum(v, 0));
+    setMetric('ov_conf', d.boundary_confidence, fmtPct);
     $('ov_tested').textContent = `${d.total_tested}/${d.total_methods}`;
     $('ov_above').textContent = d.predicted_above_boundary != null
       ? `${d.methods_above_boundary} (实测${d.tested_above_boundary}/预测${d.predicted_above_boundary})`
@@ -481,13 +559,14 @@ async function loadReport() {
       return;
     }
     // 原始 .md 下载（打印美化交给浏览器打印）
-    nav.innerHTML = `<a href="/api/report/download${runQuery()}" class="block px-2 py-1 mb-2 rounded text-xs font-semibold text-center"
-      style="border: 1px solid var(--c-gold); color: var(--c-gold);">⬇ 下载报告 (.md)</a>`;
+    nav.innerHTML = `<div class="report-nav-title">目录</div>
+      <a href="/api/report/download${runQuery()}" class="block px-2 py-1 mb-2 rounded text-xs font-semibold text-center"
+      style="border: 1px solid var(--c-gold); color: var(--c-gold);">下载报告 (.md)</a>`;
     // 按 ## 分段
     const chunks = d.markdown.split(/^## /m);
     const head = chunks[0];
     const headTitle = (head.match(/^# (.+)$/m) || [])[1] || '安全评估报告';
-    body.innerHTML += `<div class="card report-body"><h1>${esc(headTitle)}</h1>${mdSafe(head.replace(/^# .+$/m, ''))}</div>`;
+    body.innerHTML += `<div class="card report-body report-head"><h1>${esc(headTitle)}</h1>${mdSafe(head.replace(/^# .+$/m, ''))}</div>`;
     chunks.slice(1).forEach((chunk, i) => {
       const nl = chunk.indexOf('\n');
       const title = nl > 0 ? chunk.slice(0, nl).trim() : chunk.trim();
@@ -572,7 +651,7 @@ async function loadClusters() {
     loadClusterTree();
     const d = await api('/api/clusters' + runQuery());
     if (!d.available) {
-      ['cl_methods', 'cl_n', 'cl_sil', 'cl_db'].forEach(id => { $(id).textContent = '-'; });
+      ['cl_methods', 'cl_n', 'cl_sil', 'cl_db'].forEach(id => { $(id).textContent = '-'; $(id)._v = null; });
       $('rvBanner').className = 'banner level-inconclusive mb-3';
       $('rvBanner').style.padding = '12px 16px';
       $('rvVerdict').textContent = '暂无聚类数据';
@@ -581,10 +660,10 @@ async function loadClusters() {
       clearCharts(['chart_cluster_cover', 'chart_rv']);
       return;
     }
-    $('cl_methods').textContent = d.n_methods ?? '-';
-    $('cl_n').textContent = d.n_clusters ?? '-';
-    $('cl_sil').textContent = fmtNum(d.validation?.silhouette, 4);
-    $('cl_db').textContent = fmtNum(d.validation?.davies_bouldin, 4);
+    setMetric('cl_methods', d.n_methods ?? null, v => (v == null ? '-' : fmtNum(v, 0)));
+    setMetric('cl_n', d.n_clusters ?? null, v => (v == null ? '-' : fmtNum(v, 0)));
+    setMetric('cl_sil', d.validation?.silhouette ?? null, v => fmtNum(v, 4));
+    setMetric('cl_db', d.validation?.davies_bouldin ?? null, v => fmtNum(v, 4));
 
     const cl = (d.clusters || []).slice(0, 20);
     Plotly.newPlot('chart_cluster_cover', [
@@ -616,7 +695,7 @@ async function loadClusters() {
       const rvPositive = rvStatus === 'effective' || rvStatus === 'promising';
       $('rvBanner').className = 'banner mb-3 ' + (rvPositive ? 'level-safe' : 'level-broken');
       $('rvBanner').style.padding = '12px 16px';
-      $('rvVerdict').textContent = (rvPositive ? '✅ ' : '⚠️ ') + rv.verdict;
+      $('rvVerdict').innerHTML = `<span class="seal-chip">${rvPositive ? '显著' : '存疑'}</span>${esc(rv.verdict)}`;
       let rvStats = `p_anova=${rv.p_anova} · p_kruskal=${rv.p_kruskal} · eta²=${rv.eta2} · ε²=${rv.epsilon2}`;
       if (rv.underpowered) rvStats += ` · n=${rv.n_total}/${rv.adequate_n}（不足）`;
       $('rvStats').textContent = rvStats;
@@ -853,11 +932,11 @@ async function loadModel() {
     $('modelEmpty').classList.add('hidden'); $('modelBody').classList.remove('hidden');
     const s = d.svd_ridge;
 
-    $('md_lambda').textContent = fmtNum(s.lambda_opt, 4);
-    $('md_sigma').textContent = fmtNum(s.sigma2, 1);
+    setMetric('md_lambda', s.lambda_opt ?? null, v => fmtNum(v, 4));
+    setMetric('md_sigma', s.sigma2 ?? null, v => fmtNum(v, 1));
     const pca = s.pca_summary || {};
     $('md_df').textContent = pca.effective_df != null ? `${fmtNum(pca.effective_df, 1)}/${pca.n_features}` : '-';
-    $('md_gt').textContent = s.n_ground_truth ?? '-';
+    setMetric('md_gt', s.n_ground_truth ?? null, v => (v == null ? '-' : fmtNum(v, 0)));
 
     // 正则化路径
     const rp = s.regularization_path || {};
@@ -1004,7 +1083,7 @@ async function startEvaluate() {
     const view = await res.json();
     // 预检（诚实版：只看文件名是否含 baseline，不假装能探测针内容）
     const noBaseline = !$('evalInput').value.includes('baseline');
-    setStatus('评估任务已启动' + (noBaseline ? '（⚠️ 攻击集文件名不含 baseline，越狱税将不会计算）' : ''));
+    setStatus('评估任务已启动' + (noBaseline ? '（注意：攻击集文件名不含 baseline，越狱税将不会计算）' : ''));
     if (view.id) watchTask(view.id);
     startTaskPolling();
     await loadTasks();
@@ -1205,6 +1284,7 @@ window.addEventListener('scroll', () => {
 
 // ---------- 启动 ----------
 (async () => {
+  const bootT0 = performance.now();   // splash 最小展示计时
   // URL 参数（可分享的视图状态）：?theme=dark|light  ?cmp=<批次名>
   const q = new URLSearchParams(location.search);
   if (q.get('theme') === 'dark' || q.get('theme') === 'light') theme = q.get('theme');
@@ -1219,6 +1299,8 @@ window.addEventListener('scroll', () => {
     loadSection('overview');
   }
   loadRunSection();
+  // splash 收尾：数据首轮加载后且至少展示 900ms，避免一闪而过
+  setTimeout(dismissSplash, Math.max(0, 900 - (performance.now() - bootT0)));
   // 直达对比视图：等总览数据就位后自动展开对比面板
   const cmpRun = q.get('cmp');
   if (cmpRun && start === 'overview') {

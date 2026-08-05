@@ -26,10 +26,13 @@ import numpy as np
 
 from llmsec.core.config import INITIAL_ELO, PREDICTORS_DIR
 from llmsec.core.io import load_artifact, save_artifact
+from llmsec.core.logging import get_logger
 from llmsec.core.results import ResultsMatrix
 from llmsec.evaluation.elo import derive_elo
 from llmsec.evaluation.elo_cluster import EloPredictorModel
 from llmsec.params import BLEND_PRIOR_K, RIDGE_PRED_STD_CAP_MIN, RIDGE_PRED_STD_CAP_MULT
+
+logger = get_logger(__name__)
 
 
 class BlendPredictor:
@@ -174,7 +177,7 @@ class BlendPredictor:
             means, variances = model.predict({method: feat}, [method])
             return float(means[0]), float(variances[0])
         except Exception as e:
-            logger.warning("模型 %s predict 失败（返回 None）: %s", model_name, e)
+            logger.warning("模型 %s predict 失败（返回 None）: %s", model, e)
             return None, None
 
     # ---------- 诊断 ----------
