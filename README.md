@@ -46,7 +46,7 @@ R[method][model] = MatchResult         ← 唯一真相（原始观测）
 
 1. **Elo 不跨模型混淆** —— 每个模型的 Elo 仅由该模型列回放得到，绝不借用其它模型。
 2. **多模型天然支持** —— R 的第二维就是模型；`TARGETS` 环境变量可一次扫描多个目标。
-3. **可重建** —— Elo、预测器、收敛判定都能从 R + 方法特征 X 全量重算，缓存丢失无碍。
+3. **可重建** —— Elo、预测器、收敛判定都能从 R + 方法特征 X 全量重算，缓存丢失无碍。收敛轨迹自轮次编号（`round`）随观测记入 R 的 `extra` 后，`derive_elo` 按轮分组回放即可重建 `_round_defender_elos`；旧记录无 `round` 则回退逐条回放。
 
 存储布局（`output/state/`）：`results.json`（R 主存储，权威）+ `elo_cache.json`（派生缓存，可删可重建）。`state.json` 退化为可选快照备份。
 

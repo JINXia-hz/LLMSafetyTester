@@ -301,7 +301,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
             tested.add(method_name)
 
             # 实时更新 ELO（双边：攻击方 vs 防御方）
-            tracker.update(method_name, DEFENDER_NAME, result["eval_score"])
+            tracker.update(method_name, DEFENDER_NAME, result["eval_score"], round_idx=0)
 
             # 记录结果
             all_results.append({
@@ -392,7 +392,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
             tested.add(method_name)
 
             # 实时更新 ELO（双边：攻击方 vs 防御方）
-            tracker.update(method_name, DEFENDER_NAME, result["eval_score"])
+            tracker.update(method_name, DEFENDER_NAME, result["eval_score"], round_idx=round_idx)
 
             # 记录结果
             all_results.append({
@@ -549,6 +549,8 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
         "boundary_confidence": boundary.get("confidence", 0.0),
         "converged": boundary.get("converged", False),
         "top_threats": [r["method"] for r in ranking[:5]],
+        # #14：top_threats 里哪些是未真实测量的预测方法（避免报告把预测 Elo 当真实威胁）
+        "top_threats_predicted": [r["method"] for r in ranking[:5] if r.get("predicted")],
         "defender_elo": boundary.get("defender_elo", INITIAL_ELO),
         "upsets": tracker.find_upsets(min_elo_gap=0),
         "jailbreak_tax": tax_summary,

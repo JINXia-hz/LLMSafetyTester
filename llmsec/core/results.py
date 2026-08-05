@@ -64,6 +64,13 @@ def _file_lock(filepath: Path, timeout: float = 10.0):
                     break
             except OSError:
                 time.sleep(0.05)
+        if not acquired:
+            # #15：超时放行时必须留痕——对"唯一真相"存储，静默交替写会损坏且无信号。
+            # 保持放行策略（不阻塞评估：评估成本高于罕见损坏），但记 ERROR 供排查并发写来源
+            _logger.error(
+                "results.json 文件锁获取超时(%.0fs)，放行写入（罕见并发竞争下可能损坏；"
+                "若反复出现请排查 dashboard/实验框架并发写）: %s", timeout, filepath,
+            )
         yield  # 拿到锁（或超时放行）后执行临界区
     finally:
         try:

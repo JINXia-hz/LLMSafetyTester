@@ -103,6 +103,7 @@ class ELOTracker:
         attacker_name: str,
         defender_name: str,
         eval_score: float,
+        round_idx: int | None = None,
     ) -> dict:
         """
         双边 ELO 更新（连续成绩映射版）。
@@ -180,6 +181,7 @@ class ELOTracker:
             "expected_attacker_win": round(expected_att, 4),
             "perf": round(perf, 4),
             "k_def": round(k_def, 2),
+            "round": round_idx,
         }
         self.history.append(info)
         return info
@@ -480,10 +482,14 @@ class ELOTracker:
         recent_n = min(n_rounds, CONV_WINDOW_MIN)
         recent = round_elos[-recent_n:] if recent_n >= 2 else round_elos
         if len(recent) >= 2:
+            # #9：近期窗口小(≤CONV_WINDOW_MIN)，OLS 斜率对单点离群敏感（翻转 drift 符号
+            # → 误判"仍在漂移/已稳"）。改 Theil-Sen（两两斜率中位）：4 点仅 6 个斜率取中位，
+            # 成本可忽略；n=2 时退化为唯一两两斜率（与 OLS 等价，向后兼容）
+            from scipy.stats import theilslopes
+
             tr = np.arange(1, len(recent) + 1, dtype=float)
             yr = np.asarray(recent, dtype=float)
-            s_tt_r = float(np.sum((tr - tr.mean()) ** 2))
-            drift = float(np.sum((tr - tr.mean()) * (yr - yr.mean())) / s_tt_r) if s_tt_r > 0 else 0.0
+            drift = float(theilslopes(yr, tr)[0])
         else:
             drift = stats["slope"] if stats else None
 
@@ -538,9 +544,15 @@ class ELOTracker:
     # 排名
     # ============================================================
     def get_attacker_ranking(self) -> list[dict]:
-        """攻击方 ELO 排名（降序：高 ELO = 强攻击）。"""
+        """攻击方 ELO 排名（降序：高 ELO = 强攻击）。
+
+        每条附 ``predicted`` 标记（#14）：True = 该方法未真实测量——live tracker
+        里为 SVD-Ridge 预测 Elo，derive_elo 派生态里为未测初始 Elo。下游展示
+        threat 表时可据此加"(预测)"徽标，避免把预测值当真实威胁呈现。
+        """
         ranking = [
-            {"method": name, "elo": round(elo, 1)}
+            {"method": name, "elo": round(elo, 1),
+             "predicted": name not in self.ground_truth_methods}
             for name, elo in self.attacker_ratings.items()
         ]
         ranking.sort(key=lambda x: x["elo"], reverse=True)
@@ -845,15 +857,30 @@ def derive_elo(
     参数:
       method_catalog: 攻击集规范方法清单（注入未测方法的初始 Elo，覆盖率分母）。
 
-    返回: ELOTracker，ratings 完全由该模型列派生。无真实轮界信息，故不回放
-    record_round_end——收敛轨迹请读 live run 快照（dashboard _load_state）。
+    返回: ELOTracker，ratings 完全由该模型列派生。
+    #10：若 R 记录全部带 round（extra），按 round 分组回放并在每轮末调
+    record_round_end，重建 _round_defender_elos → 收敛轨迹可从 R 全量重算
+    （README 主张名副其实）；缺 round 的旧记录回退逐条回放（向后兼容）。
     """
     tracker = ELOTracker()
     if method_catalog:
         for m in method_catalog:
             tracker.attacker_ratings.setdefault(m, float(tracker.initial))
 
-    for res in results_matrix.ordered_results(model):
-        tracker.update(res.method, model, res.eval_score)
+    ordered = results_matrix.ordered_results(model)
+    rounds = [r.extra.get("round") for r in ordered]
+    if rounds and all(rd is not None for rd in rounds):
+        # 全部带 round → 按轮分组回放（ordered 已 ts 升序、round 单调），
+        # 每轮末调 record_round_end 重建收敛轨迹（#10）
+        from itertools import groupby
+
+        for _rd, group in groupby(zip(ordered, rounds), key=lambda x: x[1]):
+            for res, _ in group:
+                tracker.update(res.method, model, res.eval_score)
+            tracker.record_round_end(model)
+    else:
+        # 旧记录无 round（或混合迁移数据）→ 逐条回放，不重建轮界（向后兼容）
+        for res in ordered:
+            tracker.update(res.method, model, res.eval_score)
 
     return tracker

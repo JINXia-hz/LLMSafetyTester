@@ -30,11 +30,10 @@ from llmsec.core.logging import get_logger
 from llmsec.evaluation.elo import ELOTracker
 from llmsec.params import (
     CLUSTER_BLIND_SPOT_ELO_MARGIN,
-    CLUSTER_BLIND_SPOT_MAX_COVERAGE,
+    CLUSTER_COVERAGE_BOUNDARY,
     CLUSTER_HIGH_RISK_ELO_MARGIN,
     CLUSTER_HIGH_RISK_MIN_SUCCESS,
     CLUSTER_STABLE_MAX_ELO_STD,
-    CLUSTER_STABLE_MIN_COVERAGE,
 )
 
 # ============================================================
@@ -195,10 +194,10 @@ def analyze_clusters(
         if detail["mean_success_rate"] >= CLUSTER_HIGH_RISK_MIN_SUCCESS and detail["mean_elo"] >= defender_elo - CLUSTER_HIGH_RISK_ELO_MARGIN:
             high_risk.append(cid_str)
         # 盲区：测试覆盖低 + 平均 Elo 接近边界
-        elif detail["test_coverage"] < CLUSTER_BLIND_SPOT_MAX_COVERAGE and abs(detail["mean_elo"] - defender_elo) <= CLUSTER_BLIND_SPOT_ELO_MARGIN:
+        elif detail["test_coverage"] < CLUSTER_COVERAGE_BOUNDARY and abs(detail["mean_elo"] - defender_elo) <= CLUSTER_BLIND_SPOT_ELO_MARGIN:
             blind_spots.append(cid_str)
         # 稳定：覆盖足够 + 方差低
-        elif detail["test_coverage"] >= CLUSTER_STABLE_MIN_COVERAGE and detail["elo_std"] <= CLUSTER_STABLE_MAX_ELO_STD:
+        elif detail["test_coverage"] >= CLUSTER_COVERAGE_BOUNDARY and detail["elo_std"] <= CLUSTER_STABLE_MAX_ELO_STD:
             stable.append(cid_str)
 
     analysis = {

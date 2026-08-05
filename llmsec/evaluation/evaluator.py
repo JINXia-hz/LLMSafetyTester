@@ -730,7 +730,9 @@ def update_elo(all_results: list[dict], summary: dict,
     for r in all_results:
         method = r.get("method", "unknown")
         score = r.get("eval_score", 0)
-        tracker.update(method, defender_name, score)
+        # #10：把结果记录里的 round 透传进 history，publish_tracker 写入 R 的 extra，
+        # 使 derive_elo 能按轮分组重建收敛轨迹
+        tracker.update(method, defender_name, score, round_idx=r.get("round"))
     # 记录轮次终点使 _round_defender_elos 非空——否则 compute_security_boundary
     # 的 check_convergence 恒因 n_rounds=0 返回 ci_half=None（confidence 恒 0），
     # 即便已实测大量方法。单批次只有 1 轮故仍无法估噪声（m<3），但数据结构完整。

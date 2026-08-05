@@ -188,7 +188,7 @@ def test_m19_update_elo_defender_name():
         def load(self, path):
             pass
 
-        def update(self, method, defender, score):
+        def update(self, method, defender, score, round_idx=None):
             used_names.append(defender)
 
         def record_round_end(self, defender):

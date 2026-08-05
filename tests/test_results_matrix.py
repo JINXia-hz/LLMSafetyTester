@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 
 from llmsec.core.results import ResultsMatrix
-from llmsec.evaluation.elo import derive_elo
+from llmsec.evaluation.elo import ELOTracker, derive_elo
 
 
 def test_results_matrix_basics():
@@ -125,5 +125,41 @@ def test_derive_elo_deterministic_and_monotone():
     tg = derive_elo(mat, "gpt")
     if tg.get_attacker_elo("winner") != 1500.0:
         print("❌ Elo 跨模型泄漏（gpt 列空却变了 Elo）"); return 1
+
+
+def test_derive_elo_reconstructs_rounds_from_R():
+    """#10：R 带 round（extra）时 derive_elo 按轮分组回放重建 _round_defender_elos，
+    使收敛轨迹可从 R 全量重算；旧记录无 round 回退逐条回放（向后兼容）。"""
+    # 3 轮，每轮 2 场，带 round
+    mat = ResultsMatrix()
+    ts = 0
+    live = ELOTracker()
+    for rd in (1, 2, 3):
+        for i in (1, 2):
+            ts += 1
+            mat.upsert(f"m{rd}_{i}", "def", 3.0 if rd % 2 else -2.0, ts=ts, extra={"round": rd})
+            live.update(f"m{rd}_{i}", "def", 3.0 if rd % 2 else -2.0, round_idx=rd)
+        live.record_round_end("def")
+
+    derived = derive_elo(mat, "def")
+    conv = derived.check_convergence("def", total_methods=10, tested_count=6)
+    if conv["n_rounds"] != 3:
+        print(f"❌ derive_elo 未从 R 重建轮界: n_rounds={conv['n_rounds']}"); return 1
+    # 重建轨迹应与 live tracker 逐点一致（同序同值回放）
+    live_rounds = live._round_defender_elos["def"]
+    derived_rounds = derived._round_defender_elos["def"]
+    if len(derived_rounds) != len(live_rounds) or any(
+        abs(a - b) > 1e-9 for a, b in zip(live_rounds, derived_rounds)
+    ):
+        print(f"❌ 重建轨迹与 live 不符: live={live_rounds} derived={derived_rounds}"); return 1
+
+    # 向后兼容：旧记录无 round → 不重建轮界
+    old = ResultsMatrix()
+    for i in range(5):
+        old.upsert(f"old{i}", "def", 3.0, ts=i + 1)
+    conv_old = derive_elo(old, "def").check_convergence("def", total_methods=10, tested_count=5)
+    if conv_old["n_rounds"] != 0:
+        print(f"❌ 旧记录无 round 却重建了轮界: n_rounds={conv_old['n_rounds']}"); return 1
+
 
 

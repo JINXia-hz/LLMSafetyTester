@@ -87,8 +87,10 @@ def run_hdbscan_clustering(
     # 2. HDBSCAN
     # 2. HDBSCAN 密度视图（flat labels + 稀疏区）
     # min_samples=1 放宽互达距离，集中空间里显著降低噪声率；
-    # min_cluster_size 随规模温和增长
-    min_cluster_size = max(3, n // HDBSCAN_MIN_CLUSTER_DIV)
+    # #11：min_cluster_size 改 sqrt 缩放（原 n//DIV 线性：n=132→3 偏激进，密度视图过分割）。
+    # 默认 DIV=40 复现 sqrt(n)：n=50→7, 132→12, 400→20, 1000→32；DIV 调小→更严（更大簇 fewer），
+    # 调大→更松。下限 5 杜绝极小簇。手动 sweep：固定攻击集跑 hdb，比 silhouette/簇效选 DIV。
+    min_cluster_size = max(5, int(round((n ** 0.5) * 40 / HDBSCAN_MIN_CLUSTER_DIV)))
     clf = hdbscan.HDBSCAN(
         min_cluster_size=min_cluster_size,
         min_samples=1,
@@ -136,6 +138,13 @@ def run_hdbscan_clustering(
         "generated_at": datetime.now().isoformat(),
         "method_count": n,
         "clustering_method": "ward_autok+hdbscan",
+        # #12：两套标签的几何假设差异——展示侧据此解读，勿混用
+        "geometry_note": (
+            "method_labels=Ward 关键层（最小化簇内方差，假设近球状，用于切层/簇效验证/安全分析）；"
+            "hdbscan.method_labels=密度视图（按互达距离，能识别变密度簇与噪声，min_samples=1 放宽）。"
+            "HDBSCAN 的 single_linkage_tree_ 在最近邻链式合并下退化为单簇+单点，无法用于切层，"
+            "故缩放/关键层改用 Ward 树（同一白化坐标）。"
+        ),
         "n_clusters": k_best,
         # ward 主标签无噪声概念；取 HDBSCAN 密度视图的真实噪声数（同嵌套 hdbscan.n_noise）
         "n_noise": n_noise,

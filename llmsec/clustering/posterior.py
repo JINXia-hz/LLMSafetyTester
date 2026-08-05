@@ -115,10 +115,10 @@ def learn_supervised_weights(
         logger.info("弱监督信号为零（特征与反应无相关），跳过特征加权")
         return np.ones(d)
 
-    # 归一到均值 1 并裁剪，避免单个特征主导或消失。
-    # 顺序固定为"先归一后 clip"：clip 后再归一（w /= w.mean()）会把最大值重新抬出
-    # clip 上限（如 5.0），失去裁剪的保护意义；先归一后 clip 均值仍 ≈ 1。
-    w = corr / corr.mean() if corr.mean() > 0 else np.ones(d)
+    # #13：原 corr/corr.mean() 对噪声特征数敏感（大量 corr≈0 拉低均值 → 强特征撞上限被压扁）。
+    # 改 1+(corr−mean)：均值≈1、偏离有界、对噪声特征数稳健；所有 corr 相等时 w 全 1（退化为不加权）。
+    # 顺序仍"先归一后 clip"：clip 后均值略偏离 1，但逐元素落在 clip 内，保护意义不变。
+    w = 1.0 + (corr - corr.mean()) if corr.mean() > 0 else np.ones(d)
     w = np.clip(w, clip[0], clip[1])
 
     logger.info(

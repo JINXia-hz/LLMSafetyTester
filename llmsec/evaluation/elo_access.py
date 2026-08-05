@@ -136,9 +136,9 @@ def publish_tracker(tracker: ELOTracker, model: str) -> None:
     derive_elo(R, model) 的派生态（M-2），使缓存恒等于 R 重算结果，
     不与 elo_state_for 冷派生产生分歧。
 
-    收敛轨迹 / 场次 / pred_std 仍取 live tracker：它们依赖真实轮界
-    （record_round_end）与在线预测，R 派生态无法重建；dashboard 收敛曲线
-    经缓存即可正确呈现该 run。
+    收敛轨迹 / 场次 / pred_std 仍取 live tracker（缓存即真相呈现该 run）；
+    其中收敛轨迹自 #10 起 R 也带 round，derive_elo 可按轮分组重建
+    _round_defender_elos（仅当 R 记录全部带 round；旧数据回退逐条回放）。
 
     防御：tracker 缺少真实 ELOTracker 接口（如测试 stub）时静默跳过，不污染 R。
     """
@@ -149,9 +149,12 @@ def publish_tracker(tracker: ELOTracker, model: str) -> None:
     # 镜像 history → R（按 defender 归属，防跨模型错记）
     for h in tracker.history:
         if h.get("defender") == model:
+            # #10：round 经 extra 持久化进 R，使 derive_elo 能按轮分组重建收敛轨迹
+            extra = {"round": h["round"]} if h.get("round") is not None else None
             R.upsert(
                 h["attacker"], model, h["eval_score"],
                 status=_coarse_status(h["eval_score"]),
+                extra=extra,
             )
     R.save()
 
