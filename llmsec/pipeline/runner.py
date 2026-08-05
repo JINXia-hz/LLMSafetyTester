@@ -56,6 +56,7 @@ from llmsec.core.io import (
     write_jsonl,  # noqa: F401 — attack_phase lazy import + tests monkeypatch
 )
 from llmsec.core.logging import setup_console
+from llmsec.core.seed import get_global_seed
 from llmsec.core.text import strip_math_tax  # noqa: F401 — allergy_phase lazy import
 from llmsec.evaluation import (
     FAST_REFUSAL_PATTERNS,  # noqa: F401 — allergy_phase lazy import
@@ -73,6 +74,7 @@ from llmsec.params import (
     DEFAULT_MAX_ROUNDS,
     MAX_TWIN_WINDOW,  # noqa: F401 — allergy_phase lazy import
     MIN_TWIN_WINDOW,  # noqa: F401 — allergy_phase lazy import
+    RIDGE_REFIT_THRESHOLD,
     SAMPLER_HYBRID_EXPLORE_ROUNDS,
     SAMPLER_INFOGAIN_ALPHA,
     SAMPLER_INFOGAIN_BETA,
@@ -180,8 +182,8 @@ def main():
                         help=f"最大自适应轮次（默认{DEFAULT_MAX_ROUNDS}，必须 >= 1）")
     parser.add_argument("--twin-window", type=int, default=None,
                         help="过敏检测方法数上限；未指定时按ELO边界置信度自适应（置信度越低窗口越大）")
-    parser.add_argument("--ridge-refit-threshold", type=int, default=10,
-                        help="新增 ground truth 方法数达到多少时触发 SVD-Ridge 重跑 K-Fold（默认 10）；"
+    parser.add_argument("--ridge-refit-threshold", type=int, default=RIDGE_REFIT_THRESHOLD,
+                        help=f"新增 ground truth 方法数达到多少时触发 SVD-Ridge 重跑 K-Fold（默认 {RIDGE_REFIT_THRESHOLD}）；"
                              "未达阈值则用现有 λ* 快速 refit")
     parser.add_argument("--refresh-features", action="store_true",
                         help="强制在本次运行开始时重建特征缓存（攻击集/特征未变时本会跳过）")
@@ -203,8 +205,8 @@ def main():
     parser.add_argument("--target", type=str, default=None,
                         help="单目标：按名称选择一个 .env 声明的目标进行常规评估"
                              "（走单目标流程，结果写入 R 矩阵）。与 --targets 互斥")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="全局随机种子，贯穿 K-Fold/D-optimal/PCA（实验复现用，默认 42）")
+    parser.add_argument("--seed", type=int, default=get_global_seed(),
+                        help=f"全局随机种子，贯穿 K-Fold/D-optimal/PCA（实验复现用，默认 {get_global_seed()}）")
     parser.add_argument("--work-dir", type=str, default=None,
                         help="实验隔离模式：state/results 写入该目录，不碰全局 R/"
                              "elo_cache，且跳过聚类落盘。HPO trial 用")

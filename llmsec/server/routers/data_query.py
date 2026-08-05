@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import datetime
 from pathlib import Path
@@ -596,3 +597,51 @@ async def api_targets():
     except Exception:
         targets = []
     return {"targets": targets}
+
+
+@router.get("/api/targets/probe")
+async def api_targets_probe():
+    """探查所有目标模型的 API 可通性。
+
+    对每个目标发送最轻量请求（OpenAI models.list 或 HTTP GET），5s 超时。
+    返回 [{name, model, reachable, latency_ms, error}]。
+    api_key / base_url 绝不出后端。
+    """
+    import time
+
+    from llmsec.core.config import load_targets, target_backend
+    from llmsec.core.llm import create_openai_client
+
+    try:
+        targets_cfg = load_targets()
+    except Exception:
+        return {"targets": []}
+
+    async def _probe_one(name, cfg):
+        backend = target_backend(name)
+
+        def _do():
+            t0 = time.time()
+            if backend == "pcap_judge":
+                # pcap judge 不是 OpenAI 兼容 API，用 HTTP GET 探通
+                import requests
+                import urllib3
+                urllib3.disable_warnings()
+                r = requests.get(cfg.base_url, timeout=5, verify=False)
+                r.raise_for_status()
+            else:
+                # OpenAI 兼容：models.list() 是最轻量 GET，不消耗 token
+                client = create_openai_client(cfg.api_key, cfg.base_url, timeout=5.0)
+                client.models.list()
+            return round((time.time() - t0) * 1000)
+
+        try:
+            latency = await asyncio.to_thread(_do)
+            return {"name": name, "model": cfg.model, "reachable": True,
+                    "latency_ms": latency, "error": None}
+        except Exception as e:
+            return {"name": name, "model": cfg.model, "reachable": False,
+                    "latency_ms": None, "error": str(e)[:120]}
+
+    results = await asyncio.gather(*[_probe_one(n, c) for n, c in targets_cfg.items()])
+    return {"targets": list(results)}

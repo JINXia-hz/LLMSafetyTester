@@ -1008,6 +1008,27 @@ async function loadRunSection() {
         opt.value = t.name; opt.textContent = t.name;
         tsel.appendChild(opt);
       });
+      // 后台探查可通性，禁用不可通的目标（不阻塞 UI）
+      if ((tgts.targets || []).length > 0) {
+        api('/api/targets/probe').then(d => {
+          const unreachable = new Set(
+            (d.targets || []).filter(t => !t.reachable).map(t => t.name)
+          );
+          if (unreachable.size === 0) return;
+          [...tsel.options].forEach(opt => {
+            if (unreachable.has(opt.value)) {
+              const info = (d.targets || []).find(t => t.name === opt.value);
+              opt.textContent = `⚠ ${opt.value}（不可通）`;
+              opt.disabled = true;
+              opt.title = info ? info.error : '连接失败';
+            }
+          });
+          // 当前选中项被禁用时回退到默认
+          if (tsel.selectedOptions[0] && tsel.selectedOptions[0].disabled) {
+            tsel.value = '';
+          }
+        }).catch(() => {});
+      }
     }
     await loadTasks();
   } catch (e) { setStatus('运行控制加载失败: ' + e.message); }

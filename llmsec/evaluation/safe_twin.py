@@ -45,6 +45,7 @@ from llmsec.core.logging import setup_console
 from llmsec.core.text import strip_math_tax
 from llmsec.evaluation.judge import FAST_REFUSAL_PATTERNS, Judge, create_judge_client
 from llmsec.params import (
+    API_DELAY,
     MIN_TWIN_WINDOW,
     PORTRAIT_ASR_SAFE,
     PORTRAIT_FPR_SAFE,
@@ -86,7 +87,6 @@ TWIN_FILE = SAFE_TWINS_FILE
 
 # TEMPERATURE 统一从 llmsec.params 读取（TWIN_GEN_TEMPERATURE 别名）
 MAX_TOKENS = 1024
-API_DELAY = 1.0
 MAX_RETRIES = 3
 RETRY_DELAY = 2.0    # 重试间隔（秒）
 
@@ -275,7 +275,7 @@ def evaluate_allergy():
     if done_ids:
         logger.info(f"📋 已有 {len(done_ids)} 条本模型过敏测试结果，将跳过\n")
 
-    client = create_openai_client(api_key=TARGET_API_KEY, base_url=TARGET_BASE_URL, timeout=60)
+    client = create_openai_client(api_key=TARGET_API_KEY, base_url=TARGET_BASE_URL, timeout=_TARGET_CONFIG.timeout)
     tested = 0
 
     judge_client = create_judge_client()

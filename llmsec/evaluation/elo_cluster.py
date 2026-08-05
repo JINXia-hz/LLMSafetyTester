@@ -51,6 +51,7 @@ from llmsec.params import (
     RIDGE_N_FOLDS,
     RIDGE_PRED_STD_CAP_MIN,
     RIDGE_PRED_STD_CAP_MULT,
+    RIDGE_REFIT_THRESHOLD,
 )
 
 # 特征提取代码版本：提取逻辑 / 特征块结构变更时 +1，使旧特征缓存与 ridge w 失效（M-5/M-6）
@@ -400,7 +401,7 @@ class ClusterEloPredictor:
 
     def __init__(
         self,
-        ridge_refit_threshold: int = 10,
+        ridge_refit_threshold: int = RIDGE_REFIT_THRESHOLD,
         min_cluster_size: int = 3,
     ):
         self.ridge_refit_threshold = ridge_refit_threshold

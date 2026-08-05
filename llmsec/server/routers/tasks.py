@@ -16,7 +16,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from llmsec.core.config import ATTACKS_DIR, TASK_LOG_DIR
-from llmsec.params import ADAPTIVE_BATCH_MAX
+from llmsec.params import ADAPTIVE_BATCH_MAX, DEFAULT_BATCH_SIZE, DEFAULT_MAX_ROUNDS
 
 router = APIRouter()
 
@@ -54,8 +54,8 @@ class EvaluateRequest(BaseModel):
     input: str = "l1.jsonl"
     # runner._adaptive_batch_size 会把 batch 压到 [ADAPTIVE_BATCH_MIN, ADAPTIVE_BATCH_MAX] 内，
     # 上限与 runner 对齐，避免用户传 >ADAPTIVE_BATCH_MAX 时被静默压回；默认值随上限自适应
-    batch_size: int = Field(default=min(10, ADAPTIVE_BATCH_MAX), ge=1, le=ADAPTIVE_BATCH_MAX)
-    max_rounds: int = Field(default=5, ge=1, le=50)
+    batch_size: int = Field(default=min(DEFAULT_BATCH_SIZE, ADAPTIVE_BATCH_MAX), ge=1, le=ADAPTIVE_BATCH_MAX)
+    max_rounds: int = Field(default=DEFAULT_MAX_ROUNDS, ge=1, le=50)
     sampler: str = Field(default="hybrid", pattern="^(gap|infogain|coordinate|hybrid)$")
     # 目标模型（.env TARGETS 中声明的名字）；None = .env 默认目标。
     # pattern 防异常字符（argv 以列表传递不走 shell，仍做白名单校验）

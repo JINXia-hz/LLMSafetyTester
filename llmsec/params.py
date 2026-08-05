@@ -104,6 +104,9 @@ RIDGE_PRED_STD_CAP_MULT = 3.0    # 预测 std 上限 = 此倍数 × GT Elo std
 RIDGE_PRED_STD_CAP_MIN = 200.0   # 预测 std 上限的绝对下限
 # 解释：CI 宽于 ±几百 Elo 已无信息量；封顶保护 summary/state/看板/前端所有下游，
 #       防止任何残留的方差异常压扁图表坐标轴。
+RIDGE_REFIT_THRESHOLD = 10
+# 解释：GT 增长数 < 此值时复用现有 λ* 做单次快速 refit（不重跑 K-Fold），
+#       增长 ≥ 此值时重跑 K-Fold 选 λ。CLI --ridge-refit-threshold 可覆盖。
 
 
 # ============================================================
