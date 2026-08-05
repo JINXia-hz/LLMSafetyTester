@@ -14,9 +14,6 @@ output/
 attacks/*
 !attacks/exemple.jsonl
 
-# 静态参考数据（harmbench 行为库等，体积大）
-data/
-
 # IDE
 .vscode/
 .idea/
