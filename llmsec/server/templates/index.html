@@ -565,6 +565,10 @@
               <div class="space-y-2 text-xs mb-3">
                 <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">目标模型</span><select id="evalTarget" class="flex-1"><option value="">（.env 默认）</option></select></div>
                 <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">攻击集</span><select id="evalInput" class="flex-1"></select></div>
+                <div id="dropZone" class="rounded-lg p-2 text-center cursor-pointer transition-colors" style="border: 2px dashed var(--c-border); color: var(--c-muted);">
+                  <span class="text-xs">拖拽 .jsonl 到此处导入，或<a href="#" id="dropBrowse" class="underline">点击选择</a></span>
+                  <input type="file" id="dropFile" accept=".jsonl" class="hidden">
+                </div>
                 <div class="text-xs" style="color: var(--c-muted); padding-left: 4rem;">按：越狱税需含数学探针的攻击集（文件名含 baseline）</div>
                 <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">阶段</span>
                   <select id="evalPhase" class="flex-1"><option value="all">全部</option><option value="1">仅攻击</option><option value="2">仅过敏</option></select></div>

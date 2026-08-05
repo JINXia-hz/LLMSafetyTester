@@ -578,10 +578,25 @@ async def api_model(run: str | None = None):
 
 @router.get("/api/attack-sets")
 async def api_attack_sets():
+    """列出可用攻击集，含元信息（大小、修改时间、记录数）。"""
+
     if not ATTACKS_DIR.exists():
         return {"files": []}
-    files = sorted(p.name for p in ATTACKS_DIR.glob("*.jsonl"))
-    return {"files": files}
+    result = []
+    for p in sorted(ATTACKS_DIR.glob("*.jsonl"), key=lambda x: x.name):
+        size_kb = round(p.stat().st_size / 1024, 1)
+        mtime = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        # 快速计行数（只数非空行，不 parse JSON）
+        n_records = 0
+        try:
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        n_records += 1
+        except OSError:
+            pass
+        result.append({"name": p.name, "size_kb": size_kb, "mtime": mtime, "n_records": n_records})
+    return {"files": result}
 
 
 @router.get("/api/targets")

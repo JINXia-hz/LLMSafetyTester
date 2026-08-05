@@ -144,6 +144,8 @@ class EloPredictorModel:
         self.effective_df: float | None = None
         # 训练计数（供缓存与测试断言）
         self.fit_count: int = 0
+        # OOS 预测（λ* 下逐折留出，键=ground_truth 方法名）——供 BlendPredictor 估计层间残差协方差（#3）
+        self.oos_by_key_: dict[str, float] = {}
 
     @classmethod
     def _features_to_matrix(
@@ -199,6 +201,7 @@ class EloPredictorModel:
         ground_truth: dict,
         feature_name_blocks: dict | None = None,
         lambda_override: float | None = None,
+        groups: dict | None = None,
     ) -> "EloPredictorModel":
         """
         用 ground truth 训练 Ridge 回归模型。
@@ -209,6 +212,8 @@ class EloPredictorModel:
             feature_name_blocks: 各特征块的特征名（用于特征重要性输出）
             lambda_override: 指定 λ 时跳过 K-Fold 直接 refit w（快速通道，
                 用于 ground truth 小幅增长时的增量更新）
+            groups: {method_key: group_id}，按组做 GroupKFold（统一预测器场景：
+                同方法跨模型样本同组，防 CV 泄漏，#4）。None 时走随机 K-Fold。
         """
         methods = sorted(ground_truth.keys())
         if not methods:
@@ -235,55 +240,60 @@ class EloPredictorModel:
         n = len(X_scaled)
         self.n_samples = n
         best_error = None
+        self.oos_by_key_ = {}  # 每次 fit 重置；仅完整 K-Fold 路径填充（供 #3 协方差估计）
 
         if lambda_override is not None:
-            # 快速通道：复用既有 λ，不重跑 K-Fold
+            # 快速通道：复用既有 λ，不重跑 K-Fold（OOS 不可得，#3 协方差退回 in-sample/零）
             self.lambda_opt = float(lambda_override)
         else:
-            k = min(self.n_folds, n)
+            # 选 fold 划分：groups 非空 → GroupKFold（同方法跨模型样本同组，防 CV 泄漏，#4）；
+            # 否则随机 K-Fold（H-9 余数均衡）
+            if groups is not None:
+                group_arr = np.asarray([groups.get(m, m) for m in methods])
+                unique_groups = list(dict.fromkeys(group_arr.tolist()))
+                if len(unique_groups) >= 2:
+                    from sklearn.model_selection import GroupKFold
+
+                    k_g = min(self.n_folds, len(unique_groups))
+                    splits = list(GroupKFold(n_splits=k_g).split(X_scaled, groups=group_arr))
+                else:
+                    splits = self._random_kfold_splits(n)
+            else:
+                splits = self._random_kfold_splits(n)
+            k = len(splits)
             if k < 2:
                 # 样本太少，直接用中等 λ
                 self.lambda_opt = 1.0
                 self.cv_errors = []
             else:
-                # K-Fold 交叉验证选择 λ
-                indices = np.arange(n)
-                rng = np.random.default_rng(_global_seed())
-                rng.shuffle(indices)
-                # H-9 修复：余数均衡分配到前 r 折（原代码全部堆入最后一折，
-                # n=9,k=5 → fold 尺寸 1,1,1,1,5，小 GT 时 CV 严重不均衡、偏选大 λ）
-                fold_size = n // k
-                remainder = n % k
+                # K-Fold 选 λ（#1 性能优化：每折只算一次 SVD，全部 λ 向量化求解；
+                # 原实现 n_λ × k 次 SVD，这里降为 k 次，约 15-20× 加速，数学等价）
+                lambda_arr = np.asarray(self.lambda_candidates, dtype=np.float64)
+                fold_errors = np.zeros((k, len(lambda_arr)), dtype=np.float64)
+                fold_cache: list[tuple[np.ndarray, np.ndarray]] = []  # (test_idx, preds_per_lambda)
+                for i, (train_idx, test_idx) in enumerate(splits):
+                    X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
+                    y_train, y_test = y_c[train_idx], y_c[test_idx]
+                    U_t, S_t, Vt_t = np.linalg.svd(X_train, full_matrices=False)
+                    Ut_y = U_t.T @ y_train                      # (r,)
+                    XVt = X_test @ Vt_t.T                        # (n_test, r)
+                    # scale[r, n_λ] = S / (S² + λ)；w(λ)=Vtᵀ·diag(scale)·Uᵀy，预测=X_test·w
+                    scale = S_t[:, None] / (S_t[:, None] ** 2 + lambda_arr[None, :])
+                    preds = XVt @ (scale * Ut_y[:, None])        # (n_test, n_λ)，y_c 中心化空间
+                    fold_errors[i] = np.mean((preds - y_test[:, None]) ** 2, axis=0)
+                    fold_cache.append((test_idx, preds))
 
-                best_lambda = None
-                best_error = float("inf")
-                self.cv_errors = []
+                avg_errors = fold_errors.mean(axis=0)
+                self.cv_errors = avg_errors.tolist()
+                best_pos = int(np.argmin(avg_errors))
+                best_error = float(avg_errors[best_pos])
+                self.lambda_opt = float(lambda_arr[best_pos])
 
-                for lam in self.lambda_candidates:
-                    errors = []
-                    for i in range(k):
-                        start = i * fold_size + min(i, remainder)
-                        end = start + fold_size + (1 if i < remainder else 0)
-                        test_idx = indices[start:end]
-                        train_idx = np.concatenate([indices[:start], indices[end:]])
-
-                        X_train, X_test = X_scaled[train_idx], X_scaled[test_idx]
-                        y_train, y_test = y_c[train_idx], y_c[test_idx]
-
-                        # 用训练集 SVD 计算 Ridge 解
-                        U_train, S_train, Vt_train = np.linalg.svd(X_train, full_matrices=False)
-                        w = Vt_train.T @ np.diag(S_train / (S_train**2 + lam)) @ U_train.T @ y_train
-
-                        pred = X_test @ w
-                        errors.append(float(np.mean((pred - y_test) ** 2)))
-
-                    avg_error = float(np.mean(errors))
-                    self.cv_errors.append(avg_error)
-                    if avg_error < best_error:
-                        best_error = avg_error
-                        best_lambda = lam
-
-                self.lambda_opt = float(best_lambda)
+                # OOS 预测（λ*）：从逐折预测矩阵取 best_pos 列（无需额外 SVD）→ #3 协方差估计用
+                for test_idx, preds in fold_cache:
+                    star = preds[:, best_pos] + self.y_mean      # 中心化 → Elo 尺度
+                    for pos, ti in enumerate(test_idx):
+                        self.oos_by_key_[methods[ti]] = float(star[pos])
 
         # 用最优 λ 在全数据上训练最终模型（截断数值近零奇异值保证稳定）
         U, S, Vt = np.linalg.svd(X_scaled, full_matrices=False)
@@ -321,6 +331,28 @@ class EloPredictorModel:
             n, self.lambda_opt, self.sigma2, self.effective_df, X_scaled.shape[1],
         )
         return self
+
+    def _random_kfold_splits(self, n: int) -> list[tuple[np.ndarray, np.ndarray]]:
+        """随机 K-Fold（H-9 余数均衡：前 r 折各多 1 个，防小 GT 时偏选大 λ）。
+
+        返回 [(train_idx, test_idx), ...]；n 不足 2 折时返回 []。
+        """
+        k = min(self.n_folds, n)
+        if k < 2:
+            return []
+        indices = np.arange(n)
+        rng = np.random.default_rng(_global_seed())
+        rng.shuffle(indices)
+        fold_size = n // k
+        remainder = n % k
+        splits = []
+        for i in range(k):
+            start = i * fold_size + min(i, remainder)
+            end = start + fold_size + (1 if i < remainder else 0)
+            test_idx = indices[start:end]
+            train_idx = np.concatenate([indices[:start], indices[end:]])
+            splits.append((train_idx, test_idx))
+        return splits
 
     def predict(self, features_dict: dict, methods: list[str]) -> tuple[np.ndarray, np.ndarray]:
         """

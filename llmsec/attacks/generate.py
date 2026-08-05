@@ -25,6 +25,7 @@ from openai import OpenAI
 
 from llmsec.core import (
     ATTACK_SET_L1_FILE,
+    ATTACKS_DIR,
     PROJECT_ROOT,
     GeneratorConfig,
     append_jsonl,
@@ -34,6 +35,7 @@ from llmsec.core import (
     setup_console,
 )
 from llmsec.core.text import inject_math_tax
+from llmsec.params import API_DELAY
 
 logger = get_logger(__name__)
 # 修复Windows CMD GBK编码导致emoji/Unicode输出报错
@@ -42,10 +44,10 @@ setup_console()
 # ============================================================
 # 配置
 # ============================================================
-# 文件路径 (md文件优先取项目根的上级目录，其次项目根，保持原查找逻辑)
-MD_FILE = PROJECT_ROOT.parent / "攻击分析.md"
+# 文件路径（攻击分析.md 在仓库根或 llmsec/ 下）
+MD_FILE = PROJECT_ROOT / "攻击分析.md"
 if not MD_FILE.exists():
-    MD_FILE = PROJECT_ROOT / "攻击分析.md"
+    MD_FILE = PROJECT_ROOT / "llmsec" / "攻击分析.md"
 
 # 默认输出（路径裁决 bug#10：原 output/攻击集_L1.jsonl → output/attacks/l1.jsonl）
 OUTPUT_FILE = ATTACK_SET_L1_FILE
@@ -53,7 +55,7 @@ OUTPUT_FILE = ATTACK_SET_L1_FILE
 # API调用参数
 TEMPERATURE = 0.9      # 较高温度增加多样性
 MAX_TOKENS = 4096
-API_DELAY = 1.0        # 每次API调用间隔(秒)，避免触发速率限制
+# API_DELAY 统一取自 llmsec.params（与 evaluator/safe_twin/runner 等全链路一致）
 MAX_RETRIES = 3        # 失败重试次数
 RETRY_DELAY = 2.0      # 重试间隔（秒）：内容类失败（JSON解析失败/初稿条数不符）
 RETRY_DELAY_API = 5.0  # 重试间隔（秒）：API 类失败（含 429 限流），间隔更长
@@ -354,12 +356,17 @@ def main():
     )
     parser.add_argument(
         "--output", type=str, default=None,
-        help="输出文件路径（默认 output/attacks/l1.jsonl）"
+        help="输出文件路径（默认 attacks/l1.jsonl）；相对路径锚到 attacks/"
     )
     args = parser.parse_args()
 
-    # 写入只走新路径；--output 可覆盖
-    output_file = Path(args.output) if args.output else OUTPUT_FILE
+    # 写入：相对路径锚到 ATTACKS_DIR（与 harmbench.py 统一）
+    if args.output:
+        output_file = Path(args.output)
+        if not output_file.is_absolute():
+            output_file = ATTACKS_DIR / args.output
+    else:
+        output_file = OUTPUT_FILE
 
     # ---- 解析Markdown ----
     if not MD_FILE.exists():

@@ -178,8 +178,11 @@ class InfoGainSampler(AttackSampler):
             else:
                 success_potential = 1.0 / (1.0 + 10.0 ** (-(att_elo - def_elo) / ELO_SCALE))
 
+            # #6：gap 归一化到 [0,1)（gap/(gap+ELO_SCALE)），与 uncertainty/visit/success 同量级；
+            # 原始 Elo 级 gap（0~上千）压制其它项，使 InfoGain 实际退化为 GapMin。
+            gap_n = gap / (gap + ELO_SCALE)
             score = (
-                gap
+                gap_n
                 - self.alpha * uncertainty
                 + self.beta * visit_count
                 - self.gamma * success_potential
@@ -281,7 +284,10 @@ class CoordinateDescentSampler(AttackSampler):
             ) / len(cluster_methods)
 
             # 分越低越优先：测试少、离边界近、成功率高
-            score = tested_count + avg_gap - self.min_tests_per_cluster * avg_success
+            # #6：avg_gap 归一化到 [0,1)（avg_gap/(avg_gap+ELO_SCALE)），让 tested_count
+            # 重新成为簇间协调的主导信号（原 Elo 级 avg_gap 会淹没 tested_count）
+            avg_gap_n = avg_gap / (avg_gap + ELO_SCALE)
+            score = tested_count + avg_gap_n - self.min_tests_per_cluster * avg_success
             if best_score is None or score < best_score:
                 best_score = score
                 best_cid = cid

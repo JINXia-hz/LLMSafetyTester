@@ -41,6 +41,7 @@ from openai import OpenAI
 
 from llmsec.core.config import (
     OUTPUT_DIR,
+    PROJECT_ROOT,
     RUNS_DIR,
     SAFE_TWINS_FILE,  # noqa: F401 — allergy_phase 经 runner 命名空间 lazy import
     STATE_DIR,
@@ -250,8 +251,8 @@ def main():
     runner_sampler_log_file = runs_dir / "sampler_log.jsonl"
     runner_cluster_analysis_file = runs_dir / "cluster_security_analysis.json"
 
-    # 加载攻击集
-    input_path = os.path.join(OUTPUT_DIR, args.input) if not os.path.isabs(args.input) else args.input
+    # 加载攻击集（相对路径锚到仓库根：attacks/l1.jsonl → repo_root/attacks/l1.jsonl）
+    input_path = os.path.join(PROJECT_ROOT, args.input) if not os.path.isabs(args.input) else args.input
     if not Path(input_path).exists():
         logger.error(f"❌ 攻击集不存在: {input_path}")
         logger.info("   提示: python -m llmsec.attacks.generate 或 python -m llmsec.attacks.harmbench")

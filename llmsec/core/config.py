@@ -22,8 +22,7 @@ _ENV_LOADED = False
 
 def load_env() -> bool:
     """
-    幂等加载项目根目录的 .env。
-    项目根 = llmsec 包所在目录。
+    幂等加载仓库根目录的 .env。
     返回是否找到了 .env 文件。
     """
     global _ENV_LOADED
@@ -39,13 +38,13 @@ def load_env() -> bool:
 
 
 # ============================================================
-# 路径常量
+# 路径常量（全部锚定仓库根，不落进 llmsec/ 包内部）
 # ============================================================
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 OUTPUT_DIR = PROJECT_ROOT / "output"
 STATE_DIR = OUTPUT_DIR / "state"
-ATTACKS_DIR = OUTPUT_DIR / "attacks"
+ATTACKS_DIR = PROJECT_ROOT / "attacks"
 RUNS_DIR = OUTPUT_DIR / "runs"
 
 # R 矩阵为唯一真相（results.json）；全局 state.json 已废弃。
@@ -57,7 +56,7 @@ RESULTS_FILE = STATE_DIR / "results.json"          # R[method][model] 主存储
 PREDICTORS_DIR = OUTPUT_DIR / "predictors"          # 统一/每模型 ridge 预测器
 ELO_CACHE_FILE = STATE_DIR / "elo_cache.json"       # Elo 派生缓存（可删可重建）
 
-# 攻击集（新约定：output/attacks/）
+# 攻击集（仓库根 attacks/ 目录——用户可见，支持拖拽上传）
 ATTACK_SET_L1_FILE = ATTACKS_DIR / "l1.jsonl"
 
 # 过敏检测产物（规范存储，按模型隔离见 W4）

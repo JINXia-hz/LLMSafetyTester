@@ -204,14 +204,19 @@ class ELOTracker:
                 "n_matches": 0,
                 "wins": 0,
                 "scores": [],
+                "perfs": [],   # #5：连续成绩 perf=score/(score+τ)，CI 用其方差（保留分数幅度）
             }
         stats = self.attacker_stats[method_name]
+        stats.setdefault("perfs", [])  # 旧记录迁移兜底
         stats["n_matches"] += 1
         if attacker_won:
             stats["wins"] += 1
         stats["scores"].append(float(eval_score))
+        perf = float(eval_score) / (float(eval_score) + SCORE_PERF_TAU) if eval_score > 0 else 0.0
+        stats["perfs"].append(perf)
         if len(stats["scores"]) > max_score_history:
             stats["scores"] = stats["scores"][-max_score_history:]
+            stats["perfs"] = stats["perfs"][-max_score_history:]
 
     def get_attacker_uncertainty(self, method_name: str) -> float:
         """
@@ -268,8 +273,10 @@ class ELOTracker:
         """
         返回攻击方法 Elo 及其近似置信区间 (elo, lower, upper)。
 
-        用 Elo 后验方差近似：sigma ≈ K * sqrt(p * (1 - p) / n)，
-        其中 p 为观测胜率，n 为测试次数。
+        用 Elo 后验方差近似：sigma ≈ K * sqrt(v / n)，其中 v 为连续成绩
+        perf=score/(score+τ) 序列的经验方差（#5：取代旧的 wins/n 二值胜率 p(1-p)——
+        CI 宽度反映观测一致性：稳定碾压/稳定失败均→窄 CI，忽赢忽输→宽 CI；
+        幅度信息经 perf 进入方差，score=5 与 score=0.1 不再被等同为同一二值结果）。
         """
         elo = self.get_attacker_elo(method_name)
         stats = self.attacker_stats.get(method_name)
@@ -277,10 +284,21 @@ class ELOTracker:
             return elo, elo - z * self.k, elo + z * self.k
 
         n = stats["n_matches"]
-        p = stats.get("wins", 0) / n
-        # 防止 p 为 0 或 1 时方差为 0
-        p = max(0.05, min(0.95, p))
-        sigma = self.k * (p * (1 - p) / n) ** 0.5
+        perfs = stats.get("perfs", [])
+        if len(perfs) >= 2:
+            # #5：经验方差——观测一致(perf 集中)→窄 CI，忽赢忽输(perf 离散)→宽 CI
+            v = float(np.var(perfs, ddof=1))
+        elif perfs:
+            # 单次观测：退回该 perf 的 Bernoulli 方差 p(1-p) 作上界估计
+            p = max(0.05, min(0.95, float(perfs[0])))
+            v = p * (1.0 - p)
+        else:
+            # 旧记录无 perf（迁移数据）：回退 wins/n 二值胜率
+            p = max(0.05, min(0.95, stats.get("wins", 0) / n))
+            v = p * (1.0 - p)
+        # σ² 下限：一致观测时经验方差=0 → CI=0 过度自信；地板 ~ 原 p(1-p) 最小值 0.05·0.95
+        v = max(v, 0.04)
+        sigma = self.k * (v / n) ** 0.5
         return elo, elo - z * sigma, elo + z * sigma
 
     # ============================================================

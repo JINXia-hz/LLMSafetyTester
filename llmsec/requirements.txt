@@ -150,6 +150,8 @@ python-dateutil==2.9.0.post0
     # via pandas
 python-dotenv==1.2.2
     # via -r llmsec/requirements.in
+python-multipart==0.0.32
+    # via -r llmsec/requirements.in
 pyyaml==6.0.3
     # via
     #   huggingface-hub

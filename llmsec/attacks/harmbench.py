@@ -26,7 +26,7 @@ from pathlib import Path
 
 from llmsec.attacks.obfuscators import DEFAULT_OBFUSCATIONS, OBFUSCATORS
 from llmsec.attacks.obfuscators import obfuscate as apply_obfuscation
-from llmsec.core import ATTACKS_DIR, DATA_DIR, PROJECT_ROOT, setup_console, write_jsonl
+from llmsec.core import ATTACKS_DIR, DATA_DIR, setup_console, write_jsonl
 from llmsec.core.text import inject_math_tax
 
 logger = get_logger(__name__)
@@ -229,7 +229,7 @@ def main():
     parser.add_argument("--max", type=int, default=None,
                         help="最多生成 N 条 behavior（默认全部）")
     parser.add_argument("--output", type=str, default=None,
-                        help="输出文件路径（默认 output/attacks/harmbench_jailbreak.jsonl）")
+                        help="输出文件路径（默认 attacks/harmbench_jailbreak.jsonl）；相对路径锚到 attacks/")
     parser.add_argument("--seed", type=int, default=42,
                         help="随机种子")
     parser.add_argument("--variants", type=int, default=1,
@@ -245,7 +245,8 @@ def main():
 
     output_path = Path(args.output) if args.output else DEFAULT_OUTPUT
     if not output_path.is_absolute():
-        output_path = PROJECT_ROOT / output_path
+        from llmsec.core import ATTACKS_DIR
+        output_path = ATTACKS_DIR / args.output
 
     obfuscations = None
     if args.obfuscations:

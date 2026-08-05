@@ -48,6 +48,7 @@ class BlendPredictor:
         self._measured_elo: dict[str, dict[str, float]] = {}  # model -> {method: elo}
         self._model_n: dict[str, int] = {}    # 每模型样本量
         self._gt_std: dict[str, float] = {}   # 每模型 GT Elo 的 std（std 封顶用）
+        self._cov: dict[str, float] = {}      # 统一层/模型层 OOS 残差协方差（#3：blend 方差含交叉项）
 
     # ---------- 训练 ----------
     def fit(
@@ -81,7 +82,10 @@ class BlendPredictor:
                 self._gt_std[model] = float(np.std(list(elo_map.values())))
 
         # 2) 统一预测器：池化所有 (method, model) 为独立训练样本
+        # #4：池化样本里同一方法跨模型重复出现，按方法分组做 GroupKFold，
+        # 否则随机 K-Fold 会让同方法同时进训练/测试折 → CV 泄漏、σ² 系统性乐观
         pooled_gt: dict[str, dict] = {}
+        pooled_groups: dict[str, str] = {}  # 合成 key → 方法名（GroupKFold 分组键）
         pooled_feat: dict = dict(self._features)  # 真实 method key 保留（供预测用）
         for model, elo_map in per_model_elo.items():
             for m, elo in elo_map.items():
@@ -90,10 +94,11 @@ class BlendPredictor:
                 key = f"{m}#{model}"
                 pooled_gt[key] = {"elo": elo}
                 pooled_feat[key] = self._features[m]  # 合成 key → 同一方法特征
+                pooled_groups[key] = m
         if len(pooled_gt) >= 2:
             try:
                 self.unified = EloPredictorModel()
-                self.unified.fit(pooled_feat, pooled_gt)
+                self.unified.fit(pooled_feat, pooled_gt, groups=pooled_groups)
             except Exception as e:
                 logger.warning("统一预测器 fit 失败（退化为仅模型层）: %s", e)
                 self.unified = None
@@ -111,6 +116,30 @@ class BlendPredictor:
                 self.models[model] = pm
             except Exception as e:
                 logger.warning("模型 %s 预测器 fit 失败（跳过）: %s", model, e)
+
+        # 3) 层间协方差（#3）：统一层与模型层共用方法特征 → 预测残差正相关，
+        # blend 方差须含交叉项 2·w_u·w_m·cov，否则 CI 系统性偏窄、过度自信。
+        # 用各自 λ* 的 OOS 残差估计（统一层经 GroupKFold 留出，模型层经随机 K-Fold 留出）。
+        self._cov = {}
+        if self.unified is not None and getattr(self.unified, "oos_by_key_", None):
+            u_oos = self.unified.oos_by_key_
+            for model, pm in self.models.items():
+                m_oos = getattr(pm, "oos_by_key_", {})
+                if not m_oos:
+                    continue
+                elo_map = per_model_elo.get(model, {})
+                # 取两层均有 OOS 预测的方法（统一层 key = f"{m}#{model}"）
+                common = [
+                    m for m in elo_map
+                    if f"{m}#{model}" in u_oos and m in m_oos
+                ]
+                if len(common) < 3:
+                    continue
+                y_true = np.array([elo_map[m] for m in common], dtype=np.float64)
+                r_u = y_true - np.array([u_oos[f"{m}#{model}"] for m in common])
+                r_m = y_true - np.array([m_oos[m] for m in common])
+                cov = float(np.mean(r_u * r_m) - np.mean(r_u) * np.mean(r_m))
+                self._cov[model] = cov
         return self
 
     # ---------- 权重 ----------
@@ -156,7 +185,10 @@ class BlendPredictor:
 
         if u_mean is not None and m_mean is not None:
             elo = w_u * u_mean + w_m * m_mean
-            var = w_u * w_u * (u_var or 0.0) + w_m * w_m * (m_var or 0.0)
+            # #3：两层预测残差正相关，blend 方差须含交叉项 2·w_u·w_m·cov；
+            # cov>0 时方差较原"层间独立"假设更大、CI 更诚实；max(var,0) 兜底防负
+            cov = self._cov.get(model, 0.0)
+            var = w_u * w_u * (u_var or 0.0) + w_m * w_m * (m_var or 0.0) + 2.0 * w_u * w_m * cov
             source = "blend"
         elif m_mean is not None:
             elo, var, source = m_mean, (m_var or 0.0), "model_only"
@@ -237,6 +269,7 @@ class BlendPredictor:
             "_measured_elo": self._measured_elo,
             "_model_n": self._model_n,
             "_gt_std": self._gt_std,
+            "_cov": self._cov,
             "prior_k": self.prior_k,
         })
 
@@ -254,6 +287,7 @@ class BlendPredictor:
         bp._measured_elo = data.get("_measured_elo", {})
         bp._model_n = data.get("_model_n", {})
         bp._gt_std = data.get("_gt_std", {})
+        bp._cov = data.get("_cov", {})
         return bp
 
 

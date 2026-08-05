@@ -7,8 +7,15 @@ llmsec/.models/
 __pycache__/
 *.py[cod]
 
-# output
+# 生成产物（state/runs/tasks/聚类缓存等）
 output/
+
+# 攻击集（仅保留示例文件，其余由用户自行生成或上传）
+attacks/*
+!attacks/exemple.jsonl
+
+# 静态参考数据（harmbench 行为库等，体积大）
+data/
 
 # IDE
 .vscode/

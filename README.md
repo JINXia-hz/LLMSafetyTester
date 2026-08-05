@@ -146,19 +146,19 @@ Python 3.11。`hdbscan`、`sentence-transformers`、`tiktoken` 为聚类模块�
 
 ### 2. 配置环境
 
-复制 `llmsec/.env.example` 为 `llmsec/.env`，填入目标模型与生成模型配置。
+复制 `.env.example` 为 `.env`，填入目标模型与生成模型配置。
 
 ### 3. 三步跑通
 
 ```bash
 # 步骤 1：生成攻击集（从 llmsec/攻击分析.md 提取 L1 方法）
-python -m llmsec.attacks.generate --output output/attacks/l1.jsonl
+python -m llmsec.attacks.generate --output attacks/l1.jsonl
 
 # 步骤 2：自适应攻击 + 过敏检测 + 综合报告（主入口）
 python -m llmsec.pipeline.runner --input attacks/l1.jsonl --max-rounds 10 --batch-size 10
 
 # 步骤 3：查看报告
-cat llmsec/output/runs/<时间戳>/security_report.md
+cat output/runs/<时间戳>/security_report.md
 ```
 
 **无真实 LLM 离线测试**：
@@ -178,7 +178,7 @@ TARGET_TYPE=local_sim TARGET_BASE_URL=http://127.0.0.1:8000/v1 \
 
 **攻击集只是输入耗材**。`llmsec/attacks/` 下的生成器（`攻击分析.md` 解析、内置 HarmBench 数据包装）仅是测试与示范用的样例来源——你完全可以从任何渠道自带攻击集。
 
-> 📚 HarmBench 引用与许可见 [llmsec/data/Explication.md](llmsec/data/Explication.md)。
+> 📚 HarmBench 引用与许可见 [data/Explication.md](data/Explication.md)。
 
 自带攻击集只需满足标准 JSONL 格式（每行一条）：
 
@@ -197,7 +197,7 @@ TARGET_TYPE=local_sim TARGET_BASE_URL=http://127.0.0.1:8000/v1 \
 - `source`：来源标记（可选，默认 `our`）
 - `functional_category`：功能类别（可选，默认 `standard`）
 
-放入 `output/attacks/` 后直接运行：
+放入 `attacks/` 目录后直接运行（也可通过 Web 面板拖拽上传）：
 
 ```bash
 python -m llmsec.pipeline.runner --input attacks/<你的文件>.jsonl
@@ -215,7 +215,7 @@ python -m llmsec.attacks.generate [--dry-run] [--only ID] [--start-from ID] [--o
 
 python -m llmsec.attacks.harmbench [--max N] [--seed N] [--variants N] [--obfuscate]
                                    [--no-math-tax]
-    # 用内置 HarmBench 数据生成示范攻击集，默认输出 output/attacks/harmbench_jailbreak.jsonl
+    # 用内置 HarmBench 数据生成示范攻击集，默认输出 attacks/harmbench_jailbreak.jsonl
     # 默认注入越狱税数学探针；--no-math-tax 关闭（PCAP 回放等不答题的后端）
 ```
 
@@ -230,7 +230,7 @@ python -m llmsec.pipeline.runner [--phase {all,1,2}] [--input FILE] [--batch-siz
 ```
 
 - `--phase`：`all`（攻击+过敏）、`1`（仅攻击）、`2`（仅过敏）
-- `--input`：攻击集路径，相对 `output/` 目录
+- `--input`：攻击集路径，相对仓库根目录（如 `attacks/l1.jsonl`）
 - `--target`：指定目标模型名（多目标扫描时）
 - `--twin-window`：过敏检测方法数；未指定时按 ELO 边界置信度自适应
 - `--sampler`：采样策略（见上）
@@ -332,31 +332,34 @@ pytest -n auto                             # 并行
 
 完整配置模板见 `llmsec/.env.example`（复制为 `.env` 即可）。
 
-embedding 降级链：API embedding → 本地缓存 → HF 镜像 → TF-IDF（显式配置 `EMBEDDING_API_*` 三项齐全时优先走 API，探活失败才回落）。模型首次经镜像下载后缓存于 `llmsec/.models/`，之后完全离线可用。
+embedding 降级链：API embedding → 本地缓存 → HF 镜像 → TF-IDF（显式配置 `EMBEDDING_API_*` 三项齐全时优先走 API，探活失败才回落）。模型首次经镜像下载后缓存于 `llmsec/.models/`（可经 `SENTENCE_TRANSFORMERS_HOME` 覆盖），之后完全离线可用。
 
 ---
 
 ## 目录结构
 
 ```
-llmsec/
-├── params.py     # 统一调参入口（LLMSEC_PARAM_* 环境覆盖）
-├── core/         # config(.env/路径/多目标) / results(R 矩阵) / io(原子写) /
-│                 # llm(重试) / text(越狱税) / logging / seed
-├── targets/      # 目标后端路由: openai / local_sim / pcap_judge (TARGET_TYPE)
-├── evaluation/   # evaluator(全量评估) / judge(LLM评分) / elo(双边ELO+CI收敛+derive_elo)
-│                 # elo_cluster(SVD-Ridge) / blend_predictor(统一+模型双层贝叶斯收缩)
-│                 # elo_access(R派生Elo缓存层) / active_learning(D-optimal种子)
-│                 # samplers(gap/infogain/coordinate/hybrid) / safe_twin(过敏检测)
-│                 # cluster_analysis(簇级分析+模型诊断)
-├── attacks/      # 示例攻击集生成（可选，非核心）: generate(L1) / harmbench(内置数据)
-├── data/         # 内置攻击数据（HarmBench 行为库 + 越狱模板，出处见目录内 Explication）
-├── pipeline/     # runner(自适应编排) / probe(连通性探测)
-├── reporting/    # report(五维树形画像 + LLM叙事报告 + 方法注册表)
-├── clustering/   # space(白化度量空间) / hdb(HDBSCAN) / tree(关键层auto-k) /
-│                 # features / posterior / pipeline / cli
-├── experiments/  # HPO 框架: study/executor/search(grid/random/bayesian)/metrics/schema
-└── server/       # dashboard_api(Web 面板) / local_model_server(本地模拟模型, OpenAI兼容)
+llmsec/                   # 纯源码包
+├── params.py             # 统一调参入口（LLMSEC_PARAM_* 环境覆盖）
+├── core/                 # config(.env/路径/多目标) / results(R 矩阵) / io(原子写) /
+│                         # llm(重试) / text(越狱税) / logging / seed
+├── targets/              # 目标后端路由: openai / local_sim / pcap_judge (TARGET_TYPE)
+├── evaluation/           # evaluator / judge / elo / elo_cluster / blend_predictor
+│                         # elo_access / samplers / safe_twin / cluster_analysis
+├── attacks/              # 攻击集生成器: generate(L1) / harmbench(内置数据)
+├── pipeline/             # runner(编排) / attack_phase / allergy_phase / multi_target / tax
+├── reporting/            # report(五维树形画像) / final_report
+├── clustering/           # space / hdb / tree / features / posterior / pipeline / cli
+├── experiments/          # HPO: study / executor / search / metrics / schema
+└── server/               # dashboard_api(Web面板) / routers / local_model_server
+
+attacks/                  # ★ 攻击集（用户可见，拖拽上传目标）
+├── exemple.jsonl         #   示例文件（随仓库分发）
+└── *.jsonl               #   用户自行生成或导入
+
+data/                     # 静态参考数据（HarmBench 行为库 + 越狱模板）
+output/                   # 所有生成产物（见下方布局）
+.env                      # 环境配置（API 密钥等）
 ```
 
 ---
@@ -364,12 +367,11 @@ llmsec/
 ## 输出文件布局
 
 ```
-llmsec/output/
-├── attacks/                # 攻击集（l1.jsonl、harmbench_jailbreak.jsonl）
+output/
 ├── state/                  # 持久化状态
 │   ├── results.json        #   ★ R 矩阵（唯一真相，多模型）
 │   ├── elo_cache.json      #   派生 Elo 缓存（可删可重建，按模型列指纹失效）
-│   ├── state.json          #   旧快照备份（可选，升级时一次性迁进 R）
+│   ├── state__<model>.json #   per-target 快照
 │   └── safe_twins.jsonl    #   安全孪生集
 ├── predictors/             # 统一/每模型 Ridge 预测器（BlendPredictor 派生）
 ├── runs/<时间戳>/          # runner 单次运行产物
@@ -383,12 +385,9 @@ llmsec/output/
 ├── experiments/<name>/     # HPO study：study.yaml / trials.jsonl / best.json
 ├── feature_cache.pkl       # 先验特征缓存（elo_cluster 写）
 ├── cluster_result.pkl      # 完整聚类产物（hdb 写）
-├── {输入名}_结果.jsonl      # evaluate 逐条结果
-├── {输入名}_汇总.json       # evaluate 统计摘要
 ├── method_registry.json    # 方法注册表（ELO + 聚类标签 + prompt 清单）
 ├── cluster_report.json     # 聚类报告
-├── cluster_matrix.csv      # 方法×特征矩阵
-└── cluster_features.json   # --dump-features 导出的特征
+└── cluster_matrix.csv      # 方法×特征矩阵
 ```
 
 ---

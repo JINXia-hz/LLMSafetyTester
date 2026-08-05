@@ -25,6 +25,7 @@ from pathlib import Path
 from llmsec.core.config import (
     ATTACK_SET_L1_FILE,
     OUTPUT_DIR,
+    PROJECT_ROOT,
     RUNS_DIR,
     STATE_DIR,
     JudgeConfig,
@@ -381,16 +382,15 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--skip-judge-prescreen", action="store_true",
                         help="跳过Judge预筛，所有案例都经Judge判断")
     parser.add_argument("--input", type=str, default=None,
-                        help="指定输入文件（默认 output/attacks/l1.jsonl，"
-                             "兼容旧 output/攻击集_L1.jsonl），如 --input harmbench_prompts.jsonl")
+                        help="指定输入文件（默认 attacks/l1.jsonl），如 --input harmbench_prompts.jsonl")
     return parser.parse_args(argv)
 
 
 def resolve_input_file(args: argparse.Namespace):
-    """确定输入文件：--input 优先，否则默认 output/attacks/l1.jsonl。"""
+    """确定输入文件：--input 优先，否则默认 attacks/l1.jsonl。"""
     if args.input:
         p = args.input
-        return p if Path(p).is_absolute() else OUTPUT_DIR / p
+        return p if Path(p).is_absolute() else PROJECT_ROOT / p
     return ATTACK_SET_L1_FILE
 
 

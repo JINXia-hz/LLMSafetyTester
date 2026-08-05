@@ -26,7 +26,8 @@ def test_analyze_clusters_handles_empty_tracker():
 
 
 def test_load_and_extract_result_file_resolution(tmp_path, monkeypatch):
-    """M-32：result_file 相对路径按 OUTPUT_DIR 解析（与 cli 一致）。"""
+    """M-32：result_file 相对路径按 PROJECT_ROOT 解析（与 cli 一致）。"""
+    monkeypatch.setattr(fm, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(fm, "OUTPUT_DIR", tmp_path)
     (tmp_path / "attacks").mkdir()
     (tmp_path / "attacks" / "in.jsonl").write_text(

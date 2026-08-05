@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -336,3 +336,45 @@ async def api_task_stream(task_id: str):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ============================================================
+# 攻击集上传
+# ============================================================
+@router.post("/api/attack-sets/upload")
+async def upload_attack_set(file: UploadFile = File(...)):
+    """拖拽/选择上传攻击集 .jsonl 文件。
+
+    校验后缀 + 首行可 JSON parse，存到 ATTACKS_DIR。
+    防路径穿越：只取 Path(file.filename).name。
+    """
+    if not file.filename or not file.filename.endswith(".jsonl"):
+        raise HTTPException(status_code=400, detail="文件必须是 .jsonl 格式")
+
+    # 防路径穿越：只取纯文件名
+    safe_name = Path(file.filename).name
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="无效文件名")
+
+    content = await file.read()
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="文件为空")
+
+    # 校验首行可 parse
+    first_line = content.decode("utf-8", errors="replace").split("\n", 1)[0].strip()
+    if first_line:
+        try:
+            json.loads(first_line)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="首行不是有效 JSON（非标准 JSONL 格式）")
+
+    ATTACKS_DIR.mkdir(parents=True, exist_ok=True)
+    dest = ATTACKS_DIR / safe_name
+    dest.write_bytes(content)
+
+    n_records = sum(1 for line in content.decode("utf-8", errors="replace").splitlines() if line.strip())
+    return {
+        "name": safe_name,
+        "size_kb": round(len(content) / 1024, 1),
+        "n_records": n_records,
+    }

@@ -994,9 +994,12 @@ async function loadRunSection() {
     const [sets, tgts] = await Promise.all([api('/api/attack-sets'), api('/api/targets')]);
     const sel = $('evalInput');
     sel.innerHTML = '';
-    sets.files.forEach(f => {
+    (sets.files || []).forEach(f => {
       const opt = document.createElement('option');
-      opt.value = f; opt.textContent = f;
+      // f 可能是字符串（旧格式）或对象 {name, size_kb, mtime, n_records}
+      const name = typeof f === 'string' ? f : f.name;
+      const label = typeof f === 'string' ? f : `${f.name} (${f.n_records}条 ${f.size_kb}KB)`;
+      opt.value = name; opt.textContent = label;
       sel.appendChild(opt);
     });
     // 目标模型下拉（单选，来自 .env TARGETS）
@@ -1032,6 +1035,45 @@ async function loadRunSection() {
     }
     await loadTasks();
   } catch (e) { setStatus('运行控制加载失败: ' + e.message); }
+  setupDropZone();
+}
+
+// 攻击集拖拽上传
+function setupDropZone() {
+  const dz = $('dropZone');
+  if (!dz) return;
+  const fileInput = $('dropFile');
+  const browse = $('dropBrowse');
+
+  function uploadFile(file) {
+    if (!file.name.endsWith('.jsonl')) { setStatus('只支持 .jsonl 文件'); return; }
+    const fd = new FormData();
+    fd.append('file', file);
+    setStatus(`上传中: ${file.name}...`);
+    fetch('/api/attack-sets/upload', { method: 'POST', body: fd })
+      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e)))
+      .then(d => {
+        setStatus(`已导入 ${d.name}（${d.n_records}条 ${d.size_kb}KB）`);
+        loadRunSection(); // 刷新下拉
+      })
+      .catch(e => setStatus(`上传失败: ${e.detail || e.message || e}`));
+  }
+
+  // 拖拽
+  dz.addEventListener('dragover', e => { e.preventDefault(); dz.style.borderColor = 'var(--c-accent)'; });
+  dz.addEventListener('dragleave', () => { dz.style.borderColor = 'var(--c-border)'; });
+  dz.addEventListener('drop', e => {
+    e.preventDefault();
+    dz.style.borderColor = 'var(--c-border)';
+    if (e.dataTransfer.files.length > 0) uploadFile(e.dataTransfer.files[0]);
+  });
+  // 点击选择
+  dz.addEventListener('click', () => fileInput.click());
+  if (browse) browse.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); fileInput.click(); });
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files.length > 0) uploadFile(fileInput.files[0]);
+    fileInput.value = '';
+  });
 }
 
 // 任务完成监听：启动后轮询至终态，自动刷新批次列表与当前页数据

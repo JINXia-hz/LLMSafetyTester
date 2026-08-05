@@ -29,6 +29,7 @@ from sklearn.decomposition import PCA
 
 from llmsec.core import (
     OUTPUT_DIR,
+    PROJECT_ROOT,
     estimate_tokens,
     read_jsonl,
     strip_math_tax,
@@ -801,7 +802,7 @@ def load_and_extract(
     # 加载攻击集
     attack_path = Path(attack_file)
     if not attack_path.is_absolute():
-        attack_path = OUTPUT_DIR / attack_file
+        attack_path = PROJECT_ROOT / attack_file
     if not attack_path.exists():
         raise FileNotFoundError(f"攻击集不存在: {attack_path}")
 
