@@ -58,7 +58,7 @@ class FactorSpec:
 class ObjectiveSpec:
     metric: str = "conv_rounds"
     direction: str = "minimize"     # "minimize" | "maximize"
-    aggregate: str = "mean"         # 跨 repeats 聚合：mean | mean_minus_std
+    aggregate: str = "mean"         # 跨 repeats 聚合：mean | mean_plus_std
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "ObjectiveSpec":
@@ -79,6 +79,10 @@ class StudyConfig:
     space: dict[str, FactorSpec]
     fixed: dict                     # 锁定维度（target/input/CONV_* 等）
     description: str = ""
+    budget_max_wall_minutes: int = 0  # 墙钟硬上限（0=不限）；超时即停，已完成的 config 仍聚合
+    trial_timeout_minutes: int = 30   # 单个 trial 超时（subprocess.run timeout）；超时即杀，标 timeout
+    targets: list = field(default_factory=list)  # 多目标跨模型评估（空=用 fixed.target 单目标）
+    max_concurrent: int = 1           # 跨目标/seed 并发 trial 数（不同目标端点天然可并行）
 
     @classmethod
     def from_dict(cls, d: dict) -> "StudyConfig":
@@ -91,6 +95,19 @@ class StudyConfig:
             if "type" not in v and ("low" in v or "choices" in v):
                 v["type"] = "categorical" if "choices" in v else "float"
             space[k] = FactorSpec.from_dict(v)
+        # int(float(...)) 兼容 "30.5" 这类写法（截断为 30）；非数字报带字段名的清晰错误
+        raw_wall = budget.get("max_wall_minutes", 0)
+        try:
+            wall_minutes = int(float(raw_wall))
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"study 配置 budget.max_wall_minutes 非法：{raw_wall!r}（需为数字分钟数）") from None
+        raw_tt = budget.get("trial_timeout_minutes", 30)
+        try:
+            trial_timeout = int(float(raw_tt))
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"study 配置 budget.trial_timeout_minutes 非法：{raw_tt!r}（需为数字分钟数）") from None
         return cls(
             name=d["name"],
             objective=ObjectiveSpec.from_dict(d.get("objective")),
@@ -101,13 +118,19 @@ class StudyConfig:
             space=space,
             fixed=dict(d.get("fixed", {}) or {}),
             description=d.get("description", ""),
+            budget_max_wall_minutes=wall_minutes,
+            trial_timeout_minutes=trial_timeout,
+            targets=list(d.get("targets", []) or []),
+            max_concurrent=int(d.get("max_concurrent", 1)),
         )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "StudyConfig":
         import yaml
         with open(path, "r", encoding="utf-8") as f:
-            return cls.from_dict(yaml.safe_load(f))
+            cfg = cls.from_dict(yaml.safe_load(f))
+        cfg._source_path = str(path)  # 供 run_study 拷贝配置进 study 目录
+        return cfg
 
 
 def resolve_trial(config: dict) -> tuple[list[str], dict[str, str]]:

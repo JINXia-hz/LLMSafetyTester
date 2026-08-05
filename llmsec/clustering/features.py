@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from llmsec.core.logging import get_logger
 """
 攻击特征提取模块
 
@@ -26,7 +27,6 @@ import numpy as np
 from sklearn.decomposition import PCA
 
 from llmsec.core import (
-    ATTACK_SET_L1_FILE,
     OUTPUT_DIR,
     estimate_tokens,
     read_jsonl,
@@ -35,6 +35,8 @@ from llmsec.core import (
 from llmsec.core.seed import get_global_seed as _global_seed
 from llmsec.params import EMBEDDING_PCA_DIM, TFIDF_FALLBACK_FEATURES
 
+
+logger = get_logger(__name__)
 # ============================================================
 # 工具函数
 # ============================================================
@@ -139,7 +141,7 @@ class _ApiEmbedder:
             if len(batch) <= 1 or depth >= self._max_retries:
                 raise
             backoff = 2 ** depth
-            print(f"  ⚠ embedding 批次失败 (size={len(batch)}): "
+            logger.warning(f"  ⚠ embedding 批次失败 (size={len(batch)}): "
                   f"{type(e).__name__}; 退避 {backoff}s 后减半重试 "
                   f"(depth={depth + 1}/{self._max_retries})")
             time.sleep(backoff)
@@ -189,9 +191,9 @@ def _get_embedding_model():
     降级链：显式 API 配置 → 本地缓存 → HF 镜像/官方 → TF-IDF。
 
     显式配置优先：EMBEDDING_API_BASE/API_KEY/API_MODEL 三项齐全时直接走
-    API embedding（用户显式申请/部署的服务，如内网 bge-m3），探活失败才
-    回落本地缓存。本地缓存优先于 HF 下载——旧逻辑先预检网络，不可达就
-    降级 TF-IDF，即使模型已缓存也永远用不上。
+    API embedding（用户显式申请/部署的服务，如内网 bge-m3），探活失败才回落本地缓存。
+    本地缓存优先于 HF 下载——旧逻辑先预检网络，不可达就降级 TF-IDF，即使模型已缓存
+    也永远用不上。
     """
     global _embedding_model, _embedding_available, _embedding_source
     if _embedding_model is not None or not _embedding_available:
@@ -205,19 +207,19 @@ def _get_embedding_model():
         try:
             embedder = _ApiEmbedder(api_base, api_key, api_model)
             embedder.encode(["ping"], batch_size=1)  # 探活
-            print(f"  [*] 使用 API embedding: {api_model} @ {api_base}")
+            logger.info(f"  [*] 使用 API embedding: {api_model} @ {api_base}")
             _embedding_model = embedder
             _embedding_source = "api"
             return _embedding_model
         except Exception as e:
-            print(f"  ⚠ API embedding 不可用: {e}")
+            logger.warning(f"  ⚠ API embedding 不可用: {e}")
 
     model_name = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
     # 第 1 层：本地缓存（离线可用）
     model = _try_local_cache(model_name)
     if model is not None:
-        print(f"  [*] 加载本地缓存 embedding 模型: {model_name}")
+        logger.info(f"  [*] 加载本地缓存 embedding 模型: {model_name}")
         _embedding_model = model
         _embedding_source = "cache"
         return _embedding_model
@@ -229,16 +231,16 @@ def _get_embedding_model():
         try:
             from sentence_transformers import SentenceTransformer
 
-            print(f"  [*] 加载 embedding 模型: {model_name} (via {host})")
+            logger.info(f"  [*] 加载 embedding 模型: {model_name} (via {host})")
             _embedding_model = SentenceTransformer(model_name)
             _embedding_source = "mirror"
             return _embedding_model
         except Exception as e:
-            print(f"  ⚠ embedding 模型下载/加载失败: {e}")
+            logger.warning(f"  ⚠ embedding 模型下载/加载失败: {e}")
 
     # 第 3 层：TF-IDF 兜底（API 已在第 0 层尝试过，此处不再重复）
-    print("  ⚠ 无可用 embedding 通道（API / 本地缓存 / HF镜像）")
-    print("  🔄 降级为 TF-IDF 文本特征 (无需网络)")
+    logger.warning("  ⚠ 无可用 embedding 通道（API / 本地缓存 / HF镜像）")
+    logger.info("  🔄 降级为 TF-IDF 文本特征 (无需网络)")
     _embedding_available = False
     return None
 
@@ -261,10 +263,10 @@ def extract_text_embeddings(
     """
     model = _get_embedding_model()
     if model is not None:
-        print(f"  [*] 编码 {len(prompts)} 条 prompt ...")
+        logger.info(f"  [*] 编码 {len(prompts)} 条 prompt ...")
         t0 = time.time()
         embeddings = model.encode(prompts, show_progress_bar=False, batch_size=32)
-        print(f"  [*] 编码完成 ({time.time() - t0:.1f}s), 原始维度 {embeddings.shape[1]}")
+        logger.info(f"  [*] 编码完成 ({time.time() - t0:.1f}s), 原始维度 {embeddings.shape[1]}")
 
         # PCA 降维：避免 n-1 过拟合，target_dim 上限固定且随样本数缓慢增长
         # （n=1 时 n-1=0，下限抬到 1：单样本 PCA(n_components=1) 合法）
@@ -273,13 +275,13 @@ def extract_text_embeddings(
         if target_dim < embeddings.shape[1]:
             fit_pca = pca if pca is not None else PCA(n_components=target_dim, random_state=_global_seed())
             reduced = fit_pca.fit_transform(embeddings) if pca is None else fit_pca.transform(embeddings)
-            print(f"  [*] PCA 降维: {embeddings.shape[1]} → {target_dim} "
+            logger.info(f"  [*] PCA 降维: {embeddings.shape[1]} → {target_dim} "
                   f"(解释方差比: {fit_pca.explained_variance_ratio_.sum():.2%})")
             return reduced, None, fit_pca
         return embeddings, None, None
 
     # ---- Fallback: TF-IDF ----
-    print(f"  [*] 使用 TF-IDF 降级方案 (离线)，编码 {len(prompts)} 条 prompt ...")
+    logger.info(f"  [*] 使用 TF-IDF 降级方案 (离线)，编码 {len(prompts)} 条 prompt ...")
     from sklearn.feature_extraction.text import TfidfVectorizer
 
     # 清洗 prompt
@@ -305,7 +307,7 @@ def extract_text_embeddings(
     if dense.shape[1] > target_dim:
         fit_pca = pca if pca is not None else PCA(n_components=target_dim, random_state=_global_seed())
         reduced = fit_pca.fit_transform(dense) if pca is None else fit_pca.transform(dense)
-        print(f"  [*] TF-IDF ({dense.shape[1]}d) → PCA → {target_dim}d "
+        logger.info(f"  [*] TF-IDF ({dense.shape[1]}d) → PCA → {target_dim}d "
               f"(解释方差比: {fit_pca.explained_variance_ratio_.sum():.2%})")
         return reduced, fit_vectorizer, fit_pca
     return dense, fit_vectorizer, None
@@ -520,6 +522,7 @@ def build_prior_features(method: str, record: dict | None = None) -> np.ndarray:
     tokens = [t for t in re.split(r"[_\s\-]+", method) if t]
     import math
 
+
     return np.array([
         float(len(method)),
         float(len(tokens)),
@@ -616,6 +619,33 @@ def extract_defense_features(
 CROSS_MODEL_FEATURE_NAMES: list[str] = []
 
 
+def _empty_extract_result(
+    eval_results: list[dict],
+    embedding_pca_dim: int,
+) -> tuple[dict, dict]:
+    """空方法集的短路返回：与正常路径同构的空结构（不触发 embedding 模型加载）。"""
+    meta = {
+        "method_names": [],
+        "method_to_idx": {},
+        "method_prompts": {},
+        "textual_feature_names": TEXTUAL_FEATURE_NAMES,
+        "technique_label_names": [],
+        "intent_feature_names": INTENT_FEATURE_NAMES,
+        "prior_feature_names": PRIOR_FEATURE_NAMES,
+        "defense_feature_names": DEFENSE_FEATURE_NAMES,
+        "cross_model_feature_names": CROSS_MODEL_FEATURE_NAMES,
+        "has_eval_data": len(eval_results) > 0,
+        "has_embedding": _embedding_source is not None,
+        "embedding_source": _embedding_source,
+        "embedding_artifacts": {
+            "vectorizer": None,
+            "pca": None,
+            "pca_dim": embedding_pca_dim,
+        },
+    }
+    return {}, meta
+
+
 # ============================================================
 # 主入口：提取全部特征
 # ============================================================
@@ -649,51 +679,42 @@ def extract_all_features(
 
     # 空输入短路：返回与正常路径同构的空结构（不触发 embedding 模型加载）
     if not attack_records:
-        meta = {
-            "method_names": [],
-            "method_to_idx": {},
-            "method_prompts": {},
-            "textual_feature_names": TEXTUAL_FEATURE_NAMES,
-            "technique_label_names": [],
-            "intent_feature_names": INTENT_FEATURE_NAMES,
-            "prior_feature_names": PRIOR_FEATURE_NAMES,
-            "defense_feature_names": DEFENSE_FEATURE_NAMES,
-            "cross_model_feature_names": CROSS_MODEL_FEATURE_NAMES,
-            "has_eval_data": len(eval_results) > 0,
-            "has_embedding": _embedding_source is not None,
-            "embedding_source": _embedding_source,
-            "embedding_artifacts": {
-                "vectorizer": None,
-                "pca": None,
-                "pca_dim": embedding_pca_dim,
-            },
-        }
-        print("[特征提取] 0 种攻击方法（空输入）")
-        return {}, meta
+        logger.info("[特征提取] 0 种攻击方法（空输入）")
+        return _empty_extract_result(eval_results, embedding_pca_dim)
 
-    # 按方法分组
+    # 按方法分组（M-33：缺 method 字段的记录跳过，避免整个聚类崩溃——自带攻击集可能缺键）
     method_records = defaultdict(list)
     for r in attack_records:
-        method_records[r["method"]].append(r)
+        m = r.get("method")
+        if not m:
+            continue
+        method_records[m].append(r)
+
+    # M-33：全部记录缺 method（或 method 为空）时过滤后方法集为空——若继续向下走，
+    # extract_text_embeddings 会在 PCA(n_components=..., 0 samples) 处崩 "0 sample(s)"；
+    # 与空输入同样短路返回同构空结构（调用方 runner fit_features 按 0 方法处理，不崩）
+    if not method_records:
+        logger.info(f"[特征提取] 0 种攻击方法（{len(attack_records)} 条记录全部缺 method 字段）")
+        return _empty_extract_result(eval_results, embedding_pca_dim)
 
     methods = sorted(method_records.keys())
     n_methods = len(methods)
     method_to_idx = {m: i for i, m in enumerate(methods)}
 
-    # 每个方法的代表 prompt（取第一条）
-    method_prompts_text = [method_records[m][0]["prompt"] for m in methods]
-    method_prompts_raw = {m: [r["prompt"] for r in method_records[m]] for m in methods}
+    # 每个方法的代表 prompt（取第一条）；prompt 缺失兜底空串
+    method_prompts_text = [method_records[m][0].get("prompt", "") for m in methods]
+    method_prompts_raw = {m: [r.get("prompt", "") for r in method_records[m]] for m in methods}
 
-    print(f"[特征提取] {n_methods} 种攻击方法")
+    logger.info(f"[特征提取] {n_methods} 种攻击方法")
 
     # ---- 维 1: 文本结构 ----
-    print("  维1: 文本结构特征 ...")
+    logger.info("  维1: 文本结构特征 ...")
     textual_feats = {}
     for m in methods:
         textual_feats[m] = extract_textual_features(method_prompts_text[method_to_idx[m]])
 
     # ---- 维 1b: 语义 embedding ----
-    print("  维1b: 语义 embedding ...")
+    logger.info("  维1b: 语义 embedding ...")
     text_embeddings, emb_vectorizer, emb_pca = extract_text_embeddings(
         method_prompts_text, pca_dim=embedding_pca_dim
     )
@@ -704,15 +725,15 @@ def extract_all_features(
         embedding_feats[m] = text_embeddings[idx]
 
     # ---- 维 2: 技术多标签 ----
-    print("  维2: 技术多标签 ...")
+    logger.info("  维2: 技术多标签 ...")
     technique_feats, technique_label_names = extract_technique_labels(attack_records)
 
     # ---- 维 3: 意图与对抗强度 ----
-    print("  维3: 意图与对抗强度 ...")
+    logger.info("  维3: 意图与对抗强度 ...")
     intent_feats = extract_intent_features(methods, method_prompts_raw, text_embeddings, method_to_idx)
 
     # ---- 维 4: 防御交互 ----
-    print("  维4: 防御交互 ...")
+    logger.info("  维4: 防御交互 ...")
     defense_feats = extract_defense_features(methods, eval_results)
 
     # ---- 维 5: 跨模型 (占位，未来有多模型评估数据后启用) ----
@@ -757,7 +778,7 @@ def extract_all_features(
         },
     }
 
-    print(f"[特征提取] 完成: {n_methods} 种方法 × 7 个特征块（5 块进入聚类度量）")
+    logger.info(f"[特征提取] 完成: {n_methods} 种方法 × 7 个特征块（5 块进入聚类度量）")
     return features, meta
 
 
@@ -780,16 +801,12 @@ def load_and_extract(
     # 加载攻击集
     attack_path = Path(attack_file)
     if not attack_path.is_absolute():
-        # 兼容旧名 攻击集_L1.jsonl → output/attacks/l1.jsonl
-        if attack_file in ("攻击集_L1.jsonl", "attacks/l1.jsonl", "l1.jsonl"):
-            attack_path = ATTACK_SET_L1_FILE
-        else:
-            attack_path = OUTPUT_DIR / attack_file
+        attack_path = OUTPUT_DIR / attack_file
     if not attack_path.exists():
         raise FileNotFoundError(f"攻击集不存在: {attack_path}")
 
     records = read_jsonl(attack_path)
-    print(f"[加载] {len(records)} 条攻击记录")
+    logger.info(f"[加载] {len(records)} 条攻击记录")
 
     # 加载评估结果
     eval_results = []
@@ -815,8 +832,8 @@ def load_and_extract(
 
     if result_path and result_path.exists():
         eval_results = read_jsonl(result_path)
-        print(f"[加载] {len(eval_results)} 条评估结果")
+        logger.info(f"[加载] {len(eval_results)} 条评估结果")
     else:
-        print("[加载] 无评估结果 — 防御交互特征将为零向量")
+        logger.info("[加载] 无评估结果 — 防御交互特征将为零向量")
 
     return extract_all_features(records, eval_results)

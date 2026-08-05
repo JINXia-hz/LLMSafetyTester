@@ -10,7 +10,7 @@
     from llmsec.evaluation import ELOTracker
 
     tracker = ELOTracker()
-    tracker.load(STATE_FILE)
+    tracker = derive_elo(ResultsMatrix.load(), "model-name")
     analysis = analyze_clusters(tracker)
 """
 
@@ -28,12 +28,26 @@ from llmsec.core.config import (
     OUTPUT_DIR,
 )
 from llmsec.core.io import read_json, write_json
+from llmsec.core.logging import get_logger
 from llmsec.evaluation.elo import ELOTracker
+from llmsec.params import (
+
+    CLUSTER_BLIND_SPOT_ELO_MARGIN,
+    CLUSTER_BLIND_SPOT_MAX_COVERAGE,
+    CLUSTER_HIGH_RISK_ELO_MARGIN,
+    CLUSTER_HIGH_RISK_MIN_SUCCESS,
+    CLUSTER_STABLE_MAX_ELO_STD,
+    CLUSTER_STABLE_MIN_COVERAGE,
+)
+
 
 
 # ============================================================
 # 数据加载
 # ============================================================
+
+logger = get_logger(__name__)
+
 def load_cluster_artifacts(path: Path | str | None = None) -> dict | None:
     """加载聚类产物 pickle（cluster_result.pkl，完整 schema）。"""
     if path is None:
@@ -43,7 +57,8 @@ def load_cluster_artifacts(path: Path | str | None = None) -> dict | None:
         return None
     try:
         return joblib.load(path)
-    except Exception:
+    except (EOFError, ValueError, ImportError) as e:
+        logger.error("聚类 artifacts 加载失败（%s）: %s", path, e)
         return None
 
 
@@ -154,7 +169,7 @@ def analyze_clusters(
     for method, cid in labels.items():
         try:
             cid = int(cid)
-        except Exception:
+        except (ValueError, TypeError):
             cid = -1
         clusters[cid].append(method)
 
@@ -182,13 +197,13 @@ def analyze_clusters(
 
     for cid_str, detail in cluster_details.items():
         # 高风险：高成功率 + 接近或高于边界
-        if detail["mean_success_rate"] >= 0.5 and detail["mean_elo"] >= defender_elo - 100:
+        if detail["mean_success_rate"] >= CLUSTER_HIGH_RISK_MIN_SUCCESS and detail["mean_elo"] >= defender_elo - CLUSTER_HIGH_RISK_ELO_MARGIN:
             high_risk.append(cid_str)
         # 盲区：测试覆盖低 + 平均 Elo 接近边界
-        elif detail["test_coverage"] < 0.5 and abs(detail["mean_elo"] - defender_elo) <= 150:
+        elif detail["test_coverage"] < CLUSTER_BLIND_SPOT_MAX_COVERAGE and abs(detail["mean_elo"] - defender_elo) <= CLUSTER_BLIND_SPOT_ELO_MARGIN:
             blind_spots.append(cid_str)
         # 稳定：覆盖足够 + 方差低
-        elif detail["test_coverage"] >= 0.5 and detail["elo_std"] <= 100:
+        elif detail["test_coverage"] >= CLUSTER_STABLE_MIN_COVERAGE and detail["elo_std"] <= CLUSTER_STABLE_MAX_ELO_STD:
             stable.append(cid_str)
 
     analysis = {
@@ -213,8 +228,29 @@ def analyze_clusters(
         svd_summary = build_svd_ridge_summary(tracker)
         if svd_summary:
             analysis["svd_ridge"] = svd_summary
-    except Exception:
-        pass
+        else:
+            # 诊断：模型未训练时记录原因，便于排查（不再静默丢失）
+            pred = getattr(tracker, "predictor", None)
+            model = getattr(pred, "model", None) if pred else None
+            gt_n = pred.ground_truth_count() if pred else 0
+            if model is None or model.w is None:
+                feats = pred.artifacts.get("features", {}) if pred and pred.artifacts else {}
+                gt_all = sorted(pred.ground_truth.keys()) if pred else []
+                gt_in_feats = [m for m in gt_all if m in feats]
+                stale = len(gt_all) - len(gt_in_feats)
+                if stale > 0:
+                    reason = f"GT {gt_n} 中 {stale} 个方法不在当前特征集（跨攻击集 stale 污染），可用 {len(gt_in_feats)}"
+                elif not feats:
+                    reason = "特征缓存为空（extract_all_features 可能失败）"
+                elif gt_n < (pred.min_cluster_size if pred else 3):
+                    reason = f"GT 数 {gt_n} 不足（min_cluster_size={pred.min_cluster_size if pred else 3}）"
+                else:
+                    reason = f"GT {gt_n} 但模型未训练（原因未知）"
+                analysis["svd_ridge_skipped"] = reason
+                logger.warning("SVD-Ridge 诊断跳过: %s", reason)
+    except Exception as e:
+        logger.warning("SVD-Ridge 诊断生成失败: %s", e, exc_info=True)
+        analysis["svd_ridge_error"] = str(e)
 
     return analysis
 
@@ -320,15 +356,27 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    from llmsec.core.config import STATE_FILE
+    # M-31：R 矩阵为唯一真相——经 elo_access 统一入口派生，不再直读易漂移的 state.json。
+    # 旧实现只读 state.json：只有 results.json 的部署会用全初始 Elo 生成"所有簇都是盲区"
+    # 的误导性分析并落盘。
+    from llmsec.core.results import ResultsMatrix
+    from llmsec.evaluation.elo_access import active_model
+    from llmsec.evaluation.elo import derive_elo
 
-    tracker = ELOTracker()
-    tracker.load(STATE_FILE)
 
-    analysis = analyze_clusters(tracker, defender_name=args.defender)
+    R = ResultsMatrix.load()
+    model = args.defender or active_model()
+    if model is None or not R.model_column(model):
+        logger.warning("⚠ 结果矩阵 R 无任何模型数据（请先跑评估）。聚类安全分析需真实 Elo，"
+              "以下为空分析。")
+        tracker = ELOTracker()
+    else:
+        tracker = derive_elo(R, model)
+
+    analysis = analyze_clusters(tracker, defender_name=model or args.defender)
     out_path = save_cluster_analysis(analysis, args.output)
-    print(f"聚类安全分析已保存: {out_path}")
-    print(f"  簇数: {analysis.get('n_clusters', 0)}")
-    print(f"  高风险簇: {analysis.get('high_risk_clusters', [])}")
-    print(f"  盲区簇: {analysis.get('blind_spot_clusters', [])}")
-    print(f"  稳定簇: {analysis.get('stable_clusters', [])}")
+    logger.info(f"聚类安全分析已保存: {out_path}")
+    logger.info(f"  簇数: {analysis.get('n_clusters', 0)}")
+    logger.info(f"  高风险簇: {analysis.get('high_risk_clusters', [])}")
+    logger.info(f"  盲区簇: {analysis.get('blind_spot_clusters', [])}")
+    logger.info(f"  稳定簇: {analysis.get('stable_clusters', [])}")

@@ -14,7 +14,7 @@
     predictor = ClusterEloPredictor()
     predictor.update_ground_truth("DAN", 1650)
     predictor.fit(attack_records, eval_results, force=True)
-    elo_info = predictor.predict("新攻击", record={"prompt": "...", "category": "..."})
+    elo_info = predictor.predict("新攻击")
 """
 
 import hashlib
@@ -29,8 +29,6 @@ import joblib
 import numpy as np
 
 from llmsec.clustering import (
-    CLUSTER_RESULT_FILE,
-    FEATURE_CACHE_FILE,
     extract_all_features,
     extract_intent_features,
     extract_textual_features,
@@ -45,16 +43,69 @@ from llmsec.clustering.features import (
     _strip_variant_suffix,
     build_prior_features,
 )
+from llmsec.core import config
 from llmsec.core.config import INITIAL_ELO
+from llmsec.core.io import save_artifact
 from llmsec.core.logging import get_logger
 from llmsec.core.seed import get_global_seed as _global_seed
 from llmsec.params import (
+
     RIDGE_DEGENERATE_COL_EPS,
+    RIDGE_N_FOLDS,
     RIDGE_PRED_STD_CAP_MIN,
     RIDGE_PRED_STD_CAP_MULT,
 )
 
+
+# 特征提取代码版本：提取逻辑 / 特征块结构变更时 +1，使旧特征缓存与 ridge w 失效（M-5/M-6）
+FEATURE_EXTRACTION_VERSION = 1
+
+
+
 logger = get_logger(__name__)
+
+def current_feature_config_hash() -> str:
+    """当前特征空间配置指纹（md5[:8]）。
+
+    内容 = (embedding 来源/模型, EMBEDDING_PCA_DIM, 特征提取代码版本)。
+    任一变化都意味着旧特征缓存与旧 ridge 权重不可复用；
+    fit_features 把它写入 artifacts['meta']，runner 用它做特征缓存失效判断（M-6）。
+    """
+    from llmsec import params
+    from llmsec.clustering import features as _feat
+
+    source = _feat._embedding_source  # None=尚未提取过（或 TF-IDF 兜底）
+    if source == "api":
+        model = os.environ.get("EMBEDDING_API_MODEL", "")
+    else:
+        model = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+    content = (
+        f"{source or 'tfidf'}:{model}"
+        f"|pca_dim={params.EMBEDDING_PCA_DIM}"
+        f"|v{FEATURE_EXTRACTION_VERSION}"
+    )
+    return hashlib.md5(content.encode("utf-8")).hexdigest()[:8]
+
+
+# M-17：FEATURE_CACHE_FILE / CLUSTER_RESULT_FILE 运行时经 config 动态读取（runner
+# work-dir 重绑 _cfg.FEATURE_CACHE_FILE 后即生效，见 pipeline/runner.py 隔离模式）。
+# 下方模块级别名仅为兼容旧代码/测试的按属性 patch 而保留（取值见 _cluster_files）。
+FEATURE_CACHE_FILE = config.FEATURE_CACHE_FILE
+CLUSTER_RESULT_FILE = config.CLUSTER_RESULT_FILE
+_IMPORT_TIME_PATHS = (config.FEATURE_CACHE_FILE, config.CLUSTER_RESULT_FILE)
+
+
+def _cluster_files() -> tuple[Path, Path]:
+    """返回 (feature_cache_file, cluster_result_file)。
+
+    默认动态读 core.config；模块级别名被外部 patch（旧测试兼容路径）时以 patch 值为准。
+    """
+    fc, cr = config.FEATURE_CACHE_FILE, config.CLUSTER_RESULT_FILE
+    if FEATURE_CACHE_FILE != _IMPORT_TIME_PATHS[0]:
+        fc = FEATURE_CACHE_FILE
+    if CLUSTER_RESULT_FILE != _IMPORT_TIME_PATHS[1]:
+        cr = CLUSTER_RESULT_FILE
+    return fc, cr
 
 
 class EloPredictorModel:
@@ -71,7 +122,7 @@ class EloPredictorModel:
 
     BLOCK_ORDER = ("textual", "embedding", "technique", "intent", "prior")
 
-    def __init__(self, lambda_candidates=None, n_folds: int = 5):
+    def __init__(self, lambda_candidates=None, n_folds: int = RIDGE_N_FOLDS):
         self.lambda_candidates = (
             np.logspace(-3, 4, 24) if lambda_candidates is None else lambda_candidates
         )
@@ -256,6 +307,10 @@ class EloPredictorModel:
             residuals = y_c - X_scaled @ self.w
             self.sigma2 = float(np.mean(residuals**2))
 
+        # M-7：σ² 下限——GT Elo 全相同时 σ²=0 → std=0、confidence=1.0（"绝对确定"的
+        # 零宽 CI），冷启动早期会误导 infogain 采样的不确定性项。有上限封顶却无下限。
+        self.sigma2 = max(self.sigma2, 1e-6)
+
         # 有效自由度 df(λ) = Σ σᵢ²/(σᵢ²+λ)：Ridge 收缩后的有效维度
         self.effective_df = float(np.sum(S**2 / (S**2 + self.lambda_opt))) if S.size else 0.0
 
@@ -349,10 +404,10 @@ class ClusterEloPredictor:
 
     def __init__(
         self,
-        threshold: int = 10,
+        ridge_refit_threshold: int = 10,
         min_cluster_size: int = 3,
     ):
-        self.threshold = threshold
+        self.ridge_refit_threshold = ridge_refit_threshold
         self.min_cluster_size = min_cluster_size
 
         # ground truth 库：只记录真实评估过的方法（由 ELOTracker 统一持久化到 state.json）
@@ -368,6 +423,9 @@ class ClusterEloPredictor:
         self.last_predictions: dict[str, dict] = {}
         # 模型缓存：ground truth 未变时复用 w，避免每轮重跑 K-Fold
         self._model_gt_hash: str | None = None
+        # 特征空间签名（M-5：方法集合 + 特征维度 + feature_config_hash），
+        # 特征重提取后旧 w 不得复用——原缓存只看 GT 指纹，换特征空间后 w 静默错位
+        self._model_feature_sig: str | None = None
         self._model_cv_gt_count: int = 0  # 上次完整 K-Fold 时的 GT 数
 
         self._load_artifacts()
@@ -382,11 +440,16 @@ class ClusterEloPredictor:
     def _load_artifacts(self):
         """从磁盘恢复特征缓存（features/meta 供 ridge / D-optimal 使用）。
 
-        优先读 feature_cache.pkl；缺失则回退 cluster_result.pkl（同样含 features）。
+        优先读 cluster_result.pkl（labels 只存在于此文件）；缺失则回退
+        feature_cache.pkl 取 features（无 labels，见 M-4）。
         聚类拟合元信息（last_fit_gt_count/last_fit_at）从 cluster_result.pkl 恢复。
         """
         self.artifacts = None
-        for p in (FEATURE_CACHE_FILE, CLUSTER_RESULT_FILE):
+        feature_cache_file, cluster_result_file = _cluster_files()
+        # M-4：优先读 cluster_result.pkl——labels 只存在于此文件；feature_cache.pkl 含
+        # features 但无 labels。原顺序先读 feature_cache，重启后 cluster_id 恒 -1、
+        # get_status() 显示 n_clusters=0。cluster_result 缺失才回退 feature_cache 取 features。
+        for p in (cluster_result_file, feature_cache_file):
             if p.exists():
                 try:
                     a = joblib.load(p)
@@ -398,9 +461,9 @@ class ClusterEloPredictor:
                     logger.warning("加载 %s 失败: %s", p.name, e)
 
         # 拟合元信息从聚类结果文件恢复（决定是否触发重聚类）
-        if CLUSTER_RESULT_FILE.exists():
+        if cluster_result_file.exists():
             try:
-                cr = joblib.load(CLUSTER_RESULT_FILE)
+                cr = joblib.load(cluster_result_file)
                 self.last_fit_gt_count = int(
                     cr.get("ground_truth_count", self.last_fit_gt_count)
                 )
@@ -409,12 +472,12 @@ class ClusterEloPredictor:
                 pass
 
     def _save_artifacts(self):
-        """保存先验特征缓存到 feature_cache.pkl（仅 feature_cache 形态）。"""
+        """保存先验特征缓存到 feature_cache.pkl（仅 feature_cache 形态，原子写）。"""
         if self.artifacts is None:
             return
         self.artifacts.pop("dist_matrix", None)  # 不保存完整距离矩阵
-        os.makedirs(os.path.dirname(FEATURE_CACHE_FILE) or ".", exist_ok=True)
-        joblib.dump(self.artifacts, FEATURE_CACHE_FILE)
+        feature_cache_file, _ = _cluster_files()
+        save_artifact(feature_cache_file, self.artifacts)
 
     # ============================================================
     # ground truth 管理
@@ -451,6 +514,21 @@ class ClusterEloPredictor:
         )
         return hashlib.md5(content.encode("utf-8")).hexdigest()
 
+    def _feature_space_signature(self, features: dict, meta: dict) -> str:
+        """特征空间签名（M-5）：方法集合 hash + 各特征块维度 + feature_config_hash。
+
+        特征重提取（embedding 来源 / PCA 维数 / 提取代码版本变化）后签名改变，
+        ridge 缓存的 w 不再复用——原缓存只看 GT 指纹，换特征空间后 w 与 X 静默错位。
+        """
+        method_hash = _compute_method_set_hash(sorted(features))
+        sample = next(iter(features.values()), {})
+        dims = ",".join(
+            f"{b}:{np.atleast_1d(np.asarray(sample.get(b, []))).shape[0]}"
+            for b in EloPredictorModel.BLOCK_ORDER
+        )
+        fch = meta.get("feature_config_hash", "")
+        return hashlib.md5(f"{method_hash}|{dims}|{fch}".encode("utf-8")).hexdigest()
+
     # ============================================================
     # 前置特征缓存 / D-optimality 种子 / 最终聚类（post-test）
     # ============================================================
@@ -468,6 +546,8 @@ class ClusterEloPredictor:
 
         logger.info("🧩 前置特征缓存: 总方法记录 %d 条", len(attack_records))
         features, meta = extract_all_features(attack_records, eval_results=[])
+        # M-6：特征配置指纹写入 meta，供 runner 缓存失效判断与 ridge 特征签名使用
+        meta["feature_config_hash"] = current_feature_config_hash()
 
         self.artifacts = {
             "schema_version": 1,
@@ -542,7 +622,6 @@ class ClusterEloPredictor:
     def predict(
         self,
         method: str,
-        record: dict | None = None,
     ) -> dict:
         """
         单方法兜底预测（SVD-Ridge 不可用时的降级链；批量预测请用 predict_batch）。
@@ -642,10 +721,14 @@ class ClusterEloPredictor:
         gt_count = self.ground_truth_count()
         features = self.artifacts.get("features", {}) if self.artifacts else {}
         gt_methods = sorted(self.ground_truth.keys())
+        # 过滤掉不在当前特征集中的 GT 方法（跨攻击集 resume 时的 stale GT 污染）：
+        # 旧攻击集的方法残留在 ground_truth 里但不在当前特征集，若不过滤会让
+        # use_model 永远 False，导致 SVD-Ridge 模型永远不训练（50/58 GT 可用时也被
+        # 8 个 stale 方法一票否决）。只拿有特征的 GT 训练，数量够就正常训练。
+        gt_in_features = [m for m in gt_methods if m in features]
         use_model = (
-            gt_count >= self.min_cluster_size
+            len(gt_in_features) >= self.min_cluster_size
             and bool(features)
-            and all(m in features for m in gt_methods)
         )
 
         results: dict[str, dict] = {}
@@ -656,7 +739,7 @@ class ClusterEloPredictor:
                 logger.warning("SVD-Ridge 批量预测失败，回退到变体平均: %s", e)
 
         if not results:
-            results = {m: self.predict(m, method_records.get(m)) for m in methods}
+            results = {m: self.predict(m) for m in methods}
 
         self.last_predictions = results
         return results
@@ -670,7 +753,9 @@ class ClusterEloPredictor:
         """SVD-Ridge 批量预测主流程：训练 → 预测均值/方差 → 组装结果。"""
         meta = self.artifacts.get("meta", {}) if self.artifacts else {}
         labels = self.artifacts.get("labels", {}) if self.artifacts else {}
-        gt_methods = sorted(self.ground_truth.keys())
+        # 只用有特征的 GT 方法训练（防 stale GT 污染：跨攻击集 resume 时旧方法
+        # 残留在 ground_truth 但不在当前特征集）
+        gt_methods = sorted(m for m in self.ground_truth.keys() if m in features)
 
         # 为缺失特征的未测方法批量提取特征（复用训练时的 vectorizer/PCA 保证同一特征空间）
         missing = [m for m in methods if m not in features]
@@ -694,17 +779,28 @@ class ClusterEloPredictor:
             "prior": PRIOR_FEATURE_NAMES,
         }
 
-        # 模型缓存：GT 未变 → 直接复用 w（纯矩阵预测）；
+        # 模型缓存：GT 未变且特征空间签名未变 → 直接复用 w（纯矩阵预测）；
         # GT 小幅增长 → 用现有 λ* 单次 SVD 快速 refit；
-        # GT 增长 ≥ threshold → 重跑 K-Fold 选 λ
+        # GT 增长 ≥ threshold 或特征空间变化（M-5）→ 重跑 K-Fold 选 λ
         gt_hash = self._ground_truth_hash()
         gt_count = self.ground_truth_count()
-        if self.model.w is not None and gt_hash == self._model_gt_hash:
+        feat_sig = self._feature_space_signature(features, meta)
+        feature_space_changed = (
+            self._model_feature_sig is not None and feat_sig != self._model_feature_sig
+        )
+        if feature_space_changed:
+            logger.info("特征空间已变化（重提取/配置变更），SVD-Ridge 不复用旧 w，重新训练")
+        if (
+            self.model.w is not None
+            and not feature_space_changed
+            and gt_hash == self._model_gt_hash
+        ):
             logger.info("SVD-Ridge 复用缓存模型 (ground truth %d 未变)", gt_count)
         elif (
             self.model.w is not None
+            and not feature_space_changed
             and self.model.lambda_opt is not None
-            and 0 < gt_count - self._model_cv_gt_count < self.threshold
+            and 0 < gt_count - self._model_cv_gt_count < self.ridge_refit_threshold
         ):
             self.model.fit(
                 train_features, self.ground_truth, feature_name_blocks,
@@ -716,6 +812,7 @@ class ClusterEloPredictor:
             self.model.fit(train_features, self.ground_truth, feature_name_blocks)
             self._model_cv_gt_count = gt_count
         self._model_gt_hash = gt_hash
+        self._model_feature_sig = feat_sig
 
         means, variances = self.model.predict(test_features, methods)
 
@@ -788,7 +885,7 @@ class ClusterEloPredictor:
     ) -> dict | None:
         """
         攻击完成后最终聚类（post-test）：
-        弱监督特征加权（真实 GT 反应）→ 阻尼白化 → HDBSCAN + single-linkage 树
+        弱监督特征加权（真实 GT 反应）→ 阻尼白化 → HDBSCAN + Ward 树
         → 关键层 auto-k → 全簇命名 → ANOVA/Kruskal 簇效验证。
         后验特征仅用于画像与验证，不进入度量。
 
@@ -822,7 +919,14 @@ class ClusterEloPredictor:
             write=True,
         )
 
-        self.artifacts = joblib.load(CLUSTER_RESULT_FILE)
+        # M-30：方法数 <2（如 2 条记录同属 1 方法）时 hdb 提前返回 error 且不写文件。
+        # 此时不能无条件 joblib.load——新环境 FileNotFoundError，旧环境会把上次运行的
+        # 产物当本次结果。优雅返回 None（run_attack_phase 已处理 None 分支）。
+        _, cluster_result_file = _cluster_files()
+        if not report or report.get("error") or not cluster_result_file.exists():
+            logger.warning("聚类未产出（方法数不足或写入失败），跳过 artifacts 加载")
+            return None
+        self.artifacts = joblib.load(cluster_result_file)
         self.artifacts["schema_version"] = 1
         self.artifacts["kind"] = "cluster_result"
         self.artifacts["is_final_cluster"] = True
@@ -834,8 +938,7 @@ class ClusterEloPredictor:
         self.last_fit_gt_count = self.ground_truth_count()
         self.last_fit_at = datetime.now().isoformat()
         # 写回聚类结果文件（不走 _save_artifacts——那会把聚类结果错投进 feature_cache）
-        os.makedirs(os.path.dirname(CLUSTER_RESULT_FILE) or ".", exist_ok=True)
-        joblib.dump(self.artifacts, CLUSTER_RESULT_FILE)
+        save_artifact(cluster_result_file, self.artifacts)
 
         rv = report.get("reaction_validation", {})
         logger.info(
@@ -965,8 +1068,8 @@ class ClusterEloPredictor:
             "predicted_count": len(self.last_predictions),
             "last_fit_gt_count": self.last_fit_gt_count,
             "last_fit_at": self.last_fit_at,
-            "next_fit_at_gt_count": (
-                self.last_fit_gt_count + self.threshold if self.last_fit_gt_count else self.min_cluster_size
+            "next_kfold_at_gt_count": (
+                self.last_fit_gt_count + self.ridge_refit_threshold if self.last_fit_gt_count else self.min_cluster_size
             ),
             "n_clusters": n_clusters,
             "n_noise": n_noise,
@@ -989,6 +1092,7 @@ def _compute_method_set_hash(methods: list[str]) -> str:
 if __name__ == "__main__":
     import argparse
 
+
     parser = argparse.ArgumentParser(description="聚类 Elo 预测器状态")
     parser.add_argument(
         "--status",
@@ -1000,20 +1104,20 @@ if __name__ == "__main__":
     if args.status:
         predictor = ClusterEloPredictor()
         status = predictor.get_status()
-        print("=" * 60)
-        print("📊 ClusterEloPredictor 状态")
-        print("=" * 60)
-        print(f"  ground truth 方法数: {status['ground_truth_count']}")
-        print(f"  预测缓存方法数: {status['predicted_count']}")
-        print(f"  上次训练 ground truth 数: {status['last_fit_gt_count']}")
-        print(f"  上次训练时间: {status['last_fit_at'] or '未训练'}")
-        print(f"  下次触发训练需 ≥: {status['next_fit_at_gt_count']} 个 ground truth")
-        print(f"  当前簇数: {status['n_clusters']}")
-        print(f"  噪声点数: {status['n_noise']}")
+        logger.info("=" * 60)
+        logger.info("📊 ClusterEloPredictor 状态")
+        logger.info("=" * 60)
+        logger.info(f"  ground truth 方法数: {status['ground_truth_count']}")
+        logger.info(f"  预测缓存方法数: {status['predicted_count']}")
+        logger.info(f"  上次训练 ground truth 数: {status['last_fit_gt_count']}")
+        logger.info(f"  上次训练时间: {status['last_fit_at'] or '未训练'}")
+        logger.info(f"  下次触发 K-Fold 需 ≥: {status['next_kfold_at_gt_count']} 个 ground truth")
+        logger.info(f"  当前簇数: {status['n_clusters']}")
+        logger.info(f"  噪声点数: {status['n_noise']}")
         if status["cluster_names"]:
-            print("  簇名称:")
+            logger.info("  簇名称:")
             for cid, name in sorted(status["cluster_names"].items(), key=lambda x: int(x[0])):
-                print(f"    簇 {cid}: {name}")
-        print("=" * 60)
+                logger.info(f"    簇 {cid}: {name}")
+        logger.info("=" * 60)
     else:
         parser.print_help()

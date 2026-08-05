@@ -24,6 +24,8 @@ core.results — 结果矩阵 R（唯一真相存储）
 from __future__ import annotations
 
 import logging
+import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
@@ -32,6 +34,52 @@ from llmsec.core.io import CorruptedFileError, read_json, write_json
 
 _logger = logging.getLogger(__name__)
 _SCHEMA_VERSION = 1
+
+
+@contextmanager
+def _file_lock(filepath: Path, timeout: float = 10.0):
+    """跨进程文件锁（Windows msvcrt / Unix fcntl），保护 results.json 并发写。
+
+    dashboard 与实验框架可能并发写全局 R，此锁串行化 save()，防交替写损坏。
+    锁文件 = filepath + '.lock'；超时获取不到则放行（best-effort，不阻塞评估）。
+    """
+    import time
+    lock_path = Path(str(filepath) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "a+b")
+    acquired = False
+    deadline = time.time() + timeout
+    try:
+        while time.time() < deadline:
+            try:
+                if sys.platform == "win32":
+                    import msvcrt
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    acquired = True
+                    break
+                else:
+                    import fcntl
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+            except (OSError, IOError):
+                time.sleep(0.05)
+        yield  # 拿到锁（或超时放行）后执行临界区
+    finally:
+        try:
+            if acquired:
+                if sys.platform == "win32":
+                    import msvcrt
+                    try:
+                        fh.seek(0)
+                        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    except OSError:
+                        pass
+                else:
+                    import fcntl
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
 
 
 @dataclass
@@ -157,7 +205,16 @@ class ResultsMatrix:
 
     def ordered_results(self, model: str) -> list[MatchResult]:
         """该模型列按 ts 升序的结果——Elo 回放的时序输入。"""
-        return sorted(self.model_column(model).values(), key=lambda r: (r.ts is None, r.ts))
+        # M/robustness：ts 可能混有 int/str（旧迁移数据），裸比较抛 TypeError。
+        # 数字 ts 数值序在前，非数字按字符串序在后，None 永远最后。
+        def _key(r: "MatchResult"):
+            t = r.ts
+            if t is None:
+                return (2, 0)
+            if isinstance(t, (int, float)):
+                return (0, float(t))
+            return (1, str(t))
+        return sorted(self.model_column(model).values(), key=_key)
 
     # ---------- 持久化 ----------
     def save(self, filepath: str | Path | None = None) -> Path:
@@ -172,7 +229,9 @@ class ResultsMatrix:
                 for m, col in self._r.items()
             },
         }
-        write_json(filepath, data, backup=True)
+        # 跨进程锁：dashboard 与实验并发写全局 R 时串行化（防交替写损坏）
+        with _file_lock(filepath):
+            write_json(filepath, data, backup=True)
         return filepath
 
     @classmethod
@@ -211,33 +270,6 @@ class ResultsMatrix:
                     self_ts = 0
                 if self_ts > mat._ins_order:
                     mat._ins_order = int(self_ts)
-        return mat
-
-    @classmethod
-    def migrate_from_legacy_state(
-        cls,
-        state_file: str | Path,
-        method_catalog: list[str] | None = None,
-    ) -> "ResultsMatrix":
-        """
-        从旧版单防御方 state.json 抽取历史结果，迁移进 R 矩阵作为种子数据。
-
-        旧 state.json 的 history 是 [{attacker, defender, eval_score, ...}]，
-        无 status/ts——按出现顺序作为 ts，eval_score 派生粗粒度 status。
-        保留这批已花费 API 成本的真实结果，Elo 由新机制（derive_elo）重算。
-        """
-        data = read_json(state_file)
-        if not data:
-            return cls(methods=method_catalog or [])
-        mat = cls(methods=method_catalog or [])
-        for idx, h in enumerate(data.get("history", []), start=1):
-            method = h.get("attacker")
-            model = h.get("defender")
-            score = h.get("eval_score")
-            if method is None or model is None or score is None:
-                continue
-            status = _coarse_status(score)
-            mat.upsert(method, model, float(score), status=status, ts=idx)
         return mat
 
     # ---------- 诊断 ----------

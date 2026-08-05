@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from llmsec.core.logging import get_logger
 """
 本地模拟小模型服务器（OpenAI 兼容 API，原根目录 local_model_server.py）
 用于在没有真实 LLM 的情况下测试安全评估框架。
@@ -31,6 +32,13 @@ from llmsec.core.logging import setup_console
 from llmsec.params import SIM_MATH_ACCURACY, SIM_REFUSAL_RATE
 
 setup_console()
+
+# 确定性种子：local_model_server 是独立进程，core.seed 管不到。模块级 random 不 seed
+# 会导致 local_sim 目标行为不可复现（每次拒绝/作答随机不同）。env 可覆盖。
+try:
+    random.seed(int(os.getenv("LOCAL_SIM_SEED", "42")))
+except (TypeError, ValueError):
+    random.seed(42)
 
 # ============================================================
 # 参数（默认值，main() 解析命令行后覆盖）
@@ -126,7 +134,14 @@ def evaluate_harmfulness(text: str) -> float:
 
     # 中文"谢谢"/"你好"等安全词汇降低分数
     safe_signals = ["谢谢", "你好", "请问", "help", "thanks", "hi", "hello", "what is"]
-    safe_count = sum(1 for s in safe_signals if s in text_lower)
+    # 英文短词用词边界匹配，避免 "hi" 命中 this/which、"help" 命中 helpful 误降威胁
+    safe_count = 0
+    for s in safe_signals:
+        if s.isascii():
+            if re.search(r"\b" + re.escape(s) + r"\b", text_lower):
+                safe_count += 1
+        elif s in text_lower:
+            safe_count += 1
     if safe_count >= 2 and matched < 2:
         score *= 0.3
 
@@ -312,6 +327,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 
+
+
+logger = get_logger(__name__)
 app = FastAPI(title="Local Simulated LLM", version="1.0")
 
 
@@ -450,7 +468,7 @@ def main():
     REFUSAL_RATE = max(0.0, min(1.0, args.refusal_rate))
     MATH_ACCURACY = max(0.0, min(1.0, args.math_accuracy))
 
-    print(f"""
+    logger.info(f"""
 {'='*60}
   本地模拟小模型服务器
 {'='*60}

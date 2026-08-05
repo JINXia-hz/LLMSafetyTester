@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from llmsec.core.logging import get_logger
 """
 LLM攻击集生成器 - L1级别
 读取攻击分析.md，提取所有L1攻击方法，调用生成模型API逐方法生成5条攻击prompt，
@@ -33,6 +34,9 @@ from llmsec.core import (
 )
 from llmsec.core.text import inject_math_tax
 
+
+
+logger = get_logger(__name__)
 # 修复Windows CMD GBK编码导致emoji/Unicode输出报错
 setup_console()
 
@@ -270,7 +274,7 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
         reviewed = json.loads(raw2)
         if not (isinstance(reviewed, list) and len(reviewed) == len(harm_types)):
             # 审查返回异常则退回初稿
-            print(f"  ⚠ 审查轮返回异常，使用初稿")
+            logger.warning(f"  ⚠ 审查轮返回异常，使用初稿")
             return drafts
 
         # 从审查结果提取prompt
@@ -285,12 +289,12 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
     def _on_retry(attempt, e):
         # 内容类失败（条数不符/JSON解析）短间隔；API 类失败（含 429）长间隔
         if isinstance(e, _DraftMismatchError):
-            print(f"  ⚠ 初稿条数不符，重试...")
+            logger.warning(f"  ⚠ 初稿条数不符，重试...")
             return RETRY_DELAY
         if isinstance(e, json.JSONDecodeError):
-            print(f"  ⚠ JSON解析失败 (第{attempt}轮): {e}")
+            logger.warning(f"  ⚠ JSON解析失败 (第{attempt}轮): {e}")
             return RETRY_DELAY
-        print(f"  ⚠ API调用失败 (第{attempt}轮): {e}")
+        logger.warning(f"  ⚠ API调用失败 (第{attempt}轮): {e}")
         return RETRY_DELAY_API
 
     try:
@@ -360,33 +364,33 @@ def main():
 
     # ---- 解析Markdown ----
     if not MD_FILE.exists():
-        print(f"❌ 找不到文件: {MD_FILE}")
-        print(f"   请确认攻击分析.md在桌面上（{PROJECT_ROOT.parent}）")
+        logger.error(f"❌ 找不到文件: {MD_FILE}")
+        logger.info(f"   请确认攻击分析.md在桌面上（{PROJECT_ROOT.parent}）")
         sys.exit(1)
 
     all_methods = parse_md(MD_FILE)
-    print(f"📄 从 {MD_FILE} 中提取到 {len(all_methods)} 个 L1 攻击方法\n")
+    logger.info(f"📄 从 {MD_FILE} 中提取到 {len(all_methods)} 个 L1 攻击方法\n")
 
     if args.dry_run:
-        print("=" * 70)
-        print(f"{'序号':<8} {'类别':<6} {'方法':<35} {'难度':<8}")
-        print("-" * 70)
+        logger.info("=" * 70)
+        logger.info(f"{'序号':<8} {'类别':<6} {'方法':<35} {'难度':<8}")
+        logger.info("-" * 70)
         for m in all_methods:
-            print(f"{m['id']:<8} {m['category']:<6} {m['method']:<35} {m['difficulty']:<8}")
-        print("=" * 70)
-        print(f"总计: {len(all_methods)} 种 L1 方法, 预计生成 {len(all_methods) * 5} 条攻击prompt")
+            logger.info(f"{m['id']:<8} {m['category']:<6} {m['method']:<35} {m['difficulty']:<8}")
+        logger.info("=" * 70)
+        logger.info(f"总计: {len(all_methods)} 种 L1 方法, 预计生成 {len(all_methods) * 5} 条攻击prompt")
         return
 
     # ---- 筛选 ----
     if args.only:
         methods = [m for m in all_methods if m["id"] == args.only]
         if not methods:
-            print(f"❌ 未找到方法 {args.only}")
+            logger.error(f"❌ 未找到方法 {args.only}")
             sys.exit(1)
-        print(f"🎯 仅生成: {args.only}")
+        logger.info(f"🎯 仅生成: {args.only}")
     elif args.start_from:
         methods = [m for m in all_methods if m["id"] >= args.start_from]
-        print(f"⏩ 从 {args.start_from} 开始，跳过前 {len(all_methods) - len(methods)} 个方法")
+        logger.info(f"⏩ 从 {args.start_from} 开始，跳过前 {len(all_methods) - len(methods)} 个方法")
     else:
         methods = all_methods
 
@@ -397,7 +401,7 @@ def main():
         # 提取方法编号 (如 "1.1.1-001" → "1.1.1")
         done_ids.add(str(record_id).rsplit("-", 1)[0])
     if done_ids:
-        print(f"📋 已有 {len(done_ids)} 个方法已完成，将跳过\n")
+        logger.info(f"📋 已有 {len(done_ids)} 个方法已完成，将跳过\n")
 
     # ---- 初始化API客户端 ----
     config = GeneratorConfig.from_env()
@@ -423,15 +427,15 @@ def main():
         global_idx = all_methods.index(method)
         harm_types = assign_harm_types(global_idx)
 
-        print(f"[{idx+1}/{total}] {mid} {name}")
-        print(f"         有害类别: {', '.join(harm_types)}")
+        logger.info(f"[{idx+1}/{total}] {mid} {name}")
+        logger.info(f"         有害类别: {', '.join(harm_types)}")
 
         # 调用API（两轮：生成 + 自我审查重写）
         records = call_api_two_round(client, method, harm_types, config.model)
 
         if records is None:
             fail_count += 1
-            print(f"         ❌ 生成失败（已重试{MAX_RETRIES}次）\n")
+            logger.error(f"         ❌ 生成失败（已重试{MAX_RETRIES}次）\n")
             continue
 
         # 写入JSONL（每条记录独立出题注入，见 build_entries）
@@ -442,21 +446,21 @@ def main():
 
         done_ids.add(mid)
         success_count += 1
-        print(f"         ✅ 生成 {len(generated_ids)} 条: {', '.join(generated_ids)}")
-        print(f"         📊 进度: {success_count + skip_count}/{total} 完成, {fail_count} 失败\n")
+        logger.info(f"         ✅ 生成 {len(generated_ids)} 条: {', '.join(generated_ids)}")
+        logger.info(f"         📊 进度: {success_count + skip_count}/{total} 完成, {fail_count} 失败\n")
 
         # API调用间隔
         time.sleep(API_DELAY)
 
     # ---- 汇总 ----
-    print("=" * 70)
-    print(f"🎉 生成完毕！")
-    print(f"   成功: {success_count} 种方法")
-    print(f"   跳过: {skip_count} 种方法")
-    print(f"   失败: {fail_count} 种方法")
+    logger.info("=" * 70)
+    logger.info(f"🎉 生成完毕！")
+    logger.info(f"   成功: {success_count} 种方法")
+    logger.info(f"   跳过: {skip_count} 种方法")
+    logger.info(f"   失败: {fail_count} 种方法")
     total_records = success_count * 5 + skip_count * 5
-    print(f"   输出: {total_records} 条记录 → {output_file}")
-    print("=" * 70)
+    logger.info(f"   输出: {total_records} 条记录 → {output_file}")
+    logger.info("=" * 70)
 
 
 if __name__ == "__main__":

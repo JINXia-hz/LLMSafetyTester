@@ -14,11 +14,13 @@
 
 from abc import ABC, abstractmethod
 from collections import defaultdict
+import warnings
 
 import numpy as np
 
 from llmsec.evaluation.elo import ELOTracker
 from llmsec.params import (
+    ELO_SCALE,
     SAMPLER_COORD_MIN_PER_CLUSTER,
     SAMPLER_HYBRID_EXPLORE_ROUNDS,
     SAMPLER_INFOGAIN_ALPHA,
@@ -36,17 +38,14 @@ class AttackSampler(ABC):
     def set_cluster_info(
         self,
         cluster_report: dict | None = None,
-        cluster_artifacts: dict | None = None,
     ):
         """
         注入聚类信息。子类可选择是否使用。
 
         参数:
             cluster_report: 聚类报告 dict（含 method_labels）
-            cluster_artifacts: joblib 加载的 cluster artifacts dict
         """
         self.cluster_report = cluster_report or {}
-        self.cluster_artifacts = cluster_artifacts or {}
 
     @abstractmethod
     def select(
@@ -120,15 +119,18 @@ class InfoGainSampler(AttackSampler):
 
     对每个候选方法打分：
         score = gap
-                + alpha * uncertainty
+                - alpha * uncertainty
                 + beta  * cluster_visit_count[cluster_id]
-                - gamma * success_rate
+                - gamma * success_potential
 
     分值越低越优先。兼顾：
     - 接近 defender 边界（信息量大）
     - 测试次数少 / 结果方差大（需要探索）
     - 簇覆盖（避免扎堆同一类攻击）
-    - 历史成功率高（优先可能突破的方向）
+    - 成功潜力高（优先可能突破的方向）：已测方法取历史成功率；
+      未测方法历史成功率恒 0（gamma 曾是死参数，M-10），改用 Elo 期望胜率
+      E = 1 / (1 + 10^(-(att_pred - def) / ELO_SCALE))（注入的预测 attacker Elo
+      对 defender Elo），预测强于 defender 的方法更可能突破、更优先。
     """
 
     def __init__(
@@ -166,16 +168,26 @@ class InfoGainSampler(AttackSampler):
             att_elo = tracker.get_attacker_elo(method)
             gap = abs(att_elo - def_elo)
             uncertainty = tracker.get_attacker_uncertainty(method)
-            success_rate = tracker.get_attacker_success_rate(method)
             cid = self._method_to_cluster(method)
             visit_count = self.cluster_visit_count.get(cid, 0)
 
+            # 成功潜力（M-10）：已测方法用历史成功率；未测方法 get_attacker_success_rate
+            # 恒 0（候选池恒为未测时 gamma 是死参数），改用 Elo 期望胜率
+            # E = 1/(1 + 10^(-(att-def)/ELO_SCALE)) 估计突破概率。
+            n_tests = tracker.attacker_stats.get(method, {}).get("n_matches", 0)
+            if n_tests > 0:
+                success_potential = tracker.get_attacker_success_rate(method)
+            else:
+                success_potential = 1.0 / (1.0 + 10.0 ** (-(att_elo - def_elo) / ELO_SCALE))
+
             score = (
                 gap
-                + self.alpha * uncertainty
+                - self.alpha * uncertainty
                 + self.beta * visit_count
-                - self.gamma * success_rate
+                - self.gamma * success_potential
             )
+            # 分值越低越优先：gap 小（近边界）、uncertainty 大（需要探索，M-10 修正符号）、
+            # 簇访问少（簇覆盖）、成功潜力高（可能突破）→ 均使 score 变小。
             scored.append((score, method, cid))
 
         scored.sort(key=lambda x: x[0])
@@ -229,7 +241,7 @@ class CoordinateDescentSampler(AttackSampler):
             cid = labels.get(m, -1)
             try:
                 cid = int(cid)
-            except Exception:
+            except (ValueError, TypeError):
                 cid = -1
             if cid != -1:
                 clusters.add(cid)
@@ -352,13 +364,44 @@ class HybridSampler(AttackSampler):
     def __init__(
         self,
         explore_rounds: int = SAMPLER_HYBRID_EXPLORE_ROUNDS,
-        info_gain_alpha: float = SAMPLER_INFOGAIN_ALPHA,
-        info_gain_beta: float = SAMPLER_INFOGAIN_BETA,
-        info_gain_gamma: float = SAMPLER_INFOGAIN_GAMMA,
+        info_gain_alpha: float | None = None,
+        info_gain_beta: float | None = None,
+        info_gain_gamma: float | None = None,
         coordinate_min_tests_per_method: int = 1,
         coordinate_min_tests_per_cluster: int = SAMPLER_COORD_MIN_PER_CLUSTER,
         **kwargs,
     ):
+        # M-8：runner/build_sampler 统一传 alpha/beta/gamma（InfoGain 的口径名），
+        # 这里接受为 info_gain_* 的别名，否则落入 **kwargs 被静默丢弃 → 默认 hybrid
+        # 下三个采样权重 CLI/HPO 注入完全失效（--sampler infogain 时却正常，行为割裂）
+        # 两个名字同时传时别名会静默胜出，让调用方误以为 info_gain_* 生效——必须告警
+        if "alpha" in kwargs:
+            if info_gain_alpha is not None:
+                warnings.warn(
+                    f"HybridSampler 同时收到 info_gain_alpha 与 alpha，别名 alpha={kwargs['alpha']} 胜出",
+                    stacklevel=2,
+                )
+            info_gain_alpha = kwargs.pop("alpha")
+        if "beta" in kwargs:
+            if info_gain_beta is not None:
+                warnings.warn(
+                    f"HybridSampler 同时收到 info_gain_beta 与 beta，别名 beta={kwargs['beta']} 胜出",
+                    stacklevel=2,
+                )
+            info_gain_beta = kwargs.pop("beta")
+        if "gamma" in kwargs:
+            if info_gain_gamma is not None:
+                warnings.warn(
+                    f"HybridSampler 同时收到 info_gain_gamma 与 gamma，别名 gamma={kwargs['gamma']} 胜出",
+                    stacklevel=2,
+                )
+            info_gain_gamma = kwargs.pop("gamma")
+        if info_gain_alpha is None:
+            info_gain_alpha = SAMPLER_INFOGAIN_ALPHA
+        if info_gain_beta is None:
+            info_gain_beta = SAMPLER_INFOGAIN_BETA
+        if info_gain_gamma is None:
+            info_gain_gamma = SAMPLER_INFOGAIN_GAMMA
         super().__init__(**kwargs)
         self.explore_rounds = explore_rounds
         self._round_count = 0
@@ -377,11 +420,10 @@ class HybridSampler(AttackSampler):
     def set_cluster_info(
         self,
         cluster_report: dict | None = None,
-        cluster_artifacts: dict | None = None,
     ):
-        super().set_cluster_info(cluster_report, cluster_artifacts)
-        self._info_sampler.set_cluster_info(cluster_report, cluster_artifacts)
-        self._coord_sampler.set_cluster_info(cluster_report, cluster_artifacts)
+        super().set_cluster_info(cluster_report)
+        self._info_sampler.set_cluster_info(cluster_report)
+        self._coord_sampler.set_cluster_info(cluster_report)
 
     def reset(self):
         self._round_count = 0
@@ -422,7 +464,6 @@ SAMPLER_REGISTRY = {
 def build_sampler(
     name: str,
     cluster_report: dict | None = None,
-    cluster_artifacts: dict | None = None,
     **kwargs,
 ) -> AttackSampler:
     """
@@ -431,7 +472,6 @@ def build_sampler(
     参数:
         name: "gap" | "infogain" | "coordinate" | "hybrid"
         cluster_report: 聚类报告，供需要簇信息的采样器使用
-        cluster_artifacts: 聚类 artifacts
         **kwargs: 采样器特定参数
     """
     name = name.lower()
@@ -439,5 +479,5 @@ def build_sampler(
         raise ValueError(f"未知采样器: {name}，可用: {list(SAMPLER_REGISTRY.keys())}")
 
     sampler = SAMPLER_REGISTRY[name](**kwargs)
-    sampler.set_cluster_info(cluster_report, cluster_artifacts)
+    sampler.set_cluster_info(cluster_report)
     return sampler

@@ -10,10 +10,38 @@ const C = {
 const PLOT_CFG = { responsive: true, displayModeBar: false };
 const PLOT_FONT = { family: 'ui-sans-serif, system-ui, sans-serif', color: C.text };
 
-// Plotly 默认白底与册页米白卡片冲突：统一透明底（一层包装，业务代码无需逐个改）
+// ---------- 主题（绢本纸日 / 石窟夜色） ----------
+const THEME_CHART = {
+  light: { text: '#2F343B', grid: '#E3D8B8', primary: '#46586B', muted: '#8A8571' },
+  dark:  { text: '#E4D8BE', grid: '#454D55', primary: '#7A96AF', muted: '#9A917B' },
+};
+let theme = localStorage.getItem('llmsec-theme') || 'light';
+
+function tangLayout() {
+  const t = THEME_CHART[theme];
+  const axis = { gridcolor: t.grid, zerolinecolor: t.grid };
+  return {
+    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    font: { family: PLOT_FONT.family, color: t.text },
+    xaxis: axis, yaxis: { ...axis },
+    polar: { bgcolor: 'rgba(0,0,0,0)', radialaxis: axis, angularaxis: axis },
+  };
+}
+
+// Plotly 统一走绢本金碧主题模板（深合并，业务 layout 的 xaxis/yaxis 不会被底色覆盖）
 const _newPlot = Plotly.newPlot.bind(Plotly);
-Plotly.newPlot = (id, traces, layout = {}, cfg) =>
-  _newPlot(id, traces, { paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)', ...layout }, cfg);
+Plotly.newPlot = (id, traces, layout = {}, cfg) => {
+  const base = tangLayout();
+  const merged = {
+    ...base, ...layout,
+    font: { ...base.font, ...(layout.font || {}) },
+    xaxis: { ...base.xaxis, ...(layout.xaxis || {}) },
+    yaxis: { ...base.yaxis, ...(layout.yaxis || {}) },
+    polar: layout.polar ? { ...base.polar, ...layout.polar } : undefined,
+  };
+  if (!layout.polar) delete merged.polar;
+  return _newPlot(id, traces, merged, cfg);
+};
 
 // 匾额等级印章：等级 → 印字
 const SEAL_CHARS = { safe: '安', allergic: '警', vulnerable: '伤', broken: '破', inconclusive: '?' };
@@ -27,6 +55,7 @@ function setBanner(level) {
 
 let currentRun = '';           // '' = 最新
 let activeSection = 'overview';
+let lastOverview = null;       // 最近一次总览数据（批次对比用）
 const loaded = {};             // section -> 已加载的 run
 
 const $ = id => document.getElementById(id);
@@ -73,29 +102,53 @@ function loadSection(name) {
 }
 function invalidate() { for (const k in loaded) delete loaded[k]; loadSection(activeSection); }
 
+// ---------- 主题切换（依赖 $ 与 invalidate，定义于此） ----------
+function applyTheme(t, rerender = true) {
+  theme = t;
+  localStorage.setItem('llmsec-theme', t);
+  document.documentElement.dataset.theme = t === 'dark' ? 'dark' : '';
+  const tc = THEME_CHART[t];
+  PLOT_FONT.color = tc.text;
+  C.primary = tc.primary; C.muted = tc.muted;   // 图表系列色随主题微调
+  $('themeBtn').textContent = t === 'dark' ? '☀️ 纸日' : '🌙 夜色';
+  if (rerender) invalidate();                    // 重绘当前板块图表
+}
+$('themeBtn').addEventListener('click', () => applyTheme(theme === 'dark' ? 'light' : 'dark'));
+
 // ---------- 运行批次 ----------
 async function loadRuns() {
   const data = await api('/api/runs');
   const sel = $('runSelect');
   sel.innerHTML = '<option value="">最新</option>';
+  const cmp = $('cmpSelect');
+  // 占位空项：默认不选中任何批次，避免"未选择"分支成死代码
+  cmp.innerHTML = '<option value="">选择对比批次…</option>';
   data.runs.forEach(r => {
     const opt = document.createElement('option');
     opt.value = r.name;
-    opt.textContent = r.name + (r.has_report ? '' : ' (无报告)');
+    // 富化条目：印字等级 + 目标模型 + ASR，一眼分辨批次质量（option 纯文本，无法上色）
+    opt.textContent = r.has_report
+      ? `${SEAL_CHARS[r.security_level] || '▫'} ${r.name} · ${r.target_model || '?'} · ASR ${fmtPct(r.asr)}`
+      : `${r.name} (无报告)`;
     sel.appendChild(opt);
+    cmp.appendChild(opt.cloneNode(true));   // 批次对比下拉共用同一清单
   });
+  // 任务完成后列表会重建：保留用户已选批次，避免被弹回"最新"
+  if (currentRun && [...sel.options].some(o => o.value === currentRun)) sel.value = currentRun;
 }
 $('runSelect').addEventListener('change', e => { currentRun = e.target.value; invalidate(); });
 $('refreshBtn').addEventListener('click', async () => { await loadRuns(); invalidate(); });
 
 // ---------- 总览 ----------
 async function loadOverview() {
+  loadTrend();   // 趋势是跨批次全局数据，与当前批次无关，独立加载独立失败
   try {
     const d = await api('/api/overview' + runQuery());
     if (!d.available) {
+      lastOverview = null;
       setBanner('inconclusive');
       $('ov_target').textContent = '目标模型: -';
-      $('ov_verdict').textContent = '暂无运行数据';
+      $('ov_verdict').textContent = d.message || '暂无运行数据';
       $('ov_recommendation').textContent = '';
       ['ov_asr', 'ov_fpr', 'ov_boundary', 'ov_conf', 'ov_tested', 'ov_above', 'ov_tax']
         .forEach(id => { $(id).textContent = '-'; });
@@ -104,10 +157,14 @@ async function loadOverview() {
       return;
     }
     const level = d.security_level || 'inconclusive';
+    lastOverview = d;
+    if (cmpActive) renderCompare();   // 切批次后对比面板"当前"列同步重渲染
     setBanner(level);
     $('ov_target').textContent = `目标模型: ${d.target_model || '-'}  ·  批次 ${d.run}`;
     $('ov_verdict').textContent = d.overall_verdict || level.toUpperCase();
     $('ov_recommendation').textContent = d.recommendation ? '💡 ' + d.recommendation : '';
+    // stale_report 提示：存在更新批次时展示；切回最新批次（无 message）时清除旧文案
+    setStatus(d.message || '');
 
     $('ov_asr').textContent = fmtPct(d.asr);
     $('ov_fpr').textContent = fmtPct(d.fpr);
@@ -163,6 +220,182 @@ async function loadOverview() {
   } catch (e) { setStatus('总览加载失败: ' + e.message); }
 }
 
+// ---------- 安全趋势（跨批次，/api/trend） ----------
+let trendTarget = '';          // '' = 全部目标
+let trendTargetCounts = {};    // {target: 批次数}，仅在"全部"视图时从完整数据统计
+async function loadTrend() {
+  const el = $('chart_trend');
+  if (!el) return;
+  try {
+    const d = await api('/api/trend' + (trendTarget ? '?target=' + encodeURIComponent(trendTarget) : ''));
+    // "全部"视图时统计各目标批次数（供 chip 标签显示）
+    if (!trendTarget) {
+      trendTargetCounts = {};
+      (d.trend || []).forEach(p => {
+        trendTargetCounts[p.target] = (trendTargetCounts[p.target] || 0) + 1;
+      });
+    }
+    // 目标过滤 chips：有目标时始终渲染（含"全部"按钮），不再因选中后 targets 缩为 1 而消失
+    const chips = $('trendTargets');
+    chips.innerHTML = '';
+    const allTargets = d.targets || [];
+    if (allTargets.length > 0) {
+      const mk = (val, label) => {
+        const b = document.createElement('button');
+        b.className = 'btn text-xs ' + (trendTarget === val ? 'btn-primary' : 'btn-plain');
+        b.textContent = label;
+        b.onclick = () => { trendTarget = val; loadTrend(); };
+        chips.appendChild(b);
+      };
+      mk('', '全部');
+      allTargets.forEach(t => {
+        const n = trendTargetCounts[t] || 0;
+        mk(t, n > 0 ? `${t} (${n})` : t);
+      });
+    }
+    const pts = d.trend || [];
+    if (!pts.length) {
+      $('trendMeta').textContent = '';
+      el.innerHTML = '<div class="text-xs py-8 text-center" style="color: var(--c-muted);">暂无带报告的批次，趋势无从谈起</div>';
+      return;
+    }
+    $('trendMeta').textContent = `（${pts.length} 个批次 · 全局数据，不随批次切换）`;
+    // 按目标分组：每目标两条 trace——ELO 实线（左轴）+ ASR 点线（右轴）
+    // target 为 null 的批次归入"未知目标"，避免分组键/trace 名出现 'null'
+    const byTarget = {};
+    pts.forEach(p => { const k = p.target || '未知目标'; (byTarget[k] = byTarget[k] || []).push(p); });
+    const traces = [];
+    Object.entries(byTarget).forEach(([t, arr], i) => {
+      const color = CLUSTER_COLORS[i % CLUSTER_COLORS.length];
+      arr.sort((a, b) => (a.run < b.run ? -1 : 1));
+      const xs = arr.map(p => p.run);
+      traces.push({
+        x: xs, y: arr.map(p => p.elo), type: 'scatter', mode: 'lines+markers',
+        name: `${t} · ELO`, line: { color, width: 2 }, marker: { size: 6, color },
+        hovertemplate: '%{x}<br>ELO %{y:.0f}<extra>' + esc(t) + '</extra>',
+      });
+      traces.push({
+        x: xs, y: arr.map(p => p.asr), type: 'scatter', mode: 'lines+markers',
+        name: `${t} · ASR`, yaxis: 'y2',
+        line: { color, width: 1.5, dash: 'dot' }, marker: { size: 5, symbol: 'circle-open', color },
+        hovertemplate: '%{x}<br>ASR %{y:.1%}<extra>' + esc(t) + '</extra>',
+      });
+    });
+    Plotly.newPlot('chart_trend', traces, {
+      margin: { t: 10 }, height: 320, font: PLOT_FONT,
+      xaxis: { tickangle: -30, tickfont: { size: 10 } },
+      yaxis: { title: 'ELO' },
+      yaxis2: { overlaying: 'y', side: 'right', tickformat: '.0%', title: 'ASR', range: [0, 1] },
+      legend: { orientation: 'h', y: -0.32, font: { size: 10 } },
+    }, PLOT_CFG);
+  } catch (e) { $('trendMeta').textContent = '（趋势加载失败）'; }
+}
+
+// ---------- 批次对比 ----------
+let cmpActive = false;
+$('cmpBtn').addEventListener('click', () => {
+  cmpActive = !cmpActive;
+  $('cmpPanel').classList.toggle('hidden', !cmpActive);
+  $('cmpSelect').classList.toggle('hidden', !cmpActive);
+  $('cmpHint').classList.toggle('hidden', !cmpActive);
+  $('cmpBtn').className = 'btn text-xs ' + (cmpActive ? 'btn-accent' : 'btn-plain');
+  if (cmpActive) renderCompare();
+});
+$('cmpSelect').addEventListener('change', renderCompare);
+
+function cmpRow(name, cur, oth, delta, goodWhenDown, suffix = '') {
+  let cls = 'cmp-delta-flat', txt = '—';
+  if (delta != null && Math.abs(delta) > 1e-9) {
+    const good = goodWhenDown ? delta < 0 : delta > 0;
+    cls = good ? 'cmp-delta-up-good' : 'cmp-delta-up-bad';
+    txt = (delta > 0 ? '+' : '') + delta + suffix;
+  }
+  return `<tr><td>${name}</td><td>${cur}</td><td>${oth}</td><td class="${cls}">${txt}</td></tr>`;
+}
+
+async function renderCompare() {
+  const other = $('cmpSelect').value;
+  if (!other || !lastOverview || !lastOverview.available) {
+    if (!other) { $('cmpTable').innerHTML = '<span class="text-xs" style="color: var(--c-muted);">选择一个对比批次</span>'; clearCharts(['chart_cmp_radar']); }
+    return;
+  }
+  if (lastOverview.run === other) {
+    $('cmpTable').innerHTML = '<span class="text-xs" style="color: var(--c-muted);">与当前批次相同，换个批次试试</span>';
+    clearCharts(['chart_cmp_radar']);
+    return;
+  }
+  try {
+    const o = await api('/api/overview?run=' + encodeURIComponent(other));
+    if (!o.available) { $('cmpTable').innerHTML = '<span class="text-xs" style="color: var(--c-muted);">该批次无总览数据</span>'; return; }
+    const a = lastOverview;
+
+    // 雷达叠加：当前=石青，对比=土红
+    const r = a.radar;
+    Plotly.newPlot('chart_cmp_radar', [
+      { type: 'scatterpolar', r: [...r.values, r.values[0]], theta: [...r.labels, r.labels[0]],
+        fill: 'toself', fillcolor: 'rgba(70,88,107,0.15)', name: a.run,
+        line: { color: C.primary, width: 2 }, marker: { size: 5, color: C.primary } },
+      { type: 'scatterpolar', r: [...o.radar.values, o.radar.values[0]], theta: [...o.radar.labels, o.radar.labels[0]],
+        fill: 'toself', fillcolor: 'rgba(168,91,67,0.12)', name: o.run,
+        line: { color: C.accent, width: 2, dash: 'dot' }, marker: { size: 5, color: C.accent } },
+    ], {
+      polar: { radialaxis: { range: [0, 1], tickformat: '.0%', tickfont: { size: 10 } } },
+      margin: { t: 24, b: 24, l: 62, r: 62 }, font: PLOT_FONT,
+      showlegend: true, legend: { orientation: 'h', y: -0.12, font: { size: 10 } },
+    }, PLOT_CFG);
+
+    // 增量表（红=变差，绿=变好）
+    const pctD = (x, y) => (x == null || y == null) ? null : +(((y - x) * 100).toFixed(1));
+    const numD = (x, y) => (x == null || y == null) ? null : +(y - x).toFixed(1);
+    $('cmpTable').innerHTML = `<table>
+      <tr><th>指标</th><th>当前 ${esc(a.run)}</th><th>对比 ${esc(o.run)}</th><th>Δ</th></tr>
+      ${cmpRow('ASR 攻击成功率', fmtPct(a.asr), fmtPct(o.asr), pctD(a.asr, o.asr), true, '%')}
+      ${cmpRow('FPR 误杀率', fmtPct(a.fpr), fmtPct(o.fpr), pctD(a.fpr, o.fpr), true, '%')}
+      ${cmpRow('ELO 安全边界', fmtNum(a.boundary_elo, 0), fmtNum(o.boundary_elo, 0), numD(a.boundary_elo, o.boundary_elo), false)}
+      ${cmpRow('边界置信度', fmtPct(a.boundary_confidence), fmtPct(o.boundary_confidence), pctD(a.boundary_confidence, o.boundary_confidence), false, '%')}
+      ${cmpRow('已测方法', `${a.total_tested}/${a.total_methods}`, `${o.total_tested}/${o.total_methods}`, numD(a.total_tested, o.total_tested), false)}
+      ${cmpRow('边界以上威胁', a.methods_above_boundary, o.methods_above_boundary, numD(a.methods_above_boundary, o.methods_above_boundary), true)}
+    </table>`;
+  } catch (e) { $('cmpTable').innerHTML = '<span class="text-xs">对比加载失败: ' + esc(e.message) + '</span>'; }
+}
+
+// ---------- 威胁表格：点击表头排序 ----------
+let threatRows = [];
+let threatSort = { key: 'elo', dir: -1 };   // 默认 ELO 降序
+const THREAT_KEY = { elo: t => t.elo ?? -Infinity, asr: t => t.asr ?? -Infinity, tax: t => t.mean_jailbreak_tax ?? -Infinity, tested: t => t.tested ? 1 : 0 };
+
+function renderThreatTable() {
+  const tbody = $('threatTable');
+  tbody.innerHTML = '';
+  const get = THREAT_KEY[threatSort.key];
+  const rows = [...threatRows].sort((a, b) => (get(a) - get(b)) * threatSort.dir);
+  rows.forEach(t => {
+    const tr = document.createElement('tr');
+    tr.style.borderTop = '1px solid #E3D8B8';
+    const badge = t.tested
+      ? '<span class="badge badge-gt">实测</span>'
+      : '<span class="badge badge-pred">预测</span>';
+    const ci = t.ci95 ? `[${fmtNum(t.ci95[0], 0)}, ${fmtNum(t.ci95[1], 0)}]` : '-';
+    tr.innerHTML = `<td class="py-2 pr-4 font-mono text-xs">${esc(t.method)}</td>
+      <td class="py-2 pr-4 font-semibold">${fmtNum(t.elo)}</td>
+      <td class="py-2 pr-4">${t.asr != null ? fmtPct(t.asr) : '-'}</td>
+      <td class="py-2 pr-4">${t.mean_jailbreak_tax != null ? fmtNum(t.mean_jailbreak_tax, 2) : '-'}</td>
+      <td class="py-2 pr-4">${badge}</td><td class="py-2 text-xs">${ci}</td>`;
+    tbody.appendChild(tr);
+  });
+  document.querySelectorAll('#sec-threats th[data-sort]').forEach(th => {
+    th.classList.toggle('sort-asc', th.dataset.sort === threatSort.key && threatSort.dir === 1);
+    th.classList.toggle('sort-desc', th.dataset.sort === threatSort.key && threatSort.dir === -1);
+  });
+}
+document.querySelectorAll('#sec-threats th[data-sort]').forEach(th => {
+  th.addEventListener('click', () => {
+    const k = th.dataset.sort;
+    threatSort = threatSort.key === k ? { key: k, dir: -threatSort.dir } : { key: k, dir: -1 };
+    renderThreatTable();
+  });
+});
+
 // ---------- 威胁看板 ----------
 async function loadThreats() {
   try {
@@ -175,6 +408,18 @@ async function loadThreats() {
       return;
     }
 
+    // 防御方当前 ELO 描金参考线：威胁条与防御边界的相对位置一目了然
+    const defEntries = Object.entries(elo.round_defender_elos || {});
+    let defShapes = [], defAnno = [];
+    if (defEntries.length && defEntries[0][1].length) {
+      const dv = defEntries[0][1];
+      const curElo = dv[dv.length - 1];
+      defShapes = [{ type: 'line', x0: curElo, x1: curElo, yref: 'paper', y0: 0, y1: 1,
+                     line: { color: C.gold, width: 1.5, dash: 'dash' } }];
+      defAnno = [{ x: curElo, y: 1, yref: 'paper', text: '防御方 ELO', showarrow: false,
+                   xanchor: 'left', yanchor: 'bottom', font: { size: 10, color: C.gold } }];
+    }
+
     const top = (d.top_threats || []).slice(0, 10);
     Plotly.newPlot('chart_top_threats', [{
       y: top.map(t => t.method).reverse(),
@@ -183,7 +428,8 @@ async function loadThreats() {
       text: top.map(t => fmtNum(t.elo, 0)).reverse(), textposition: 'auto',
       marker: { color: top.map(t => t.tested ? C.warn : C.muted).reverse() },
     }], { margin: { t: 10 }, height: 380, font: PLOT_FONT,
-          xaxis: { title: 'ELO（红=实测，灰=预测）' } }, PLOT_CFG);
+          xaxis: { title: 'ELO（红=实测，灰=预测）' },
+          shapes: defShapes, annotations: defAnno }, PLOT_CFG);
 
     // 收敛曲线
     const series = Object.entries(elo.round_defender_elos || {});
@@ -197,23 +443,9 @@ async function loadThreats() {
             xaxis: { title: '轮次' }, yaxis: { title: `防御方 ELO（${name}）` } }, PLOT_CFG);
     }
 
-    // 威胁表格
-    const tbody = $('threatTable');
-    tbody.innerHTML = '';
-    (d.top_threats || []).forEach(t => {
-      const tr = document.createElement('tr');
-      tr.style.borderTop = '1px solid #E3D8B8';
-      const badge = t.tested
-        ? '<span class="badge badge-gt">实测</span>'
-        : '<span class="badge badge-pred">预测</span>';
-      const ci = t.ci95 ? `[${fmtNum(t.ci95[0], 0)}, ${fmtNum(t.ci95[1], 0)}]` : '-';
-      tr.innerHTML = `<td class="py-2 pr-4 font-mono text-xs">${esc(t.method)}</td>
-        <td class="py-2 pr-4 font-semibold">${fmtNum(t.elo)}</td>
-        <td class="py-2 pr-4">${t.asr != null ? fmtPct(t.asr) : '-'}</td>
-        <td class="py-2 pr-4">${t.mean_jailbreak_tax != null ? fmtNum(t.mean_jailbreak_tax, 2) : '-'}</td>
-        <td class="py-2 pr-4">${badge}</td><td class="py-2 text-xs">${ci}</td>`;
-      tbody.appendChild(tr);
-    });
+    // 威胁表格（数据入缓存，交给可排序渲染器）
+    threatRows = d.top_threats || [];
+    renderThreatTable();
 
     // 防御强项
     const dl = $('defenseList');
@@ -248,6 +480,9 @@ async function loadReport() {
       body.innerHTML = '<div class="card text-sm" style="color: var(--c-muted);">该批次没有 security_report.md</div>';
       return;
     }
+    // 原始 .md 下载（打印美化交给浏览器打印）
+    nav.innerHTML = `<a href="/api/report/download${runQuery()}" class="block px-2 py-1 mb-2 rounded text-xs font-semibold text-center"
+      style="border: 1px solid var(--c-gold); color: var(--c-gold);">⬇ 下载报告 (.md)</a>`;
     // 按 ## 分段
     const chunks = d.markdown.split(/^## /m);
     const head = chunks[0];
@@ -258,7 +493,7 @@ async function loadReport() {
       const title = nl > 0 ? chunk.slice(0, nl).trim() : chunk.trim();
       const content = nl > 0 ? chunk.slice(nl + 1) : '';
       const anchor = `rep-${i}`;
-      nav.innerHTML += `<a href="#${anchor}" class="block px-2 py-1 rounded hover:bg-stone-100" style="color: var(--c-primary);">${esc(title)}</a>`;
+      nav.innerHTML += `<a href="#${anchor}" class="rep-link block px-2 py-1 rounded hover:bg-stone-100" style="color: var(--c-primary);">${esc(title)}</a>`;
       const div = document.createElement('div');
       div.className = 'card report-body';
       div.id = anchor;
@@ -290,6 +525,7 @@ async function loadProjection(method) {
       y: pts.map(p => p.y),
       type: 'scatter', mode: 'markers',
       name: cid === '-1' ? '噪声' : pts[0].cluster_name,
+      customdata: pts.map(p => p.cluster),   // 点选联动簇卡片用
       marker: {
         size: 9,
         color: CLUSTER_COLORS[i % CLUSTER_COLORS.length],
@@ -305,7 +541,7 @@ async function loadProjection(method) {
     const meta = method === 'pca' && d.explained_variance
       ? `两维解释方差 ${(d.explained_variance[0] * 100).toFixed(1)}% + ${(d.explained_variance[1] * 100).toFixed(1)}%`
       : method === 'tsne' ? `perplexity=${d.perplexity}` : '';
-    $('projMeta').textContent = `（${d.n} 种方法 · ${meta} · 实心=实测 空心=预测 · 数据来自最近一次聚类，全局）`;
+    $('projMeta').textContent = `（${d.n} 种方法 · ${meta} · 实心=实测 空心=预测 · 点选可定位簇卡片 · 数据来自最近一次聚类，全局）`;
 
     Plotly.newPlot('chart_projection', traces, {
       margin: { t: 10 }, height: 520, font: PLOT_FONT,
@@ -313,6 +549,20 @@ async function loadProjection(method) {
       yaxis: { title: method === 'pca' ? 'PC2' : 't-SNE 2' },
       legend: { orientation: 'h', y: -0.18, font: { size: 10 } },
     }, PLOT_CFG);
+
+    // 点选投影点 → 滚动到对应簇卡片并描金闪高（k 切割视图的簇 id 语义不同，不联动）
+    const gd = $('chart_projection');
+    if (gd.removeAllListeners) gd.removeAllListeners('plotly_click');
+    gd.on('plotly_click', ev => {
+      const cid = ev.points && ev.points[0] && ev.points[0].customdata;
+      if (cid == null) return;
+      const card = document.getElementById('clcard-' + cid);
+      if (!card) return;
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      card.classList.remove('clcard-flash'); void card.offsetWidth;   // 重触发
+      card.classList.add('clcard-flash');
+      setTimeout(() => card.classList.remove('clcard-flash'), 1600);
+    });
   } catch (e) { $('projMeta').textContent = '（投影加载失败: ' + e.message + '）'; }
 }
 
@@ -326,7 +576,7 @@ async function loadClusters() {
       $('rvBanner').className = 'banner level-inconclusive mb-3';
       $('rvBanner').style.padding = '12px 16px';
       $('rvVerdict').textContent = '暂无聚类数据';
-      $('rvStats').textContent = '';
+      $('rvStats').textContent = d.reason === 'no_cluster' ? '该批次无聚类分析结果，可先在"运行控制"跑聚类安全分析' : '';
       $('clusterCards').innerHTML = '';
       clearCharts(['chart_cluster_cover', 'chart_rv']);
       return;
@@ -361,10 +611,15 @@ async function loadClusters() {
     // ---- 簇效验证卡片 ----
     const rv = d.reaction_validation;
     if (rv && rv.available) {
-      $('rvBanner').className = 'banner mb-3 ' + (rv.effective ? 'level-safe' : 'level-broken');
+      // 4 分支判定：effective/promising → 绿（好消息）；weak/ineffective → 红
+      const rvStatus = rv.status || (rv.effective ? 'effective' : 'ineffective');
+      const rvPositive = rvStatus === 'effective' || rvStatus === 'promising';
+      $('rvBanner').className = 'banner mb-3 ' + (rvPositive ? 'level-safe' : 'level-broken');
       $('rvBanner').style.padding = '12px 16px';
-      $('rvVerdict').textContent = (rv.effective ? '✅ ' : '⚠️ ') + rv.verdict;
-      $('rvStats').textContent = `p_anova=${rv.p_anova} · p_kruskal=${rv.p_kruskal} · eta²=${rv.eta2} · ε²=${rv.epsilon2}`;
+      $('rvVerdict').textContent = (rvPositive ? '✅ ' : '⚠️ ') + rv.verdict;
+      let rvStats = `p_anova=${rv.p_anova} · p_kruskal=${rv.p_kruskal} · eta²=${rv.eta2} · ε²=${rv.epsilon2}`;
+      if (rv.underpowered) rvStats += ` · n=${rv.n_total}/${rv.adequate_n}（不足）`;
+      $('rvStats').textContent = rvStats;
       const pcs = Object.entries(rv.per_cluster || {}).sort((a, b) => b[1].mean_score - a[1].mean_score);
       if (pcs.length) {
         Plotly.newPlot('chart_rv', [{
@@ -396,6 +651,7 @@ async function loadClusters() {
         .filter(([, c]) => c === -1).map(([m]) => m);
       const div = document.createElement('div');
       div.className = 'card';
+      div.id = 'clcard--1';   // 投影噪声点（cluster=-1）点选联动的落点
       div.style.background = '#F2EBD8';
       div.innerHTML = `
         <div class="flex items-center justify-between">
@@ -415,6 +671,7 @@ async function loadClusters() {
       else if (stableSet.has(c.id)) { tag = '<span class="cluster-tag" style="background:#DFE5D4;color:#4f7351;">稳定</span>'; bg = '#EDF0E4'; }
       const div = document.createElement('div');
       div.className = 'card';
+      div.id = 'clcard-' + c.id;   // 投影点选联动的落点
       div.style.background = bg;
       div.innerHTML = `
         <div class="flex items-center justify-between">
@@ -474,12 +731,22 @@ function drawDendrogram() {
     xs.push(x4[0], x4[1], x4[2], x4[3], null);
     ys.push(y4[0], y4[1], y4[2], y4[3], null);
   });
-  Plotly.newPlot('chart_dendrogram', [{
+  const traces = [{
     x: xs, y: ys, type: 'scatter', mode: 'lines',
     line: { color: C.primary, width: 1.2 }, hoverinfo: 'skip',
-  }], {
+  }];
+  // 叶子方法名：隐形散点只供 hover（scipy dendrogram 叶子 x = 10*i+5）
+  if (d.leaves && d.leaves.length) {
+    traces.push({
+      x: d.leaves.map((_, i) => i * 10 + 5), y: d.leaves.map(() => 0),
+      type: 'scatter', mode: 'markers',
+      marker: { size: 14, opacity: 0 },
+      text: d.leaves, hovertemplate: '%{text}<extra></extra>',
+    });
+  }
+  Plotly.newPlot('chart_dendrogram', traces, {
     margin: { t: 10 }, height: 300, font: PLOT_FONT, showlegend: false,
-    xaxis: { showticklabels: false, title: `${d.n} 种方法（叶节点）` },
+    xaxis: { showticklabels: false, title: `${d.n} 种方法（叶节点，hover 看方法名）` },
     yaxis: { title: '合并距离' },
     shapes: [cutLineShape(treeCutHeight(treeK))],
   }, PLOT_CFG);
@@ -668,17 +935,37 @@ async function loadRunSection() {
 }
 
 // 任务完成监听：启动后轮询至终态，自动刷新批次列表与当前页数据
+// （SSE 流不可用时的回退路径）
+// Fix 2: watchTimers 按 taskId 去重，防 SSE 反复断线时 interval 无限堆叠
+const watchTimers = new Map();
 function watchTask(taskId) {
+  if (watchTimers.has(taskId)) clearInterval(watchTimers.get(taskId));
   const timer = setInterval(async () => {
     try {
       const t = await api('/api/tasks/' + taskId);
       if (t.status === 'running') return;
       clearInterval(timer);
+      watchTimers.delete(taskId);
       setStatus(`任务 ${t.kind} ${t.status === 'success' ? '已完成' : '失败'}，数据已刷新`);
       await loadRuns();
       invalidate();
-    } catch (e) { clearInterval(timer); }
+    } catch (e) { clearInterval(timer); watchTimers.delete(taskId); }
   }, 3000);
+  watchTimers.set(taskId, timer);
+}
+function stopWatchTask(taskId) {
+  if (watchTimers.has(taskId)) { clearInterval(watchTimers.get(taskId)); watchTimers.delete(taskId); }
+}
+
+// Fix 1: 自适应轮询——仅在存在运行中任务时才 2s 刷 taskList，无任务时停止
+// （原无条件 setInterval 在任务结束后仍持续重建 DOM，是"停止后仍刷新"的主因）
+let taskPollTimer = null;
+function startTaskPolling() {
+  if (taskPollTimer) return;
+  taskPollTimer = setInterval(() => { if (activeSection === 'run') loadTasks(); }, 2000);
+}
+function stopTaskPolling() {
+  if (taskPollTimer) { clearInterval(taskPollTimer); taskPollTimer = null; }
 }
 
 async function startTask(kind) {
@@ -691,6 +978,7 @@ async function startTask(kind) {
     const view = await res.json();
     setStatus(`${kind} 任务已启动`);
     if (view.id) watchTask(view.id);
+    startTaskPolling();
     await loadTasks();
   } catch (e) { setStatus(`启动失败: ${e.message}`); }
 }
@@ -714,8 +1002,11 @@ async function startEvaluate() {
       throw new Error(err.detail || res.status);
     }
     const view = await res.json();
-    setStatus('评估任务已启动');
+    // 预检（诚实版：只看文件名是否含 baseline，不假装能探测针内容）
+    const noBaseline = !$('evalInput').value.includes('baseline');
+    setStatus('评估任务已启动' + (noBaseline ? '（⚠️ 攻击集文件名不含 baseline，越狱税将不会计算）' : ''));
     if (view.id) watchTask(view.id);
+    startTaskPolling();
     await loadTasks();
   } catch (e) { setStatus(`启动失败: ${e.message}`); }
 }
@@ -724,38 +1015,200 @@ const TASK_STATUS = {
   running: ['运行中', 'background:rgba(70,88,107,.14);color:#46586B;'],
   success: ['完成', 'background:rgba(117,135,107,.20);color:#55694B;'],
   failed: ['失败', 'background:#F0DBCF;color:#9a4a35;'],
+  cancelled: ['已取消', 'background:#EAE2CC;color:#7C7663;'],
 };
+
+// 运行中任务的 SSE 日志流：任务 id → { es, text, el }
+// text 持久保存，列表每 2s 重建 DOM 时重新灌回，日志不丢
+const taskStreams = new Map();
+
+function closeTaskStream(id) {
+  const s = taskStreams.get(id);
+  if (s) { try { s.es.close(); } catch (e) { /* ignore */ } taskStreams.delete(id); }
+}
+
+function attachTaskStream(t, logEl) {
+  const existing = taskStreams.get(t.id);
+  if (existing) {
+    existing.el = logEl;                       // 挂到本轮新建的 log-box 上
+    logEl.textContent = existing.text || t.log_tail || '(暂无输出)';
+    logEl.scrollTop = logEl.scrollHeight;
+    return;
+  }
+  const es = new EventSource('/api/tasks/' + encodeURIComponent(t.id) + '/stream');
+  const s = { es, text: '', el: logEl };
+  taskStreams.set(t.id, s);
+  es.onmessage = ev => {
+    s.text += ev.data + '\n';
+    if (s.el) { s.el.textContent = s.text; s.el.scrollTop = s.el.scrollHeight; }
+  };
+  es.addEventListener('done', ev => {
+    closeTaskStream(t.id);
+    let info = {};
+    try { info = JSON.parse(ev.data); } catch (e) { /* ignore */ }
+    setStatus(`任务 ${t.kind} 已结束（${info.status || '未知'}），数据已刷新`);
+    loadRuns();
+    invalidate();
+    loadTasks();
+  });
+  es.onerror = () => {
+    // SSE 断线/不可用 → 关闭（阻止浏览器自动重连）并回退轮询
+    closeTaskStream(t.id);
+    if (!watchTimers.has(t.id)) watchTask(t.id);  // Fix 2: 防已有 timer 时重复创建
+  };
+}
+
+async function cancelTask(id, kind) {
+  if (!confirm(`确定取消任务 ${kind}？子进程将被终止。`)) return;
+  try {
+    const res = await fetch('/api/tasks/' + encodeURIComponent(id) + '/cancel', { method: 'POST' });
+    if (res.status === 409) {
+      setStatus('任务已结束，无需取消');
+    } else if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || res.status);
+    } else {
+      setStatus(`已取消任务 ${kind}`);
+    }
+    // Fix 3: 取消后立即停止客户端轮询与 SSE，不等下次 poll 发现
+    stopWatchTask(id);
+    closeTaskStream(id);
+    await loadTasks();
+  } catch (e) { setStatus('取消失败: ' + e.message); }
+}
+
+// Fix 4: 增量 DOM 更新——不再每次 innerHTML='' 全清重建（消除闪烁/滚动丢失/SSE el 失效）
+function _buildTaskCard(t) {
+  const [label, style] = TASK_STATUS[t.status] || [t.status, ''];
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.style.padding = '10px 14px';
+  card.dataset.taskId = t.id;
+  card.dataset.status = t.status;
+  card.innerHTML = `
+    <div class="flex items-center justify-between mb-1 gap-2 flex-wrap">
+      <div><span class="cluster-tag" data-role="badge"></span>
+        <span class="font-semibold ml-2">${esc(t.kind)}</span>
+        <span class="text-xs ml-2" style="color: var(--c-muted);">${esc(t.started_at?.slice(11, 19) || '')}</span></div>
+      <div class="flex items-center gap-3" data-role="meta">
+        <span class="text-xs font-mono" style="color: var(--c-muted);">${esc(t.cmd)}</span>
+        <a class="text-xs" style="color: var(--c-primary);" href="/api/tasks/${encodeURIComponent(t.id)}/log?download=1">⬇ 完整日志</a>
+      </div>
+    </div>
+    <div class="log-box mt-2" data-role="log"></div>`;
+  _updateTaskCard(card, t);
+  return card;
+}
+function _updateTaskCard(card, t) {
+  const [label, style] = TASK_STATUS[t.status] || [t.status, ''];
+  // badge：仅在文本/样式变化时写 DOM
+  const badge = card.querySelector('[data-role="badge"]');
+  if (badge.textContent !== label) { badge.textContent = label; badge.setAttribute('style', style); }
+  // cancel 按钮：按状态增删（仅状态转换时操作）
+  const meta = card.querySelector('[data-role="meta"]');
+  const cancelBtn = meta.querySelector('[data-cancel]');
+  if (t.status === 'running' && !cancelBtn) {
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-plain text-xs';
+    btn.dataset.cancel = '';
+    btn.textContent = '⏹ 取消';
+    btn.onclick = () => cancelTask(t.id, t.kind);
+    meta.appendChild(btn);
+  } else if (t.status !== 'running' && cancelBtn) {
+    cancelBtn.remove();
+  }
+  // 日志：有活跃 SSE 流时不碰（流自己管 textContent），无流时从 log_tail 更新
+  const logEl = card.querySelector('[data-role="log"]');
+  if (!taskStreams.has(t.id)) {
+    const text = t.log_tail || '(暂无输出)';
+    if (logEl.textContent !== text) logEl.textContent = text;
+  }
+}
 
 async function loadTasks() {
   try {
     const data = await api('/api/tasks');
     const wrap = $('taskList');
-    wrap.innerHTML = '';
+    const runningIds = new Set();
+    const seenIds = new Set();
+
     if (!data.tasks.length) {
-      wrap.innerHTML = '<span style="color: var(--c-muted);">暂无任务</span>';
+      if (!wrap.querySelector('[data-empty]')) {
+        wrap.innerHTML = '<span data-empty style="color: var(--c-muted);">暂无任务</span>';
+      }
+      [...taskStreams.keys()].forEach(id => closeTaskStream(id));
+      [...watchTimers.keys()].forEach(id => stopWatchTask(id));
+      stopTaskPolling();
       return;
     }
+    const empty = wrap.querySelector('[data-empty]');
+    if (empty) empty.remove();
+
+    // 索引现有卡片
+    const cardMap = new Map();
+    wrap.querySelectorAll('.card[data-task-id]').forEach(c => cardMap.set(c.dataset.taskId, c));
+
     data.tasks.forEach(t => {
-      const [label, style] = TASK_STATUS[t.status] || [t.status, ''];
-      const div = document.createElement('div');
-      div.className = 'card';
-      div.style.padding = '10px 14px';
-      div.innerHTML = `
-        <div class="flex items-center justify-between mb-1">
-          <div><span class="cluster-tag" style="${style}">${label}</span>
-            <span class="font-semibold ml-2">${esc(t.kind)}</span>
-            <span class="text-xs ml-2" style="color: var(--c-muted);">${t.started_at?.slice(11, 19) || ''}</span></div>
-          <div class="text-xs font-mono" style="color: var(--c-muted);">${esc(t.cmd)}</div>
-        </div>
-        <div class="log-box mt-2">${esc(t.log_tail || '(暂无输出)')}</div>`;
-      wrap.appendChild(div);
+      seenIds.add(t.id);
+      let card = cardMap.get(t.id);
+      if (!card) {
+        card = _buildTaskCard(t);
+        wrap.appendChild(card);
+      } else {
+        _updateTaskCard(card, t);
+      }
+      if (t.status === 'running') {
+        runningIds.add(t.id);
+        const logEl = card.querySelector('[data-role="log"]');
+        logEl.scrollTop = logEl.scrollHeight;
+        attachTaskStream(t, logEl);   // SSE 直播；失败自动回退轮询
+      }
     });
+    // 移除消失任务的卡片
+    cardMap.forEach((card, id) => { if (!seenIds.has(id)) card.remove(); });
+    // 终态/消失任务的流：关闭清理
+    [...taskStreams.keys()].forEach(id => { if (!runningIds.has(id)) closeTaskStream(id); });
+    [...watchTimers.keys()].forEach(id => { if (!runningIds.has(id)) stopWatchTask(id); });
+
+    // Fix 1: 无运行中任务时停止轮询（消除"停止后仍刷新"）；有任务时确保轮询
+    if (runningIds.size === 0) stopTaskPolling(); else startTaskPolling();
   } catch (e) { /* 静默 */ }
 }
-setInterval(() => { if (activeSection === 'run') loadTasks(); }, 2000);
+
+// ---------- 键盘导航 ----------
+document.addEventListener('keydown', e => {
+  if (e.target.matches('input, select, textarea') || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key >= '1' && e.key <= '6') {
+    document.querySelectorAll('#nav .nav-item')[+e.key - 1]?.click();
+  } else if (e.key === 'r') {
+    $('refreshBtn').click();
+  } else if (e.key === '/') {
+    e.preventDefault();
+    (activeSection === 'model' ? $('predCiSearch') : $('runSelect')).focus();
+  }
+});
+
+// ---------- 阅读进度条 + 报告目录 scrollspy ----------
+window.addEventListener('scroll', () => {
+  const h = document.documentElement;
+  const max = h.scrollHeight - h.clientHeight;
+  $('readProgress').style.width = (max > 0 ? (h.scrollTop / max) * 100 : 0) + '%';
+  if (activeSection !== 'report') return;
+  let current = null;
+  document.querySelectorAll('#reportBody .card[id^="rep-"]').forEach(el => {
+    if (el.getBoundingClientRect().top <= 140) current = el.id;
+  });
+  document.querySelectorAll('#reportNav a.rep-link').forEach(a => {
+    a.classList.toggle('active', current !== null && a.getAttribute('href') === '#' + current);
+  });
+}, { passive: true });
 
 // ---------- 启动 ----------
 (async () => {
+  // URL 参数（可分享的视图状态）：?theme=dark|light  ?cmp=<批次名>
+  const q = new URLSearchParams(location.search);
+  if (q.get('theme') === 'dark' || q.get('theme') === 'light') theme = q.get('theme');
+  applyTheme(theme, false);   // 恢复主题（不触发重绘）
   await loadRuns();
   // hash 直达：#threats 等；默认总览
   const h = location.hash.slice(1);
@@ -766,4 +1219,16 @@ setInterval(() => { if (activeSection === 'run') loadTasks(); }, 2000);
     loadSection('overview');
   }
   loadRunSection();
+  // 直达对比视图：等总览数据就位后自动展开对比面板
+  const cmpRun = q.get('cmp');
+  if (cmpRun && start === 'overview') {
+    const t = setInterval(() => {
+      if (!lastOverview) return;
+      clearInterval(t);
+      if (!cmpActive) $('cmpBtn').click();
+      $('cmpSelect').value = cmpRun;
+      renderCompare();
+    }, 200);
+    setTimeout(() => clearInterval(t), 10000);
+  }
 })();

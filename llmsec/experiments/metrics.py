@@ -15,7 +15,9 @@ from pathlib import Path
 def load_json(p: Path):
     try:
         return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+        import logging
+        logging.getLogger("llmsec.experiments.metrics").warning("load_json(%s) 失败: %s", p, e)
         return None
 
 
@@ -86,20 +88,29 @@ def _conv_rounds_from_state(work_dir: Path, max_rounds: int | None) -> int | flo
         final = tracker.check_convergence(defender, total_methods=total, tested_count=n_gt)
         ci = final.get("ci_half") or CONV_CI_TARGET
         return mr + float(ci) / float(CONV_CI_TARGET)
-    except Exception:
+    except (ValueError, KeyError, AttributeError, TypeError) as e:
+        import logging
+        logging.getLogger("llmsec.experiments.metrics").error(
+            "_conv_rounds_from_state 失败（trial 评分将缺失）: %s", e, exc_info=True)
         return None
 
 
 def aggregate(values: list[float], mode: str) -> float:
-    """跨 repeats 聚合目标值。"""
+    """跨 repeats 聚合目标值。
+
+    mode:
+      - "mean"：均值
+      - "mean_plus_std"（风险厌恶，最小化方向推荐）：返回 mean + std。
+        最小化方向下"低且稳"优先——同均值时 std 越大（越抖）越被惩罚。
+    """
     vals = [v for v in values if v is not None and math.isfinite(v)]
     if not vals:
         return float("inf")
     mean = sum(vals) / len(vals)
-    if mode == "mean_minus_std":
+    if mode == "mean_plus_std":
         if len(vals) >= 2:
             std = math.sqrt(sum((v - mean) ** 2 for v in vals) / (len(vals) - 1))
         else:
             std = 0.0
-        return mean - std  # 最小化方向下，偏好低且稳
+        return mean + std
     return mean

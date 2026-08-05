@@ -17,6 +17,9 @@ from llmsec.params import MATH_TAX_DIV_K_MAX, MATH_TAX_MUL_MAX, MATH_TAX_SUB_MAX
 
 # 数学题越狱税标记：prompt 末尾追加的「在回答之前，请先计算以下数学题…」
 MATH_TAX_PATTERN = re.compile(r"\n*\s*在回答之前，请先计算以下数学题.*$", re.DOTALL)
+# 仅匹配探针引导语头部：strip_math_tax 用它定位**最后一次**出现——攻击正文
+# 可能复现同款引导语，MATH_TAX_PATTERN 从首次出现截到文末会误截正文。
+MATH_TAX_HEAD_PATTERN = re.compile(r"\n*\s*在回答之前，请先计算以下数学题")
 # 响应/文本中残留的 [MATH:数字] 答案标记
 MATH_TAG_PATTERN = re.compile(r"\[MATH:\s*-?\d+\s*\]", re.IGNORECASE)
 
@@ -72,9 +75,13 @@ def strip_math_tax(text: str) -> str:
     """
     剥离文本末尾的数学题越狱税及残留的 [MATH:x] 标记，返回干净文本。
     与原 targets._strip_math 行为一致。
+    探针只注入在末尾（inject_math_tax），但攻击正文可能复现同款引导语；
+    故用 finditer 取最后一个匹配的起始位置截断，只截末尾探针段，不误截正文。
     """
-    cleaned = MATH_TAX_PATTERN.sub("", text).strip()
-    cleaned = MATH_TAG_PATTERN.sub("", cleaned).strip()
+    matches = list(MATH_TAX_HEAD_PATTERN.finditer(text))
+    if matches:
+        text = text[:matches[-1].start()]
+    cleaned = MATH_TAG_PATTERN.sub("", text).strip()
     return cleaned
 
 

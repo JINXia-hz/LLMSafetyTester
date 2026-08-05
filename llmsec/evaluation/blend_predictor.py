@@ -1,4 +1,4 @@
-"""
+﻿"""
 evaluation.blend_predictor — 统一预测 + 模型预测，自适应加权（贝叶斯收缩）
 
 设计（对应"预测矩阵"管理）：
@@ -29,16 +29,13 @@ from llmsec.core.io import load_artifact, save_artifact
 from llmsec.core.results import ResultsMatrix
 from llmsec.evaluation.elo import derive_elo
 from llmsec.evaluation.elo_cluster import EloPredictorModel
-from llmsec.params import RIDGE_PRED_STD_CAP_MIN, RIDGE_PRED_STD_CAP_MULT
-
-# 自适应权重先验强度：w_m = n/(n+K)。K 越大越偏向统一预测（更保守）。
-DEFAULT_BLEND_PRIOR_K = 10.0
+from llmsec.params import BLEND_PRIOR_K, RIDGE_PRED_STD_CAP_MIN, RIDGE_PRED_STD_CAP_MULT
 
 
 class BlendPredictor:
     """统一 + 模型双层预测器，按样本量自适应混合。"""
 
-    def __init__(self, prior_k: float = DEFAULT_BLEND_PRIOR_K):
+    def __init__(self, prior_k: float = BLEND_PRIOR_K):
         self.prior_k = float(prior_k)
         self.unified: EloPredictorModel | None = None
         self.models: dict[str, EloPredictorModel] = {}
@@ -94,8 +91,9 @@ class BlendPredictor:
             try:
                 self.unified = EloPredictorModel()
                 self.unified.fit(pooled_feat, pooled_gt)
-            except Exception:
-                self.unified = None  # 退化数据训练失败 → 仅靠模型层/兜底
+            except Exception as e:
+                logger.warning("统一预测器 fit 失败（退化为仅模型层）: %s", e)
+                self.unified = None
 
         # 3) 每模型预测器
         for model, elo_map in per_model_elo.items():
@@ -108,8 +106,8 @@ class BlendPredictor:
                 pm = EloPredictorModel()
                 pm.fit(self._features, gt)
                 self.models[model] = pm
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("模型 %s 预测器 fit 失败（跳过）: %s", model, e)
         return self
 
     # ---------- 权重 ----------
@@ -175,7 +173,8 @@ class BlendPredictor:
         try:
             means, variances = model.predict({method: feat}, [method])
             return float(means[0]), float(variances[0])
-        except Exception:
+        except Exception as e:
+            logger.warning("模型 %s predict 失败（返回 None）: %s", model_name, e)
             return None, None
 
     # ---------- 诊断 ----------
@@ -243,7 +242,7 @@ class BlendPredictor:
         data = load_artifact(path)
         if not data:
             return None
-        bp = cls(prior_k=data.get("prior_k", DEFAULT_BLEND_PRIOR_K))
+        bp = cls(prior_k=data.get("prior_k", BLEND_PRIOR_K))
         bp.unified = data.get("unified")
         bp.models = data.get("models", {})
         bp._features = data.get("_features", {})

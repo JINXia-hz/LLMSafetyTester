@@ -51,7 +51,7 @@ budget:
 objective:                    # optimization target
   metric: conv_rounds         # metric name (see §5)
   direction: minimize         # minimize | maximize
-  aggregate: mean             # aggregate across repeats: mean | mean_minus_std
+  aggregate: mean             # aggregate across repeats: mean | mean_plus_std
 
 # Locked dimensions: fixed values used by every trial
 fixed:
@@ -122,7 +122,7 @@ Each trial extracts metrics from its work-dir's `runner_report.json` (`metrics.p
 
 Aggregation across repeats (`aggregate`):
 - `mean`: simple mean.
-- `mean_minus_std`: mean − std (under minimization, prefers configs that are **low and stable**, penalizing jittery ones).
+- `mean_plus_std`: mean + std (under minimization, prefers configs that are **low and stable**, penalizing jittery ones). `mean_minus_std` is a legacy alias with the same behavior.
 
 ---
 

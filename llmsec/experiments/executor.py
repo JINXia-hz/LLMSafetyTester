@@ -26,6 +26,7 @@ def _runner_argv(work_dir: Path, seed: int, config: dict) -> tuple[list[str], di
         "--phase", "1",            # 实验只跑攻击阶段（收敛度量来自这里）
         "--work-dir", str(work_dir),
         "--seed", str(seed),
+        "--no-early-stop",         # 跑满 max_rounds：ci_half@固定预算目标需同预算可比
         *argv_extra,
     ]
     env_override = {**env_override, "PYTHONUNBUFFERED": "1"}  # 子进程实时刷出，便于观测
@@ -38,11 +39,13 @@ def run_trial(
     work_dir: Path,
     study_name: str,
     trial_idx: int,
+    trial_timeout_minutes: int = 30,
 ) -> dict:
     """
     执行一个 trial（单 seed）。返回记录 dict（含 metrics / status / 耗时）。
 
     config: {factor_name: value}（搜索值 ∪ fixed），含 input/target/max_rounds 等。
+    trial_timeout_minutes: 单 trial 超时；超时杀子进程、status="timeout"（防慢/挂 trial 阻塞 study）。
     """
     # input 路径归一化（无分隔符 → 补 attacks/），统一用于 argv 与 manifest
     config = dict(config)
@@ -62,18 +65,25 @@ def run_trial(
     status = "running"
     returncode = None
     err = None
+    timeout_s = trial_timeout_minutes * 60 if trial_timeout_minutes and trial_timeout_minutes > 0 else None
     try:
         full_env = {**__import__("os").environ, **env_override}
         with open(log_path, "w", encoding="utf-8") as log:
             proc = subprocess.run(argv, stdout=log, stderr=subprocess.STDOUT,
-                                  env=full_env, cwd=str(Path(__file__).resolve().parents[2]))
+                                  env=full_env, cwd=str(Path(__file__).resolve().parents[2]),
+                                  timeout=timeout_s)
         returncode = proc.returncode
         status = "success" if returncode == 0 else "failed"
+    except subprocess.TimeoutExpired:
+        # 超时：subprocess.run 已杀子进程；标记 timeout，仍尝试提取部分指标供诊断
+        err = f"超时（>{trial_timeout_minutes}min）"
+        status = "timeout"
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
         status = "error"
 
     elapsed = (datetime.now() - started).total_seconds()
+    # 任何已落盘的部分状态都尝试提取（timeout/failed 也有诊断价值）；error（未跑）跳过
     metrics = extract_metrics(work_dir, max_rounds=_max_rounds_of(config)) if status != "error" else {}
 
     return {

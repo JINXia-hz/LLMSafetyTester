@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
+from llmsec.core.logging import get_logger
 """
 层级报告生成器 — 树形分解 + LLM叙事润色
 
 读取评估结果，构建多维树形安全画像，调用LLM生成人类可读的Markdown报告。
 
-树形维度:
+树形维度（共 5 个）:
   by_harm_type       → 按有害类别 (violence/privacy/fraud/hate/illegal/self_harm)
   by_attack_category → 按攻击大类 (1.1 语言盲区, 1.5 语义框架, HB.* 等)
-  by_method          → 具体攻击方法 (叶子节点)
   by_elo_tier        → 按ELO威胁等级 (高/中/低)
   by_functional      → 按功能场景 (standard/contextual)
   by_source          → 按数据来源 (our/HarmBench)
+
+口径说明: 一个方法可同属多个类别，by_harm_type 按方法的全部 harm_types 归组——
+  同一方法会在其所属的每个有害类别下重复计入，故各类别 count 之和 ≠ 方法总数
+  （by_attack_category / by_functional / by_source 同理）。
 
 输出:
   output/security_report.md   — 人类可读的Markdown安全报告
@@ -36,15 +40,15 @@ from llmsec.core.config import (
     METHOD_REGISTRY_FILE,
     OUTPUT_DIR,
     REPORT_FILE,
-    STATE_FILE,
     TREE_FILE,
     GeneratorConfig,
 )
-from llmsec.core.io import iter_jsonl, read_jsonl, write_json
+from llmsec.core.io import iter_jsonl, read_json, read_jsonl, write_json
 from llmsec.core.llm import chat_with_retry, create_openai_client
 from llmsec.core.logging import setup_console
 from llmsec.evaluation.elo import ELOTracker
 from llmsec.params import (
+
     PORTRAIT_ASR_SAFE,
     PORTRAIT_FPR_SAFE,
     PORTRAIT_MIN_CONFIDENCE,
@@ -61,6 +65,9 @@ setup_console()
 # ============================================================
 # TREE_FILE / REPORT_FILE / METHOD_REGISTRY_FILE 由 core.config 统一定义
 
+
+
+logger = get_logger(__name__)
 
 def _report_config() -> GeneratorConfig:
     """报告生成模型配置（沿用 GENERATOR_* 环境变量，缺省回退默认模型/地址）。"""
@@ -96,7 +103,7 @@ def load_all_results(output_dir) -> list[dict]:
             attack_file = run_dir / "attack_results.jsonl"
             if attack_file.exists():
                 results = read_jsonl(attack_file)
-                print(f"   数据来源: runner（{attack_file}）")
+                logger.info(f"   数据来源: runner（{attack_file}）")
                 return results
 
     # evaluator 结果（无 run 数据时的回退）
@@ -105,7 +112,7 @@ def load_all_results(output_dir) -> list[dict]:
         if fname.endswith("_结果.jsonl"):
             all_results.extend(read_jsonl(output_dir / fname))
     if all_results:
-        print("   数据来源: evaluator（*_结果.jsonl）")
+        logger.info("   数据来源: evaluator（*_结果.jsonl）")
     return all_results
 
 
@@ -134,11 +141,33 @@ def load_elo(output_dir, model: str | None = None) -> dict:
 def load_allergy(output_dir) -> dict:
     """加载过敏报告。
 
-    W4 归一：优先读规范全局 allergy_report.json（safe_twin 写）；缺失时回退到
-    最新一次 run 的 allergy.json（runner 写）。两者 schema 都含
-    summary.false_positive_rate，下游 build_tree 口径一致。
+    W4 归一 + 按模型分文件：优先读 safe_twin 现行产物 allergy__{model}.json
+    （有当前活跃模型对应的文件时取它，否则取最新修改的一个）；缺失时回退旧版
+    全局 allergy_report.json，再回退最新一次 run 的 allergy.json（runner 写）。
+    schema 都含 summary.false_positive_rate，下游 build_tree 口径一致。
     """
     output_dir = Path(output_dir)
+
+    # 按模型分文件（safe_twin 现行写法，换模型不互相覆盖）
+    candidates = sorted(output_dir.glob("allergy__*.json"),
+                        key=lambda p: p.stat().st_mtime, reverse=True)
+    if candidates:
+        chosen = candidates[0]
+        try:
+            from llmsec.evaluation.elo_access import active_model
+            model = active_model()
+        except Exception:
+            model = None
+        if model:
+            safe = re.sub(r"[^\w.-]", "_", model)
+            own = output_dir / f"allergy__{safe}.json"
+            if own in candidates:
+                chosen = own
+        data = read_json(chosen)
+        if data:
+            return data
+
+    # 回退：旧版全局单文件（按模型分文件之前的 safe_twin 产物）
     canonical = output_dir / "allergy_report.json"
     data = read_json(canonical)
     if data:
@@ -264,25 +293,31 @@ def build_method_stats(results: list[dict], elo_ratings: dict,
 
 
 def _load_elo_tracker(output_dir=None) -> ELOTracker | None:
-    """加载完整 ELO 状态（攻击方+防御方），文件不存在返回 None。
+    """加载完整 ELO 状态（攻击方+防御方），无数据返回 None。
 
     优先读 output_dir/state/state.json（与 --output-dir 保持一致）；
-    该文件不存在时回退全局 STATE_FILE（兼容旧行为）并打印提示。
+    该文件不存在时从 R 矩阵派生（唯一真相），不再回退全局 state.json。
     """
-    state_file = None
     if output_dir is not None:
         candidate = Path(output_dir) / "state" / "state.json"
         if candidate.exists():
-            state_file = candidate
-        else:
-            print(f"   ⚠ {candidate} 不存在，回退默认状态文件 {STATE_FILE}")
-    if state_file is None:
-        if not STATE_FILE.exists():
-            return None
-        state_file = STATE_FILE
-    tracker = ELOTracker()
-    tracker.load(state_file)
-    return tracker
+            tracker = ELOTracker()
+            tracker.load(str(candidate))
+            return tracker if tracker.attacker_ratings else None
+    # 从 R 派生
+    try:
+        from llmsec.core.results import ResultsMatrix
+        from llmsec.evaluation.elo_access import active_model
+        from llmsec.evaluation.elo import derive_elo
+
+
+        R = ResultsMatrix.load()
+        model = active_model()
+        if model and R.n_for_model(model) > 0:
+            return derive_elo(R, model)
+    except Exception:
+        pass
+    return None
 
 
 def build_tree(method_stats: dict[str, dict], allergy_data: dict,
@@ -294,7 +329,7 @@ def build_tree(method_stats: dict[str, dict], allergy_data: dict,
     tax_info: 可选，runner 的越狱税聚合块（含 baseline 对比），
               透传进 overall.jailbreak_tax 供报告/前端展示。
     output_dir: 可选，输出目录；用于定位 state/state.json 计算 ELO 边界，
-                缺省时回退全局 STATE_FILE。
+                缺省时从 R 矩阵派生。
 
     返回:
     {
@@ -676,7 +711,7 @@ def generate_narrative(tree: dict, output_dir) -> str:
     cfg = _report_config()
     client = create_openai_client(cfg.api_key, cfg.base_url, timeout=cfg.timeout)
 
-    print("🧠 调用LLM生成叙事报告...")
+    logger.info("🧠 调用LLM生成叙事报告...")
     try:
         response = chat_with_retry(
             client,
@@ -696,7 +731,7 @@ def generate_narrative(tree: dict, output_dir) -> str:
         markdown = re.sub(r"\s*```$", "", markdown)
         return markdown
     except Exception as e:
-        print(f"  ⚠ LLM调用失败（已重试3次）: {e}")
+        logger.warning(f"  ⚠ LLM调用失败（已重试3次）: {e}")
 
     # Fallback: 基本文本报告
     return generate_fallback_report(tree)
@@ -787,58 +822,58 @@ def main():
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
-    print("📊 加载评估数据...")
+    logger.info("📊 加载评估数据...")
     results = load_all_results(output_dir)
     elo_ratings = load_elo(output_dir)
     allergy_data = load_allergy(output_dir)
     metadata = load_prompt_metadata()
 
-    print(f"   评估记录: {len(results)} 条")
-    print(f"   ELO方法数: {len(elo_ratings)}")
-    print(f"   过敏数据: {'有' if allergy_data else '无'}")
-    print(f"   元数据: {len(metadata)} 条")
+    logger.info(f"   评估记录: {len(results)} 条")
+    logger.info(f"   ELO方法数: {len(elo_ratings)}")
+    logger.info(f"   过敏数据: {'有' if allergy_data else '无'}")
+    logger.info(f"   元数据: {len(metadata)} 条")
 
     if not results:
-        print("⚠ 无评估结果，无法生成报告。请先运行 evaluate.py 或 runner.py")
+        logger.warning("⚠ 无评估结果，无法生成报告。请先运行 evaluate.py 或 runner.py")
         return
 
     # 构建统计
-    print("🌳 构建树形安全画像...")
+    logger.info("🌳 构建树形安全画像...")
     method_stats = build_method_stats(results, elo_ratings, metadata)
-    print(f"   聚合为 {len(method_stats)} 种攻击方法")
+    logger.info(f"   聚合为 {len(method_stats)} 种攻击方法")
 
     tree = build_tree(method_stats, allergy_data, elo_ratings, output_dir=output_dir)
 
     # 保存树数据
-    tree_path = os.path.join(output_dir, "security_tree.json")
+    tree_path = Path(output_dir) / "security_tree.json"
     write_json(tree_path, tree)
-    print(f"📁 树形数据: {tree_path}")
+    logger.info(f"📁 树形数据: {tree_path}")
 
     # 生成方法注册表
     registry = build_method_registry(method_stats, elo_ratings, results, metadata)
-    registry_path = os.path.join(output_dir, "method_registry.json")
+    registry_path = Path(output_dir) / "method_registry.json"
     write_json(registry_path, registry)
-    print(f"📁 方法注册表: {registry_path}")
+    logger.info(f"📁 方法注册表: {registry_path}")
 
     # 生成叙事报告
     markdown = generate_narrative(tree, output_dir)
 
-    report_path = os.path.join(output_dir, "security_report.md")
+    report_path = Path(output_dir) / "security_report.md"
     Path(report_path).parent.mkdir(parents=True, exist_ok=True)
     Path(report_path).write_text(markdown, encoding="utf-8")
-    print(f"📁 叙事报告: {report_path}")
+    logger.info(f"📁 叙事报告: {report_path}")
 
     # 终端摘要
     o = tree["overall"]
-    print(f"\n{'='*60}")
-    print(f"📋 报告摘要")
-    print(f"{'='*60}")
-    print(f"  安全等级: {o['security_level'].upper()}")
-    print(f"  ASR={o['asr']*100:.1f}%  FPR={o['fpr']*100:.1f}%")
-    print(f"  ELO边界={o['elo_boundary']:.0f} (置信度{o['elo_confidence']*100:.0f}%)")
-    print(f"  TOP3威胁: {', '.join(t['method'] for t in tree['top_threats'][:3])}")
-    print(f"  意外盲区: {len(tree.get('upsets', {}).get('weakness', []))} 个")
-    print(f"{'='*60}")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"📋 报告摘要")
+    logger.info(f"{'='*60}")
+    logger.info(f"  安全等级: {o['security_level'].upper()}")
+    logger.info(f"  ASR={o['asr']*100:.1f}%  FPR={o['fpr']*100:.1f}%")
+    logger.info(f"  ELO边界={o['elo_boundary']:.0f} (置信度{o['elo_confidence']*100:.0f}%)")
+    logger.info(f"  TOP3威胁: {', '.join(t['method'] for t in tree['top_threats'][:3])}")
+    logger.info(f"  意外盲区: {len(tree.get('upsets', {}).get('weakness', []))} 个")
+    logger.info(f"{'='*60}")
 
 
 if __name__ == "__main__":

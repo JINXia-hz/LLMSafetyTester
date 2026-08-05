@@ -13,14 +13,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
 from llmsec.core.results import ResultsMatrix
 from llmsec.evaluation.elo import derive_elo
 
 
-def test_results_matrix_basics() -> int:
+def test_results_matrix_basics():
     """upsert/get/列访问/覆盖率/时序。"""
     mat = ResultsMatrix()
     mat.upsert("DAN", "qwen", 3.0, status="fully_compliant", ts=2)
@@ -41,11 +39,9 @@ def test_results_matrix_basics() -> int:
         print(f"❌ ordered_results 时序错误: {qwen_order}"); return 1
     if sorted(mat.all_models()) != ["gpt", "qwen"]:
         print("❌ all_models 错误"); return 1
-    print("✅ ResultsMatrix 基础访问通过")
-    return 0
 
 
-def test_results_matrix_roundtrip() -> int:
+def test_results_matrix_roundtrip():
     """save → load 幂等。"""
     mat = ResultsMatrix(methods=["DAN", "rot13"])
     mat.upsert("DAN", "qwen", 3.0, status="fully_compliant", ts=1, extra={"len": 42})
@@ -61,11 +57,9 @@ def test_results_matrix_roundtrip() -> int:
         print("❌ round-trip extra 丢失"); return 1
     if mat2.get("rot13", "qwen").eval_score != -1.0:
         print("❌ round-trip 第二条丢失"); return 1
-    print("✅ ResultsMatrix round-trip 通过")
-    return 0
 
 
-def test_load_targets_multi_and_legacy() -> int:
+def test_load_targets_multi_and_legacy():
     """多目标编号前缀 + legacy 单目标回退。"""
     from llmsec.core.config import load_targets
 
@@ -110,11 +104,9 @@ def test_load_targets_multi_and_legacy() -> int:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-    print("✅ load_targets 多目标/legacy 通过")
-    return 0
 
 
-def test_derive_elo_deterministic_and_monotone() -> int:
+def test_derive_elo_deterministic_and_monotone():
     """R 是唯一真相：两次派生幂等；胜场越多 Elo 越高；不跨模型。"""
     mat = ResultsMatrix()
     # winner 对 qwen 全胜，loser 对 qwen 全败
@@ -135,23 +127,5 @@ def test_derive_elo_deterministic_and_monotone() -> int:
     tg = derive_elo(mat, "gpt")
     if tg.get_attacker_elo("winner") != 1500.0:
         print("❌ Elo 跨模型泄漏（gpt 列空却变了 Elo）"); return 1
-    print("✅ derive_elo 幂等/单调/不跨模型 通过")
-    return 0
 
 
-def main() -> int:
-    tests = [
-        test_results_matrix_basics,
-        test_results_matrix_roundtrip,
-        test_load_targets_multi_and_legacy,
-        test_derive_elo_deterministic_and_monotone,
-    ]
-    for t in tests:
-        if t() != 0:
-            return 1
-    print("\n✅ 所有 P1 数据模型测试通过")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

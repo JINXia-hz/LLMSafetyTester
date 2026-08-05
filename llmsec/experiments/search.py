@@ -99,8 +99,12 @@ class BayesianSearch(SearchEngine):
         trial_obj, _ = trial
         try:
             self._study.tell(trial_obj, float(value))
-        except Exception:
-            pass
+        except (ValueError, TypeError) as e:
+            # tell 失败 = 花了 API 钱的 trial 结果被丢弃，不可静默
+            import logging
+            logging.getLogger("llmsec.experiments.search").error(
+                "Optuna study.tell 失败（trial 结果未记录）: %s", e, exc_info=True)
+            raise
         self._pending = None
 
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from llmsec.core.logging import get_logger
 """
 目标 API 探测脚本（原根目录 probe_victim.py）
 
@@ -22,6 +23,9 @@ from llmsec.core.logging import setup_console
 from llmsec.targets import call_target
 from llmsec.targets.pcap import PCAP_JUDGE_URL, build_pcap_payload
 
+
+
+logger = get_logger(__name__)
 setup_console()
 
 # 忽略 SSL 证书警告（内网自签名证书）
@@ -42,25 +46,25 @@ def probe(test_text: str):
 
 def probe_openai(test_text: str, target_type: str):
     """openai / local_sim 后端探测：走统一路由，打印响应概要。"""
-    print(f"📡 探测目标后端: TARGET_TYPE={target_type}")
-    print(f"   测试文本: {test_text}")
-    print()
+    logger.info(f"📡 探测目标后端: TARGET_TYPE={target_type}")
+    logger.info(f"   测试文本: {test_text}")
+    logger.info("")
 
     result = call_target(test_text)
 
     meta = result.get("meta", {})
-    print(f"   backend : {meta.get('backend', target_type)}")
-    print(f"   latency : {result['latency_ms']:.0f}ms")
-    print(f"   tokens  : prompt={result['tokens_prompt']}, completion={result['tokens_completion']}")
+    logger.info(f"   backend : {meta.get('backend', target_type)}")
+    logger.info(f"   latency : {result['latency_ms']:.0f}ms")
+    logger.info(f"   tokens  : prompt={result['tokens_prompt']}, completion={result['tokens_completion']}")
     if result["error"]:
-        print(f"❌ 调用失败: {result['error']}")
-        print("   提示: 检查 TARGET_BASE_URL / TARGET_API_KEY / TARGET_MODEL 配置与目标可达性")
+        logger.error(f"❌ 调用失败: {result['error']}")
+        logger.info("   提示: 检查 TARGET_BASE_URL / TARGET_API_KEY / TARGET_MODEL 配置与目标可达性")
         return
     if result.get("target_refused"):
-        print("   ⚠ 目标侧主动拒绝了该请求（target_refused=True）")
-    print()
-    print("✅ 连接成功，响应内容:")
-    print(result["content"][:2000])
+        logger.warning("   ⚠ 目标侧主动拒绝了该请求（target_refused=True）")
+    logger.info("")
+    logger.info("✅ 连接成功，响应内容:")
+    logger.info(result["content"][:2000])
 
 
 def probe_pcap(test_text: str):
@@ -68,11 +72,11 @@ def probe_pcap(test_text: str):
     # strip_math=False：探测文本原样嵌入，不做数学题越狱税剥离
     payload = build_pcap_payload(test_text, strip_math=False)
 
-    print(f"📡 发送探测请求到: {PCAP_JUDGE_URL}")
-    print(f"   测试文本: {test_text}")
-    print(f"   请求体:")
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    print()
+    logger.info(f"📡 发送探测请求到: {PCAP_JUDGE_URL}")
+    logger.info(f"   测试文本: {test_text}")
+    logger.info(f"   请求体:")
+    logger.info(json.dumps(payload, ensure_ascii=False, indent=2))
+    logger.info("")
 
     t0 = time.perf_counter()
     try:
@@ -83,36 +87,36 @@ def probe_pcap(test_text: str):
             verify=False,
         )
         latency = (time.perf_counter() - t0) * 1000
-        print(f"✅ HTTP {resp.status_code} ({latency:.0f}ms)")
-        print(f"   Content-Type: {resp.headers.get('Content-Type', 'unknown')}")
-        print(f"   响应体长度: {len(resp.text)} 字符")
-        print()
+        logger.info(f"✅ HTTP {resp.status_code} ({latency:.0f}ms)")
+        logger.info(f"   Content-Type: {resp.headers.get('Content-Type', 'unknown')}")
+        logger.info(f"   响应体长度: {len(resp.text)} 字符")
+        logger.info("")
 
         # 尝试解析 JSON
         try:
             data = resp.json()
-            print("📋 解析后的 JSON 响应:")
-            print(json.dumps(data, ensure_ascii=False, indent=2))
-            print()
+            logger.info("📋 解析后的 JSON 响应:")
+            logger.info(json.dumps(data, ensure_ascii=False, indent=2))
+            logger.info("")
 
             # 尝试找出模型输出的字段
-            print("🔍 字段扫描:")
+            logger.info("🔍 字段扫描:")
             scan_for_text_fields(data)
 
         except json.JSONDecodeError:
-            print("⚠ 响应不是有效 JSON，原始文本:")
-            print(resp.text[:2000])
+            logger.warning("⚠ 响应不是有效 JSON，原始文本:")
+            logger.info(resp.text[:2000])
 
     except requests.exceptions.SSLError as e:
-        print(f"❌ SSL 错误: {e}")
-        print("   提示: 尝试用 http:// 而非 https://，或检查证书")
+        logger.error(f"❌ SSL 错误: {e}")
+        logger.info("   提示: 尝试用 http:// 而非 https://，或检查证书")
     except requests.exceptions.ConnectionError as e:
-        print(f"❌ 连接失败: {e}")
-        print(f"   提示: 检查目标是否可达 (ping 10.132.65.75)")
+        logger.error(f"❌ 连接失败: {e}")
+        logger.info("   提示: 检查 PCAP_JUDGE_URL 指向的目标是否可达")
     except requests.exceptions.Timeout:
-        print(f"❌ 请求超时 ({TIMEOUT}s)")
+        logger.error(f"❌ 请求超时 ({TIMEOUT}s)")
     except Exception as e:
-        print(f"❌ 未知错误: {type(e).__name__}: {e}")
+        logger.error(f"❌ 未知错误: {type(e).__name__}: {e}")
 
 
 def scan_for_text_fields(data, prefix=""):
@@ -122,9 +126,9 @@ def scan_for_text_fields(data, prefix=""):
             path = f"{prefix}.{key}" if prefix else key
             if isinstance(value, str):
                 if len(value) > 20:
-                    print(f"   📝 {path} (len={len(value)}): {value[:200]}...")
+                    logger.info(f"   📝 {path} (len={len(value)}): {value[:200]}...")
                 else:
-                    print(f"   📄 {path}: {value}")
+                    logger.info(f"   📄 {path}: {value}")
             elif isinstance(value, (dict, list)):
                 scan_for_text_fields(value, path)
     elif isinstance(data, list) and len(data) > 0:

@@ -13,7 +13,6 @@ evaluation.elo_access — Elo 派生访问层（R-cutover 的读取统一入口�
   2. publish_tracker(tracker, model)：评估结束后把 live tracker 的结果写入 R，
      并把**完整**派生状态（含 live run 的收敛轨迹）发布到缓存。runner / evaluator
      经此写入，state.json 退化为可选的快照备份。
-  3. maybe_migrate_legacy()：首次升级时把旧 state.json 的 history 一次性迁进 R。
 
 缓存失效以"模型列内容指纹"为准——R 中该模型列变动即作废对应缓存项。
 """
@@ -23,12 +22,12 @@ from __future__ import annotations
 import hashlib
 from typing import Optional
 
-from llmsec.core.config import ELO_CACHE_FILE, STATE_FILE
+from llmsec.core import config
 from llmsec.core.io import read_json, write_json
 from llmsec.core.results import ResultsMatrix, _coarse_status
 from llmsec.evaluation.elo import ELOTracker, derive_elo
 
-_CACHE_VERSION = 1
+_CACHE_VERSION = 2  # v2：ground_truth 统一 {m: {elo: ...}} 形态 + 补 attacker_pred_std
 
 
 # ============================================================
@@ -46,15 +45,18 @@ def _model_fingerprint(R: ResultsMatrix, model: str) -> Optional[str]:
 
 
 def _load_cache() -> dict:
-    cache = read_json(ELO_CACHE_FILE, default={})
+    cache = read_json(config.ELO_CACHE_FILE, default={})
     if not isinstance(cache, dict):
+        return {}
+    # 缓存 schema 漂移即整体作废（指纹不变时旧 schema 项仍会命中，须按版本拦截）
+    if cache.get("_version") != _CACHE_VERSION:
         return {}
     return cache
 
 
 def _save_cache(cache: dict) -> None:
     cache.setdefault("_version", _CACHE_VERSION)
-    write_json(ELO_CACHE_FILE, cache)
+    write_json(config.ELO_CACHE_FILE, cache)
 
 
 # ============================================================
@@ -65,7 +67,8 @@ def elo_state_for(model: str) -> dict:
 
     结构（与旧 state.json 子集兼容，供 report/dashboard 直接消费）：
       {fingerprint, attacker_ratings, defender_ratings, ground_truth,
-       round_defender_elos, defender_match_count, n}
+       round_defender_elos, defender_match_count, attacker_pred_std, n}
+      ground_truth 与 state.json 同构：{method: {elo: ...}}。
 
     该模型在 R 中无结果时返回 {}。冷派生（无 live 轨迹）时 round_defender_elos
     可能为空——收敛曲线类视图应优先读 run 快照（见 dashboard _load_state）。
@@ -86,9 +89,10 @@ def elo_state_for(model: str) -> dict:
         "fingerprint": fp,
         "attacker_ratings": dict(tracker.attacker_ratings),
         "defender_ratings": dict(tracker.defender_ratings),
-        "ground_truth": {m: {} for m in tracker.ground_truth_methods},
+        "ground_truth": {m: dict(g) for m, g in tracker.predictor.ground_truth.items()},
         "round_defender_elos": {k: v for k, v in tracker._round_defender_elos.items()},
         "defender_match_count": {k: v for k, v in tracker._defender_match_count.items()},
+        "attacker_pred_std": dict(tracker.attacker_pred_std),
         "n": len(tracker.ground_truth_methods),
     }
     cache[model] = entry
@@ -126,10 +130,16 @@ def _ts_key(ts):
 # 写入（live tracker → R + 缓存）
 # ============================================================
 def publish_tracker(tracker: ELOTracker, model: str) -> None:
-    """评估结束后发布：把 live tracker 的结果写入 R，并把完整派生状态发布到缓存。
+    """评估结束后发布：把 live tracker 的结果写入 R，并把派生状态发布到缓存。
 
-    live tracker 含真实收敛轨迹（record_round_end 累积），故缓存项的
-    round_defender_elos 完整——dashboard 收敛曲线经缓存即可正确呈现该 run。
+    语义：R 对同 (method, model) 的多次观测**以最后一次为准**（upsert 覆盖），
+    而 live tracker 会累积全部更新——故缓存项的 ratings/ground_truth 取
+    derive_elo(R, model) 的派生态（M-2），使缓存恒等于 R 重算结果，
+    不与 elo_state_for 冷派生产生分歧。
+
+    收敛轨迹 / 场次 / pred_std 仍取 live tracker：它们依赖真实轮界
+    （record_round_end）与在线预测，R 派生态无法重建；dashboard 收敛曲线
+    经缓存即可正确呈现该 run。
 
     防御：tracker 缺少真实 ELOTracker 接口（如测试 stub）时静默跳过，不污染 R。
     """
@@ -147,56 +157,19 @@ def publish_tracker(tracker: ELOTracker, model: str) -> None:
     R.save()
 
     fp = _model_fingerprint(R, model)
+    # M-2：ratings/ground_truth 用 R 派生态（同键多次观测以末值为准），
+    # 不直接拷 live tracker 的累积态
+    derived = derive_elo(R, model)
     cache = _load_cache()
     cache[model] = {
         "fingerprint": fp,
-        "attacker_ratings": dict(tracker.attacker_ratings),
-        "defender_ratings": dict(tracker.defender_ratings),
-        "ground_truth": {m: {} for m in tracker.ground_truth_methods},
+        "attacker_ratings": dict(derived.attacker_ratings),
+        "defender_ratings": dict(derived.defender_ratings),
+        "ground_truth": {m: dict(g) for m, g in derived.predictor.ground_truth.items()},
         "round_defender_elos": {k: v for k, v in tracker._round_defender_elos.items()},
         "defender_match_count": {k: v for k, v in tracker._defender_match_count.items()},
-        "n": len(tracker.ground_truth_methods),
+        "attacker_pred_std": dict(tracker.attacker_pred_std),
+        "n": len(derived.ground_truth_methods),
     }
     _save_cache(cache)
 
-
-def invalidate(model: Optional[str] = None) -> None:
-    """作废派生缓存。R 被外部改动后可手动调用；publish_tracker 已自动维护。"""
-    if model is None:
-        write_json(ELO_CACHE_FILE, {})
-        return
-    cache = _load_cache()
-    cache.pop(model, None)
-    _save_cache(cache)
-
-
-# ============================================================
-# 一次性迁移（旧 state.json → R）
-# ============================================================
-def maybe_migrate_legacy(force: bool = False) -> bool:
-    """R 为空且存在旧 state.json（含 history）时，一次性迁移历史结果进 R。
-
-    幂等：R 已有数据则跳过（除非 force=True，此时在 R 基础上补迁）。
-    返回是否执行了迁移。state.json 不被删除（保留为只读 legacy 备份）。
-    """
-    R = ResultsMatrix.load()
-    if R.all_models() and not force:
-        return False
-    if not STATE_FILE.exists():
-        return False
-
-    legacy = read_json(STATE_FILE)
-    if not legacy or not legacy.get("history"):
-        return False
-
-    # 单防御方旧数据：defender 取 history 中的 defender，或回退 attacker_ratings 时期
-    mat = ResultsMatrix.migrate_from_legacy_state(STATE_FILE)
-    if mat.all_models():
-        # 保留既有 R 内容（force 补迁场景），合并迁移结果
-        for method, col in mat._r.items():
-            for model, res in col.items():
-                if R.get(method, model) is None:
-                    R.upsert(method, model, res.eval_score, status=res.status, ts=res.ts)
-        R.save()
-        invalidate()
-    return True

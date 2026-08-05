@@ -10,15 +10,13 @@ llmsec.evaluation — 评估子包
 常用符号再导出，供 runner 等模块按 `from llmsec.evaluation import ...` 使用。
 """
 
-from llmsec.evaluation.active_learning import d_optimal_scores, greedy_d_optimal
-from llmsec.evaluation.elo import ELOTracker, derive_elo, update_elo_from_results
+from llmsec.evaluation.active_learning import greedy_d_optimal
+from llmsec.evaluation.elo import ELOTracker, derive_elo
 from llmsec.evaluation.elo_cluster import ClusterEloPredictor, EloPredictorModel
 from llmsec.evaluation.elo_access import (
     active_model,
     attacker_ratings_for,
     elo_state_for,
-    invalidate,
-    maybe_migrate_legacy,
     publish_tracker,
 )
 from llmsec.evaluation.samplers import (
@@ -51,14 +49,14 @@ __all__ = [
     "Judge", "create_judge_client", "fast_prescreen",
     "FAST_REFUSAL_PATTERNS", "FAST_HARMFUL_SIGNALS",
     # elo
-    "ELOTracker", "derive_elo", "update_elo_from_results",
+    "ELOTracker", "derive_elo",
     # elo_access（R-cutover 读写统一入口）
     "elo_state_for", "attacker_ratings_for", "active_model",
-    "publish_tracker", "invalidate", "maybe_migrate_legacy",
+    "publish_tracker",
     # elo_cluster
     "ClusterEloPredictor", "EloPredictorModel",
     # active_learning
-    "greedy_d_optimal", "d_optimal_scores",
+    "greedy_d_optimal",
     # samplers
     "AttackSampler", "GapMinSampler", "InfoGainSampler",
     "CoordinateDescentSampler", "HybridSampler", "build_sampler",

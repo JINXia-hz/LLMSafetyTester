@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 回归测试：Elo 收敛判定与固定簇预测。
 
@@ -10,10 +10,7 @@
 """
 
 import sys
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
 from llmsec.evaluation.elo import ELOTracker
 from llmsec.evaluation.elo_cluster import (
@@ -23,7 +20,7 @@ from llmsec.evaluation.elo_cluster import (
 )
 
 
-def test_strip_variant_suffix() -> int:
+def test_strip_variant_suffix():
     """测试变体后缀剥离。"""
     cases = [
         ("method_rot13", "method"),
@@ -36,14 +33,10 @@ def test_strip_variant_suffix() -> int:
     ]
     for raw, expected in cases:
         got = _strip_variant_suffix(raw)
-        if got != expected:
-            print(f"❌ _strip_variant_suffix({raw!r}) = {got!r}, expected {expected!r}")
-            return 1
-    print("✅ 变体后缀剥离通过")
-    return 0
+        assert not (got != expected), f"❌ _strip_variant_suffix({raw!r}) = {got!r}, expected {expected!r}"
 
 
-def test_extract_variant_suffix() -> int:
+def test_extract_variant_suffix():
     """测试变体后缀提取。"""
     cases = [
         ("method_rot13", "rot13"),
@@ -56,14 +49,10 @@ def test_extract_variant_suffix() -> int:
     ]
     for raw, expected in cases:
         got = _extract_variant_suffix(raw)
-        if got != expected:
-            print(f"❌ _extract_variant_suffix({raw!r}) = {got!r}, expected {expected!r}")
-            return 1
-    print("✅ 变体后缀提取通过")
-    return 0
+        assert not (got != expected), f"❌ _extract_variant_suffix({raw!r}) = {got!r}, expected {expected!r}"
 
 
-def test_predict_suffix_variant_fallback() -> int:
+def test_predict_suffix_variant_fallback():
     """predict 应优先用同后缀变体的 ground truth。"""
     predictor = ClusterEloPredictor()
     predictor.ground_truth = {
@@ -86,28 +75,19 @@ def test_predict_suffix_variant_fallback() -> int:
     }
 
     # 预测同后缀的新变体 attack_d_rot13：应接近 rot13 平均 (1800+1700)/2 = 1750
-    pred = predictor.predict("attack_d_rot13", record=None)
-    if pred["source"] != "predicted_suffix_variant":
-        print(f"❌ predict 未优先使用同后缀变体兜底: source={pred['source']}")
-        return 1
+    pred = predictor.predict("attack_d_rot13")
+    assert not (pred["source"] != "predicted_suffix_variant"), f"❌ predict 未优先使用同后缀变体兜底: source={pred['source']}"
     expected = (1800.0 + 1700.0) / 2
-    if abs(pred["elo"] - expected) > 1e-6:
-        print(f"❌ predict 同后缀预测错误: elo={pred['elo']}, expected={expected}")
-        return 1
+    assert not (abs(pred["elo"] - expected) > 1e-6), f"❌ predict 同后缀预测错误: elo={pred['elo']}, expected={expected}"
 
     # 预测同基底但不同后缀的 attack_e_code：应回退到同基底变体（但同基底只有 attack_c_b64，后缀不同）
     # attack_e_code 与 attack_c_b64 不是同基底（基底是 attack_c vs attack_e），也不是同后缀
     # 所以应该使用簇内/全局平均
-    pred2 = predictor.predict("attack_e_code", record=None)
-    if pred2["source"] == "predicted_suffix_variant":
-        print(f"❌ predict 错误地把无关方法识别为同后缀变体: source={pred2['source']}")
-        return 1
-
-    print("✅ predict 同后缀变体兜底通过")
-    return 0
+    pred2 = predictor.predict("attack_e_code")
+    assert not (pred2["source"] == "predicted_suffix_variant"), f"❌ predict 错误地把无关方法识别为同后缀变体: source={pred2['source']}"
 
 
-def test_predict_base_variant_fallback() -> int:
+def test_predict_base_variant_fallback():
     """predict 在同后缀不存在时应回退到同基底变体。"""
     predictor = ClusterEloPredictor()
     predictor.ground_truth = {
@@ -127,20 +107,13 @@ def test_predict_base_variant_fallback() -> int:
     }
 
     # attack_code 没有同后缀 ground truth，但有同基底变体 attack_rot13 和 attack_b64
-    pred = predictor.predict("attack_code", record=None)
-    if pred["source"] != "predicted_variant":
-        print(f"❌ predict 未回退到同基底变体: source={pred['source']}")
-        return 1
+    pred = predictor.predict("attack_code")
+    assert not (pred["source"] != "predicted_variant"), f"❌ predict 未回退到同基底变体: source={pred['source']}"
     expected = (1800.0 + 1200.0) / 2
-    if abs(pred["elo"] - expected) > 1e-6:
-        print(f"❌ predict 同基底预测错误: elo={pred['elo']}, expected={expected}")
-        return 1
-
-    print("✅ predict 同基底变体兜底通过")
-    return 0
+    assert not (abs(pred["elo"] - expected) > 1e-6), f"❌ predict 同基底预测错误: elo={pred['elo']}, expected={expected}"
 
 
-def test_convergence_resists_false_positive() -> int:
+def test_convergence_resists_false_positive():
     """Elo 噪声大（真值 Elo 95%CI 半宽超目标）时不应判收敛。"""
     tracker = ELOTracker()
     defender = "test-model"
@@ -156,14 +129,10 @@ def test_convergence_resists_false_positive() -> int:
         tracker.ground_truth_methods.add(f"method_{i}")
 
     conv = tracker.check_convergence(defender, total_methods=50)
-    if conv["converged"]:
-        print(f"❌ 假收敛未被拦截: ci_half={conv['ci_half']}, drift={conv['drift']}, coverage={conv['coverage']}")
-        return 1
-    print(f"✅ 抗假阳性收敛判定通过 (ci_half={conv['ci_half']}, drift={conv['drift']})")
-    return 0
+    assert not (conv["converged"]), f"❌ 假收敛未被拦截: ci_half={conv['ci_half']}, drift={conv['drift']}, coverage={conv['coverage']}"
 
 
-def test_convergence_true_positive() -> int:
+def test_convergence_true_positive():
     """噪声小、漂移小、覆盖率足够时应判收敛。"""
     tracker = ELOTracker()
     defender = "test-model"
@@ -179,14 +148,10 @@ def test_convergence_true_positive() -> int:
         tracker.ground_truth_methods.add(f"method_{i}")
 
     conv = tracker.check_convergence(defender, total_methods=50)
-    if not conv["converged"]:
-        print(f"❌ 真收敛未通过: {conv}")
-        return 1
-    print(f"✅ 真收敛判定通过 (ci_half={conv['ci_half']}, drift={conv['drift']})")
-    return 0
+    assert not (not conv["converged"]), f"❌ 真收敛未通过: {conv}"
 
 
-def test_boundary_split_tested_predicted() -> int:
+def test_boundary_split_tested_predicted():
     """compute_security_boundary 应按实测/预测拆分边界以上统计。"""
     tracker = ELOTracker()
     defender = "test-model"
@@ -206,38 +171,9 @@ def test_boundary_split_tested_predicted() -> int:
     tracker.ground_truth_methods = {"tested_high", "tested_low"}
 
     b = tracker.compute_security_boundary(defender)
-    if b.get("tested_above_boundary") != 1:
-        print(f"❌ tested_above_boundary={b.get('tested_above_boundary')}, expected 1")
-        return 1
-    if b.get("predicted_above_boundary") != 1:
-        print(f"❌ predicted_above_boundary={b.get('predicted_above_boundary')}, expected 1")
-        return 1
-    if b.get("methods_above_boundary") != 2:
-        print(f"❌ methods_above_boundary={b.get('methods_above_boundary')}, expected 2")
-        return 1
-    if b["tested_above_boundary"] + b["predicted_above_boundary"] != b["methods_above_boundary"]:
-        print("❌ 拆分之和 != 总数")
-        return 1
-    print("✅ 边界以上实测/预测拆分通过")
-    return 0
+    assert not (b.get("tested_above_boundary") != 1), f"❌ tested_above_boundary={b.get('tested_above_boundary')}, expected 1"
+    assert not (b.get("predicted_above_boundary") != 1), f"❌ predicted_above_boundary={b.get('predicted_above_boundary')}, expected 1"
+    assert not (b.get("methods_above_boundary") != 2), f"❌ methods_above_boundary={b.get('methods_above_boundary')}, expected 2"
+    assert not (b["tested_above_boundary"] + b["predicted_above_boundary"] != b["methods_above_boundary"]), "❌ 拆分之和 != 总数"
 
 
-def main() -> int:
-    tests = [
-        test_strip_variant_suffix,
-        test_extract_variant_suffix,
-        test_predict_suffix_variant_fallback,
-        test_predict_base_variant_fallback,
-        test_convergence_resists_false_positive,
-        test_convergence_true_positive,
-        test_boundary_split_tested_predicted,
-    ]
-    for t in tests:
-        if t() != 0:
-            return 1
-    print("\n✅ 所有 Elo 收敛/预测回归测试通过")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

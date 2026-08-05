@@ -66,12 +66,28 @@ def iter_jsonl(path) -> Iterator[dict]:
 
 
 def write_jsonl(path, rows) -> None:
-    """整体覆写 JSONL 文件（自动创建父目录）。"""
+    """整体覆写 JSONL 文件（自动创建父目录）。
+
+    原子写（仿 write_json）：写 <path>.tmp → flush+fsync → os.replace，
+    中断不会留下截断的 JSONL。
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        # 清理残留 tmp（os.replace 失败时）
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def append_jsonl(path, row: dict) -> None:

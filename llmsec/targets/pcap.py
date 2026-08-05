@@ -30,12 +30,9 @@ load_env()
 # 注意：以下常量是 import 期固化的默认值；实际使用处（建客户端/发请求）
 # 会重新读 env，保证 dashboard 等长跑进程运行期改 os.environ 也生效。
 # ============================================================
-PCAP_JUDGE_URL = os.getenv(
-    "PCAP_JUDGE_URL",
-    "https://10.132.65.75:7078/api/v1/soc/pcap/judge",
-)
-PCAP_MODEL_VERSION = os.getenv("PCAP_MODEL_VERSION", "Qwen3.6-35B-A3B")
-PCAP_PROMPT_KEY = os.getenv("PCAP_PROMPT_KEY", "custom:dev")
+PCAP_JUDGE_URL = os.getenv("PCAP_JUDGE_URL", "")
+PCAP_MODEL_VERSION = os.getenv("PCAP_MODEL_VERSION", "unknown")
+PCAP_PROMPT_KEY = os.getenv("PCAP_PROMPT_KEY", "")
 
 REQUEST_TIMEOUT = 90.0   # PCAP 判读较慢
 MAX_RETRIES = 3

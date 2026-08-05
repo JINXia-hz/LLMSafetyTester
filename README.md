@@ -267,27 +267,21 @@ python -m llmsec.clustering.cli [--input FILE] [--result-file FILE] [--dump-feat
 python -m llmsec.reporting.report [--output-dir DIR]
     # 独立生成报告：扫描 *_结果.jsonl 和最新 runs/ 的 attack_results.jsonl
 
-python -m llmsec.pipeline.launcher
-    # 交互式启动器：选择攻击集与模式后引导执行
-
 python -m llmsec.pipeline.probe [--text "测试文本"]
     # 目标 API 连通性探测（按 TARGET_TYPE 路由）
 ```
 
 ### 测试
 
+基于 pytest（174 个用例，绝大多数离线可跑）：
+
 ```bash
-python -m tests.clustering_kdistance      # 离线验证聚类效果
-python -m tests.test_whitened_tree        # 阻尼白化空间 / auto-k / D-optimal 种子覆盖
-python -m tests.test_elo_convergence      # predict 变体兜底与 check_convergence 抗假阳性
-python -m tests.test_svd_ridge            # SVD-Ridge 批量预测精度 / 回退 / K-Fold / 缓存
-python -m tests.test_blend_predictor      # Blend 双层预测 + 贝叶斯收缩
-python -m tests.test_elo_access           # R → 派生 Elo 缓存指纹失效
-python -m tests.test_p2_correctness       # ResultsMatrix 正确性
-python -m tests.test_p2_data_integrity    # 数据完整性（原子写 / 损坏恢复）
-python -m tests.test_dashboard_api        # Web 面板 API / 任务生命周期
-python -m tests.test_jailbreak_tax        # 越狱税注入/计量/哨兵守卫
+pytest tests/                              # 全量
+pytest tests/test_elo_convergence.py       # 示例：单文件
+pytest -n auto                             # 并行
 ```
+
+> 📚 完整测试矩阵、命名约定（p0/p1/p2 批次代号）、"出问题该看哪个测试"速查见 [tests/README.md](tests/README.md)。
 
 ---
 
@@ -338,7 +332,7 @@ python -m tests.test_jailbreak_tax        # 越狱税注入/计量/哨兵守卫
 
 完整配置模板见 `llmsec/.env.example`（复制为 `.env` 即可）。
 
-embedding 降级链：本地缓存 → HF 镜像 → API embedding → TF-IDF。模型首次经镜像下载后缓存于 `llmsec/.models/`，之后完全离线可用。
+embedding 降级链：API embedding → 本地缓存 → HF 镜像 → TF-IDF（显式配置 `EMBEDDING_API_*` 三项齐全时优先走 API，探活失败才回落）。模型首次经镜像下载后缓存于 `llmsec/.models/`，之后完全离线可用。
 
 ---
 
@@ -357,7 +351,7 @@ llmsec/
 │                 # cluster_analysis(簇级分析+模型诊断)
 ├── attacks/      # 示例攻击集生成（可选，非核心）: generate(L1) / harmbench(内置数据)
 ├── data/         # 内置攻击数据（HarmBench 行为库 + 越狱模板，出处见目录内 Explication）
-├── pipeline/     # runner(自适应编排) / launcher(交互启动器) / probe(连通性探测)
+├── pipeline/     # runner(自适应编排) / probe(连通性探测)
 ├── reporting/    # report(五维树形画像 + LLM叙事报告 + 方法注册表)
 ├── clustering/   # space(白化度量空间) / hdb(HDBSCAN) / tree(关键层auto-k) /
 │                 # features / posterior / pipeline / cli
@@ -401,4 +395,4 @@ llmsec/output/
 
 ## 许可
 
-GPL
+GPL v3

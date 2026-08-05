@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from llmsec.core.logging import get_logger
 """
 HarmBench 攻击集生成器（内置数据，测试与示范用，非项目核心）
 
@@ -26,6 +27,8 @@ from llmsec.attacks.obfuscators import DEFAULT_OBFUSCATIONS, OBFUSCATORS, obfusc
 from llmsec.core import ATTACKS_DIR, DATA_DIR, PROJECT_ROOT, setup_console, write_jsonl
 from llmsec.core.text import inject_math_tax
 
+
+logger = get_logger(__name__)
 # 修复Windows CMD GBK编码导致emoji/Unicode输出报错
 setup_console()
 
@@ -47,11 +50,11 @@ def load_jailbreaks(path=None) -> list[str]:
     """从内置 JSON 加载 114 个人工越狱模板。"""
     path = Path(path) if path else JAILBREAKS_JSON
     if not path.exists():
-        print(f"⚠ 未找到模板文件: {path}，使用内置简化模板")
+        logger.warning(f"⚠ 未找到模板文件: {path}，使用内置简化模板")
         return _fallback_jailbreaks()
     with open(path, "r", encoding="utf-8") as f:
         jailbreaks = json.load(f)
-    print(f"  ✅ 加载 {len(jailbreaks)} 个越狱模板")
+    logger.info(f"  ✅ 加载 {len(jailbreaks)} 个越狱模板")
     return jailbreaks
 
 
@@ -212,7 +215,7 @@ def generate(
             entries.append(entry)
 
     write_jsonl(output_path, entries)
-    print(f"  ✅ 生成 {len(rows)} 条 behavior × {variants} 变体 = {len(entries)} 条攻击 prompt → {output_path.name}")
+    logger.info(f"  ✅ 生成 {len(rows)} 条 behavior × {variants} 变体 = {len(entries)} 条攻击 prompt → {output_path.name}")
 
 
 # ============================================================
@@ -220,6 +223,7 @@ def generate(
 # ============================================================
 def main():
     import argparse
+
     parser = argparse.ArgumentParser(description="HarmBench 攻击集生成器")
     parser.add_argument("--max", type=int, default=None,
                         help="最多生成 N 条 behavior（默认全部）")
@@ -246,11 +250,11 @@ def main():
     if args.obfuscations:
         obfuscations = [x.strip() for x in args.obfuscations.split(",") if x.strip()]
 
-    print("🔧 HarmBench 攻击集生成器（内置数据）")
-    print(f"   行为数据: {BEHAVIORS_CSV}")
-    print(f"   越狱模板: {JAILBREAKS_JSON}")
-    print(f"   变体数: {args.variants}{' + 混淆' if args.obfuscate else ''}")
-    print()
+    logger.info("🔧 HarmBench 攻击集生成器（内置数据）")
+    logger.info(f"   行为数据: {BEHAVIORS_CSV}")
+    logger.info(f"   越狱模板: {JAILBREAKS_JSON}")
+    logger.info(f"   变体数: {args.variants}{' + 混淆' if args.obfuscate else ''}")
+    logger.info("")
 
     jailbreaks = load_jailbreaks()
 
@@ -266,8 +270,8 @@ def main():
         math_tax=not args.no_math_tax,
     )
 
-    print(f"\n📁 输出: {output_path}")
-    print(f"   用法: python -m llmsec.evaluation.evaluator --input attacks/{output_path.name} --no-judge")
+    logger.info(f"\n📁 输出: {output_path}")
+    logger.info(f"   用法: python -m llmsec.evaluation.evaluator --input attacks/{output_path.name} --no-judge")
 
 
 if __name__ == "__main__":

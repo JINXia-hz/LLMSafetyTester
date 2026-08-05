@@ -269,27 +269,21 @@ python -m llmsec.clustering.cli [--input FILE] [--result-file FILE] [--dump-feat
 python -m llmsec.reporting.report [--output-dir DIR]
     # Standalone report: scans *_结果.jsonl and the latest runs/ attack_results.jsonl
 
-python -m llmsec.pipeline.launcher
-    # Interactive launcher: pick an attack set and mode, then guide execution
-
 python -m llmsec.pipeline.probe [--text "test text"]
     # Target API connectivity probe (routes by TARGET_TYPE)
 ```
 
 ### Tests
 
+pytest-based (174 cases, most run offline):
+
 ```bash
-python -m tests.clustering_kdistance      # offline clustering-effect verification
-python -m tests.test_whitened_tree        # damped whitened space / auto-k / D-optimal seed coverage
-python -m tests.test_elo_convergence      # predict variant fallback & check_convergence anti-false-positive
-python -m tests.test_svd_ridge            # SVD-Ridge batch-prediction accuracy / fallback / K-Fold / cache
-python -m tests.test_blend_predictor      # Blend two-layer prediction + Bayesian shrinkage
-python -m tests.test_elo_access           # R → derived-Elo cache fingerprint invalidation
-python -m tests.test_p2_correctness       # ResultsMatrix correctness
-python -m tests.test_p2_data_integrity    # data integrity (atomic write / corruption recovery)
-python -m tests.test_dashboard_api        # Web panel API / task lifecycle
-python -m tests.test_jailbreak_tax        # jailbreak-tax injection/scoring/sentinel guard
+pytest tests/                              # all
+pytest tests/test_elo_convergence.py       # example: single file
+pytest -n auto                             # parallel
 ```
+
+> 📚 Full test matrix, naming conventions (p0/p1/p2 batch codes), and a "which test to read when X breaks" cheat sheet in [tests/README.md](tests/README.md).
 
 ---
 
@@ -340,7 +334,7 @@ Six sections in the sidebar:
 
 Full template in `llmsec/.env.example` (copy to `.env`).
 
-Embedding fallback chain: local cache → HF mirror → API embedding → TF-IDF. After the model downloads once via the mirror it's cached under `llmsec/.models/` and works fully offline.
+Embedding fallback chain: API embedding → local cache → HF mirror → TF-IDF (when `EMBEDDING_API_*` are all set, the API takes priority; falls back only if the probe fails). After the model downloads once via the mirror it's cached under `llmsec/.models/` and works fully offline.
 
 ---
 
@@ -359,7 +353,7 @@ llmsec/
 │                 # cluster_analysis(cluster-level analysis + model diagnostics)
 ├── attacks/      # demo attack-set generation (optional, non-core): generate(L1) / harmbench(built-in data)
 ├── data/         # built-in attack data (HarmBench behavior library + jailbreak templates; see Explication)
-├── pipeline/     # runner(adaptive orchestration) / launcher(interactive) / probe(connectivity)
+├── pipeline/     # runner(adaptive orchestration) / probe(connectivity)
 ├── reporting/    # report(five-dimensional tree profile + LLM narrative + method registry)
 ├── clustering/   # space(whitened metric space) / hdb(HDBSCAN) / tree(key-layer auto-k) /
 │                 # features / posterior / pipeline / cli
@@ -403,4 +397,4 @@ llmsec/output/
 
 ## License
 
-GPL
+GPL v3

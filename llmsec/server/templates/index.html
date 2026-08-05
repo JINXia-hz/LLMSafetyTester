@@ -25,9 +25,54 @@
       --c-muted: #7C7663;
       --c-line: #DCCFAE;
       --c-on-seal: #F8EFD8;
+      --c-topbar: #EFE8D3;
+      --c-input-bg: #FBF6E6;
+      --c-th-bg: #EFE7CE;
+      --c-btn-plain-bg: #E7DDC2;
+      --c-log-bg: #262B30;
+      --c-log-text: #CDBE9C;
+      --c-plaque1: #46586B;
+      --c-plaque2: #3A495A;
       --serif: "KaiTi", "STKaiti", "Kaiti SC", "SimSun", serif;
     }
-    body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: var(--c-bg); color: var(--c-text); }
+    /* ---------- C-2 石窟夜色（暗色主题） ---------- */
+    [data-theme="dark"] {
+      --c-bg: #2A2F35;
+      --c-card: #353C43;
+      --c-sidebar: #22272C;
+      --c-sidebar-deep: #1B1F23;
+      --c-primary: #5A748C;
+      --c-accent: #C07358;
+      --c-warn: #C07358;
+      --c-safe: #84987A;
+      --c-ochre: #C49A54;
+      --c-deep: #96604A;
+      --c-gold: #B8963A;
+      --c-text: #E4D8BE;
+      --c-muted: #A79C85;
+      --c-line: #454D55;
+      --c-on-seal: #F8EFD8;
+      --c-topbar: #2F353B;
+      --c-input-bg: #2B3138;
+      --c-th-bg: #3E4650;
+      --c-btn-plain-bg: #454D55;
+      --c-log-bg: #1E2226;
+      --c-log-text: #CDBE9C;
+      --c-plaque1: #3E5266;
+      --c-plaque2: #31404F;
+    }
+    [data-theme="dark"] .badge-gt { background: rgba(132,152,122,.22); color: #A9BC9E; }
+    [data-theme="dark"] .badge-pred { background: rgba(90,116,140,.25); color: #9FB6C9; }
+    [data-theme="dark"] .report-body p, [data-theme="dark"] .report-body li { color: #C9BC9E; }
+    [data-theme="dark"] .card:has(> .metric-value)::after {
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56' viewBox='0 0 56 56'%3E%3Cg fill='none' stroke='%23E4D8BE' stroke-width='1'%3E%3Crect x='16' y='16' width='24' height='24'/%3E%3Crect x='21' y='21' width='14' height='14' transform='rotate(45 28 28)'/%3E%3Ccircle cx='28' cy='28' r='3'/%3E%3C/g%3E%3C/svg%3E");
+      opacity: .10;
+    }
+    [data-theme="dark"] .clouds {
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='18' viewBox='0 0 240 18'%3E%3Cg fill='none' stroke='%23E4D8BE' stroke-width='1.1'%3E%3Cpath d='M8 13 q11 -12 24 -5 q-9 1 -7 7'/%3E%3Cpath d='M64 11 q13 -14 28 -6 q-10 1.5 -8 8'/%3E%3Cpath d='M128 13 q11 -12 24 -5 q-9 1 -7 7'/%3E%3Cpath d='M188 11 q13 -14 28 -6 q-10 1.5 -8 8'/%3E%3C/g%3E%3C/svg%3E");
+      opacity: .08;
+    }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: var(--c-bg); color: var(--c-text); transition: background .25s, color .25s; }
 
     /* ---------- 卡片：方角小圆角 + 米白册页 ---------- */
     .card { position: relative; background: var(--c-card); border: 1px solid var(--c-line); border-radius: 6px; padding: 16px; }
@@ -78,7 +123,7 @@
     .btn:disabled { opacity: .45; cursor: not-allowed; }
     .btn-primary { background: var(--c-primary); color: #F3E9CE; }
     .btn-accent { background: var(--c-accent); color: var(--c-on-seal); }
-    .btn-plain { background: #E7DDC2; color: var(--c-text); }
+    .btn-plain { background: var(--c-btn-plain-bg); color: var(--c-text); }
 
     /* ---------- 横幅 ---------- */
     .banner { border-radius: 6px; padding: 22px 26px; color: #F8EFD8; }
@@ -91,8 +136,8 @@
     /* 总览匾额：恒石青底 + 金边 + 藻井团花 + 等级印章 */
     .banner.plaque {
       position: relative; overflow: hidden;
-      background: linear-gradient(160deg, var(--c-sidebar) 0%, var(--c-sidebar-deep) 100%);
-      border: 1px solid var(--c-sidebar-deep);
+      background: linear-gradient(160deg, var(--c-plaque1) 0%, var(--c-plaque2) 100%);
+      border: 1px solid var(--c-plaque2);
       border-left: 3px solid var(--c-gold);
       padding-right: 190px;
     }
@@ -135,13 +180,17 @@
     .report-body ul { list-style: disc; } .report-body ol { list-style: decimal; }
     .report-body table { border-collapse: collapse; margin: 0.6em 0; font-size: 0.85rem; }
     .report-body th, .report-body td { border: 1px solid var(--c-line); padding: 5px 10px; }
-    .report-body th { background: #EFE7CE; }
-    .report-body code { background: #EFE7CE; border-radius: 3px; padding: 1px 5px; font-size: 0.82rem; }
+    .report-body th { background: var(--c-th-bg); }
+    .report-body code { background: var(--c-th-bg); border-radius: 3px; padding: 1px 5px; font-size: 0.82rem; }
     .report-body blockquote { border-left: 3px solid var(--c-gold); padding-left: 12px; color: var(--c-muted); margin: 0.6em 0; }
 
-    .log-box { background: #262B30; color: #CDBE9C; font-family: ui-monospace, Consolas, monospace; font-size: 0.75rem; border-radius: 4px; border-top: 2px solid var(--c-gold); padding: 12px; height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
-    select, input[type="number"], input[type="text"] { border: 1px solid var(--c-line); border-radius: 4px; padding: 6px 10px; font-size: 0.85rem; background: #FBF6E6; color: var(--c-text); }
+    .log-box { background: var(--c-log-bg); color: var(--c-log-text); font-family: ui-monospace, Consolas, monospace; font-size: 0.75rem; border-radius: 4px; border-top: 2px solid var(--c-gold); padding: 12px; height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+    select, input[type="number"], input[type="text"] { border: 1px solid var(--c-line); border-radius: 4px; padding: 6px 10px; font-size: 0.85rem; background: var(--c-input-bg); color: var(--c-text); }
     .cluster-tag { font-size: 0.72rem; padding: 2px 8px; border-radius: 2px; font-weight: 600; }
+
+    /* ---------- 聚类投影点选 → 簇卡片描金闪高 ---------- */
+    .card { transition: box-shadow .4s ease; }
+    .clcard-flash { box-shadow: 0 0 0 2px var(--c-gold), 0 4px 18px rgba(191,160,60,.28) !important; }
 
     /* ---------- 威胁表格：表头描金底线 ---------- */
     #sec-threats thead tr { border-bottom: 2px solid var(--c-gold); }
@@ -152,12 +201,32 @@
     .empty-state .empty-title { font-family: var(--serif); font-size: 1.15rem; font-weight: 700; color: var(--c-text); }
     .empty-state .empty-sub { font-size: 0.85rem; color: var(--c-muted); margin-top: 6px; }
 
+    /* ---------- 阅读进度条 + 报告目录高亮 ---------- */
+    #readProgress { position: fixed; top: 0; left: 0; height: 2px; width: 0; background: var(--c-gold); z-index: 50; transition: width .1s linear; }
+    #reportNav a.rep-link.active { box-shadow: inset 3px 0 0 var(--c-gold); font-weight: 600; color: var(--c-text) !important; }
+
+    /* ---------- 批次对比 ---------- */
+    .cmp-delta-up-bad { color: var(--c-accent); font-weight: 700; }
+    .cmp-delta-up-good { color: var(--c-safe); font-weight: 700; }
+    .cmp-delta-flat { color: var(--c-muted); }
+    #cmpTable table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    #cmpTable th, #cmpTable td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--c-line); }
+    #cmpTable th { color: var(--c-muted); font-weight: 600; font-size: 0.75rem; }
+
+    /* ---------- 可排序表头 ---------- */
+    th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
+    th[data-sort]:hover { color: var(--c-text); }
+    th[data-sort]::after { content: " ⇅"; opacity: .35; font-size: .8em; }
+    th[data-sort].sort-asc::after { content: " ↑"; opacity: 1; color: var(--c-gold); }
+    th[data-sort].sort-desc::after { content: " ↓"; opacity: 1; color: var(--c-gold); }
+
     @media (prefers-reduced-motion: reduce) {
       .medal svg, .clouds, .seal-anim, .section.visible .card { animation: none !important; }
     }
   </style>
 </head>
 <body>
+  <div id="readProgress"></div>
   <div class="flex min-h-screen">
     <!-- ============ 侧边栏 ============ -->
     <aside class="w-56 shrink-0 flex flex-col" style="background: var(--c-sidebar);">
@@ -182,11 +251,12 @@
     <!-- ============ 主区域 ============ -->
     <main class="flex-1 min-w-0">
       <!-- 顶栏 -->
-      <div class="flex items-center gap-3 px-6 py-4" style="background: #EFE8D3; border-bottom: 1px solid var(--c-line);">
+      <div class="flex items-center gap-3 px-6 py-4" style="background: var(--c-topbar); border-bottom: 1px solid var(--c-line);">
         <label class="text-sm font-medium">运行批次:</label>
         <select id="runSelect" class="min-w-[240px]"><option value="">最新</option></select>
         <button id="refreshBtn" class="btn btn-plain">🔄 刷新</button>
         <span id="status" class="text-sm" style="color: var(--c-muted);"></span>
+        <button id="themeBtn" class="btn btn-plain text-xs ml-auto" title="切换石窟夜色 / 绢本纸日">🌙 夜色</button>
       </div>
 
       <div class="p-6 max-w-6xl">
@@ -204,6 +274,17 @@
           </div>
           <div class="clouds" aria-hidden="true"></div>
 
+          <!-- 批次对比 -->
+          <div class="flex items-center gap-2 mb-4">
+            <button id="cmpBtn" class="btn btn-plain text-xs">⇄ 批次对比</button>
+            <select id="cmpSelect" class="hidden text-xs" style="min-width: 220px;"></select>
+            <span id="cmpHint" class="text-xs hidden" style="color: var(--c-muted);">当前批次 vs 所选批次</span>
+          </div>
+          <div id="cmpPanel" class="hidden grid grid-cols-1 lg:grid-cols-2 gap-4 mb-5">
+            <div class="card"><h3 class="font-semibold mb-2 text-sm">五维画像叠加（石青=当前 · 土红=对比）</h3><div id="chart_cmp_radar"></div></div>
+            <div class="card"><h3 class="font-semibold mb-2 text-sm">指标增量（对比 − 当前）</h3><div id="cmpTable"></div></div>
+          </div>
+
           <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-3 mb-5">
             <div class="card"><div class="metric-label">ASR 攻击成功率</div><div class="metric-value" id="ov_asr">-</div></div>
             <div class="card"><div class="metric-label">FPR 误杀率</div><div class="metric-value" id="ov_fpr">-</div></div>
@@ -219,6 +300,18 @@
             <div class="card"><h3 class="font-semibold mb-2 text-sm">五维安全画像</h3><div id="chart_radar"></div></div>
             <div class="card"><h3 class="font-semibold mb-2 text-sm">按有害类别 ASR</h3><div id="chart_harm"></div></div>
           </div>
+
+          <!-- 跨批次安全趋势（全局数据，不随批次切换） -->
+          <div class="card mt-4">
+            <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+              <h3 class="font-semibold text-sm">安全趋势（跨批次）
+                <span id="trendMeta" class="text-xs font-normal" style="color: var(--c-muted);"></span>
+              </h3>
+              <div id="trendTargets" class="flex gap-1 flex-wrap"></div>
+            </div>
+            <div class="text-xs mb-1" style="color: var(--c-muted);">实线 = 防御方 ELO（左轴） · 点线 = ASR（右轴）</div>
+            <div id="chart_trend"></div>
+          </div>
         </section>
 
         <!-- ============ 威胁看板 ============ -->
@@ -231,8 +324,8 @@
             <h3 class="font-semibold mb-3 text-sm">高威胁方法清单</h3>
             <div class="overflow-auto"><table class="min-w-full text-sm">
               <thead><tr class="text-left" style="color: var(--c-muted);">
-                <th class="py-2 pr-4">方法</th><th class="py-2 pr-4">ELO</th><th class="py-2 pr-4">ASR</th>
-                <th class="py-2 pr-4">税</th><th class="py-2 pr-4">来源</th><th class="py-2">95% CI</th>
+                <th class="py-2 pr-4">方法</th><th class="py-2 pr-4" data-sort="elo">ELO</th><th class="py-2 pr-4" data-sort="asr">ASR</th>
+                <th class="py-2 pr-4" data-sort="tax">税</th><th class="py-2 pr-4" data-sort="tested">来源</th><th class="py-2">95% CI</th>
               </tr></thead>
               <tbody id="threatTable"></tbody>
             </table></div>
@@ -352,6 +445,7 @@
               <div class="space-y-2 text-xs mb-3">
                 <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">目标模型</span><select id="evalTarget" class="flex-1"><option value="">（.env 默认）</option></select></div>
                 <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">攻击集</span><select id="evalInput" class="flex-1"></select></div>
+                <div class="text-xs" style="color: var(--c-muted); padding-left: 4rem;">💡 越狱税需含数学探针的攻击集（文件名含 baseline）</div>
                 <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">阶段</span>
                   <select id="evalPhase" class="flex-1"><option value="all">全部</option><option value="1">仅攻击</option><option value="2">仅过敏</option></select></div>
                 <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">批大小</span><input type="number" id="evalBatch" value="10" min="1" max="50" class="flex-1"></div>

@@ -22,7 +22,6 @@ import hashlib
 import json
 from datetime import datetime
 
-import joblib
 import numpy as np
 
 from llmsec.clustering.pipeline import (
@@ -39,12 +38,14 @@ from llmsec.clustering.tree import (
     sweep_candidates,
 )
 from llmsec.core.config import CLUSTER_REPORT_FILE, CLUSTER_RESULT_FILE, OUTPUT_DIR
+from llmsec.core.io import save_artifact, write_json
 from llmsec.core.logging import get_logger
 from llmsec.params import HDBSCAN_MIN_CLUSTER_DIV
 
+
+
+
 logger = get_logger(__name__)
-
-
 def _method_set_hash(methods: list[str]) -> str:
     return hashlib.md5(",".join(sorted(set(methods))).encode("utf-8")).hexdigest()
 
@@ -169,8 +170,10 @@ def run_hdbscan_clustering(
 
     if write:
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        with open(CLUSTER_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2, allow_nan=False)
+        # allow_nan=False 语义保留：先整体序列化验证，NaN/Infinity 直接抛错；
+        # write_json 默认原子写（.tmp → os.replace），崩溃不留半截报告
+        json.dumps(report, ensure_ascii=False, allow_nan=False)
+        write_json(CLUSTER_REPORT_FILE, report)
         _export_matrix(labels, features, meta)
 
         artifacts = {
@@ -202,7 +205,7 @@ def run_hdbscan_clustering(
             "hdbscan_report": report,
             "generated_at": report["generated_at"],
         }
-        joblib.dump(artifacts, CLUSTER_RESULT_FILE)
+        save_artifact(CLUSTER_RESULT_FILE, artifacts)
         logger.info(
             "✅ 聚类完成: 关键层 k*=%d, 密度视图 %d 簇+%d 噪声, silhouette=%.4f",
             k_best, n_flat, n_noise, validation.get("silhouette", 0.0),

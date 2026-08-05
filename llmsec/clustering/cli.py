@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from llmsec.core.logging import get_logger
 """
 攻击聚类分析 CLI 入口（post-test 设计：聚类在测试流程结束后运行）
 
@@ -29,6 +30,8 @@ from llmsec.clustering import (
 from llmsec.clustering.space import build_feature_matrix
 from llmsec.core.io import read_jsonl
 
+
+logger = get_logger(__name__)
 setup_console()
 
 
@@ -42,28 +45,41 @@ def main():
                         help="仅提取特征并导出 JSON，不聚类")
     args = parser.parse_args()
 
-    print(f"📂 加载数据: {args.input}")
+    logger.info(f"📂 加载数据: {args.input}")
+    # M-32：result_file 路径解析必须与 load_and_extract 一致（相对 OUTPUT_DIR）。原实现
+    # cli 侧按 CWD 读、内部按 OUTPUT_DIR 读，传 runs/<ts>/attack_results.jsonl 相对路径时
+    # cli 读到 0 条 → 弱监督加权与 ANOVA 静默失效，而 defense 特征却成功提取（两个数据视图）。
     eval_results = []
+    resolved_result = args.result_file
     if args.result_file:
-        eval_results = read_jsonl(args.result_file)
-        print(f"📂 评估结果: {args.result_file} ({len(eval_results)} 条)")
+        from pathlib import Path as _Path
+
+        rp = _Path(args.result_file)
+        if not rp.is_absolute():
+            rp = OUTPUT_DIR / args.result_file
+        resolved_result = str(rp)
+        eval_results = read_jsonl(resolved_result)
+        logger.info(f"📂 评估结果: {resolved_result} ({len(eval_results)} 条)")
+        if not eval_results:
+            # 读回 0 条时弱监督加权与 ANOVA 簇效验证会静默失效——显式提醒，防"以为带了评估"
+            logger.warning(f"  ⚠ 评估结果读回 0 条（文件缺失或全为空行）——弱监督加权与簇效验证将被跳过")
     features, meta = load_and_extract(
         attack_file=args.input,
-        result_file=args.result_file,
+        result_file=resolved_result,
     )
 
     methods = meta["method_names"]
-    print(f"   共 {len(methods)} 种攻击方法")
+    logger.info(f"   共 {len(methods)} 种攻击方法")
 
     feat_dims = {}
     for m in methods[:1]:
         for block_name, block_data in features[m].items():
             dim = len(block_data) if hasattr(block_data, "__len__") else 1
             feat_dims[block_name] = dim
-    print(f"   特征维度: {feat_dims}")
+    logger.info(f"   特征维度: {feat_dims}")
 
     if args.dump_features:
-        out_path = os.path.join(OUTPUT_DIR, "extracted_features.json")
+        out_path = OUTPUT_DIR / "extracted_features.json"
         serializable = {}
         for m in methods:
             serializable[m] = {}
@@ -74,7 +90,7 @@ def main():
                     serializable[m][block_name] = list(block_data) if hasattr(block_data, "__iter__") else float(block_data)
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(serializable, f, ensure_ascii=False, indent=2, allow_nan=False)
-        print(f"\n📁 特征导出: {out_path}")
+        logger.info(f"\n📁 特征导出: {out_path}")
         return
 
     # 弱监督权重（有评估结果时）
@@ -85,45 +101,45 @@ def main():
         X = build_feature_matrix(features, methods)
         y = {m: reactions[m]["mean_score"] for m in methods if m in reactions}
         weights = learn_supervised_weights(X, methods, y)
-        print(f"   弱监督: {len(y)} 个已测方法参与特征加权")
+        logger.info(f"   弱监督: {len(y)} 个已测方法参与特征加权")
 
-    print(f"\n⏳ HDBSCAN 聚类")
+    logger.info(f"\n⏳ HDBSCAN 聚类")
     report = run_hdbscan_clustering(
         features, meta, feature_weights=weights, reactions=reactions,
     )
 
     if "error" in report:
-        print(f"\n❌ {report['error']}")
+        logger.error(f"\n❌ {report['error']}")
         sys.exit(1)
 
-    print(f"\n{'='*60}")
-    print(f"📊 聚类分析结果")
-    print(f"{'='*60}")
-    print(f"  簇数: {report['n_clusters']} (+ {report['n_noise']} 噪声)")
-    print(f"  关键层: k*={report.get('chosen_k')} (top3 {report.get('top_ks', [])})")
+    logger.info(f"\n{'='*60}")
+    logger.info(f"📊 聚类分析结果")
+    logger.info(f"{'='*60}")
+    logger.info(f"  簇数: {report['n_clusters']} (+ {report['n_noise']} 噪声)")
+    logger.info(f"  关键层: k*={report.get('chosen_k')} (top3 {report.get('top_ks', [])})")
 
     val = report.get("validation", {})
-    print(f"  轮廓系数: {val.get('silhouette', 0):.4f}")
-    print(f"  Calinski-Harabasz: {val.get('calinski_harabasz', 0):.2f}")
-    print(f"  Davies-Bouldin: {val.get('davies_bouldin', 0):.4f}")
+    logger.info(f"  轮廓系数: {val.get('silhouette', 0):.4f}")
+    logger.info(f"  Calinski-Harabasz: {val.get('calinski_harabasz', 0):.2f}")
+    logger.info(f"  Davies-Bouldin: {val.get('davies_bouldin', 0):.4f}")
 
     rv = report.get("reaction_validation")
     if rv and rv.get("available"):
-        print(f"\n  簇效验证: {rv['verdict']}")
-        print(f"    p_anova={rv['p_anova']}, p_kruskal={rv['p_kruskal']}, "
+        logger.info(f"\n  簇效验证: {rv['verdict']}")
+        logger.info(f"    p_anova={rv['p_anova']}, p_kruskal={rv['p_kruskal']}, "
               f"eta²={rv['eta2']}, ε²={rv['epsilon2']}")
 
-    print(f"\n  簇命名:")
+    logger.info(f"\n  簇命名:")
     for cid, name in sorted(report.get("cluster_names", {}).items(), key=lambda x: int(x[0])):
         tag = "🟡 稀疏区" if cid == "-1" else f"簇{cid}"
         members = [m for m, c in report.get("method_labels", {}).items() if str(c) == str(cid)]
-        print(f"    {tag} ({len(members)} 种方法): {name}")
+        logger.info(f"    {tag} ({len(members)} 种方法): {name}")
         if len(members) <= 8:
-            print(f"      → {', '.join(members)}")
+            logger.info(f"      → {', '.join(members)}")
 
-    print(f"\n  📁 报告: {CLUSTER_REPORT_FILE}")
-    print(f"  📁 矩阵: {CLUSTER_MATRIX_FILE}")
-    print(f"{'='*60}")
+    logger.info(f"\n  📁 报告: {CLUSTER_REPORT_FILE}")
+    logger.info(f"  📁 矩阵: {CLUSTER_MATRIX_FILE}")
+    logger.info(f"{'='*60}")
 
 
 if __name__ == "__main__":

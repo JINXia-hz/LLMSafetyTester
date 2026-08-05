@@ -1,4 +1,4 @@
-# LLM 红队攻击测试工具依赖（Python 3.11）
+﻿# LLM 红队攻击测试工具依赖（Python 3.11）
 # 按 llmsec/ 包实际 import 生成
 
 # 核心：目标/裁判/生成模型 API 与配置
@@ -21,3 +21,7 @@ scipy>=1.10
 hdbscan>=0.8,<0.9          # 可选：--method hdbscan（默认聚类算法）
 sentence-transformers>=2   # 可选：语义嵌入特征
 tiktoken>=0.5              # 可选：token 数估算，缺失时退化为近似值
+
+# 测试框架
+pytest>=8,<9
+pytest-xdist>=3

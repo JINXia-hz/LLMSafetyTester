@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 回归测试：BlendPredictor（统一 + 模型双层预测，自适应权重）。
 
@@ -10,15 +10,13 @@
 """
 
 import sys
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
 
 import numpy as np
 
 from llmsec.core.results import ResultsMatrix
-from llmsec.evaluation.blend_predictor import BlendPredictor, DEFAULT_BLEND_PRIOR_K
+from llmsec.evaluation.blend_predictor import BlendPredictor
+from llmsec.params import BLEND_PRIOR_K
 from llmsec.evaluation.elo_cluster import EloPredictorModel
 
 BLOCKS = EloPredictorModel.BLOCK_ORDER
@@ -29,7 +27,7 @@ def _feat(methods, seed=0):
     return {m: {b: rng.standard_normal(4) for b in BLOCKS} for m in methods}
 
 
-def test_prediction_paths() -> int:
+def test_prediction_paths():
     R = ResultsMatrix()
     for ts in range(1, 11):
         R.upsert("m%d" % ts, "qwen", 3.0 if ts <= 5 else -2.0, ts=ts)
@@ -45,11 +43,9 @@ def test_prediction_paths() -> int:
     r3 = bp.predict("m1", "brand_new")
     if r3["w_model"] != 0.0 or r3["source"] != "unified_only":
         print("❌ 全新模型应 unified_only:", r3); return 1
-    print("✅ 三种预测路径通过")
-    return 0
 
 
-def test_adaptive_weights() -> int:
+def test_adaptive_weights():
     """样本越少 → w_model 越小（更偏统一）。"""
     R = ResultsMatrix()
     for ts in range(1, 31):
@@ -64,29 +60,15 @@ def test_adaptive_weights() -> int:
         print(f"❌ 少样本应更偏统一: w_small={w_small} >= w_big={w_big}"); return 1
     # 公式校验：w_m = n/(n+K)
     import math
-    if not math.isclose(w_big, 30 / (30 + DEFAULT_BLEND_PRIOR_K), abs_tol=1e-9):
+    if not math.isclose(w_big, 30 / (30 + BLEND_PRIOR_K), abs_tol=1e-9):
         print(f"❌ w_big 公式不符: {w_big}"); return 1
-    print(f"✅ 自适应权重通过 (big n=30→{w_big:.3f}, small n=3→{w_small:.3f})")
-    return 0
 
 
-def test_no_data_fallback() -> int:
+def test_no_data_fallback():
     """两层都无数据 → fallback 返回初始 Elo + 大 std。"""
     bp = BlendPredictor()  # 未 fit
     r = bp.predict("any", "any")
     if r["source"] != "fallback" or r["elo"] != 1500.0:
         print("❌ 空预测器应 fallback/1500:", r); return 1
-    print("✅ 空数据兜底通过")
-    return 0
 
 
-def main() -> int:
-    for t in (test_prediction_paths, test_adaptive_weights, test_no_data_fallback):
-        if t() != 0:
-            return 1
-    print("\n✅ 所有 BlendPredictor 测试通过")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

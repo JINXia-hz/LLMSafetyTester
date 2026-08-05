@@ -48,8 +48,8 @@ STATE_DIR = OUTPUT_DIR / "state"
 ATTACKS_DIR = OUTPUT_DIR / "attacks"
 RUNS_DIR = OUTPUT_DIR / "runs"
 
-# 状态文件（统一持久化：output/state/state.json）
-STATE_FILE = STATE_DIR / "state.json"
+# R 矩阵为唯一真相（results.json）；全局 state.json 已废弃。
+# per-run 快照在 runs/<ts>/state.json，per-target 快照在 state__<name>.json。
 SAFE_TWINS_FILE = STATE_DIR / "safe_twins.jsonl"
 
 # 结果矩阵（多模型唯一真相）+ 派生缓存目录
@@ -86,8 +86,6 @@ CLUSTER_FEATURES_FILE = OUTPUT_DIR / "cluster_features.json"
 #   - cluster_result.pkl：完整聚类产物，hdb 写、final_fit 增补
 FEATURE_CACHE_FILE = OUTPUT_DIR / "feature_cache.pkl"
 CLUSTER_RESULT_FILE = OUTPUT_DIR / "cluster_result.pkl"
-# 已废弃别名（指向 cluster_result.pkl），仅为未迁移的外部引用保留；新代码用上面两个。
-CLUSTER_ARTIFACTS_FILE = CLUSTER_RESULT_FILE
 
 
 # ============================================================
@@ -268,16 +266,20 @@ class JudgeConfig:
     api_key: str = ""
     base_url: str = DEFAULT_BASE_URL
     model: str = DEFAULT_MODEL
-    timeout: float = 30.0          # judge.py 现行 JUDGE_TIMEOUT
-    max_retries: int = 2           # judge.py 现行 JUDGE_MAX_RETRIES
+    timeout: float = 30.0
+    max_retries: int = 2
     temperature: float = 0.0
     max_tokens: int = 512
 
     @classmethod
     def from_env(cls) -> "JudgeConfig":
         load_env()
+        # M-23：JUDGE_MODEL 缺省回退 GENERATOR_MODEL（与 README 一致），最后才回退 DEFAULT_MODEL。
+        # 原实现回退硬编码 DEFAULT_MODEL=deepseek-v4-flash，GENERATOR 配到非 deepseek 服务商
+        # 且不设 JUDGE_MODEL 时，Judge 用对方 base_url 请求 "deepseek-v4-flash" → 404。
+        model = os.getenv("JUDGE_MODEL") or os.getenv("GENERATOR_MODEL") or DEFAULT_MODEL
         return cls(
             api_key=os.getenv("GENERATOR_API_KEY", os.getenv("JUDGE_API_KEY", "")),
             base_url=os.getenv("GENERATOR_BASE_URL", DEFAULT_BASE_URL),
-            model=os.getenv("JUDGE_MODEL", DEFAULT_MODEL),
+            model=model,
         )

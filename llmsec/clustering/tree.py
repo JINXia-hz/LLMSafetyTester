@@ -17,17 +17,20 @@ import numpy as np
 
 from llmsec.core.logging import get_logger
 from llmsec.params import (
+
     KNEE_FLATTEN_RATIO,  # 边界上升判定：末尾增益高于最大增益的该比例即视为"仍在上升"
     TREE_K_MAX,
     TREE_K_MIN,
 )
 
-logger = get_logger(__name__)
 
 
 # ============================================================
 # auto-k：log 增长 + 候选集
 # ============================================================
+
+logger = get_logger(__name__)
+
 def log_growth_k0(n: int, k_min: int = TREE_K_MIN, k_max: int = TREE_K_MAX) -> int:
     """聚类量随数据规模 log 增长：n=100→7, n=1000→10, n=10000→14。
 
@@ -58,6 +61,7 @@ def candidate_ks(n: int) -> list[int]:
 def cut_tree(Z: np.ndarray, methods: list[str], k: int) -> dict[str, int]:
     """在 linkage 树上切出 k 个簇（标签规范化为 0..k-1）。"""
     from scipy.cluster.hierarchy import fcluster
+
 
     raw = fcluster(Z, t=k, criterion="maxclust")
     return {m: int(c) - 1 for m, c in zip(methods, raw)}

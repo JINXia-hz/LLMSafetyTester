@@ -42,7 +42,9 @@ def retry_call(
       也可用于打印重试日志。
     """
     last_error: Exception | None = None
-    for attempt in range(1, retries + 1):
+    # 至少一次尝试：retries<1（误传 0）时也调用一次，否则 range 为空 → raise last_error(None)
+    # 抛 TypeError: exceptions must derive from BaseException
+    for attempt in range(1, max(1, retries) + 1):
         try:
             return func()
         except Exception as e:

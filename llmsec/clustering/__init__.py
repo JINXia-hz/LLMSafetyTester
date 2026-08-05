@@ -3,7 +3,7 @@ llmsec.clustering — 攻击方法聚类子包
 
   - features.py：5 维攻击特征提取
   - space.py：阻尼白化（轻量马氏）特征空间 + 弱监督特征权重
-  - hdb.py：HDBSCAN 聚类主管线（post-test）+ single-linkage 树关键层
+  - hdb.py：HDBSCAN 聚类主管线（post-test）+ Ward 树关键层
   - tree.py：层次树层选择工具（算法无关）
   - posterior.py：后验统计（机器反应 / 弱监督 / ANOVA 簇效验证）
   - pipeline.py：聚类工具（自动命名 / 画像 / 导出）
@@ -44,7 +44,6 @@ from llmsec.clustering.tree import (
     sweep_candidates,
 )
 from llmsec.core.config import (
-    CLUSTER_ARTIFACTS_FILE,
     CLUSTER_FEATURES_FILE,
     CLUSTER_MATRIX_FILE,
     CLUSTER_REPORT_FILE,
@@ -71,5 +70,5 @@ __all__ = [
     "cut_tree", "candidate_ks", "sweep_candidates", "select_knee", "log_growth_k0",
     # 路径常量
     "CLUSTER_REPORT_FILE", "CLUSTER_MATRIX_FILE", "CLUSTER_FEATURES_FILE",
-    "CLUSTER_ARTIFACTS_FILE", "FEATURE_CACHE_FILE", "CLUSTER_RESULT_FILE",
+    "FEATURE_CACHE_FILE", "CLUSTER_RESULT_FILE",
 ]
