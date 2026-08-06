@@ -488,7 +488,7 @@ def run_evaluation(records: list[dict], args: argparse.Namespace,
 
             # 单条评估（核心逻辑统一在 evaluate_single）
             result = evaluate_single(
-                prompt_text, expected_answer, None, judge,
+                prompt_text, expected_answer, judge,
                 use_judge=use_judge,
                 skip_prescreen=args.skip_judge_prescreen,
             )
