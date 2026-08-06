@@ -39,7 +39,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r llmsec/requirements.txt
 
+      - name: Install test dependencies
+        run: pip install pytest pytest-xdist
+
       - name: Run tests
         env:
           PYTHONIOENCODING: utf-8
-        run: pytest tests/ -q --tb=short
+        run: python -m pytest tests/ -q --tb=short
