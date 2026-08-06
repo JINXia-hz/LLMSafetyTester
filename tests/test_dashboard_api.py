@@ -12,7 +12,8 @@ import time
 
 from fastapi.testclient import TestClient
 
-from llmsec.server.dashboard_api import TASKS, _start_task, app
+from llmsec.server.dashboard_api import app
+from llmsec.server.routers.tasks import TASKS, _start_task
 
 client = TestClient(app)
 

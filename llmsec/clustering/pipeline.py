@@ -12,6 +12,7 @@
 树层选择在 llmsec.clustering.tree（算法无关）。
 """
 
+import json
 import re
 from collections import Counter, defaultdict
 
@@ -144,6 +145,87 @@ def auto_name_clusters(
         cluster_names[cid] = name
 
     return cluster_names
+
+
+def ai_rename_clusters(
+    cluster_names: dict[int, str],
+    labels: dict[str, int],
+    features: dict,
+    meta: dict,
+    method_prompts: dict[str, str],
+) -> dict[int, str]:
+    """LLM 把技术名润色为简短中文人话标签；离线/失败时原样返回技术名。
+
+    一次调用覆盖所有簇（省 API）。用 GENERATOR_* 配置（同攻击生成模型）。
+    仅在主聚类（hdb.py）调用；dashboard 交互重切走 auto_name_clusters 技术名。
+    """
+    if not cluster_names:
+        return cluster_names
+    try:
+        from llmsec.core import GeneratorConfig, create_openai_client, retry_call
+        from llmsec.core.llm import is_retryable_error
+    except Exception:
+        return cluster_names
+
+    cfg = GeneratorConfig.from_env()
+    if not cfg.api_key or not cfg.model:
+        return cluster_names  # 离线/未配置 → 保留技术名
+
+    # 按簇分组并构造摘要
+    clusters: dict[int, list[str]] = defaultdict(list)
+    for m, cid in labels.items():
+        clusters[cid].append(m)
+    items = []
+    for cid in sorted(clusters):
+        members = clusters[cid]
+        keywords = [kw for kw, _ in _extract_tfidf_keywords(method_prompts, members, top_n=4)[:3]]
+        items.append({
+            "id": str(cid),
+            "technical_name": cluster_names.get(cid, f"簇{cid}"),
+            "members_sample": members[:8],
+            "keywords": keywords,
+        })
+
+    user_prompt = (
+        "下面是若干攻击方法聚类，每个簇有技术名、代表成员方法名、关键词。\n"
+        "请为每个簇起一个**简短中文标签**（≤10字，人能看懂，概括该簇攻击主题；"
+        "不要照抄技术名，不要带引号/编号/解释）。\n"
+        "严格只输出 JSON 对象 {\"id\": \"标签\", ...}，不要任何多余文字。\n\n"
+        + json.dumps(items, ensure_ascii=False, indent=2)
+    )
+
+    def _gen():
+        resp = client.chat.completions.create(
+            model=cfg.model,
+            messages=[
+                {"role": "system", "content": "你是安全攻击方法分类专家，擅长用简短中文概括聚类主题。"},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+            max_tokens=800,
+        )
+        return resp.choices[0].message.content.strip()
+
+    try:
+        client = create_openai_client(cfg.api_key, cfg.base_url, cfg.timeout)
+        raw = retry_call(_gen, retries=cfg.max_retries, delay=1.0, retry_on=is_retryable_error)
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not m:
+            logger.warning("AI 簇命名：未解析到 JSON，保留技术名")
+            return cluster_names
+        mapping = json.loads(m.group(0))
+        renamed = dict(cluster_names)
+        for cid in cluster_names:
+            new = mapping.get(str(cid)) or mapping.get(cid)
+            if isinstance(new, str):
+                new = new.strip().strip("\"'")[:20]
+                if new:
+                    renamed[cid] = new
+        logger.info("AI 簇命名完成：%s", renamed)
+        return renamed
+    except Exception as e:
+        logger.warning("AI 簇命名失败，保留技术名: %s", e)
+        return cluster_names
 
 
 # ============================================================

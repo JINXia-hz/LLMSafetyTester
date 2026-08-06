@@ -106,7 +106,7 @@ def run_multi_target_phase(
             per_target_attack_files[name] = attack_file
             try:
                 run_attack_phase(
-                    records, None, judge, tracker,
+                    records, judge, tracker,
                     batch_size=args.batch_size, max_rounds=args.max_rounds,
                     attack_file=attack_file,
                     sampler=args.sampler,
@@ -118,6 +118,7 @@ def run_multi_target_phase(
                     cluster_analysis_file=None,
                     skip_final_clustering=True,
                     state_file=STATE_DIR / f"state__{name}.json",
+                    concurrency=getattr(args, "concurrency", None),
                 )
             except Exception as e:
                 logger.warning(f"  ⚠ 目标 {name} 攻击阶段失败: {e}")
@@ -166,8 +167,9 @@ def run_multi_target_phase(
             allergy_file = runs_dir / f"allergy__{name}.json"
             try:
                 asm = run_allergy_phase(
-                    method_records, None, twin_client, judge, tracker,
-                    n_window=n_window, allergy_file=allergy_file)
+                    method_records, twin_client, judge, tracker,
+                    n_window=n_window, allergy_file=allergy_file,
+                    concurrency=getattr(args, "concurrency", None))
             except Exception as e:
                 logger.warning(f"  ⚠ {name} 过敏检测失败: {e}")
                 asm = {"error": str(e)}

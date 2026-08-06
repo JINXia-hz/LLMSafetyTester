@@ -26,14 +26,6 @@ from fastapi.templating import Jinja2Templates
 from llmsec.core.config import RUNS_DIR
 from llmsec.core.logging import get_logger
 from llmsec.server.routers import cluster_viz, data_query, tasks
-from llmsec.server.routers.cluster_viz import _CACHE_MAX_SIZE, _cache_put
-from llmsec.server.routers.data_query import _convergence_score
-from llmsec.server.routers.tasks import (
-    TASKS,
-    EvaluateRequest,
-    _refresh_task_status,
-    _start_task,
-)
 
 logger = get_logger(__name__)
 
@@ -69,19 +61,9 @@ app.include_router(tasks.router)
 
 
 # ============================================================
-# 向后兼容 / 测试访问的再导出
+# 模块级 RUNS_DIR 作为 data_query._runs_dir() 的 monkeypatch 入口保留
 # ============================================================
-# 路由拆分后，部分历史符号被测试与外部以 `dashboard_api.X` 形式引用；
-# 这里集中再导出，保持 `uvicorn llmsec.server.dashboard_api:app` 入口与 API 不变。
 __all__ = [
     "RUNS_DIR",
-    "TASKS",
-    "EvaluateRequest",
-    "_CACHE_MAX_SIZE",
-    "_cache_put",
-    "_convergence_score",
-    "_refresh_task_status",
-    "_start_task",
     "app",
-    "logger",
 ]

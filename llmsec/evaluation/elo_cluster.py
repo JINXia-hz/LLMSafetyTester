@@ -84,25 +84,11 @@ def current_feature_config_hash() -> str:
     return hashlib.md5(content.encode("utf-8")).hexdigest()[:8]
 
 
-# M-17：FEATURE_CACHE_FILE / CLUSTER_RESULT_FILE 运行时经 config 动态读取（runner
-# work-dir 重绑 _cfg.FEATURE_CACHE_FILE 后即生效，见 pipeline/runner.py 隔离模式）。
-# 下方模块级别名仅为兼容旧代码/测试的按属性 patch 而保留（取值见 _cluster_files）。
-FEATURE_CACHE_FILE = config.FEATURE_CACHE_FILE
-CLUSTER_RESULT_FILE = config.CLUSTER_RESULT_FILE
-_IMPORT_TIME_PATHS = (config.FEATURE_CACHE_FILE, config.CLUSTER_RESULT_FILE)
-
-
+# FEATURE_CACHE_FILE / CLUSTER_RESULT_FILE 运行时经 config 动态读取（runner
+# work-dir 重绑 _cfg 后即生效，见 pipeline/runner.py 隔离模式）。
 def _cluster_files() -> tuple[Path, Path]:
-    """返回 (feature_cache_file, cluster_result_file)。
-
-    默认动态读 core.config；模块级别名被外部 patch（旧测试兼容路径）时以 patch 值为准。
-    """
-    fc, cr = config.FEATURE_CACHE_FILE, config.CLUSTER_RESULT_FILE
-    if _IMPORT_TIME_PATHS[0] != FEATURE_CACHE_FILE:
-        fc = FEATURE_CACHE_FILE
-    if _IMPORT_TIME_PATHS[1] != CLUSTER_RESULT_FILE:
-        cr = CLUSTER_RESULT_FILE
-    return fc, cr
+    """返回 (feature_cache_file, cluster_result_file)，动态读 core.config。"""
+    return config.FEATURE_CACHE_FILE, config.CLUSTER_RESULT_FILE
 
 
 class EloPredictorModel:

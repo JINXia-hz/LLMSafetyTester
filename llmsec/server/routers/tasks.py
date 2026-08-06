@@ -66,9 +66,8 @@ def _refresh_task_status(t: dict) -> None:
     """刷新任务状态：子进程已结束但 status 仍为 running 时更新为 success/failed，
     并关闭 log_file 句柄（置 None）。
 
-    子进程可能崩溃且无人轮询接口，若只在 _task_view 里更新状态，
-    TASKS 中会残留永久 running 的任务（导致 _start_task 的 409 检查误拒同类新任务），
-    log_file 句柄也随 TASKS 常驻泄漏。
+    子进程可能崩溃且无人轮询，若不在每次 _task_view 里更新状态，TASKS 会残留永久
+    running 的任务（阻塞同 kind 队列推进、log_file 句柄常驻泄漏）。
     """
     if t["status"] != "running":
         return
@@ -82,6 +81,7 @@ def _refresh_task_status(t: dict) -> None:
     if log_file is not None:
         log_file.close()
         t["log_file"] = None
+    _advance_queue(t["kind"])   # running→终态，推进该 kind 的队列
 
 
 def _task_view(task_id: str, t: dict) -> dict:
@@ -103,26 +103,17 @@ def _task_view(task_id: str, t: dict) -> dict:
         "returncode": rc,
         "started_at": t["started_at"],
         "log_tail": log_tail,
+        "error": t.get("error"),
     }
 
 
-def _start_task(kind: str, argv: list[str]) -> dict:
-    # 先刷新所有 running 任务的真实状态，避免子进程崩溃后无人轮询
-    # 导致 status 永久 running（409 误拒同类新任务）与 log_file 句柄泄漏
-    for t in TASKS.values():
-        _refresh_task_status(t)
-    for tid, t in TASKS.items():
-        if t["kind"] == kind and t["status"] == "running":
-            raise HTTPException(status_code=409, detail=f"{kind} 任务正在运行中 (id={tid})")
-
+def _spawn(task_id: str, t: dict) -> None:
+    """启动已入队任务的子进程（打开日志、Popen、置 running）。Popen 失败置 failed。"""
     TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    task_id = f"{kind}-{datetime.now().strftime('%H%M%S')}-{uuid.uuid4().hex[:6]}"
-    log_path = TASK_LOG_DIR / f"{task_id}.log"
-    log_file = open(log_path, "w", encoding="utf-8")
-
+    log_file = open(t["log_path"], "w", encoding="utf-8")
     try:
         proc = subprocess.Popen(
-            [sys.executable, *argv],
+            [sys.executable, *t["argv"]],
             cwd=WORKSPACE_ROOT,
             stdout=log_file,
             stderr=subprocess.STDOUT,
@@ -130,18 +121,44 @@ def _start_task(kind: str, argv: list[str]) -> dict:
         )
     except OSError as e:
         log_file.close()
-        raise HTTPException(status_code=500, detail=f"任务启动失败: {e}")
+        t["status"] = "failed"
+        t["returncode"] = -1
+        t["error"] = f"任务启动失败: {e}"
+        return
+    t["proc"] = proc
+    t["log_file"] = log_file
+    t["status"] = "running"
 
+
+def _advance_queue(kind: str) -> None:
+    """该 kind 无 running 任务时，启动最早的 queued 任务（FIFO）。"""
+    if any(t["kind"] == kind and t["status"] == "running" for t in TASKS.values()):
+        return
+    for tid, t in TASKS.items():  # dict 保序，最早入队在前
+        if t["kind"] == kind and t["status"] == "queued":
+            _spawn(tid, t)
+            return
+
+
+def _start_task(kind: str, argv: list[str]) -> dict:
+    # 先刷新所有 running 任务的真实状态，避免子进程崩溃后无人轮询
+    # 导致 status 永久 running（阻塞同 kind 队列推进）与 log_file 句柄泄漏
+    for t in TASKS.values():
+        _refresh_task_status(t)
+
+    task_id = f"{kind}-{datetime.now().strftime('%H%M%S')}-{uuid.uuid4().hex[:6]}"
     TASKS[task_id] = {
         "kind": kind,
         "cmd": " ".join(argv),
-        "proc": proc,
-        "log_path": log_path,
-        "log_file": log_file,
-        "status": "running",
+        "argv": argv,
+        "proc": None,
+        "log_path": TASK_LOG_DIR / f"{task_id}.log",
+        "log_file": None,
+        "status": "queued",          # 同 kind 有 running 时排队；由 _advance_queue 在前一个结束后启动
         "started_at": datetime.now().isoformat(),
     }
     _evict_tasks()
+    _advance_queue(kind)             # 无 running 时立即启动本任务；否则保持 queued
     return _task_view(task_id, TASKS[task_id])
 
 
@@ -156,8 +173,20 @@ async def api_run_evaluate(req: EvaluateRequest):
     input_name = Path(req.input).name
     if not input_name.endswith(".jsonl"):
         raise HTTPException(status_code=400, detail="input 必须是 .jsonl 文件名")
-    if not (ATTACKS_DIR / input_name).exists():
+    attack_file = ATTACKS_DIR / input_name
+    if not attack_file.exists():
         raise HTTPException(status_code=404, detail=f"攻击集不存在: attacks/{input_name}")
+
+    # 越狱税探针预检：读首条记录的 expected_answer（非 0/None 即含数学探针）
+    has_tax_probe = False
+    try:
+        with open(attack_file, encoding="utf-8") as f:
+            first_line = f.readline()
+        if first_line.strip():
+            ea = json.loads(first_line).get("expected_answer")
+            has_tax_probe = ea not in (0, None)
+    except Exception:
+        has_tax_probe = False
 
     argv = [
         "-m", "llmsec.pipeline.runner",
@@ -178,7 +207,9 @@ async def api_run_evaluate(req: EvaluateRequest):
         if declared and req.target not in declared:
             raise HTTPException(status_code=400, detail=f"目标未在 TARGETS 中声明: {req.target!r}")
         argv += ["--target", req.target]
-    return _start_task("evaluate", argv)
+    view = _start_task("evaluate", argv)
+    view["has_tax_probe"] = has_tax_probe
+    return view
 
 
 @router.post("/api/run/cluster-analysis")
@@ -226,10 +257,10 @@ async def api_task_log(task_id: str, download: bool = False):
 
 @router.post("/api/tasks/{task_id}/cancel")
 async def api_task_cancel(task_id: str):
-    """取消运行中的任务：SIGTERM → 5s 宽限 → SIGKILL，置 cancelled 状态。
+    """取消排队中或运行中的任务，置 cancelled。
 
-    Windows 无 SIGTERM 语义：Popen.terminate 即 TerminateProcess 强杀，宽限期仅对 POSIX 有效。
-    proc.wait 经 asyncio.to_thread 包裹，避免同步等待阻塞事件循环。
+    queued：直接标记取消（无子进程可杀）。running：SIGTERM → 5s 宽限 → SIGKILL，
+    取消后推进同 kind 队列。Windows 无 SIGTERM 语义（Popen.terminate 即强杀）。
     runner 每场攻击实时 upsert 进 R，故取消后已观测的结果保留在结果矩阵中。
     已结束的任务返回 409。
     """
@@ -237,8 +268,11 @@ async def api_task_cancel(task_id: str):
     if t is None:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
     _refresh_task_status(t)
-    if t["status"] != "running":
+    if t["status"] not in ("running", "queued"):
         raise HTTPException(status_code=409, detail=f"任务已结束（{t['status']}），无法取消")
+    if t["status"] == "queued":
+        t["status"] = "cancelled"
+        return _task_view(task_id, t)
     proc: subprocess.Popen = t["proc"]
     proc.terminate()
     try:
@@ -252,6 +286,7 @@ async def api_task_cancel(task_id: str):
     if log_file is not None:
         log_file.close()
         t["log_file"] = None
+    _advance_queue(t["kind"])   # 取消 running 后，启动该 kind 队列里的下一个
     return _task_view(task_id, t)
 
 

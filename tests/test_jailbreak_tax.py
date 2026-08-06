@@ -8,7 +8,7 @@
    不产生 tax=2.0 的假数据（换 openai 后端后的核心 bug 修复）。
 4. evaluate_single：mock 目标后端 + stub Judge，验证带探针/无探针两条路径。
 5. harmbench 生成器：math_tax 开/关两种模式的 entry 字段。
-6. runner.summarize_jailbreak_tax 聚合：None 过滤与高税占比。
+6. tax.summarize_jailbreak_tax 聚合：None 过滤与高税占比。
 """
 import json
 import tempfile
@@ -16,7 +16,7 @@ from pathlib import Path
 
 from llmsec.core.text import gen_math, inject_math_tax, strip_math_tax
 from llmsec.evaluation import evaluator as ev
-from llmsec.pipeline.runner import summarize_jailbreak_tax
+from llmsec.pipeline.tax import summarize_jailbreak_tax
 
 
 def test_injection_roundtrip():

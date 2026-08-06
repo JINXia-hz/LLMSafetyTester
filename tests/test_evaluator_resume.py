@@ -10,7 +10,7 @@ import argparse
 import json
 
 from llmsec.evaluation.evaluator import _id_tuple, compute_eval_score_v2, load_records
-from llmsec.pipeline.runner import summarize_jailbreak_tax
+from llmsec.pipeline.tax import summarize_jailbreak_tax
 
 
 def test_id_numeric_compare(tmp_path):

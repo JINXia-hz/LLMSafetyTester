@@ -186,6 +186,99 @@ class ELOTracker:
         self.history.append(info)
         return info
 
+    def update_round(
+        self,
+        defender_name: str,
+        matches: list[tuple[str, float]],
+        round_idx: int | None = None,
+    ) -> list[dict]:
+        """
+        同步轮次 ELO 更新（Model B）：一个 round 的全部观测用**轮始快照**算 delta，
+        攻击方各自更新、防御方一次性加总。
+
+        语义：防御方是固定模型，批内攻击是对同一防御方状态的同时独立观测——
+        每场 expected/k_def 都用轮始 def_0 与轮级 k_def_round，防御方 = def_0 + Σ delta。
+        - 批内顺序无关（Σ 可交换），消除 batch_size↔K_def 耦合（n_def 每轮 +len(matches)）。
+        - 攻击方批内各法唯一 → 互不影响，各自 += delta_att（用各自轮始 elo）。
+        - N=1 时与逐场 update() 等价（向后兼容）。
+
+        参数:
+            matches: [(attacker_name, eval_score), ...]，一个 round 的全部（通常 batch_size 个）。
+            round_idx: 当前轮次编号（记入 history，经 publish 持久化进 R 供 derive_elo 重建）。
+        返回: 每场的更新详情列表（与 update() 的 info 同 schema）。
+        """
+        if not matches:
+            return []
+
+        # 轮始快照（整轮一致）
+        def_0 = self.get_defender_elo(defender_name)
+        n_def_0 = self._defender_match_count[defender_name]
+        k_def_round = float(self.k) / (max(1.0, n_def_0 / K_DEF_DECAY_N0) ** 0.5)
+
+        # 第一遍：基于快照算每场 delta（不写状态，便于顺序无关求和）
+        computed = []
+        sum_delta_def = 0.0
+        for attacker_name, raw_score in matches:
+            try:
+                eval_score = float(raw_score)
+                if not np.isfinite(eval_score):
+                    eval_score = 0.0
+            except (TypeError, ValueError):
+                eval_score = 0.0
+
+            att_0 = self.get_attacker_elo(attacker_name)
+            if eval_score > 0:
+                perf = eval_score / (eval_score + SCORE_PERF_TAU)
+            else:
+                perf = 0.0
+            attacker_won = eval_score > 0
+
+            expected_att = self._expected(att_0, def_0)  # 全用轮始 def_0
+            expected_def = 1.0 - expected_att
+            k_att = float(self.k)
+
+            delta_att = float(np.nan_to_num(k_att * (perf - expected_att)))
+            delta_def = float(np.nan_to_num(k_def_round * ((1.0 - perf) - expected_def)))
+            sum_delta_def += delta_def
+            computed.append((attacker_name, eval_score, att_0, perf, expected_att, attacker_won, delta_att, delta_def))
+
+        # 第二遍：写状态——攻击方各自更新、防御方一次性加总
+        # √N 缩放：N 场同基线(def_0)观测的有效独立数 ~ √N，防御方聚合步长除以 √N。
+        # 蒙特卡洛验证：消过冲（误差 ~115→~19，优于逐场 Model A 的 ~102）、覆盖率最优；
+        # N=1 时 √1=1 与逐场 update() 等价（向后兼容）。
+        new_def_elo = def_0 + sum_delta_def / (len(matches) ** 0.5)
+        self.defender_ratings[defender_name] = new_def_elo
+        self._defender_match_count[defender_name] = n_def_0 + len(matches)
+
+        infos = []
+        for (attacker_name, eval_score, att_0, perf, expected_att, attacker_won, delta_att, delta_def) in computed:
+            new_att_elo = att_0 + delta_att
+            self.attacker_ratings[attacker_name] = new_att_elo
+            self.ground_truth_methods.add(attacker_name)
+            self.predictor.update_ground_truth(attacker_name, new_att_elo)
+            self._update_attacker_stats(attacker_name, eval_score, attacker_won)
+
+            info = {
+                "attacker": attacker_name,
+                "defender": defender_name,
+                "attacker_old_elo": round(att_0, 1),
+                "attacker_new_elo": round(new_att_elo, 1),
+                "attacker_delta": round(new_att_elo - att_0, 1),
+                # Model B：防御方批内不逐场移动，old=轮始、new=轮末聚合、delta=本场贡献
+                "defender_old_elo": round(def_0, 1),
+                "defender_new_elo": round(new_def_elo, 1),
+                "defender_delta": round(delta_def, 1),
+                "eval_score": eval_score,
+                "attacker_won": attacker_won,
+                "expected_attacker_win": round(expected_att, 4),
+                "perf": round(perf, 4),
+                "k_def": round(k_def_round, 2),
+                "round": round_idx,
+            }
+            self.history.append(info)
+            infos.append(info)
+        return infos
+
     def record_round_end(self, defender_name: str):
         """记录本轮结束时的防御方 Elo，用于收敛判断。应在每轮 batch 测试后调用。"""
         self._round_defender_elos[defender_name].append(self.get_defender_elo(defender_name))
@@ -206,19 +299,14 @@ class ELOTracker:
                 "n_matches": 0,
                 "wins": 0,
                 "scores": [],
-                "perfs": [],   # #5：连续成绩 perf=score/(score+τ)，CI 用其方差（保留分数幅度）
             }
         stats = self.attacker_stats[method_name]
-        stats.setdefault("perfs", [])  # 旧记录迁移兜底
         stats["n_matches"] += 1
         if attacker_won:
             stats["wins"] += 1
         stats["scores"].append(float(eval_score))
-        perf = float(eval_score) / (float(eval_score) + SCORE_PERF_TAU) if eval_score > 0 else 0.0
-        stats["perfs"].append(perf)
         if len(stats["scores"]) > max_score_history:
             stats["scores"] = stats["scores"][-max_score_history:]
-            stats["perfs"] = stats["perfs"][-max_score_history:]
 
     def get_attacker_uncertainty(self, method_name: str) -> float:
         """
@@ -266,42 +354,6 @@ class ELOTracker:
         if n == 0:
             return 0.0
         return stats.get("wins", 0) / n
-
-    def get_attacker_rating_with_ci(
-        self,
-        method_name: str,
-        z: float = 1.96,
-    ) -> tuple[float, float, float]:
-        """
-        返回攻击方法 Elo 及其近似置信区间 (elo, lower, upper)。
-
-        用 Elo 后验方差近似：sigma ≈ K * sqrt(v / n)，其中 v 为连续成绩
-        perf=score/(score+τ) 序列的经验方差（#5：取代旧的 wins/n 二值胜率 p(1-p)——
-        CI 宽度反映观测一致性：稳定碾压/稳定失败均→窄 CI，忽赢忽输→宽 CI；
-        幅度信息经 perf 进入方差，score=5 与 score=0.1 不再被等同为同一二值结果）。
-        """
-        elo = self.get_attacker_elo(method_name)
-        stats = self.attacker_stats.get(method_name)
-        if not stats or stats.get("n_matches", 0) == 0:
-            return elo, elo - z * self.k, elo + z * self.k
-
-        n = stats["n_matches"]
-        perfs = stats.get("perfs", [])
-        if len(perfs) >= 2:
-            # #5：经验方差——观测一致(perf 集中)→窄 CI，忽赢忽输(perf 离散)→宽 CI
-            v = float(np.var(perfs, ddof=1))
-        elif perfs:
-            # 单次观测：退回该 perf 的 Bernoulli 方差 p(1-p) 作上界估计
-            p = max(0.05, min(0.95, float(perfs[0])))
-            v = p * (1.0 - p)
-        else:
-            # 旧记录无 perf（迁移数据）：回退 wins/n 二值胜率
-            p = max(0.05, min(0.95, stats.get("wins", 0) / n))
-            v = p * (1.0 - p)
-        # σ² 下限：一致观测时经验方差=0 → CI=0 过度自信；地板 ~ 原 p(1-p) 最小值 0.05·0.95
-        v = max(v, 0.04)
-        sigma = self.k * (v / n) ** 0.5
-        return elo, elo - z * sigma, elo + z * sigma
 
     # ============================================================
     # 配对推荐
@@ -858,9 +910,10 @@ def derive_elo(
       method_catalog: 攻击集规范方法清单（注入未测方法的初始 Elo，覆盖率分母）。
 
     返回: ELOTracker，ratings 完全由该模型列派生。
-    #10：若 R 记录全部带 round（extra），按 round 分组回放并在每轮末调
-    record_round_end，重建 _round_defender_elos → 收敛轨迹可从 R 全量重算
-    （README 主张名副其实）；缺 round 的旧记录回退逐条回放（向后兼容）。
+    #10 + Model B：若 R 记录带 round 且在 ts 序下单调非降（单一连贯 run 的轮次），
+    按轮用 update_round（同步轮次）回放并在每轮末调 record_round_end，重建收敛轨迹；
+    否则（无 round / 累积 R 跨 run 混杂 / resume 重置 round）回退逐场 update()（Model A，
+    确定性、累积安全）。注：累积 R 派生态与单 run live tracker 本就不同口径（R 跨 run累积）。
     """
     tracker = ELOTracker()
     if method_catalog:
@@ -869,17 +922,21 @@ def derive_elo(
 
     ordered = results_matrix.ordered_results(model)
     rounds = [r.extra.get("round") for r in ordered]
-    if rounds and all(rd is not None for rd in rounds):
-        # 全部带 round → 按轮分组回放（ordered 已 ts 升序、round 单调），
-        # 每轮末调 record_round_end 重建收敛轨迹（#10）
+    # Model B 仅当 round 齐全且 ts 序下单调非降（单一连贯 run）；否则累积 R 混杂 → Model A
+    use_model_b = (
+        bool(rounds)
+        and all(rd is not None for rd in rounds)
+        and all(rounds[i] <= rounds[i + 1] for i in range(len(rounds) - 1))
+    )
+    if use_model_b:
         from itertools import groupby
 
         for _rd, group in groupby(zip(ordered, rounds), key=lambda x: x[1]):
-            for res, _ in group:
-                tracker.update(res.method, model, res.eval_score)
+            round_matches = [(res.method, res.eval_score) for res, _ in group]
+            tracker.update_round(model, round_matches, round_idx=_rd)
             tracker.record_round_end(model)
     else:
-        # 旧记录无 round（或混合迁移数据）→ 逐条回放，不重建轮界（向后兼容）
+        # 累积/混杂/无 round → 逐场 update() 回放（Model A，确定性、跨 run 安全）
         for res in ordered:
             tracker.update(res.method, model, res.eval_score)
 

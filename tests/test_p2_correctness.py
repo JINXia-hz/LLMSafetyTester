@@ -58,7 +58,7 @@ def test_h3_trajectory_restored_on_exception():
     """check_convergence 抛异常时，_compute_conv_rounds 传播异常但 finally 恢复轨迹。"""
     import pytest as _pytest
 
-    from llmsec.pipeline.runner import _compute_conv_rounds
+    from llmsec.reporting.final_report import _compute_conv_rounds
     tr = ELOTracker()
     tr._round_defender_elos['def'] = [1500.0, 1510.0, 1520.0]
     original = list(tr._round_defender_elos['def'])
@@ -79,7 +79,7 @@ def test_h3_trajectory_restored_on_exception():
 
 def test_h3_trajectory_restored_on_normal_return():
     """正常返回时轨迹也恢复。"""
-    from llmsec.pipeline.runner import _compute_conv_rounds
+    from llmsec.reporting.final_report import _compute_conv_rounds
     tr = ELOTracker()
     tr._round_defender_elos['def'] = [1500.0, 1501.0, 1502.0, 1503.0]
     original = list(tr._round_defender_elos['def'])
@@ -179,7 +179,7 @@ def test_h10_predict_batch_fallback_schema_consistent():
 
 def test_h1_quick_precluster_returns_labels():
     """_quick_precluster 有足够 features 时返回 labels。"""
-    from llmsec.pipeline.runner import _quick_precluster
+    from llmsec.pipeline.attack_phase import _quick_precluster
     tr = ELOTracker()
     rng = np.random.default_rng(42)
     methods = [f'm{i}' for i in range(6)]
@@ -192,7 +192,7 @@ def test_h1_quick_precluster_returns_labels():
 
 def test_h1_quick_precluster_no_features_returns_none():
     """_quick_precluster 无 features / 方法太少时返回 None。"""
-    from llmsec.pipeline.runner import _quick_precluster
+    from llmsec.pipeline.attack_phase import _quick_precluster
     tr = ELOTracker()
     tr.predictor.artifacts = {}
     assert _quick_precluster(tr, ['m1', 'm2']) is None, 'H1: 无 features 返回 None'

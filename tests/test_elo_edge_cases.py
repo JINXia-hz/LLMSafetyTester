@@ -56,19 +56,20 @@ def test_sigma2_floor_on_constant_gt():
 
 def test_load_artifacts_prefers_cluster_result():
     """M-4：两文件并存时优先 cluster_result.pkl（含 labels），重启后标签不丢。"""
-    orig_cr = ec.CLUSTER_RESULT_FILE
-    orig_fc = ec.FEATURE_CACHE_FILE
+    import llmsec.core.config as cfg
+    orig_cr = cfg.CLUSTER_RESULT_FILE
+    orig_fc = cfg.FEATURE_CACHE_FILE
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
-        ec.CLUSTER_RESULT_FILE = tmp / "cluster_result.pkl"
-        ec.FEATURE_CACHE_FILE = tmp / "feature_cache.pkl"
+        cfg.CLUSTER_RESULT_FILE = tmp / "cluster_result.pkl"
+        cfg.FEATURE_CACHE_FILE = tmp / "feature_cache.pkl"
         # feature_cache：仅 features（无 labels）
-        joblib.dump({"features": {"m1": {"t": [0.0]}, "m2": {"t": [1.0]}}}, ec.FEATURE_CACHE_FILE)
+        joblib.dump({"features": {"m1": {"t": [0.0]}, "m2": {"t": [1.0]}}}, cfg.FEATURE_CACHE_FILE)
         # cluster_result：features + labels —— 应被优先加载
         joblib.dump(
             {"features": {"m1": {"t": [0.0]}, "m2": {"t": [1.0]}},
              "labels": {"m1": 0, "m2": 1}, "kind": "cluster_result"},
-            ec.CLUSTER_RESULT_FILE,
+            cfg.CLUSTER_RESULT_FILE,
         )
         try:
             pred = ClusterEloPredictor()
@@ -76,5 +77,5 @@ def test_load_artifacts_prefers_cluster_result():
             assert pred.artifacts is not None
             assert pred.artifacts.get("labels"), "应优先加载含 labels 的 cluster_result"
         finally:
-            ec.CLUSTER_RESULT_FILE = orig_cr
-            ec.FEATURE_CACHE_FILE = orig_fc
+            cfg.CLUSTER_RESULT_FILE = orig_cr
+            cfg.FEATURE_CACHE_FILE = orig_fc

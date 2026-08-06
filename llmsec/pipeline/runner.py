@@ -126,20 +126,14 @@ def load_prompt_records(filepath) -> list[dict]:
 # ============================================================
 # Phase 2: 过敏检测
 # ============================================================
-# 以下函数已拆至 llmsec/pipeline/allergy_phase.py，底部兼容性 re-export
-# 重新绑定回 runner 命名空间，历史 ``from llmsec.pipeline.runner import X`` 用法不变：
-#   - select_twin_candidates
-#   - run_allergy_phase
-# （compute_min_twin_sample_size / adaptive_twin_window / get_or_create_twin
-#   见文件顶部，同样已拆出。）
+# 过敏检测逻辑见 llmsec/pipeline/allergy_phase.py
+# （select_twin_candidates / run_allergy_phase / adaptive_twin_window / get_or_create_twin）。
 
 
 # ============================================================
 # 多目标编排（--targets）
 # ============================================================
-# 以下函数已拆至 llmsec/pipeline/multi_target.py，底部兼容性 re-export
-# 重新绑定回 runner 命名空间，历史 `from llmsec.pipeline.runner import X` 用法不变：
-#   - run_multi_target_phase
+# 多目标编排见 llmsec/pipeline/multi_target.py（run_multi_target_phase）。
 
 
 # ============================================================
@@ -213,11 +207,18 @@ def main():
                              "elo_cache，且跳过聚类落盘。HPO trial 用")
     parser.add_argument("--no-early-stop", action="store_true",
                         help="跑满 max_rounds 不提前收敛停（实验 ci_half@固定预算可比性所需）")
+    parser.add_argument("--concurrency", type=int, default=None,
+                        help="批内并行求值并发度：不传=全并发(=batch_size)；0/--no-parallel=串行；N>0=限 N。"
+                             "评估纯函数并行、ELO 串行(Model B 同步轮次)，结果与并发度无关")
+    parser.add_argument("--no-parallel", action="store_true",
+                        help="禁用批内并行求值（等价 --concurrency 0，串行）")
     args = parser.parse_args()
 
     # 实验隔离模式默认跑满预算（ci_half@预算目标要求每个 trial 同预算）；CLI 显式可覆盖
     if args.work_dir:
         args.no_early_stop = True
+    if args.no_parallel:
+        args.concurrency = 0
 
     # 全局种子注入（实验复现）
     from llmsec.core.seed import set_global_seed
@@ -226,7 +227,6 @@ def main():
     # 实验隔离模式：重绑 results/elo_cache/state 路径到 work-dir，全局零污染（M-17）。
     # elo_access 经 config 模块动态读取这些路径，故重绑模块属性即生效。
     if args.work_dir:
-        from pathlib import Path
         wd = Path(args.work_dir)
         wd.mkdir(parents=True, exist_ok=True)
         import llmsec.core.config as _cfg
@@ -279,7 +279,6 @@ def main():
     logger.info("")
 
     # 初始化客户端
-    # 注意：不再创建 target_client——evaluate_single 忽略该参数，实际走 call_target 路由
     twin_client = OpenAI(api_key=GENERATOR_API_KEY, base_url=GENERATOR_BASE_URL)
     judge_client = create_judge_client()
     judge = Judge(judge_client)
@@ -321,7 +320,7 @@ def main():
             logger.info("  ✅ 强制重建完成，已更新所有方法预测 Elo")
 
         attack_summary = run_attack_phase(
-            records, None, judge, tracker,
+            records, judge, tracker,
             batch_size=args.batch_size, max_rounds=args.max_rounds,
             attack_file=runner_attack_file,
             sampler=args.sampler,
@@ -336,6 +335,7 @@ def main():
                         else (str(STATE_DIR / f"state__{args.target}.json") if args.target
                               else str(runs_dir / "state.json"))),  # per-run 快照（不再写全局 STATE_FILE）
             no_early_stop=args.no_early_stop,
+            concurrency=args.concurrency,
         )
         # publish_tracker 在 run_attack_phase 每轮已调用（写 R + elo_cache），
         # main() 末尾再次 publish 做最终同步——此处不再重复镜像 R。
@@ -373,9 +373,10 @@ def main():
         logger.info(f"  📏 本次过敏检测窗口：{n_window} 个方法 "
               f"(ELO边界置信度={boundary_info.get('confidence', 0)*100:.0f}%)")
         allergy_summary = run_allergy_phase(
-            method_records, None, twin_client, judge, tracker,
+            method_records, twin_client, judge, tracker,
             n_window=n_window,
             allergy_file=runner_allergy_file,
+            concurrency=args.concurrency,
         )
 
     # ---- Phase 3 ----
@@ -506,32 +507,19 @@ def main():
 
 
 # ============================================================
-# 兼容性 re-export（拆分后保持 from llmsec.pipeline.runner import X 可用）
-# F401=unused import（re-export 本身就是"未使用"，必须保留供外部 import）
+# 延迟导入（打破与子模块的循环依赖；子模块在函数体内 from runner import …）
 # ============================================================
 from llmsec.pipeline.allergy_phase import (  # noqa: E402, F401
     adaptive_twin_window,
-    compute_min_twin_sample_size,
-    get_or_create_twin,
     run_allergy_phase,
-    select_twin_candidates,
 )
 from llmsec.pipeline.attack_phase import (  # noqa: E402, F401
-    _adaptive_batch_size,
-    _compute_method_set_hash,
-    _dedup_attack_results,
     _inject_predicted_elos,
-    _quick_precluster,
-    _should_refresh_features,
     run_attack_phase,
 )
 from llmsec.pipeline.multi_target import run_multi_target_phase  # noqa: E402, F401
-from llmsec.pipeline.tax import format_tax_line, summarize_jailbreak_tax  # noqa: E402, F401
-from llmsec.reporting.final_report import (  # noqa: E402, F401
-    _compute_conv_rounds,
-    generate_final_report,
-    generate_recommendation,
-)
+from llmsec.pipeline.tax import format_tax_line  # noqa: E402, F401
+from llmsec.reporting.final_report import generate_final_report  # noqa: E402, F401
 
 if __name__ == "__main__":
     # 优先使用项目根目录下的 .venv，避免系统 Python 缺少依赖。

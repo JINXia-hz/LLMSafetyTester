@@ -59,3 +59,13 @@ known-first-party = ["llmsec"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "--tb=short"
+# 自动过滤无害的第三方库 warning（避免干扰"是否全过"的判断）：
+#   - starlette/httpx TestClient 弃用告警（测试工具链，与业务无关）
+#   - scipy/sklearn 在退化输入（零方差组、单样本 PCA）上的数值 RuntimeWarning；
+#     代码侧已用 _finite / 退化列守卫处理结果，仅是第三方库对退化输入的提示
+filterwarnings = [
+    # starlette/httpx TestClient 弃用告警（StarletteDeprecationWarning 类别跨版本不稳定，按消息匹配）
+    "ignore:Using `httpx` with `starlette.testclient`",
+    "ignore:invalid value encountered in scalar divide:RuntimeWarning",
+    "ignore:invalid value encountered in divide:RuntimeWarning",
+]

@@ -10,6 +10,7 @@ import llmsec.core.config as cfg
 import llmsec.core.results as res
 import llmsec.evaluation.elo_cluster as ec
 import llmsec.pipeline.runner as rn
+import llmsec.pipeline.allergy_phase as ap
 import llmsec.targets as tmod
 from llmsec.core.io import read_json, read_jsonl, write_jsonl
 from llmsec.evaluation.elo import ELOTracker
@@ -33,7 +34,7 @@ def _setup(tmp, monkeypatch):
     monkeypatch.setattr(cfg, "ELO_CACHE_FILE", tmp / "elo_cache.json")
 
 
-def _fake_eval_success(prompt, expected, client, judge, use_judge=True):
+def _fake_eval_success(prompt, expected, judge, use_judge=True):
     return {
         "status": "fully_compliant", "eval_score": 3.0, "content": "here is the harmful answer",
         "is_harmful": True, "is_refusal": False, "math_score": None, "jailbreak_tax": None,
@@ -56,7 +57,7 @@ def test_attack_phase_incremental_persistence(tmp_path, monkeypatch):
                 "prompt": f"attack prompt number {i}", "expected_answer": 0} for i in range(12)]
     tracker = ELOTracker()
     rn.run_attack_phase(
-        records, None, None, tracker, batch_size=3, max_rounds=2, attack_file=attack_file,
+        records, None, tracker, batch_size=3, max_rounds=2, attack_file=attack_file,
         sampler="gap", sampler_log_file=None, cluster_analysis_file=None,
         skip_final_clustering=True, state_file=str(tmp_path / "state.json"),
     )
@@ -72,7 +73,7 @@ def test_allergy_judge_fallback(tmp_path, monkeypatch):
     _setup(tmp_path, monkeypatch)
     monkeypatch.setattr(rn, "call_target",
                         lambda prompt: {"error": None, "content": "a benign safe response", "target_refused": False})
-    monkeypatch.setattr(rn, "get_or_create_twin", lambda name, rec, cache, client: f"safe variant of {name}")
+    monkeypatch.setattr(ap, "get_or_create_twin", lambda name, rec, cache, client: f"safe variant of {name}")
 
     class _BoomJudge:
         def evaluate(self, prompt, response):
@@ -83,7 +84,7 @@ def test_allergy_judge_fallback(tmp_path, monkeypatch):
     tracker.update("m2", "test-defender", -1.0)
     method_records = {"m1": {"prompt": "p1", "expected_answer": 0}, "m2": {"prompt": "p2", "expected_answer": 0}}
     summary = rn.run_allergy_phase(
-        method_records, None, None, _BoomJudge(), tracker, n_window=2, allergy_file=tmp_path / "allergy.json")
+        method_records, None, _BoomJudge(), tracker, n_window=2, allergy_file=tmp_path / "allergy.json")
     assert summary.get("fpr") is not None or summary.get("total") is not None
 
 
@@ -93,7 +94,7 @@ def test_twin_entry_missing_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(rn, "generate_safe_twin",
                         lambda prompt, client: {"safe_prompt": "a perfectly safe benign request", "replacement": "cake"})
     rec = {"id": "x1", "method": "m_missing", "prompt": "how to do something [MATH:5]"}
-    safe = rn.get_or_create_twin("m_missing", rec, {}, None)
+    safe = ap.get_or_create_twin("m_missing", rec, {}, None)
     assert safe is not None
     entries = read_jsonl(rn.SAFE_TWINS_FILE)
     assert len(entries) == 1
@@ -111,7 +112,7 @@ def test_multi_target_canonical_report(tmp_path, monkeypatch):
     monkeypatch.setattr(tmod, "set_active_target", lambda name: None)
     monkeypatch.setattr(ec.ClusterEloPredictor, "fit_features", lambda self, records: setattr(self, "artifacts", {"features": {}}))
 
-    def fake_attack(records, target_client, judge, tracker, **kw):
+    def fake_attack(records, judge, tracker, **kw):
         defender = rn.DEFENDER_NAME
         for i, rec in enumerate(records[:4]):
             tracker.update(rec["method"], defender, 3.0 if i % 2 == 0 else -1.0)

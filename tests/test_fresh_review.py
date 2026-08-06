@@ -56,7 +56,8 @@ def test_fr2_dashboard_api_has_logger():
     import llmsec.server.dashboard_api as api
     assert hasattr(api, 'logger'), 'FR-2: dashboard_api 有 logger 属性'
     # 降级路径不抛 NameError（模拟异常输入）
-    score = api._convergence_score({"defender_ratings": {}, "round_defender_elos": {}})
+    from llmsec.server.routers.data_query import _convergence_score
+    score = _convergence_score({"defender_ratings": {}, "round_defender_elos": {}})
     assert score is None, 'FR-2: 空输入降级返回 None'
 
 
@@ -179,7 +180,7 @@ def test_fr7_evaluator_update_elo_has_round_end():
 # ============================================================
 def test_fr8_dedup_missing_keys_no_false_merge():
     """缺 id 的同方法记录不会因 (None, method) 键碰撞而合并。"""
-    from llmsec.pipeline.runner import _dedup_attack_results
+    from llmsec.pipeline.attack_phase import _dedup_attack_results
     rows = [
         {"method": "x", "eval_score": 1.0},  # 无 id
         {"method": "x", "eval_score": 2.0},  # 无 id，旧代码会覆盖
@@ -192,7 +193,7 @@ def test_fr8_dedup_missing_keys_no_false_merge():
 
 def test_fr8_dedup_same_key_keeps_last():
     """同 (id, method) 的记录正常去重，保留后出现的。"""
-    from llmsec.pipeline.runner import _dedup_attack_results
+    from llmsec.pipeline.attack_phase import _dedup_attack_results
     rows = [
         {"id": "1", "method": "x", "eval_score": 1.0},
         {"id": "1", "method": "x", "eval_score": 5.0},  # 覆盖前一条

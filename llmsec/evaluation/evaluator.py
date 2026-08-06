@@ -225,17 +225,14 @@ def _eval_no_judge(math_score: int | None, content: str) -> dict:
 # ============================================================
 # 单条评估（唯一评估核心，主循环与 runner.py 自适应循环共用）
 # ============================================================
-def evaluate_single(prompt_text: str, expected_answer: int | None, target_client=None,
+def evaluate_single(prompt_text: str, expected_answer: int | None,
                     judge: Judge = None, use_judge: bool = True,
                     skip_prescreen: bool = False) -> dict:
     """
     对单条prompt执行完整评估：发送 → 评分 → 返回结果。
     供 evaluator 主循环和 runner.py 自适应循环共用。
 
-    target_client: 保留的兼容参数（原伪client），已忽略——
-                   实际调用统一走 llmsec.targets.call_target 按 TARGET_TYPE 路由。
-    skip_prescreen: 透传给 judge.evaluate（原 main 内联循环支持 --skip-judge-prescreen，
-                    合并时并入本函数）。
+    skip_prescreen: 透传给 judge.evaluate。
 
     返回:
     {
@@ -727,12 +724,20 @@ def update_elo(all_results: list[dict], summary: dict,
     if defender_name is None:
         defender_name = DEFENDER_NAME
     tracker = ELOTracker()
-    for r in all_results:
-        method = r.get("method", "unknown")
-        score = r.get("eval_score", 0)
-        # #10：把结果记录里的 round 透传进 history，publish_tracker 写入 R 的 extra，
-        # 使 derive_elo 能按轮分组重建收敛轨迹
-        tracker.update(method, defender_name, score, round_idx=r.get("round"))
+    # Model B：结果带 round → 按 round 分组用 update_round（同步轮次，与 runner/derive_elo 一致）；
+    # 无 round（全量评估 legacy 单批次）→ 逐场 update()（per-match，向后兼容）
+    rounds_seq = [r.get("round") for r in all_results]
+    if rounds_seq and all(rd is not None for rd in rounds_seq):
+        from itertools import groupby
+        for rd, group in groupby(all_results, key=lambda r: r.get("round")):
+            matches = [(r.get("method", "unknown"), r.get("eval_score", 0)) for r in group]
+            tracker.update_round(defender_name, matches, round_idx=rd)
+    else:
+        for r in all_results:
+            tracker.update(
+                r.get("method", "unknown"), defender_name, r.get("eval_score", 0),
+                round_idx=r.get("round"),
+            )
     # 记录轮次终点使 _round_defender_elos 非空——否则 compute_security_boundary
     # 的 check_convergence 恒因 n_rounds=0 返回 ci_half=None（confidence 恒 0），
     # 即便已实测大量方法。单批次只有 1 轮故仍无法估噪声（m<3），但数据结构完整。

@@ -149,8 +149,7 @@ def _load_state(run: str | None = None) -> dict:
     """加载 Elo state。指定 run 时优先读 run 目录内的快照（runner 结束时保存），
     避免全局 state 漂移导致历史批次的实测/预测标记错配。
 
-    R-cutover：无 run 快照时不再读易漂移的全局 state.json，而是从结果矩阵 R
-    派生活跃模型的 Elo（经 elo_access 缓存）；R 亦空时才回退全局 state.json。"""
+    无 run 快照时从结果矩阵 R 派生活跃模型的 Elo（唯一真相，经 elo_access 缓存）。"""
     run_dir = _run_dir(run)
     if run_dir is not None:
         snapshot = load_json(run_dir / "state.json")
@@ -171,9 +170,9 @@ def _load_state(run: str | None = None) -> dict:
 
 
 def _gt_set(state: dict) -> set:
-    """从 state 取 ground_truth 方法集合，兼容 dict（state.json 形态）与 list（派生缓存形态）。"""
+    """从 state 取 ground_truth 方法集合（dict 形态：{method: {...}}）。"""
     gt = state.get("ground_truth", {})
-    return set(gt.keys() if isinstance(gt, dict) else gt)
+    return set(gt.keys())
 
 
 def _convergence_score(state: dict) -> float | None:

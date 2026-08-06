@@ -46,7 +46,7 @@ R[method][model] = MatchResult         ← 唯一真相（原始观测）
 
 1. **Elo 不跨模型混淆** —— 每个模型的 Elo 仅由该模型列回放得到，绝不借用其它模型。
 2. **多模型天然支持** —— R 的第二维就是模型；`TARGETS` 环境变量可一次扫描多个目标。
-3. **可重建** —— Elo、预测器、收敛判定都能从 R + 方法特征 X 全量重算，缓存丢失无碍。收敛轨迹自轮次编号（`round`）随观测记入 R 的 `extra` 后，`derive_elo` 按轮分组回放即可重建 `_round_defender_elos`；旧记录无 `round` 则回退逐条回放。
+3. **可重建** —— Elo、预测器、收敛判定都能从 R + 方法特征 X 全量重算，缓存丢失无碍。收敛轨迹自轮次编号（`round`）随观测记入 R 的 `extra` 后，`derive_elo` 在 round 于 ts 序单调（单一连贯 run）时按轮用 `update_round`（Model B）回放重建 `_round_defender_elos`；累积/混杂 R 或无 `round` 旧记录则回退逐场 `update`（Model A，确定性、跨 run 安全）。
 
 存储布局（`output/state/`）：`results.json`（R 主存储，权威）+ `elo_cache.json`（派生缓存，可删可重建）。`state.json` 退化为可选快照备份。
 
@@ -60,6 +60,7 @@ R[method][model] = MatchResult         ← 唯一真相（原始观测）
 
 - **连续成绩映射**：`perf = score/(score+τ)`（饱和），把分数幅度放进结果项而非 K 因子，根治早期 ELO 来回跳。
 - **K 衰减**：攻击方用全 K（每法通常只测 1~2 次）；防御方每场必上，`K_def = K / sqrt(max(1, n/N0))`，场次越多评级越稳。
+- **同步轮次更新（Model B）+ 批内并行**：一个 round 的全部攻击用**轮始快照** `def_0/K_def` 算 delta（防御方是固定模型，批内攻击是对同一状态的同时独立观测），攻击方各自更新、防御方一次性 `def_0 + Σdelta/√N` 聚合。批内**顺序无关**（Σ 可交换）、消除 batch↔K 耦合；`/√N` 缩放避免 N×全K 求和过冲（蒙特卡洛验证边界误差 ~115→~13，优于逐场）。批内 `evaluate_single` 是纯函数 → 可安全并行求值（`--concurrency`），ELO 仍按轮串行更新，结果与并发度无关。
 
 ### 单一 CI 收敛判据
 

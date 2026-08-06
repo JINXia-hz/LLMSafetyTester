@@ -7,8 +7,7 @@ LLM攻击集生成器 - L1级别
 输出为JSONL格式到 output/attacks/l1.jsonl。
 
 用法：python -m llmsec.attacks.generate
-支持断点续传：已生成的方法会自动跳过（读取时兼容旧路径 output/攻击集_L1.jsonl，
-写入一律走新路径，见 core.config 路径裁决）。
+支持断点续传：已生成的方法会自动跳过（读写均走 output/attacks/l1.jsonl）。
 
 原根目录 generate_attacks.py 平移而来：解析/生成/prompt 模板逻辑不变，
 dotenv、win32 修复、OpenAI 创建、JSONL 读写、数学税正则改由 llmsec.core 提供。
@@ -49,7 +48,7 @@ MD_FILE = PROJECT_ROOT / "攻击分析.md"
 if not MD_FILE.exists():
     MD_FILE = PROJECT_ROOT / "llmsec" / "攻击分析.md"
 
-# 默认输出（路径裁决 bug#10：原 output/攻击集_L1.jsonl → output/attacks/l1.jsonl）
+# 默认输出
 OUTPUT_FILE = ATTACK_SET_L1_FILE
 
 # API调用参数

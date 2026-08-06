@@ -128,38 +128,38 @@ def test_derive_elo_deterministic_and_monotone():
 
 
 def test_derive_elo_reconstructs_rounds_from_R():
-    """#10：R 带 round（extra）时 derive_elo 按轮分组回放重建 _round_defender_elos，
-    使收敛轨迹可从 R 全量重算；旧记录无 round 回退逐条回放（向后兼容）。"""
+    """#10 + Model B：R 带 round（extra）且单调时 derive_elo 按轮用 update_round 重建
+    _round_defender_elos，与 live tracker(update_round)逐位一致；旧记录无 round 回退逐场。"""
     # 3 轮，每轮 2 场，带 round
     mat = ResultsMatrix()
     ts = 0
     live = ELOTracker()
     for rd in (1, 2, 3):
-        for i in (1, 2):
+        matches = [(f"m{rd}_{i}", 3.0 if rd % 2 else -2.0) for i in (1, 2)]
+        for i in (1, 2):  # R 按 ts 顺序 upsert（derive_elo 按 ts 序分组）
             ts += 1
             mat.upsert(f"m{rd}_{i}", "def", 3.0 if rd % 2 else -2.0, ts=ts, extra={"round": rd})
-            live.update(f"m{rd}_{i}", "def", 3.0 if rd % 2 else -2.0, round_idx=rd)
+        live.update_round("def", matches, round_idx=rd)   # Model B 同步轮次
         live.record_round_end("def")
 
     derived = derive_elo(mat, "def")
     conv = derived.check_convergence("def", total_methods=10, tested_count=6)
-    if conv["n_rounds"] != 3:
-        print(f"❌ derive_elo 未从 R 重建轮界: n_rounds={conv['n_rounds']}"); return 1
-    # 重建轨迹应与 live tracker 逐点一致（同序同值回放）
+    assert conv["n_rounds"] == 3, f"derive_elo 未从 R 重建轮界: n_rounds={conv['n_rounds']}"
+    # 重建轨迹应与 live tracker(Model B update_round)逐点一致
     live_rounds = live._round_defender_elos["def"]
     derived_rounds = derived._round_defender_elos["def"]
-    if len(derived_rounds) != len(live_rounds) or any(
-        abs(a - b) > 1e-9 for a, b in zip(live_rounds, derived_rounds)
-    ):
-        print(f"❌ 重建轨迹与 live 不符: live={live_rounds} derived={derived_rounds}"); return 1
+    assert len(derived_rounds) == len(live_rounds), f"轮数不符: {len(live_rounds)} vs {len(derived_rounds)}"
+    assert all(abs(a - b) < 1e-9 for a, b in zip(live_rounds, derived_rounds)), \
+        f"重建轨迹与 live 不符: live={live_rounds} derived={derived_rounds}"
+    # 防御方最终 Elo 也一致
+    assert abs(live.get_defender_elo("def") - derived.get_defender_elo("def")) < 1e-9, "defender elo 不一致"
 
-    # 向后兼容：旧记录无 round → 不重建轮界
+    # 向后兼容：旧记录无 round → 不重建轮界（Model A 逐场回退）
     old = ResultsMatrix()
     for i in range(5):
         old.upsert(f"old{i}", "def", 3.0, ts=i + 1)
     conv_old = derive_elo(old, "def").check_convergence("def", total_methods=10, tested_count=5)
-    if conv_old["n_rounds"] != 0:
-        print(f"❌ 旧记录无 round 却重建了轮界: n_rounds={conv_old['n_rounds']}"); return 1
+    assert conv_old["n_rounds"] == 0, f"旧记录无 round 却重建了轮界: n_rounds={conv_old['n_rounds']}"
 
 
 

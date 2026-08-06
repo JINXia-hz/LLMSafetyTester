@@ -12,11 +12,10 @@ import tempfile
 from pathlib import Path
 
 from llmsec.params import ADAPTIVE_BATCH_MAX
-from llmsec.server.dashboard_api import (
-    _CACHE_MAX_SIZE,
+from llmsec.server.routers.cluster_viz import _CACHE_MAX_SIZE, _cache_put
+from llmsec.server.routers.tasks import (
     TASKS,
     EvaluateRequest,
-    _cache_put,
     _refresh_task_status,
     _start_task,
 )

@@ -61,7 +61,6 @@ ATTACK_SET_L1_FILE = ATTACKS_DIR / "l1.jsonl"
 
 # 过敏检测产物（规范存储，按模型隔离见 W4）
 TWIN_RESULT_FILE = OUTPUT_DIR / "allergy_results.jsonl"
-ALLERGY_REPORT_FILE = OUTPUT_DIR / "allergy_report.json"
 
 # 报告产物（reporting 写、dashboard 读）
 TREE_FILE = OUTPUT_DIR / "security_tree.json"

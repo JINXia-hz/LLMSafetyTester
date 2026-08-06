@@ -8,7 +8,7 @@
 import json
 from types import SimpleNamespace as NS
 
-import llmsec.evaluation.elo_cluster as ec
+import llmsec.clustering.hdb as hdb
 import llmsec.evaluation.safe_twin as st
 from llmsec.clustering import run_hdbscan_clustering
 from llmsec.core.io import read_jsonl
@@ -73,7 +73,7 @@ def test_fpr_per_model_isolation(tmp_path, monkeypatch):
 def test_hdbscan_single_method_returns_error(tmp_path, monkeypatch):
     """M-30：<2 方法时 run_hdbscan_clustering 返回 error 且不写文件。"""
     cr = tmp_path / "cluster_result.pkl"
-    monkeypatch.setattr(ec, "CLUSTER_RESULT_FILE", cr)
+    monkeypatch.setattr(hdb, "CLUSTER_RESULT_FILE", cr)
     features = {"only_method": {"textual": [0.0]}}
     meta = {"method_names": ["only_method"]}
     report = run_hdbscan_clustering(features, meta, write=True)

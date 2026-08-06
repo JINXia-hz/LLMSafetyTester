@@ -26,6 +26,7 @@ import numpy as np
 
 from llmsec.clustering.pipeline import (
     _export_matrix,
+    ai_rename_clusters,
     auto_name_clusters,
     build_cluster_profiles,
 )
@@ -121,6 +122,7 @@ def run_hdbscan_clustering(
 
     # 4. 命名（关键层各簇 + 密度视图各簇；噪声组固定命名为稀疏区）
     cluster_names = auto_name_clusters(labels, features, meta, meta.get("method_prompts", {}))
+    cluster_names = ai_rename_clusters(cluster_names, labels, features, meta, meta.get("method_prompts", {}))
     flat_names = auto_name_clusters(flat_labels, features, meta, meta.get("method_prompts", {}))
     if -1 in flat_names:
         flat_names[-1] = "稀疏区（低密度噪声）"

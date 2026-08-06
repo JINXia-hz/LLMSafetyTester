@@ -116,8 +116,8 @@ def load_elo(output_dir, model: str | None = None) -> dict:
     """
     加载 ELO 攻击方评分（method → elo）。
 
-    R-cutover：优先从结果矩阵 R 派生（经 elo_access 缓存）；R 为空时回退旧
-    output/state/state.json 的 attacker_ratings（兼容历史 run）。
+    优先从结果矩阵 R 派生（唯一真相，经 elo_access 缓存）；R 为空时读
+    output_dir/state/state.json（支持自定义 output_dir 的 state 快照）。
     model 缺省取 R 中最新活跃模型。
     """
     from llmsec.evaluation.elo_access import active_model, attacker_ratings_for
@@ -128,7 +128,7 @@ def load_elo(output_dir, model: str | None = None) -> dict:
         if ratings:
             return ratings
 
-    # 回退：旧 state.json
+    # 回退：output_dir 下的 state 快照
     state_file = Path(output_dir) / "state" / "state.json"
     data = read_json(state_file)
     return (data or {}).get("attacker_ratings", {})
@@ -138,9 +138,8 @@ def load_allergy(output_dir) -> dict:
     """加载过敏报告。
 
     W4 归一 + 按模型分文件：优先读 safe_twin 现行产物 allergy__{model}.json
-    （有当前活跃模型对应的文件时取它，否则取最新修改的一个）；缺失时回退旧版
-    全局 allergy_report.json，再回退最新一次 run 的 allergy.json（runner 写）。
-    schema 都含 summary.false_positive_rate，下游 build_tree 口径一致。
+    （有当前活跃模型对应的文件时取它，否则取最新修改的一个）；缺失时回退最新一次
+    run 的 allergy.json（runner 写）。schema 都含 summary.false_positive_rate，下游 build_tree 口径一致。
     """
     output_dir = Path(output_dir)
 
@@ -162,12 +161,6 @@ def load_allergy(output_dir) -> dict:
         data = read_json(chosen)
         if data:
             return data
-
-    # 回退：旧版全局单文件（按模型分文件之前的 safe_twin 产物）
-    canonical = output_dir / "allergy_report.json"
-    data = read_json(canonical)
-    if data:
-        return data
 
     # 回退：最新 run 的 allergy.json（runner 产物）
     runs_dir = output_dir / "runs"
@@ -292,7 +285,7 @@ def _load_elo_tracker(output_dir=None) -> ELOTracker | None:
     """加载完整 ELO 状态（攻击方+防御方），无数据返回 None。
 
     优先读 output_dir/state/state.json（与 --output-dir 保持一致）；
-    该文件不存在时从 R 矩阵派生（唯一真相），不再回退全局 state.json。
+    该文件不存在时从 R 矩阵派生（唯一真相）。
     """
     if output_dir is not None:
         candidate = Path(output_dir) / "state" / "state.json"

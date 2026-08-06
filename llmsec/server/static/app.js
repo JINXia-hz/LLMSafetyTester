@@ -1042,6 +1042,8 @@ async function loadRunSection() {
 function setupDropZone() {
   const dz = $('dropZone');
   if (!dz) return;
+  if (dz.dataset.bound) return;        // 幂等：loadRunSection 每次切页都会重跑，避免重复绑定 click 监听器（弹窗弹多次的根因）
+  dz.dataset.bound = '1';
   const fileInput = $('dropFile');
   const browse = $('dropBrowse');
 
@@ -1070,6 +1072,8 @@ function setupDropZone() {
   // 点击选择
   dz.addEventListener('click', () => fileInput.click());
   if (browse) browse.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); fileInput.click(); });
+  // 阻止 input 自身合成 click 冒泡到 dz，否则 dz 的 click handler 会再次调 fileInput.click() → 选择框弹两次
+  fileInput.addEventListener('click', e => e.stopPropagation());
   fileInput.addEventListener('change', () => {
     if (fileInput.files.length > 0) uploadFile(fileInput.files[0]);
     fileInput.value = '';
@@ -1144,9 +1148,7 @@ async function startEvaluate() {
       throw new Error(err.detail || res.status);
     }
     const view = await res.json();
-    // 预检（诚实版：只看文件名是否含 baseline，不假装能探测针内容）
-    const noBaseline = !$('evalInput').value.includes('baseline');
-    setStatus('评估任务已启动' + (noBaseline ? '（注意：攻击集文件名不含 baseline，越狱税将不会计算）' : ''));
+    setStatus('评估任务已启动' + (view.has_tax_probe === false ? '（该攻击集无数学探针，越狱税将不计算）' : ''));
     if (view.id) watchTask(view.id);
     startTaskPolling();
     await loadTasks();
@@ -1155,6 +1157,7 @@ async function startEvaluate() {
 
 const TASK_STATUS = {
   running: ['运行中', 'background:rgba(70,88,107,.14);color:#46586B;'],
+  queued: ['排队中', 'background:rgba(200,170,60,.18);color:#8a7218;'],
   success: ['完成', 'background:rgba(117,135,107,.20);color:#55694B;'],
   failed: ['失败', 'background:#F0DBCF;color:#9a4a35;'],
   cancelled: ['已取消', 'background:#EAE2CC;color:#7C7663;'],
@@ -1226,22 +1229,32 @@ function _buildTaskCard(t) {
   card.className = 'card';
   card.style.padding = '10px 14px';
   card.dataset.taskId = t.id;
-  card.dataset.status = t.status;
+  card.dataset.status = '';   // 留空，让 _updateTaskCard 首次按状态自动折叠/展开
   card.innerHTML = `
-    <div class="flex items-center justify-between mb-1 gap-2 flex-wrap">
-      <div><span class="cluster-tag" data-role="badge"></span>
-        <span class="font-semibold ml-2">${esc(t.kind)}</span>
-        <span class="text-xs ml-2" style="color: var(--c-muted);">${esc(t.started_at?.slice(11, 19) || '')}</span></div>
+    <div class="flex items-center justify-between mb-1 gap-2 flex-wrap" data-role="header" style="cursor:pointer;">
+      <div class="flex items-center gap-2"><span class="task-chevron" data-role="chevron">▶</span><span class="cluster-tag" data-role="badge"></span>
+        <span class="font-semibold">${esc(t.kind)}</span>
+        <span class="text-xs" style="color: var(--c-muted);">${esc(t.started_at?.slice(11, 19) || '')}</span></div>
       <div class="flex items-center gap-3" data-role="meta">
         <span class="text-xs font-mono" style="color: var(--c-muted);">${esc(t.cmd)}</span>
         <a class="text-xs" style="color: var(--c-primary);" href="/api/tasks/${encodeURIComponent(t.id)}/log?download=1">⬇ 完整日志</a>
       </div>
     </div>
     <div class="log-box mt-2" data-role="log"></div>`;
+  // 点击头部切换展开/收起（取消按钮、下载链接不触发）
+  card.querySelector('[data-role="header"]').addEventListener('click', e => {
+    if (e.target.closest('button, a')) return;
+    card.dataset.collapsed = (card.dataset.collapsed === '1') ? '0' : '1';
+  });
   _updateTaskCard(card, t);
   return card;
 }
 function _updateTaskCard(card, t) {
+  // 仅在状态变化时自动折叠/展开（running 展开；queued/终态收起）。轮询不干预手动操作
+  if (card.dataset.status !== t.status) {
+    card.dataset.collapsed = (t.status === 'running') ? '0' : '1';
+    card.dataset.status = t.status;
+  }
   const [label, style] = TASK_STATUS[t.status] || [t.status, ''];
   // badge：仅在文本/样式变化时写 DOM
   const badge = card.querySelector('[data-role="badge"]');
@@ -1249,14 +1262,14 @@ function _updateTaskCard(card, t) {
   // cancel 按钮：按状态增删（仅状态转换时操作）
   const meta = card.querySelector('[data-role="meta"]');
   const cancelBtn = meta.querySelector('[data-cancel]');
-  if (t.status === 'running' && !cancelBtn) {
+  if ((t.status === 'running' || t.status === 'queued') && !cancelBtn) {
     const btn = document.createElement('button');
     btn.className = 'btn btn-plain text-xs';
     btn.dataset.cancel = '';
     btn.textContent = '⏹ 取消';
     btn.onclick = () => cancelTask(t.id, t.kind);
     meta.appendChild(btn);
-  } else if (t.status !== 'running' && cancelBtn) {
+  } else if (t.status !== 'running' && t.status !== 'queued' && cancelBtn) {
     cancelBtn.remove();
   }
   // 日志：有活跃 SSE 流时不碰（流自己管 textContent），无流时从 log_tail 更新
@@ -1313,7 +1326,9 @@ async function loadTasks() {
     [...watchTimers.keys()].forEach(id => { if (!runningIds.has(id)) stopWatchTask(id); });
 
     // Fix 1: 无运行中任务时停止轮询（消除"停止后仍刷新"）；有任务时确保轮询
-    if (runningIds.size === 0) stopTaskPolling(); else startTaskPolling();
+    // 仅当有排队中任务时才轮询（探测 queued→running 晋级）；单任务运行靠 SSE 直播 + done 事件刷新
+    const hasQueued = data.tasks.some(t => t.status === 'queued');
+    if (hasQueued) startTaskPolling(); else stopTaskPolling();
   } catch (e) { /* 静默 */ }
 }
 

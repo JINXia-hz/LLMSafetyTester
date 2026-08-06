@@ -5,7 +5,7 @@
 1. 一侧不足不补齐——自适应窗口 9 只选出 5（兜底分支形同虚设）；
 2. 上方取错侧——ranking 按 Elo 降序，above[:k] 取到离边界最远的强攻击。
 """
-from llmsec.pipeline.runner import select_twin_candidates
+from llmsec.pipeline.allergy_phase import select_twin_candidates
 
 
 def _ranking(elos: list[float]):

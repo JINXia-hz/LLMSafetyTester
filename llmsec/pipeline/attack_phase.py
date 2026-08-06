@@ -22,8 +22,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from openai import OpenAI
-
     from llmsec.evaluation.elo import ELOTracker
     from llmsec.evaluation.judge import Judge
 
@@ -150,10 +148,49 @@ def _adaptive_batch_size(
 
 
 
+def _build_attack_row(rec: dict, result: dict, round_idx: int, phase: str) -> dict:
+    """构造 attack_results.jsonl 的单行（seed/attack 共用，避免两处大 dict 重复）。"""
+    return {
+        "round": round_idx,
+        "phase": phase,
+        "method": rec["method"],
+        "id": rec["id"],
+        "category": rec.get("category", "unknown"),
+        "category_name": rec.get("category_name", ""),
+        "source": rec.get("source", "our"),
+        "functional_category": rec.get("functional_category", "standard"),
+        "harm_type": rec["harm_type"],
+        "eval_score": result["eval_score"],
+        "jailbreak_tax": result["jailbreak_tax"],
+        "math_score": result.get("math_score"),
+        "actual_answer": result.get("actual_answer"),
+        "expected_answer": rec["expected_answer"],
+        "status": result["status"],
+        "compliance_level": result.get("compliance_level"),
+        "latency_ms": result["latency_ms"],
+        "judge_harmfulness": result.get("judge_harmfulness", 1),
+        "judge_specificity": result.get("judge_specificity", 1),
+        "judge_dangerousness": result.get("judge_dangerousness", 1),
+        "is_harmful": result.get("is_harmful", False),
+        "is_refusal": result.get("is_refusal", False),
+        "response_preview": result.get("content", "")[:500],
+    }
+
+
+def _resolve_workers(batch_n: int, concurrency: int | None) -> int:
+    """解析并发度：None → 全并发(=batch)；0 → 串行(1)；N>0 → min(N, batch)。"""
+    if concurrency is None:
+        return max(1, batch_n)
+    if concurrency <= 0:
+        return 1
+    return max(1, min(concurrency, batch_n))
+
+
+
 # ============================================================
 # Phase 1: ELO 自适应攻击测试
 # ============================================================
-def run_attack_phase(records: list[dict], target_client: OpenAI,
+def run_attack_phase(records: list[dict],
                      judge: Judge, tracker: ELOTracker,
                      batch_size: int, max_rounds: int,
                      attack_file,
@@ -165,9 +202,10 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
                      sampler_log_file: Path | None = None,
                      cluster_analysis_file: Path | None = None,
                      skip_final_clustering: bool = False,
-                     state_file: Path | str | None = None,
-                     no_early_stop: bool = False,
-                     ) -> dict:
+                    state_file: Path | str | None = None,
+                    no_early_stop: bool = False,
+                    concurrency: int | None = None,
+                    ) -> dict:
     """
     自适应攻击测试：从ELO中档开始，逐轮二分搜索。
     新增：聚类冷启动预测 + 动态重训练 + 种子采样 + 可插拔采样器 + 聚类安全分析。
@@ -282,6 +320,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
               f"（对预测矩阵信息量最大的方向，n={len(all_methods)} → k0={log_growth_k0(len(all_methods))}）")
         logger.info(f"     方法: {', '.join(m[:25] for m in seed_methods)}")
 
+        seed_rows: list[tuple[str, float]] = []
         for method_name in seed_methods:
             rec = method_records[method_name]
             prompt_text = rec["prompt"]
@@ -289,7 +328,7 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
 
             logger.info(f"     → {method_name[:40]}")
             result = evaluate_single(
-                prompt_text, expected_answer, target_client, judge, use_judge=True
+                prompt_text, expected_answer, judge, use_judge=True
             )
 
             # API 错误（断网等）不更新 Elo、不记结果，方法保持未测状态以便下轮重试
@@ -299,42 +338,18 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
                 continue
 
             tested.add(method_name)
-
-            # 实时更新 ELO（双边：攻击方 vs 防御方）
-            tracker.update(method_name, DEFENDER_NAME, result["eval_score"], round_idx=0)
-
-            # 记录结果
-            all_results.append({
-                "round": 0,
-                "phase": "seed",
-                "method": method_name,
-                "id": rec["id"],
-                "category": rec.get("category", "unknown"),
-                "category_name": rec.get("category_name", ""),
-                "source": rec.get("source", "our"),
-                "functional_category": rec.get("functional_category", "standard"),
-                "harm_type": rec["harm_type"],
-                "eval_score": result["eval_score"],
-                "jailbreak_tax": result["jailbreak_tax"],
-                "math_score": result.get("math_score"),
-                "actual_answer": result.get("actual_answer"),
-                "expected_answer": expected_answer,
-                "status": result["status"],
-                "compliance_level": result.get("compliance_level"),
-                "latency_ms": result["latency_ms"],
-                "judge_harmfulness": result.get("judge_harmfulness", 1),
-                "judge_specificity": result.get("judge_specificity", 1),
-                "judge_dangerousness": result.get("judge_dangerousness", 1),
-                "is_harmful": result.get("is_harmful", False),
-                "is_refusal": result.get("is_refusal", False),
-                "response_preview": result.get("content", "")[:500],
-            })
+            all_results.append(_build_attack_row(rec, result, 0, "seed"))
+            seed_rows.append((method_name, result["eval_score"]))
 
             score = result["eval_score"]
             sym = "✅" if score > 0 else ("🔶" if score > -1 else "❌")
             logger.info(f" → {sym} score={score:.1f} {result['status']}")
 
             time.sleep(API_DELAY)
+
+        # Model B 同步轮次 ELO：种子批用轮始快照一次性更新（与主循环语义统一）
+        if seed_rows:
+            tracker.update_round(DEFENDER_NAME, seed_rows, round_idx=0)
 
         # 明细先于 state 落盘（同主循环顺序，防崩溃窗口丢数据）
         write_jsonl(attack_file, all_results)
@@ -373,59 +388,47 @@ def run_attack_phase(records: list[dict], target_client: OpenAI,
         logger.info(f"\n  🔵 Round {round_idx}/{max_rounds}: 测试 {len(next_methods)} 种攻击方法")
         logger.info(f"     方法: {', '.join(m[:25] for m in next_methods)}")
 
-        for method_name in next_methods:
-            rec = method_records[method_name]
-            prompt_text = rec["prompt"]
-            expected_answer = rec["expected_answer"]
+        # ---- 批内并行求值（evaluate_single 纯函数，无 ELO 依赖）+ Model B 同步轮次 ELO ----
+        max_workers = _resolve_workers(len(next_methods), concurrency)
 
-            logger.info(f"     → {method_name[:40]}")
-            result = evaluate_single(
-                prompt_text, expected_answer, target_client, judge, use_judge=True
-            )
+        def _eval_one(m):
+            # 并发 worker：补 threading.local 的 ambient 目标继承缺口（多目标路由正确）
+            try:
+                from llmsec.targets import set_active_target
+                set_active_target(DEFENDER_NAME)
+            except Exception:
+                pass
+            rec_m = method_records[m]
+            return evaluate_single(rec_m["prompt"], rec_m["expected_answer"], judge, use_judge=True)
 
+        if max_workers > 1:
+            logger.info(f"     ⚡ 批内并行求值 (concurrency={max_workers})")
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                raw_results = list(ex.map(_eval_one, next_methods))
+        else:
+            raw_results = [_eval_one(m) for m in next_methods]
+
+        round_rows: list[tuple[str, float]] = []
+        for method_name, result in zip(next_methods, raw_results):
             # API 错误（断网等）不更新 Elo、不记结果，方法保持未测状态以便下轮重试
             if result["status"] == "api_error":
-                logger.warning(f" → ⚠️ API错误: {result.get('error', '')}，跳过")
-                time.sleep(API_DELAY)
+                logger.warning(f"     → {method_name[:40]} ⚠️ API错误: {result.get('error', '')}，跳过")
+                if max_workers == 1:
+                    time.sleep(API_DELAY)
                 continue
-
             tested.add(method_name)
-
-            # 实时更新 ELO（双边：攻击方 vs 防御方）
-            tracker.update(method_name, DEFENDER_NAME, result["eval_score"], round_idx=round_idx)
-
-            # 记录结果
-            all_results.append({
-                "round": round_idx,
-                "phase": "attack",
-                "method": method_name,
-                "id": rec["id"],
-                "category": rec.get("category", "unknown"),
-                "category_name": rec.get("category_name", ""),
-                "source": rec.get("source", "our"),
-                "functional_category": rec.get("functional_category", "standard"),
-                "harm_type": rec["harm_type"],
-                "eval_score": result["eval_score"],
-                "jailbreak_tax": result["jailbreak_tax"],
-                "math_score": result.get("math_score"),
-                "actual_answer": result.get("actual_answer"),
-                "expected_answer": expected_answer,
-                "status": result["status"],
-                "compliance_level": result.get("compliance_level"),
-                "latency_ms": result["latency_ms"],
-                "judge_harmfulness": result.get("judge_harmfulness", 1),
-                "judge_specificity": result.get("judge_specificity", 1),
-                "judge_dangerousness": result.get("judge_dangerousness", 1),
-                "is_harmful": result.get("is_harmful", False),
-                "is_refusal": result.get("is_refusal", False),
-                "response_preview": result.get("content", "")[:500],
-            })
-
+            all_results.append(_build_attack_row(method_records[method_name], result, round_idx, "attack"))
+            round_rows.append((method_name, result["eval_score"]))
             score = result["eval_score"]
             sym = "✅" if score > 0 else ("🔶" if score > -1 else "❌")
-            logger.info(f" → {sym} score={score:.1f} {result['status']}")
+            logger.info(f"     → {method_name[:40]} {sym} score={score:.1f} {result['status']}")
+            if max_workers == 1:
+                time.sleep(API_DELAY)
 
-            time.sleep(API_DELAY)
+        # Model B 同步轮次 ELO：批内全部观测用轮始快照一次性更新（顺序无关、消除 batch↔K 耦合）
+        if round_rows:
+            tracker.update_round(DEFENDER_NAME, round_rows, round_idx=round_idx)
 
         # 落盘顺序：明细先于 state——若 state.json 已含本轮 GT 但 attack_results.jsonl
         # 还没写时崩溃，resume 会把本轮方法标为"已测"但明细永久丢失（ASR/税/threats 全失真）。

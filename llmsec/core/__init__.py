@@ -5,7 +5,6 @@ llmsec.core — 基础设施层
 """
 
 from llmsec.core.config import (
-    ALLERGY_REPORT_FILE,
     ATTACK_SET_L1_FILE,
     ATTACKS_DIR,
     CLUSTER_FEATURES_FILE,
@@ -70,7 +69,7 @@ __all__ = [
     "FEATURE_CACHE_FILE", "CLUSTER_RESULT_FILE",
     "TREE_FILE", "REPORT_FILE", "METHOD_REGISTRY_FILE",
     "CLUSTER_SECURITY_ANALYSIS_FILE",
-    "ALLERGY_REPORT_FILE", "TWIN_RESULT_FILE", "TASK_LOG_DIR",
+    "TWIN_RESULT_FILE", "TASK_LOG_DIR",
     "DEFAULT_BASE_URL", "DEFAULT_MODEL",
     "load_env", "load_targets",
     "TargetConfig", "GeneratorConfig", "JudgeConfig",
