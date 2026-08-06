@@ -13,7 +13,7 @@ output/
 
 # 攻击集（仅保留示例文件，其余由用户自行生成或上传）
 attacks/*
-!attacks/exemple.jsonl
+!attacks/example.jsonl
 
 # IDE
 .vscode/
