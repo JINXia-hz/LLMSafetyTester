@@ -35,8 +35,7 @@ PCAP_MODEL_VERSION = os.getenv("PCAP_MODEL_VERSION", "unknown")
 PCAP_PROMPT_KEY = os.getenv("PCAP_PROMPT_KEY", "")
 
 REQUEST_TIMEOUT = 90.0   # PCAP 判读较慢
-MAX_RETRIES = 3
-RETRY_DELAY = 3.0        # 重试间隔（秒）
+from llmsec.params import API_MAX_RETRIES, TARGET_RETRY_DELAY  # noqa: E402
 
 
 class _PcapHttpError(Exception):
@@ -115,7 +114,7 @@ class PcapJudgeTargetClient(TargetClient):
         self,
         url: str | None = None,
         timeout: float = REQUEST_TIMEOUT,
-        max_retries: int = MAX_RETRIES,
+        max_retries: int = API_MAX_RETRIES,
     ):
         # env 惰性读取：url 缺省时以模块常量为默认，长跑进程运行期改 env 生效
         self.url = url or os.getenv("PCAP_JUDGE_URL", PCAP_JUDGE_URL)
@@ -178,7 +177,7 @@ class PcapJudgeTargetClient(TargetClient):
             }
 
         try:
-            return retry_call(_do_request, retries=self.max_retries, delay=RETRY_DELAY)
+            return retry_call(_do_request, retries=self.max_retries, delay=TARGET_RETRY_DELAY)
         except _PcapHttpError as e:
             # 5xx/429 重试耗尽：返回结构与单次非 200 一致
             return self._http_error_result(prompt, e.resp, e.latency)

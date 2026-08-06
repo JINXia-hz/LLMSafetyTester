@@ -268,18 +268,19 @@ def test_pcap_retry():
 
 def test_generate_retry():
     from llmsec.attacks import generate as gen
+    from llmsec.params import API_MAX_RETRIES, API_RATE_LIMIT_DELAY, API_RETRY_DELAY
     method = {'method': 'm1', 'category_name': 'c1', 'description': 'd1'}
     harm_types = ['violence']
     with _SleepRecorder() as sr:
         client = _FakeOpenAIClient([RuntimeError('429 rate limit')])
         r = gen.call_api_two_round(client, method, harm_types, model='m')
-    assert r is None and client.completions.calls == gen.MAX_RETRIES == 3, 'generate：API 失败 3 次尝试后返回 None'
-    assert sr.calls == [gen.RETRY_DELAY_API] * 2 == [5.0, 5.0], 'generate：API/429 失败间隔 5s'
+    assert r is None and client.completions.calls == API_MAX_RETRIES == 3, 'generate：API 失败 3 次尝试后返回 None'
+    assert sr.calls == [API_RATE_LIMIT_DELAY] * 2 == [5.0, 5.0], 'generate：API/429 失败间隔 5s'
     with _SleepRecorder() as sr2:
         client2 = _FakeOpenAIClient([_FakeChatResponse('这不是JSON')])
         r2 = gen.call_api_two_round(client2, method, harm_types, model='m')
     assert r2 is None and client2.completions.calls == 3, 'generate：JSON 解析失败 3 次尝试后返回 None'
-    assert sr2.calls == [gen.RETRY_DELAY] * 2 == [2.0, 2.0], 'generate：JSON 解析失败间隔 2s'
+    assert sr2.calls == [API_RETRY_DELAY] * 2 == [2.0, 2.0], 'generate：JSON 解析失败间隔 2s'
     with _SleepRecorder() as sr3:
         bad = _FakeChatResponse('[{"harm_type":"violence","prompt":"a"},{"harm_type":"violence","prompt":"b"}]')
         client3 = _FakeOpenAIClient([bad])
@@ -294,11 +295,12 @@ def test_generate_retry():
 
 def test_safe_twin_retry():
     from llmsec.evaluation import safe_twin as st
+    from llmsec.params import API_MAX_RETRIES, API_RETRY_DELAY
     with _SleepRecorder() as sr:
         client = _FakeOpenAIClient([RuntimeError('boom')])
         r = st.generate_safe_twin('攻击 prompt', client)
-    assert r is None and client.completions.calls == st.MAX_RETRIES == 3, 'safe_twin：3 次尝试后返回 None（旧语义）'
-    assert sr.calls == [st.RETRY_DELAY] * 2 == [2.0, 2.0], 'safe_twin：重试间隔 2s'
+    assert r is None and client.completions.calls == API_MAX_RETRIES == 3, 'safe_twin：3 次尝试后返回 None'
+    assert sr.calls == [API_RETRY_DELAY] * 2 == [2.0, 2.0], 'safe_twin：重试间隔 2s'
     with _SleepRecorder():
         ok = _FakeChatResponse('{"safe_prompt": "安全版", "replacement": "炸弹→蛋糕"}')
         client2 = _FakeOpenAIClient([RuntimeError('boom'), ok])

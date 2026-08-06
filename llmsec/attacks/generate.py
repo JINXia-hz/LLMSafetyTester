@@ -34,7 +34,7 @@ from llmsec.core import (
     setup_console,
 )
 from llmsec.core.text import inject_math_tax
-from llmsec.params import API_DELAY
+from llmsec.params import API_DELAY, API_MAX_RETRIES, API_RATE_LIMIT_DELAY, API_RETRY_DELAY
 
 logger = get_logger(__name__)
 # 修复Windows CMD GBK编码导致emoji/Unicode输出报错
@@ -54,10 +54,7 @@ OUTPUT_FILE = ATTACK_SET_L1_FILE
 # API调用参数
 TEMPERATURE = 0.9      # 较高温度增加多样性
 MAX_TOKENS = 4096
-# API_DELAY 统一取自 llmsec.params（与 evaluator/safe_twin/runner 等全链路一致）
-MAX_RETRIES = 3        # 失败重试次数
-RETRY_DELAY = 2.0      # 重试间隔（秒）：内容类失败（JSON解析失败/初稿条数不符）
-RETRY_DELAY_API = 5.0  # 重试间隔（秒）：API 类失败（含 429 限流），间隔更长
+# 重试参数统一取自 params（API_RETRY_DELAY/API_MAX_RETRIES/API_RATE_LIMIT_DELAY）
 
 
 class _DraftMismatchError(Exception):
@@ -290,18 +287,18 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
         # 内容类失败（条数不符/JSON解析）短间隔；API 类失败（含 429）长间隔
         if isinstance(e, _DraftMismatchError):
             logger.warning("  ⚠ 初稿条数不符，重试...")
-            return RETRY_DELAY
+            return API_RETRY_DELAY
         if isinstance(e, json.JSONDecodeError):
             logger.warning(f"  ⚠ JSON解析失败 (第{attempt}轮): {e}")
-            return RETRY_DELAY
+            return API_RETRY_DELAY
         logger.warning(f"  ⚠ API调用失败 (第{attempt}轮): {e}")
-        return RETRY_DELAY_API
+        return API_RATE_LIMIT_DELAY
 
     try:
         return retry_call(
             _two_round,
-            retries=MAX_RETRIES,
-            delay=RETRY_DELAY,
+            retries=API_MAX_RETRIES,
+            delay=API_RETRY_DELAY,
             on_retry=_on_retry,
         )
     except Exception:
@@ -440,7 +437,7 @@ def main():
 
         if records is None:
             fail_count += 1
-            logger.error(f"         ❌ 生成失败（已重试{MAX_RETRIES}次）\n")
+            logger.error(f"         ❌ 生成失败（已重试{API_MAX_RETRIES}次）\n")
             continue
 
         # 写入JSONL（每条记录独立出题注入，见 build_entries）

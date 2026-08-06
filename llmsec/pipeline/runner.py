@@ -76,6 +76,7 @@ from llmsec.params import (
     MAX_TWIN_WINDOW,  # noqa: F401 — allergy_phase lazy import
     MIN_TWIN_WINDOW,  # noqa: F401 — allergy_phase lazy import
     RIDGE_REFIT_THRESHOLD,
+    SAMPLER_COORD_MIN_PER_CLUSTER,
     SAMPLER_HYBRID_EXPLORE_ROUNDS,
     SAMPLER_INFOGAIN_ALPHA,
     SAMPLER_INFOGAIN_BETA,
@@ -193,6 +194,8 @@ def main():
                         help=f"InfoGain 成功潜力权重（默认 {SAMPLER_INFOGAIN_GAMMA}）")
     parser.add_argument("--coordinate-rounds", type=int, default=SAMPLER_HYBRID_EXPLORE_ROUNDS,
                         help=f"Hybrid 模式下前多少轮使用 InfoGain 探索（默认 {SAMPLER_HYBRID_EXPLORE_ROUNDS}）")
+    parser.add_argument("--coord-min-per-cluster", type=int, default=SAMPLER_COORD_MIN_PER_CLUSTER,
+                        help=f"坐标下降采样器每簇最少实测数（默认 {SAMPLER_COORD_MIN_PER_CLUSTER}）")
     parser.add_argument("--targets", type=str, default=None,
                         help="多目标：逗号分隔的目标名子集（取自 .env TARGETS）；"
                              "指定后 Phase 1 逐目标攻击，结果写入 results 矩阵 R，"
@@ -338,6 +341,7 @@ def main():
             sampler_beta=args.sampler_beta,
             sampler_gamma=args.sampler_gamma,
             coordinate_rounds=args.coordinate_rounds,
+            coord_min_per_cluster=args.coord_min_per_cluster,
             sampler_log_file=runner_sampler_log_file,
             cluster_analysis_file=(None if args.work_dir else runner_cluster_analysis_file),
             skip_final_clustering=bool(args.work_dir),  # 隔离模式跳过聚类落盘

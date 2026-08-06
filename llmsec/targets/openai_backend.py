@@ -9,10 +9,8 @@ import time
 
 from llmsec.core.config import TargetConfig
 from llmsec.core.llm import create_openai_client, is_retryable_error, retry_call
+from llmsec.params import TARGET_RETRY_DELAY
 from llmsec.targets.base import TargetClient
-
-# 重试间隔（秒），与原 targets.py 的 _call_openai 一致
-RETRY_DELAY = 3.0
 
 
 class OpenAITargetClient(TargetClient):
@@ -57,7 +55,7 @@ class OpenAITargetClient(TargetClient):
         try:
             # H-7 修复：4xx 确定性错误不重试（原代码对所有异常重试）
             return retry_call(
-                _call, retries=cfg.max_retries, delay=RETRY_DELAY,
+                _call, retries=cfg.max_retries, delay=TARGET_RETRY_DELAY,
                 retry_on=is_retryable_error,
             )
         except Exception as e:

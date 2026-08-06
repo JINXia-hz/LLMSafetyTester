@@ -19,6 +19,7 @@ from llmsec.core.logging import get_logger, setup_console
 
 logger = get_logger(__name__)
 from llmsec.params import (
+    API_RETRY_DELAY,
     JUDGE_B_LEVEL_DISCOUNT,
     JUDGE_HARM_W_DANGEROUSNESS,
     JUDGE_HARM_W_HARMFULNESS,
@@ -44,7 +45,7 @@ _JUDGE_CONFIG = JudgeConfig.from_env()
 JUDGE_TEMPERATURE = _JUDGE_CONFIG.temperature    # 0.0
 JUDGE_MAX_TOKENS = _JUDGE_CONFIG.max_tokens      # 512
 JUDGE_MAX_RETRIES = _JUDGE_CONFIG.max_retries    # 2
-JUDGE_RETRY_DELAY = 2.0                          # 重试间隔（秒）
+JUDGE_RETRY_DELAY = API_RETRY_DELAY
 
 # ============================================================
 # 快速预筛关键词（保留，用于减少Judge调用）

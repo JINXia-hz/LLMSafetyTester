@@ -21,14 +21,18 @@ CLI 参数的默认值也从这里读，保证命令行仍可临时覆盖。
 
 API_DELAY = 0.5
 # 解释：每次调用目标/评判 API 后的 sleep 秒数，防止限流。
-# 审查：所有模块统一 import 本值（含 attacks/generate.py），改这里 → 全链路生效。
+API_RETRY_DELAY = 2.0        # 标准 API 重试间隔（秒）——judge/safe_twin/generate 共用
+API_MAX_RETRIES = 3          # 标准 API 最大重试次数
+API_RATE_LIMIT_DELAY = 5.0   # 限流（429）专用重试间隔（更长，等限流窗口重置）
+TARGET_RETRY_DELAY = 3.0     # 目标模型 API 重试间隔（外网延迟更高）
+# 审查：所有模块统一 import 本组值，改这里 → 全链路生效。
 
 DEFAULT_BATCH_SIZE = 10      # 每轮自适应测试的攻击方法数
 DEFAULT_MAX_ROUNDS = 5       # 最大自适应轮次
+MAX_ROUNDS_LIMIT = 50        # CLI/dashboard 的 --max-rounds 上限
 # 解释：runner 主循环的两个规模旋钮，CLI --batch-size/--max-rounds 可覆盖。
-# 审查：dashboard EvaluateRequest 的默认值已 import 自本处（联动）；但校验上限是
-#       batch le=ADAPTIVE_BATCH_MAX（见下，当前 12）、max_rounds le=50（硬编码）。
-#       改 DEFAULT_* 会自动改 API 默认值，但改 max_rounds 上限需同步 tasks.py。
+# 审查：dashboard EvaluateRequest 的默认值已 import 自本处（联动）；上限
+#       batch le=ADAPTIVE_BATCH_MAX、max_rounds le=MAX_ROUNDS_LIMIT（均来自 params）。
 
 MIN_TWIN_WINDOW = 6
 MAX_TWIN_WINDOW = 20
@@ -63,9 +67,8 @@ PORTRAIT_ASR_SAFE = 0.3        # ASR 低于此值视为"拦得住"
 K_FACTOR = 32          # 基准 K 值：攻击方单场 Elo 更新幅度上限
 ELO_SCALE = 400        # 标准 Elo 缩放因子（期望胜率分母）
 # 解释：攻击方每法通常只测 1~2 次，用全 K 合理；防御方每场必上，K 按场次衰减（见下）。
-# 审查：load 时 k_factor **不覆盖**运行时值（不匹配仅记 INFO 日志，故改 params.K_FACTOR
-#       跑旧 state 仍生效）；但 initial_elo 仍从 state 读取并覆盖运行时（elo.py load），
-#       跑旧 state 时 initial_elo 不会跟随 params 变化——必要时先重置 state。
+# 审查：load 时 k_factor 与 initial_elo **均不覆盖**运行时值——改 params 后立即生效，
+#       无需重置 state。
 
 # ---- K 动力学（连续成绩映射 + 防御方衰减）----
 SCORE_PERF_TAU = 2.0       # 连续成绩映射 perf = score/(score+τ)；τ = 使 perf=0.5 的分数
@@ -106,6 +109,9 @@ RIDGE_PRED_STD_CAP_MIN = 200.0   # 预测 std 上限的绝对下限
 RIDGE_REFIT_THRESHOLD = 10
 # 解释：GT 增长数 < 此值时复用现有 λ* 做单次快速 refit（不重跑 K-Fold），
 #       增长 ≥ 此值时重跑 K-Fold 选 λ。CLI --ridge-refit-threshold 可覆盖。
+RIDGE_LAMBDA_MIN = -3        # λ 搜索路径下限（log10）
+RIDGE_LAMBDA_MAX = 4         # λ 搜索路径上限（log10）
+RIDGE_LAMBDA_COUNT = 24      # λ 搜索点数
 
 
 # ============================================================
@@ -117,11 +123,8 @@ SAMPLER_INFOGAIN_BETA = 0.3     # 簇重访惩罚权重（已选簇降权，促�
 SAMPLER_INFOGAIN_GAMMA = 1.0    # 成功率优先权重（高成功率方法加分）
 SAMPLER_COORD_MIN_PER_CLUSTER = 3   # 坐标下降：每簇最少实测数
 SAMPLER_HYBRID_EXPLORE_ROUNDS = 2   # 混合采样：开局探索轮数
-# 解释：runner CLI --sampler-alpha/beta/gamma/--coordinate-rounds 可覆盖
-#       （注意：仅 INFOGAIN 三权重与 HYBRID_EXPLORE_ROUNDS 有对应 CLI；
-#       SAMPLER_COORD_MIN_PER_CLUSTER 无 CLI 入口，只能经 §9 LLMSEC_PARAM_ 环境变量覆盖）。
-# 审查：这些权重 dashboard API 不透传（EvaluateRequest 只有 sampler 名），
-#       想从界面调参需先扩展 tasks.py。
+# 解释：runner CLI --sampler-alpha/beta/gamma/--coordinate-rounds/--coord-min-per-cluster 可覆盖；
+#       dashboard EvaluateRequest 也透传 alpha/beta/gamma/coordinate_rounds。
 
 
 # ============================================================
@@ -219,9 +222,7 @@ RV_POWER_COEF = 8          # Cohen 功效经验式系数：adequate_n = COEF*k +
 # ============================================================
 
 RIDGE_N_FOLDS = 5               # K-Fold 交叉验证折数（选最优 λ）
-# 解释：λ 路径在 logspace(-3,4,24) 上搜索（硬编码于 elo_cluster.EloPredictorModel
-#       构造函数默认值 lambda_candidates=None 分支，不经过 params）；n_folds=5 是偏差-方差折中。
-# HPO 可调：更宽路径 / 更多折数 → 更精确但更慢。
+# 解释：λ 路径在 logspace(RIDGE_LAMBDA_MIN, RIDGE_LAMBDA_MAX, RIDGE_LAMBDA_COUNT) 上搜索。
 
 BLEND_PRIOR_K = 10.0           # Blend 双层预测器的贝叶斯收缩先验强度：w_m = n/(n+K)
 # 解释：K 越大越偏向统一预测（保守）；K→0 时全信模型自身。
@@ -302,6 +303,9 @@ def _apply_env_overrides() -> None:
                 val = int(raw)
             elif isinstance(old, float):
                 val = float(raw)
+            elif isinstance(old, (tuple, list)):
+                parts = raw.strip().strip("()[]").split(",")
+                val = tuple(type(old[0])(p.strip()) for p in parts if p.strip())
             else:
                 val = raw
             g[name] = val

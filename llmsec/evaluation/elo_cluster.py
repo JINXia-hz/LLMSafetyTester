@@ -48,6 +48,9 @@ from llmsec.core.logging import get_logger
 from llmsec.core.seed import get_global_seed as _global_seed
 from llmsec.params import (
     RIDGE_DEGENERATE_COL_EPS,
+    RIDGE_LAMBDA_COUNT,
+    RIDGE_LAMBDA_MAX,
+    RIDGE_LAMBDA_MIN,
     RIDGE_N_FOLDS,
     RIDGE_PRED_STD_CAP_MIN,
     RIDGE_PRED_STD_CAP_MULT,
@@ -107,7 +110,8 @@ class EloPredictorModel:
 
     def __init__(self, lambda_candidates=None, n_folds: int = RIDGE_N_FOLDS):
         self.lambda_candidates = (
-            np.logspace(-3, 4, 24) if lambda_candidates is None else lambda_candidates
+            np.logspace(RIDGE_LAMBDA_MIN, RIDGE_LAMBDA_MAX, RIDGE_LAMBDA_COUNT)
+            if lambda_candidates is None else lambda_candidates
         )
         self.n_folds = n_folds
         self.w: np.ndarray | None = None

@@ -16,7 +16,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from llmsec.core.config import ATTACKS_DIR, TASK_LOG_DIR
-from llmsec.params import ADAPTIVE_BATCH_MAX, DEFAULT_BATCH_SIZE, DEFAULT_MAX_ROUNDS
+from llmsec.params import ADAPTIVE_BATCH_MAX, DEFAULT_BATCH_SIZE, DEFAULT_MAX_ROUNDS, MAX_ROUNDS_LIMIT
 
 router = APIRouter()
 
@@ -52,13 +52,14 @@ def _evict_tasks() -> None:
 class EvaluateRequest(BaseModel):
     phase: str = Field(default="all", pattern="^(all|1|2)$")
     input: str = "l1.jsonl"
-    # runner._adaptive_batch_size 会把 batch 压到 [ADAPTIVE_BATCH_MIN, ADAPTIVE_BATCH_MAX] 内，
-    # 上限与 runner 对齐，避免用户传 >ADAPTIVE_BATCH_MAX 时被静默压回；默认值随上限自适应
     batch_size: int = Field(default=min(DEFAULT_BATCH_SIZE, ADAPTIVE_BATCH_MAX), ge=1, le=ADAPTIVE_BATCH_MAX)
-    max_rounds: int = Field(default=DEFAULT_MAX_ROUNDS, ge=1, le=50)
+    max_rounds: int = Field(default=DEFAULT_MAX_ROUNDS, ge=1, le=MAX_ROUNDS_LIMIT)
     sampler: str = Field(default="hybrid", pattern="^(gap|infogain|coordinate|hybrid)$")
-    # 目标模型（.env TARGETS 中声明的名字）；None = .env 默认目标。
-    # pattern 防异常字符（argv 以列表传递不走 shell，仍做白名单校验）
+    # 采样器权重（None = 用 params 默认值，不传 --xxx 旗标给 runner）
+    sampler_alpha: float | None = None
+    sampler_beta: float | None = None
+    sampler_gamma: float | None = None
+    coordinate_rounds: int | None = None
     target: str | None = Field(default=None, pattern=r"^[\w.\-:]+$")
 
 
@@ -196,6 +197,14 @@ async def api_run_evaluate(req: EvaluateRequest):
         "--max-rounds", str(req.max_rounds),
         "--sampler", req.sampler,
     ]
+    if req.sampler_alpha is not None:
+        argv += ["--sampler-alpha", str(req.sampler_alpha)]
+    if req.sampler_beta is not None:
+        argv += ["--sampler-beta", str(req.sampler_beta)]
+    if req.sampler_gamma is not None:
+        argv += ["--sampler-gamma", str(req.sampler_gamma)]
+    if req.coordinate_rounds is not None:
+        argv += ["--coordinate-rounds", str(req.coordinate_rounds)]
     if req.target:
         # 目标须在 .env TARGETS 已声明，否则 400（静默丢弃会张冠李戴）；
         # load_targets 失败/为空时无法校验，放行交由 runner 自身报错

@@ -827,7 +827,6 @@ class ELOTracker:
             "ground_truth": self.predictor.ground_truth,
             "attacker_stats": self.attacker_stats,
             "attacker_pred_std": self.attacker_pred_std,
-            "config": {"k_factor": self.k, "initial_elo": self.initial},
         }
         write_json(filepath, data, backup=True)
 
@@ -885,12 +884,16 @@ class ELOTracker:
         stored_k = config.get("k_factor")
         if stored_k is not None and stored_k != K_FACTOR:
             _logger.info(
-                "state.json 中 k_factor=%s 与运行时 params.K_FACTOR=%s 不一致，已忽略旧值，"
-                "采用运行时 K（HPO 安全）。",
+                "state.json 中 k_factor=%s 与运行时 params.K_FACTOR=%s 不一致，已忽略旧值",
                 stored_k, K_FACTOR,
             )
-        # self.k 保持 __init__ 的运行时 K_FACTOR（不覆盖）
-        self.initial = config.get("initial_elo", INITIAL_ELO)
+        stored_initial = config.get("initial_elo")
+        if stored_initial is not None and stored_initial != INITIAL_ELO:
+            _logger.info(
+                "state.json 中 initial_elo=%s 与运行时 INITIAL_ELO=%s 不一致，已忽略旧值",
+                stored_initial, INITIAL_ELO,
+            )
+        # self.k / self.initial 均保持 __init__ 的运行时值（不从 state 覆盖）
         return self
 
 

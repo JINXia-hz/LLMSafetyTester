@@ -47,6 +47,8 @@ from llmsec.evaluation.judge import FAST_REFUSAL_PATTERNS, Judge, create_judge_c
 from llmsec.params import (
     ALLERGY_FPR_SAFE,
     API_DELAY,
+    API_MAX_RETRIES,
+    API_RETRY_DELAY,
     MIN_TWIN_WINDOW,
     PORTRAIT_ASR_SAFE,
     TWIN_SEVERITY_FPR_MED,
@@ -86,8 +88,7 @@ TWIN_FILE = SAFE_TWINS_FILE
 
 # TEMPERATURE 统一从 llmsec.params 读取（TWIN_GEN_TEMPERATURE 别名）
 MAX_TOKENS = 1024
-MAX_RETRIES = 3
-RETRY_DELAY = 2.0    # 重试间隔（秒）
+# RETRY_DELAY / MAX_RETRIES 统一从 params 读取（API_RETRY_DELAY / API_MAX_RETRIES）
 
 
 
@@ -164,7 +165,7 @@ def generate_safe_twin(attack_prompt: str, client) -> dict | None:
         return {"safe_prompt": raw, "replacement": "无法解析JSON"}
 
     try:
-        return retry_call(_gen, retries=MAX_RETRIES, delay=RETRY_DELAY,
+        return retry_call(_gen, retries=API_MAX_RETRIES, delay=API_RETRY_DELAY,
                           retry_on=is_retryable_error)  # M-24：4xx 不重试
     except Exception as e:
         logger.warning(f"  ⚠ 安全孪生生成失败: {e}")
