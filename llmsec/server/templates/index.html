@@ -352,9 +352,10 @@
       display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
       background: var(--c-card); border: 1px solid var(--c-line); border-radius: 6px;
       padding: 14px 16px; cursor: pointer; text-align: left;
-      transition: transform .15s ease, box-shadow .2s ease, border-color .2s ease;
+      transition: transform .15s ease, box-shadow .2s ease, border-color .2s ease, opacity .3s ease;
     }
     .task-card:hover { transform: translateY(-2px); box-shadow: 0 4px 14px rgba(0,0,0,.10); }
+    button.task-card:not(.active) { opacity: .72; }
     .task-card.active { border-color: var(--c-gold); box-shadow: 0 0 0 1.5px var(--c-gold), 0 4px 14px rgba(191,160,60,.18); }
     .task-seal {
       width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
@@ -453,40 +454,7 @@
     @media (max-width: 1000px) { .run-wrap { padding: 0; } .run-wrap::before, .run-wrap::after { display: none; } }
 
     /* 雾霭：feTurbulence 分形噪声真雾，贴在未选卡上（白天=白纱+暖灰双层，夜=牙白雾） */
-    .task-card { position: relative; overflow: hidden; }
-    .task-card:not(.active) { opacity: .85; }
-    .task-card::after {
-      content: ""; position: absolute; inset: -60%; pointer-events: none; opacity: .55;
-      background-repeat: no-repeat; background-size: 100% 100%, 100% 100%;
-      background-image:
-        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='300'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.008 0.014' numOctaves='5' seed='3'/%3E%3CfeGaussianBlur stdDeviation='1.5'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 0.99 1.1 1.1 1.1 0 -0.75'/%3E%3C/filter%3E%3Crect width='400' height='300' filter='url(%23f)'/%3E%3C/svg%3E"),
-        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='300'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.01 0.02' numOctaves='4' seed='19'/%3E%3CfeColorMatrix values='0 0 0 0 0.62 0 0 0 0 0.58 0 0 0 0 0.45 1.5 1.5 1.5 0 -0.75'/%3E%3C/filter%3E%3Crect width='400' height='300' filter='url(%23f)'/%3E%3C/svg%3E");
-      animation: mistCondense ease-out, mistDrift ease-in-out infinite alternate;
-      animation-duration: var(--condense-d, .35s), 20s;
-      animation-delay: 0s, var(--condense-d, .35s);
-    }
-    [data-theme="dark"] .task-card::after {
-      opacity: .36; background-size: 100% 100%;
-      background-image:
-        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='300'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.008 0.014' numOctaves='5' seed='3'/%3E%3CfeGaussianBlur stdDeviation='1.5'/%3E%3CfeColorMatrix values='0 0 0 0 0.75 0 0 0 0 0.82 0 0 0 0 0.90 0.9 0.9 0.9 0 -0.75'/%3E%3C/filter%3E%3Crect width='400' height='300' filter='url(%23f)'/%3E%3C/svg%3E");
-    }
-    @keyframes mistDrift { from { transform: translate(-5%, -2%) scale(1); } to { transform: translate(5%, 2%) scale(1.12); } }
-    @keyframes mistCondense {
-      from { opacity: 0;    filter: blur(12px); transform: scale(var(--sc, 1.6)) translate(var(--tx, 25%), var(--ty, 8%)); }
-      to   { opacity: .55;  filter: blur(0);    transform: translate(-5%, -2%) scale(1); }
-    }
-    /* 点击 active：一次性"风吹散"——每张卡片 --tx/--ty/--sc 随机，方向各不相同 */
-    .task-card.active::after {
-      animation: mistBlow ease-out forwards;
-      animation-duration: var(--blow-d, .8s);
-    }
-    @keyframes mistBlow {
-      from { opacity: .55; transform: scale(1)   translate(0%, 0%);  filter: blur(0); }
-      40%  { opacity: .35; transform: scale(calc(var(--sc, 1.6) * 0.75)) translate(calc(var(--tx, 25%) * 0.4), calc(var(--ty, 8%) * 0.4)); filter: blur(5px); }
-      to   { opacity: 0;   transform: scale(var(--sc, 1.6)) translate(var(--tx, 25%), var(--ty, 8%)); filter: blur(12px); }
-    }
     /* 选中卡与表单同属"灯下之物"：同一描金光晕（夜色收敛衰变） */
-    .task-card.active { border-color: var(--c-gold); box-shadow: 0 0 0 1.5px var(--c-gold), 0 6px 22px rgba(191,160,60,.26); }
     .task-form { box-shadow: 0 0 0 1.5px var(--c-gold), 0 6px 22px rgba(191,160,60,.20); }
     [data-theme="dark"] .task-card.active { box-shadow: 0 0 0 1px var(--c-gold), 0 2px 9px rgba(217,180,92,.22); }
     [data-theme="dark"] .task-form { box-shadow: 0 0 0 1px var(--c-gold), 0 2px 9px rgba(217,180,92,.16); }
@@ -494,8 +462,8 @@
     @media (prefers-reduced-motion: reduce) {
       .medal svg, .clouds, .seal-anim, .section.visible .card,
       .section-enter, .section-exit, .metric-value.loading::after, .chart-loading::before,
-      .splash-medal, .splash-seal, .splash-title, .splash-sub, .splash-line,
-      .task-card::after, .task-card.active::after { animation: none !important; }
+      .splash-medal, .splash-seal, .splash-title, .splash-sub, .splash-line
+      { animation: none !important; }
       .nav-label, .nav-seal, .task-card, .factor-drawer, .factor-toggle .caret { transition: none !important; }
     }
   </style>

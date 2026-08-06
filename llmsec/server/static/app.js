@@ -1509,15 +1509,6 @@ function _buildTaskCard(t) {
   const card = document.createElement('div');
   card.className = 'card task-card';
   card.style.padding = '10px 14px';
-  // 随机风向 + 强度 + 速度（每张卡片不同，雾散方向各异——自然感）
-  const _ang = Math.random() * Math.PI * 2;
-  const _dist = 20 + Math.random() * 15;           // 20-35% 漂移距离
-  const _bd = (0.6 + Math.random() * 0.6).toFixed(2); // 0.6-1.2s 散去时长
-  card.style.setProperty('--tx', Math.round(Math.cos(_ang) * _dist) + '%');
-  card.style.setProperty('--ty', Math.round(Math.sin(_ang) * _dist * 0.5) + '%'); // 垂直幅度减半
-  card.style.setProperty('--sc', (1.4 + Math.random() * 0.4).toFixed(2));         // 1.4-1.8 膨胀
-  card.style.setProperty('--blow-d', _bd + 's');
-  card.style.setProperty('--condense-d', (_bd * 0.4).toFixed(2) + 's');            // 聚回 = 散去 ×0.4
   card.dataset.taskId = t.id;
   card.dataset.status = '';   // 留空，让 _updateTaskCard 首次按状态自动折叠/展开
   card.innerHTML = `
