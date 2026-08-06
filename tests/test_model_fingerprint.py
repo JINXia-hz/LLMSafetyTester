@@ -131,7 +131,8 @@ def test_blend_sim_weighted_differs_and_first_model_fallback():
 
 
 def test_first_model_falls_back_to_uniform():
-    """首模型（无 donor 指纹）→ 无 sim-加权 unified，predict 用均匀 fallback。"""
+    """首模型（单模型，无 donor）→ 无 unified_fallback（避免冗余训练），
+    predict 用 per-model 层（model_only source）。"""
     with tempfile.TemporaryDirectory() as d:
         probe_path = Path(d) / "probes.json"
         from llmsec.evaluation import model_fingerprint as mf
@@ -146,8 +147,10 @@ def test_first_model_falls_back_to_uniform():
             # 不写任何指纹 → solo 无 donor
             bp = BlendPredictor().fit(R, feats, method_catalog=methods + ["untested"])
             assert "solo" not in bp.unified, "无 donor 却建了 sim-加权 unified"
-            assert bp.unified_fallback is not None, "均匀 fallback 未训练"
+            # 单模型 → unified_fallback 跳过（无 pooling 意义，避免与 models[target] 冗余训练）
+            assert bp.unified_fallback is None, "单模型不应训练 unified_fallback（无跨模型池化）"
+            assert "solo" in bp.models, "per-model 预测器应已训练"
             r = bp.predict("untested", "solo")
-            assert r["source"] != "fallback"  # fallback universal 能预测
+            assert r["source"] == "model_only", f"单模型应走 model_only，实际 {r['source']}"
         finally:
             mf.PROBES_FILE = orig

@@ -571,12 +571,20 @@ class ELOTracker:
 
         # 即便轮次不足也计算指标供展示，但 converged 必为 False
         ci_ok = ci_half is not None and ci_half < CONV_CI_TARGET
-        drift_ok = drift is not None and abs(drift) < CONV_DRIFT_TARGET
+        # CI 极紧时放宽 drift 门槛：ci_half < target/2 → drift 容忍按 (target/2)/ci_half 放大
+        # （漂移比测量精度小时无实质影响——"还在动"但"动多少我们算得清"）。上限 5× 防过度放宽。
+        if ci_half is not None and 0 < ci_half < CONV_CI_TARGET / 2:
+            _relax = min(5.0, (CONV_CI_TARGET / 2) / ci_half)
+            _drift_target = CONV_DRIFT_TARGET * _relax
+        else:
+            _drift_target = CONV_DRIFT_TARGET
+        drift_ok = drift is not None and abs(drift) < _drift_target
 
         if rounds_sufficient and not ci_ok:
             notes.append(f"真值 Elo 95%CI ±{ci_half:.1f} >= 目标 ±{CONV_CI_TARGET:.0f}")
         if rounds_sufficient and not drift_ok:
-            notes.append(f"仍在漂移 {drift:+.1f}/轮 >= ±{CONV_DRIFT_TARGET:.0f}/轮")
+            _extra = f"（CI 极紧已放宽至 ±{_drift_target:.1f}/轮）" if _drift_target > CONV_DRIFT_TARGET else ""
+            notes.append(f"仍在漂移 {drift:+.1f}/轮 >= ±{_drift_target:.1f}/轮{_extra}")
         if not coverage_ok:
             notes.append(f"覆盖率 {coverage:.1%} 不足")
 
@@ -817,13 +825,13 @@ class ELOTracker:
 
         # 置信度 = 真值 Elo 95%CI 半宽相对目标的逼近度：ci_half→0 满分，ci_half≥目标 归零
         ci_half = conv.get("ci_half")
-        drift_val = conv.get("drift")
         if ci_half is None:
             confidence = 0.0
         else:
             confidence = max(0.0, 1.0 - ci_half / CONV_CI_TARGET)
-        # B5：仍在漂移时扣 confidence——ci_ok=True 但 drift 超目标不应显示高置信度
-        if drift_val is not None and abs(drift_val) >= CONV_DRIFT_TARGET:
+        # B5：drift 未通过收敛门时扣 confidence——与 check_convergence 的 drift_ok 同口径
+        # （含 dual-threshold 放宽：ci_half 极紧时 drift_ok=True 即使 drift > CONV_DRIFT_TARGET）
+        if not conv.get("drift_ok", False):
             confidence *= 0.5
         confidence = min(confidence, 0.99)  # 永不达到 100%，保留统计不确定性
 

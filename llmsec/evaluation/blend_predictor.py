@@ -102,8 +102,10 @@ class BlendPredictor:
                 pooled_donor[key] = model
 
         # 2a) 均匀 universal（fallback：首模型/无 donor 时用，与历史行为一致）
+        # 模型数≥2 才池化——单模型时 pooled = 该模型自身数据，训练 unified_fallback 等同
+        # models[target]（冗余双训练，不同 fold 策略还会产出不同 λ*），故跳过
         self.unified_fallback = None
-        if len(pooled_gt) >= 2:
+        if len(per_model_elo) >= 2 and len(pooled_gt) >= 2:
             try:
                 self.unified_fallback = EloPredictorModel()
                 self.unified_fallback.fit(pooled_feat, pooled_gt, groups=pooled_groups)

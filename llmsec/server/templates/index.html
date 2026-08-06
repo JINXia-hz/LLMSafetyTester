@@ -4,22 +4,30 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LLMSEC 安全评估工作台</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
   <script>
-    // 盖印开卷 splash 门控：每会话只播一次 + 尊重 prefers-reduced-motion。
-    // 在 <head> 尽早给 <html> 打标，CSS 据此显示 #splash，避免二次访问闪一帧。
+    // 早期内联（必须先于一切外部脚本）：
+    // 1) 主题预应用，消灭暗色用户白闪；2) splash 门控（每会话一次 + reduced-motion）；
+    // 3) 8s 硬兜底——CDN 全挂时 app.js 不执行，splash 不能卡死。
     (function () {
       try {
+        if (localStorage.getItem('llmsec-theme') === 'dark') document.documentElement.dataset.theme = 'dark';
         if (!sessionStorage.getItem('llmsec-splashed') &&
             !matchMedia('(prefers-reduced-motion: reduce)').matches) {
           document.documentElement.classList.add('js-splash');
+          setTimeout(function () {
+            var sp = document.getElementById('splash');
+            if (sp) sp.remove();
+            document.documentElement.classList.remove('js-splash');
+          }, 8000);
         }
-      } catch (e) { /* sessionStorage 不可用（隐私模式）时直接不播 */ }
+      } catch (e) { /* localStorage/sessionStorage 不可用时直接不播 */ }
     })();
   </script>
+  <!-- defer：DOM 首帧即绘（splash 立现），脚本后台并行下载、按序执行 -->
+  <script src="https://cdn.tailwindcss.com" defer></script>
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" defer></script>
   <style>
     :root {
       color-scheme: light;
@@ -313,6 +321,10 @@
       background: linear-gradient(90deg, transparent, var(--c-gold), transparent);
       background-size: 200% 100%; animation: skelSweep 1.4s linear infinite;
     }
+    .splash-stage {
+      margin-top: 12px; font-size: 0.75rem; letter-spacing: 0.35em; color: var(--c-muted);
+      font-family: var(--serif); animation: splashFade .5s ease .7s both;
+    }
 
     /* ---------- 翻页过渡（克制：exit .14s / enter .22s） ---------- */
     .section-enter { animation: secIn .22s ease both; }
@@ -430,12 +442,12 @@
     .run-wrap { position: relative; max-width: calc(56rem + 88px); margin: 0 auto; padding: 0 44px; }
     /* 卷草（唐草忍冬 S 波）竖带 + 联珠纹内缘，描金低透明度，仅作暗纹 */
     .run-wrap::before, .run-wrap::after {
-      content: ""; position: absolute; top: 4px; bottom: 4px; width: 28px; pointer-events: none;
-      opacity: .28;   /* 绢本上需更浓才可见；夜色另设 */
+      content: ""; position: absolute; top: 4px; bottom: 4px; width: 24px; pointer-events: none;
+      opacity: .34;   /* 绢本上需更浓才可见；夜色另设 */
       z-index: 6;     /* 压在雾层之上，防止被雾洗没 */
-      background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='120' viewBox='0 0 40 120'%3E%3Cg fill='none' stroke='%23BFA03C' stroke-width='1.7'%3E%3Cpath d='M18 0 C36 20 0 40 18 60 C36 80 0 100 18 120'/%3E%3Cpath d='M26 20 q8 -7 13 -7 q-2 8 -13 7'/%3E%3Cpath d='M10 52 q-8 7 -13 7 q2 -8 13 -7'/%3E%3Cpath d='M26 80 q8 -7 13 -7 q-2 8 -13 7'/%3E%3Ccircle cx='18' cy='60' r='2.8'/%3E%3C/g%3E%3Cg fill='%23BFA03C'%3E%3Ccircle cx='34' cy='6' r='1.9'/%3E%3Ccircle cx='34' cy='18' r='1.9'/%3E%3Ccircle cx='34' cy='30' r='1.9'/%3E%3Ccircle cx='34' cy='42' r='1.9'/%3E%3Ccircle cx='34' cy='54' r='1.9'/%3E%3Ccircle cx='34' cy='66' r='1.9'/%3E%3Ccircle cx='34' cy='78' r='1.9'/%3E%3Ccircle cx='34' cy='90' r='1.9'/%3E%3Ccircle cx='34' cy='102' r='1.9'/%3E%3Ccircle cx='34' cy='114' r='1.9'/%3E%3C/g%3E%3C/svg%3E") repeat-y center top / 28px 84px;
+      background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='120' viewBox='0 0 40 120'%3E%3Cg fill='none' stroke='%23BFA03C' stroke-width='1.0'%3E%3Cpath d='M18 0 C36 20 0 40 18 60 C36 80 0 100 18 120'/%3E%3Cpath d='M26 20 q8 -7 13 -7 q-2 8 -13 7'/%3E%3Cpath d='M10 52 q-8 7 -13 7 q2 -8 13 -7'/%3E%3Cpath d='M26 80 q8 -7 13 -7 q-2 8 -13 7'/%3E%3Cpath d='M18 54 a6 6 0 1 1 6 6 a3 3 0 1 0 -6 0'/%3E%3Cpath d='M18 114 a6 6 0 1 1 6 6 a3 3 0 1 0 -6 0'/%3E%3C/g%3E%3Cg fill='%23BFA03C'%3E%3Ccircle cx='33' cy='8' r='1.1'/%3E%3Ccircle cx='33' cy='20' r='1.1'/%3E%3Ccircle cx='33' cy='32' r='1.1'/%3E%3Ccircle cx='33' cy='44' r='1.1'/%3E%3Ccircle cx='33' cy='56' r='1.1'/%3E%3Ccircle cx='33' cy='68' r='1.1'/%3E%3Ccircle cx='33' cy='80' r='1.1'/%3E%3Ccircle cx='33' cy='92' r='1.1'/%3E%3Ccircle cx='33' cy='104' r='1.1'/%3E%3Ccircle cx='33' cy='116' r='1.1'/%3E%3C/g%3E%3C/svg%3E") repeat-y center top / 24px 72px;
     }
-    [data-theme="dark"] .run-wrap::before, [data-theme="dark"] .run-wrap::after { opacity: .13; }
+    [data-theme="dark"] .run-wrap::before, [data-theme="dark"] .run-wrap::after { opacity: .15; }
     .run-wrap::before { left: 6px; }
     .run-wrap::after { right: 6px; }
     @media (max-width: 1000px) { .run-wrap { padding: 0; } .run-wrap::before, .run-wrap::after { display: none; } }
@@ -449,14 +461,14 @@
       background-image:
         url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='300'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.008 0.014' numOctaves='5' seed='3'/%3E%3CfeGaussianBlur stdDeviation='1.5'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 0.99 1.1 1.1 1.1 0 -0.75'/%3E%3C/filter%3E%3Crect width='400' height='300' filter='url(%23f)'/%3E%3C/svg%3E"),
         url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='300'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.01 0.02' numOctaves='4' seed='19'/%3E%3CfeColorMatrix values='0 0 0 0 0.62 0 0 0 0 0.58 0 0 0 0 0.45 1.5 1.5 1.5 0 -0.75'/%3E%3C/filter%3E%3Crect width='400' height='300' filter='url(%23f)'/%3E%3C/svg%3E");
-      animation: mistDrift 40s ease-in-out infinite alternate;
+      animation: mistDrift 20s ease-in-out infinite alternate;
     }
     [data-theme="dark"] .task-card:not(.active)::after {
       opacity: .36; background-size: 100% 100%;
       background-image:
-        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='300'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.008 0.014' numOctaves='5' seed='3'/%3E%3CfeGaussianBlur stdDeviation='1.5'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 0.98 0.9 0.9 0.9 0 -0.75'/%3E%3C/filter%3E%3Crect width='400' height='300' filter='url(%23f)'/%3E%3C/svg%3E");
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='300'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.008 0.014' numOctaves='5' seed='3'/%3E%3CfeGaussianBlur stdDeviation='1.5'/%3E%3CfeColorMatrix values='0 0 0 0 0.75 0 0 0 0 0.82 0 0 0 0 0.90 0.9 0.9 0.9 0 -0.75'/%3E%3C/filter%3E%3Crect width='400' height='300' filter='url(%23f)'/%3E%3C/svg%3E");
     }
-    @keyframes mistDrift { from { transform: translate(-4%, -2%) scale(1); } to { transform: translate(4%, 2%) scale(1.06); } }
+    @keyframes mistDrift { from { transform: translate(-5%, -2%) scale(1); } to { transform: translate(5%, 2%) scale(1.12); } }
     /* 选中卡与表单同属"灯下之物"：同一描金光晕（夜色收敛衰变） */
     .task-card.active { border-color: var(--c-gold); box-shadow: 0 0 0 1.5px var(--c-gold), 0 6px 22px rgba(191,160,60,.26); }
     .task-form { box-shadow: 0 0 0 1.5px var(--c-gold), 0 6px 22px rgba(191,160,60,.20); }
@@ -484,6 +496,7 @@
       <div class="splash-title">LLMSEC</div>
       <div class="splash-sub">安全评估工作台</div>
       <div class="splash-line"></div>
+      <div class="splash-stage" id="splashStage">展卷…</div>
     </div>
   </div>
   <div class="flex min-h-screen">
@@ -885,6 +898,6 @@
     </main>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js" defer></script>
 </body>
 </html>

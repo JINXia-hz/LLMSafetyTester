@@ -95,6 +95,8 @@ function dismissSplash() {
   sp.classList.add('splash-out');
   setTimeout(() => sp.remove(), 350);
 }
+// 阶段字幕（展卷…→览批次…→绘丹青…）
+function splashStage(t) { const el = $('splashStage'); if (el) el.textContent = t; }
 window.addEventListener('load', () => setTimeout(dismissSplash, 4000));  // 兜底：防 API 挂起死白屏
 
 // 骨架屏：section 数据拉取期间给指标卡数值位/图表容器铺描金呼吸块
@@ -1642,10 +1644,15 @@ window.addEventListener('scroll', () => {
 // ---------- 启动 ----------
 (async () => {
   const bootT0 = performance.now();   // splash 最小展示计时
+  // 全部资源（含 defer 的 CDN 脚本）就绪信号
+  const winLoad = document.readyState === 'complete'
+    ? Promise.resolve()
+    : new Promise(r => window.addEventListener('load', r, { once: true }));
   // URL 参数（可分享的视图状态）：?theme=dark|light  ?cmp=<批次名>
   const q = new URLSearchParams(location.search);
   if (q.get('theme') === 'dark' || q.get('theme') === 'light') theme = q.get('theme');
   applyTheme(theme, false);   // 恢复主题（不触发重绘）
+  splashStage('览批次…');
   await loadRuns();
   // hash 直达：#threats 等；默认总览
   const h = location.hash.slice(1);
@@ -1656,8 +1663,10 @@ window.addEventListener('scroll', () => {
     loadSection('overview');
   }
   loadRunSection();
-  // splash 收尾：数据首轮加载后且至少展示 900ms，避免一闪而过
-  setTimeout(dismissSplash, Math.max(0, 900 - (performance.now() - bootT0)));
+  splashStage('绘丹青…');
+  // splash 收尾：全部资源就绪 + 数据首轮加载 + 至少展示 1s，避免一闪而过
+  await winLoad;
+  setTimeout(dismissSplash, Math.max(0, 1000 - (performance.now() - bootT0)));
   // 直达对比视图：等总览数据就位后自动展开对比面板
   const cmpRun = q.get('cmp');
   if (cmpRun && start === 'overview') {

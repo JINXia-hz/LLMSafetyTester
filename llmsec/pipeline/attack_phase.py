@@ -67,7 +67,8 @@ def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict],
     if not untested:
         return
 
-    # 优先 BlendPredictor：跨模型 sim-加权（发现层），单模型场景无 donor 自动退化为仅模型层
+    # 优先 BlendPredictor：跨模型 sim-加权（发现层）——仅 R 有 ≥2 模型时启用（单模型无 donor、
+    # 无跨模型意义，走 ClusterEloPredictor 单训练路径避免冗余）
     predictions: dict | None = None
     artifacts = getattr(tracker.predictor, "artifacts", None) or {}
     feats = artifacts.get("features")
@@ -77,9 +78,10 @@ def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict],
             from llmsec.evaluation.blend_predictor import load_or_fit_blend_predictor
 
             R = ResultsMatrix.load()
-            catalog = list(method_records.keys())
-            bp = load_or_fit_blend_predictor(R, feats, method_catalog=catalog)
-            predictions = {m: bp.predict(m, defender_name) for m in untested}
+            if len(R.all_models()) >= 2:
+                catalog = list(method_records.keys())
+                bp = load_or_fit_blend_predictor(R, feats, method_catalog=catalog)
+                predictions = {m: bp.predict(m, defender_name) for m in untested}
         except Exception as e:
             try:
                 from llmsec.pipeline.runner import logger
@@ -162,21 +164,28 @@ def _should_refresh_features(
 
 
 def _adaptive_batch_size(
-    current_batch: int,
+    base_batch: int,
+    ci_half: float | None = None,
     min_batch: int = ADAPTIVE_BATCH_MIN,
     max_batch: int = ADAPTIVE_BATCH_MAX,
 ) -> tuple[int, str]:
     """
-    返回下一轮 batch_size。
+    收敛距离驱动的自适应 batch_size。
 
-    设计变更：batch 不再跟随 Elo 波动（旧逻辑"std 大→减小 batch"把"漂移"
-    误当"噪声"，反而拖慢收敛）。Elo 稳定性现已由 K 衰减 + CI 收敛判据负责，
-    batch 仅作覆盖率/预算旋钮——恒定保持用户设定值，受 [min_batch, max_batch] 钳位。
+    逻辑：ratio = ci_half / CONV_CI_TARGET（当前真值 Elo 95%CI 半宽 / 目标半宽）。
+      - ratio > 1（远离收敛）→ 放大 batch，快覆盖、快降 CI
+      - ratio < 1（接近收敛）→ 缩小 batch，精修边界
+      - ci_half=None（首轮/轨迹不足未估）→ 用 base_batch（用户 --batch-size）
+    batch = clamp(round(base_batch × ratio), min_batch, max_batch)。
+
+    旧逻辑"batch 跟 Elo 波动"已废（K衰减+CI判据负责稳定性）；本函数把 batch
+    与**收敛进度**耦合——远离收敛时多花预算快推、接近收敛时少花精修。
     """
-    new_batch = max(min_batch, min(max_batch, current_batch))
-    if new_batch != current_batch:
-        return new_batch, f"batch 钳位至 [{min_batch},{max_batch}] 区间 → {new_batch}"
-    return current_batch, f"batch 固定({current_batch}，与 Elo 波动解耦)"
+    if ci_half is None or ci_half <= 0:
+        return base_batch, f"batch={base_batch}（基准，暂无 CI 估计）"
+    ratio = ci_half / CONV_CI_TARGET
+    new_batch = max(min_batch, min(max_batch, round(base_batch * ratio)))
+    return new_batch, f"batch={new_batch}（ci_half={ci_half:.0f}/目标{CONV_CI_TARGET:.0f}={ratio:.2f}×基准{base_batch}）"
 
 
 
@@ -412,7 +421,9 @@ def run_attack_phase(records: list[dict],
         logger.info(f"  ✅ 种子阶段完成: 已建立 ground truth {len(tracker.ground_truth_methods)} 种，"
               f"剩余 {len(remaining_records)} 种使用 SVD-Ridge 预测 Elo")
 
+    base_batch = batch_size  # 用户 --batch-size（nominal，自适应缩放的基准）
     current_batch_size = batch_size
+    prev_ci_half: float | None = None  # 上一轮收敛 CI（首轮 None→用 base）
     # 兜底：max_rounds<=0 时循环不执行，下方 summary 仍引用 round_idx
     round_idx = 0
     for round_idx in range(1, max_rounds + 1):
@@ -421,8 +432,8 @@ def run_attack_phase(records: list[dict],
             logger.info("\n  ✅ 所有方法已测试完毕")
             break
 
-        # 自适应调整 batch_size
-        current_batch_size, batch_reason = _adaptive_batch_size(current_batch_size)
+        # 自适应调整 batch_size（收敛距离驱动：远离收敛→大批覆盖，接近→小批精修）
+        current_batch_size, batch_reason = _adaptive_batch_size(base_batch, prev_ci_half)
         if round_idx == 1:
             logger.info(f"  📏 初始 batch_size={current_batch_size}")
         elif batch_reason:
@@ -516,6 +527,7 @@ def run_attack_phase(records: list[dict],
 
         # 检查收敛：综合轮次 Elo 标准差、相对标准差、覆盖率
         conv = tracker.check_convergence(DEFENDER_NAME, total_methods=len(all_methods), tested_count=len(tested))
+        prev_ci_half = conv.get("ci_half")  # 供下一轮 batch 自适应（收敛距离驱动）
         boundary_info = tracker.compute_security_boundary(DEFENDER_NAME)
         confidence = boundary_info.get("confidence", 0)
         # --no-early-stop：实验模式需每个 trial 跑满 max_rounds（固定预算），
