@@ -9,6 +9,7 @@
 5. 弱监督特征权重放大相关特征；D-optimal 种子覆盖优于随机。
 """
 import numpy as np
+import pytest
 
 from llmsec.clustering.space import build_whitened_space
 from llmsec.clustering.tree import candidate_ks, cut_tree, log_growth_k0, select_knee, sweep_candidates
@@ -78,6 +79,7 @@ def test_auto_k_on_blobs():
 
 def test_run_hdbscan_clustering_e2e():
     """HDBSCAN 主管线端到端：团簇 + 反应验证 + 报告结构。"""
+    pytest.importorskip("hdbscan")  # 可选依赖：CI 未装时跳过
     from llmsec.clustering.hdb import run_hdbscan_clustering
     from llmsec.clustering.posterior import compute_method_reactions
     features, methods = _make_blob_features()

@@ -242,6 +242,7 @@ def _get_embedding_model():
     # 第 3 层：TF-IDF 兜底（API 已在第 0 层尝试过，此处不再重复）
     logger.warning("  ⚠ 无可用 embedding 通道（API / 本地缓存 / HF镜像）")
     logger.info("  🔄 降级为 TF-IDF 文本特征 (无需网络)")
+    _embedding_source = "tfidf"
     _embedding_available = False
     return None
 
