@@ -6,6 +6,7 @@ llmsec/.models/
 # Python
 __pycache__/
 *.py[cod]
+*.egg-info/
 
 # 生成产物（state/runs/tasks/聚类缓存等）
 output/
