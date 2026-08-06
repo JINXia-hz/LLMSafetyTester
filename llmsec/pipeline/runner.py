@@ -289,25 +289,35 @@ def main():
 
     os.makedirs(runs_dir, exist_ok=True)
 
-    # ---- 多目标分支：--targets 指定时逐目标攻击，结果入 R 矩阵 ----
-    if args.targets:
-        if args.target:
-            logger.error("❌ --target 与 --targets 互斥")
-            sys.exit(1)
-        return run_multi_target_phase(args, records, method_records, runs_dir, judge, twin_client)
+    # ---- 目标分发：多模型为默认（除非 --target 显式指定单模型）----
+    # 1) --target <name>        → 单目标命名分支（显式单模型）
+    # 2) --targets <a,b,c>      → 多目标指定列表
+    # 3) 都没指定 + ≥2 声明目标  → 默认全部声明目标（多模型默认）
+    # 4) 都没指定 + ≤1 声明目标  → 单目标默认流程（下方）
+    from llmsec.targets import available_targets
 
-    # ---- 单目标命名分支：--target <name> 时切换 DEFENDER + ambient 路由 ----
-    # 走常规单目标流程（写 STATE_FILE 供看板展示该模型），call_target 经 ambient 自动路由
+    declared = available_targets()
+    if args.target and args.targets:
+        logger.error("❌ --target 与 --targets 互斥")
+        sys.exit(1)
+
     if args.target:
-        from llmsec.targets import available_targets, set_active_target
-        declared = available_targets()
+        # 显式单模型
         if args.target not in declared:
             logger.error(f"❌ 未声明的目标: {args.target}（可用: {sorted(declared)}）")
             sys.exit(1)
         global DEFENDER_NAME
         DEFENDER_NAME = args.target
+        from llmsec.targets import set_active_target
         set_active_target(args.target)
         logger.info(f"🎯 已选择目标: {args.target} (model={declared[args.target].model} @ {declared[args.target].base_url})")
+    elif args.targets or len(declared) >= 2:
+        # 多目标：显式 --targets，或默认 ≥2 声明目标时全部扫描
+        if not args.targets:
+            args.targets = ",".join(declared.keys())
+            logger.info(f"🎯 未指定单模型，默认多模型扫描 {len(declared)} 个目标: {list(declared.keys())}")
+        return run_multi_target_phase(args, records, method_records, runs_dir, judge, twin_client)
+    # else: ≤1 声明目标且未显式指定 → 走单目标默认流程（下方）
 
     # ---- Phase 1 ----
     attack_summary = {}
@@ -316,7 +326,7 @@ def main():
         if args.refresh_features:
             logger.info("  🔄 强制重建特征缓存 ...")
             tracker.predictor.fit_features(records)
-            _inject_predicted_elos(tracker, method_records)
+            _inject_predicted_elos(tracker, method_records, DEFENDER_NAME)
             logger.info("  ✅ 强制重建完成，已更新所有方法预测 Elo")
 
         attack_summary = run_attack_phase(

@@ -1,0 +1,2 @@
+[console_scripts]
+llmsec = llmsec.pipeline.runner:main

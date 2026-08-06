@@ -188,6 +188,7 @@ class EloPredictorModel:
         feature_name_blocks: dict | None = None,
         lambda_override: float | None = None,
         groups: dict | None = None,
+        sample_weights: dict | None = None,
     ) -> "EloPredictorModel":
         """
         用 ground truth 训练 Ridge 回归模型。
@@ -200,6 +201,10 @@ class EloPredictorModel:
                 用于 ground truth 小幅增长时的增量更新）
             groups: {method_key: group_id}，按组做 GroupKFold（统一预测器场景：
                 同方法跨模型样本同组，防 CV 泄漏，#4）。None 时走随机 K-Fold。
+            sample_weights: {method: weight}，加权 Ridge 的样本权重（发现层 D+A：
+                BlendPredictor 按 donor 相似度加权池化）。对**原始** X/y 行乘 √w，
+                下游标准化/CV/SVD 自动成加权版——数学等价 min Σw_i(y_i−x_iβ)²+λ||β||²
+                的解 = 标准 Ridge 在 (√w·X, √w·y) 上；predict 时新点不缩放（仅训练加权）。
         """
         methods = sorted(ground_truth.keys())
         if not methods:
@@ -208,6 +213,16 @@ class EloPredictorModel:
         X, self.block_dims = self._features_to_matrix(features_dict, methods)
         y = np.array([ground_truth[m]["elo"] for m in methods], dtype=np.float64)
         self.feature_names = self._resolve_feature_names(feature_name_blocks)
+
+        # 加权 Ridge（发现层 sample_weights）：对原始 X/y 行乘 √w，下游标准化/CV/SVD 自动加权
+        if sample_weights is not None:
+            _w = np.array(
+                [max(float(sample_weights.get(m, 1.0)), 0.0) for m in methods],
+                dtype=np.float64,
+            )
+            _sw = np.sqrt(_w)
+            X = X * _sw[:, None]
+            y = y * _sw
 
         # X 标准化 + y 中心化（截距项：否则零均值的 X_scaled @ w 无法表达 ~1500 的基准 Elo）
         self.x_mean = X.mean(axis=0)

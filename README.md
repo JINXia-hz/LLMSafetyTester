@@ -139,11 +139,28 @@ python -m llmsec.experiments trials <name>        # 列出全部 trial
 
 ### 1. 安装依赖
 
+**方式 A — pip install（推荐）**
+
 ```bash
-pip install -r llmsec/requirements.txt
+pip install -e .              # 核心（不含聚类，无需下载 torch）
+pip install -e ".[cluster]"   # 完整（含聚类特征提取 + embedding 模型）
+pip install -e ".[dev]"       # 开发（含测试 + lint）
 ```
 
-Python 3.11。`hdbscan`、`sentence-transformers`、`tiktoken` 为聚类模块的可选/惰性依赖。
+**方式 B — 锁定文件**
+
+```bash
+pip install -r llmsec/requirements.txt             # 核心（不含 torch）
+pip install -r llmsec/requirements-cluster.txt     # 完整（含聚类 + torch）
+```
+
+**方式 C — Docker**
+
+```bash
+docker compose up    # 自动构建 + 预缓存 embedding 模型，打开 http://localhost:8080
+```
+
+Python 3.11。`hdbscan`、`sentence-transformers`、`tiktoken` 为聚类模块的可选依赖（安装 `.[cluster]` 时拉入，会附带 `torch` ~2GB；只做攻击评估不需要）。
 
 ### 2. 配置环境
 
@@ -156,7 +173,8 @@ Python 3.11。`hdbscan`、`sentence-transformers`、`tiktoken` 为聚类模块�
 python -m llmsec.attacks.generate --output attacks/l1.jsonl
 
 # 步骤 2：自适应攻击 + 过敏检测 + 综合报告（主入口）
-python -m llmsec.pipeline.runner --input attacks/l1.jsonl --max-rounds 10 --batch-size 10
+llmsec --input attacks/l1.jsonl --max-rounds 10 --batch-size 10
+# 或：python -m llmsec.pipeline.runner --input attacks/l1.jsonl --max-rounds 10 --batch-size 10
 
 # 步骤 3：查看报告
 cat output/runs/<时间戳>/security_report.md
@@ -289,7 +307,7 @@ pytest -n auto                             # 并行
 ## Web 面板（图形化工作台）
 
 ```bash
-.venv/Scripts/uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
+python -m uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
 # 打开 http://localhost:8080
 ```
 
@@ -331,7 +349,7 @@ pytest -n auto                             # 并行
 | `EMBEDDING_API_BASE/KEY/MODEL` | 可选：OpenAI 兼容 API embedding 兜底 | - |
 | `PCAP_JUDGE_URL` | PCAP Judge 地址（TARGET_TYPE=pcap_judge 时） | - |
 
-完整配置模板见 `llmsec/.env.example`（复制为 `.env` 即可）。
+完整配置模板见 `.env.example`（复制为 `.env` 即可）。
 
 embedding 降级链：API embedding → 本地缓存 → HF 镜像 → TF-IDF（显式配置 `EMBEDDING_API_*` 三项齐全时优先走 API，探活失败才回落）。模型首次经镜像下载后缓存于 `llmsec/.models/`（可经 `SENTENCE_TRANSFORMERS_HOME` 覆盖），之后完全离线可用。
 

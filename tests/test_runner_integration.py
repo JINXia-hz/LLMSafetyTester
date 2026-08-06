@@ -9,8 +9,8 @@ from types import SimpleNamespace as NS
 import llmsec.core.config as cfg
 import llmsec.core.results as res
 import llmsec.evaluation.elo_cluster as ec
-import llmsec.pipeline.runner as rn
 import llmsec.pipeline.allergy_phase as ap
+import llmsec.pipeline.runner as rn
 import llmsec.targets as tmod
 from llmsec.core.io import read_json, read_jsonl, write_jsonl
 from llmsec.evaluation.elo import ELOTracker

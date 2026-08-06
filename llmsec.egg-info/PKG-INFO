@@ -1,0 +1,29 @@
+Metadata-Version: 2.4
+Name: llmsec
+Version: 1.0.0
+Summary: LLM 红队攻击测试工具——自适应评估、聚类分析、ELO 收敛
+Requires-Python: >=3.11
+License-File: LICENSE
+Requires-Dist: openai<3,>=2
+Requires-Dist: python-dotenv<2,>=1
+Requires-Dist: requests<3,>=2
+Requires-Dist: urllib3<3,>=2
+Requires-Dist: fastapi<1,>=0.100
+Requires-Dist: uvicorn<1,>=0.20
+Requires-Dist: pydantic<3,>=2
+Requires-Dist: jinja2<4,>=3
+Requires-Dist: pandas<4,>=2
+Requires-Dist: python-multipart>=0.0.6
+Requires-Dist: numpy>=1.24
+Requires-Dist: scikit-learn>=1.3
+Requires-Dist: scipy>=1.10
+Requires-Dist: optuna<4,>=3
+Provides-Extra: cluster
+Requires-Dist: hdbscan<0.9,>=0.8; extra == "cluster"
+Requires-Dist: sentence-transformers>=2; extra == "cluster"
+Requires-Dist: tiktoken>=0.5; extra == "cluster"
+Provides-Extra: dev
+Requires-Dist: pytest<9,>=8; extra == "dev"
+Requires-Dist: pytest-xdist>=3; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+Dynamic: license-file

@@ -1,0 +1,10 @@
+.venv/
+output/
+__pycache__/
+*.pyc
+.git/
+.github/
+.pytest_cache/
+*.egg-info/
+llmsec/.models/
+docs/*.md

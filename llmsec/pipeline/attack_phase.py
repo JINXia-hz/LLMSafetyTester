@@ -50,18 +50,47 @@ from llmsec.pipeline.tax import format_tax_line, summarize_jailbreak_tax
 # ============================================================
 # Phase 1 辅助函数
 # ============================================================
-def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict]):
+def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict],
+                           defender_name: str):
     """
     为所有尚未真实评估的方法注入预测初始 Elo。
-    优先使用 SVD-Ridge 模型批量预测（含 MAP 不确定性）；
-    ground truth 不足时由 predict_batch 内部回退到同后缀/同基底变体平均。
-    已真实评估的方法保持其当前 Elo 不变。
+
+    优先 **BlendPredictor**（跨模型：sim-加权 universal + 每模型层，发现层 D+A——
+    冷启动从相似 donor 借先验，多模型场景的核心）；特征不可用/失败 → 回退
+    ClusterEloPredictor（单模型 SVD-Ridge + 变体兜底）。已真实评估的方法 Elo 不变。
     """
     untested = {
         m: r for m, r in method_records.items()
         if m not in tracker.ground_truth_methods
     }
-    predictions = tracker.predictor.predict_batch(untested)
+    if not untested:
+        return
+
+    # 优先 BlendPredictor：跨模型 sim-加权（发现层），单模型场景无 donor 自动退化为仅模型层
+    predictions: dict | None = None
+    artifacts = getattr(tracker.predictor, "artifacts", None) or {}
+    feats = artifacts.get("features")
+    if feats:
+        try:
+            from llmsec.core.results import ResultsMatrix
+            from llmsec.evaluation.blend_predictor import load_or_fit_blend_predictor
+
+            R = ResultsMatrix.load()
+            catalog = list(method_records.keys())
+            bp = load_or_fit_blend_predictor(R, feats, method_catalog=catalog)
+            predictions = {m: bp.predict(m, defender_name) for m in untested}
+        except Exception as e:
+            try:
+                from llmsec.pipeline.runner import logger
+                logger.warning(f"BlendPredictor 预测失败，回退 ClusterEloPredictor: {e}")
+            except Exception:
+                pass
+            predictions = None
+
+    # 回退：ClusterEloPredictor（单模型 SVD-Ridge + 同后缀/同基底变体平均）
+    if predictions is None:
+        predictions = tracker.predictor.predict_batch(untested)
+
     for method, pred in predictions.items():
         tracker.attacker_ratings[method] = pred["elo"]
         if pred.get("std") is not None:
@@ -282,7 +311,7 @@ def run_attack_phase(records: list[dict],
         logger.info(f"  ♻️ 复用已有特征缓存 (ground truth {gt_count} 种)")
 
     # ---- 冷启动：为所有未测方法注入预测 Elo ----
-    _inject_predicted_elos(tracker, method_records)
+    _inject_predicted_elos(tracker, method_records, DEFENDER_NAME)
     logger.info(f"  🧊 冷启动: 已为 {len(all_methods)} 种方法注入初始 Elo "
           f"(ground truth {len(tracker.ground_truth_methods)} 种)")
 
@@ -355,9 +384,23 @@ def run_attack_phase(records: list[dict],
         write_jsonl(attack_file, all_results)
         tracker.record_round_end(DEFENDER_NAME)
 
+        # 发现层 D+A：种子评估后算 per-seed Elo 指纹（独立于累积 R，
+        # 供 BlendPredictor 相似度加权池化——冷启动从相似 donor 借先验）
+        if seed_rows:
+            try:
+                from llmsec.evaluation.model_fingerprint import compute_fingerprint, save_probe
+
+                seed_evaluated = [m for m, _ in seed_rows]
+                fp = compute_fingerprint(tracker, seed_evaluated)
+                if len(fp) >= 3:
+                    save_probe(DEFENDER_NAME, fp, seed_evaluated)
+                    logger.info(f"  🧬 防御指纹已记录: {len(fp)} 个哨兵 Elo（发现层 donor 相似度用）")
+            except Exception as e:
+                logger.warning(f"  ⚠ 指纹计算/存储失败（不影响评估）: {e}")
+
         # 用 SVD-Ridge 重新预测剩余方法
         remaining_records = {m: r for m, r in method_records.items() if m not in tested}
-        _inject_predicted_elos(tracker, remaining_records)
+        _inject_predicted_elos(tracker, remaining_records, DEFENDER_NAME)
         if sf:
             tracker.save(sf)
         logger.info(f"  ✅ 种子阶段完成: 已建立 ground truth {len(tracker.ground_truth_methods)} 种，"
@@ -444,7 +487,7 @@ def run_attack_phase(records: list[dict],
 
         # SVD-Ridge 更新：基于新增 ground truth 刷新未测方法预测 Elo（聚类不重训）
         remaining_records = {m: r for m, r in method_records.items() if m not in tested}
-        _inject_predicted_elos(tracker, remaining_records)
+        _inject_predicted_elos(tracker, remaining_records, DEFENDER_NAME)
         if sf:
             tracker.save(sf)
         logger.info(f"     🔄 预测已更新: {len(remaining_records)} 个未测方法的 SVD-Ridge 预测 Elo")

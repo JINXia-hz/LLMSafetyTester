@@ -208,7 +208,8 @@ def run_multi_target_phase(
         try:
             bp = load_or_fit_blend_predictor(R, features, method_catalog=catalog)
             bp_summary = bp.summary()
-            logger.info(f"\n  🧠 混合预测器: unified={bp_summary['unified_trained']}  "
+            logger.info(f"\n  🧠 混合预测器: universal={bp_summary['unified_fallback_trained']}  "
+                  f"sim-加权={bp_summary['unified_sim_weighted_models']}  "
                   f"models={bp_summary['models_trained']}")
             for m, w in bp_summary["weights_per_model"].items():
                 logger.info(f"     {m:28s} w_model={w['w_model']:.2f} w_unified={w['w_unified']:.2f}")

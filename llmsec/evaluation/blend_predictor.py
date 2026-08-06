@@ -40,7 +40,10 @@ class BlendPredictor:
 
     def __init__(self, prior_k: float = BLEND_PRIOR_K):
         self.prior_k = float(prior_k)
-        self.unified: EloPredictorModel | None = None
+        # 发现层 D+A：unified 从"全局1个"改为"每 target 1个(sim-加权)"。
+        # unified_fallback = 均匀 universal（首模型/无 donor 时用）；unified = {target: sim-加权}
+        self.unified_fallback: EloPredictorModel | None = None
+        self.unified: dict[str, EloPredictorModel] = {}
         self.models: dict[str, EloPredictorModel] = {}
         self._features: dict = {}             # method -> 特征向量
         self._catalog: list[str] = []         # 规范方法清单
@@ -86,6 +89,7 @@ class BlendPredictor:
         # 否则随机 K-Fold 会让同方法同时进训练/测试折 → CV 泄漏、σ² 系统性乐观
         pooled_gt: dict[str, dict] = {}
         pooled_groups: dict[str, str] = {}  # 合成 key → 方法名（GroupKFold 分组键）
+        pooled_donor: dict[str, str] = {}   # 合成 key → donor 模型名（发现层 sim-加权用）
         pooled_feat: dict = dict(self._features)  # 真实 method key 保留（供预测用）
         for model, elo_map in per_model_elo.items():
             for m, elo in elo_map.items():
@@ -95,13 +99,45 @@ class BlendPredictor:
                 pooled_gt[key] = {"elo": elo}
                 pooled_feat[key] = self._features[m]  # 合成 key → 同一方法特征
                 pooled_groups[key] = m
+                pooled_donor[key] = model
+
+        # 2a) 均匀 universal（fallback：首模型/无 donor 时用，与历史行为一致）
+        self.unified_fallback = None
         if len(pooled_gt) >= 2:
             try:
-                self.unified = EloPredictorModel()
-                self.unified.fit(pooled_feat, pooled_gt, groups=pooled_groups)
+                self.unified_fallback = EloPredictorModel()
+                self.unified_fallback.fit(pooled_feat, pooled_gt, groups=pooled_groups)
             except Exception as e:
-                logger.warning("统一预测器 fit 失败（退化为仅模型层）: %s", e)
-                self.unified = None
+                logger.warning("均匀 universal fit 失败（blend 退化为仅模型层）: %s", e)
+
+        # 2b) 发现层 D+A：每个有指纹的 target 训练 sim-加权 unified
+        # target 自身样本权重=1，有指纹 donor=sim(target,donor)，无指纹 donor=0(排除)；
+        # 无相似 donor 的 target 不建 → predict 时回退 unified_fallback
+        self.unified = {}
+        if self.unified_fallback is not None:
+            try:
+                from llmsec.evaluation.model_fingerprint import donor_similarities, load_probes
+
+                probes = load_probes()
+            except Exception:
+                probes = {}
+            for target in models:
+                sims = donor_similarities(target, probes) if probes else {}
+                if not sims:
+                    continue  # 首模型/无相似 donor → 用 fallback
+                sw = {
+                    key: (1.0 if pooled_donor[key] == target
+                          else sims.get(pooled_donor[key], 0.0))
+                    for key in pooled_gt
+                }
+                if sum(1 for v in sw.values() if v > 0) < 2:
+                    continue  # 有效样本不足 → 用 fallback
+                try:
+                    pm = EloPredictorModel()
+                    pm.fit(pooled_feat, pooled_gt, groups=pooled_groups, sample_weights=sw)
+                    self.unified[target] = pm
+                except Exception as e:
+                    logger.warning("target %s sim-加权 unified fit 失败（用 fallback）: %s", target, e)
 
         # 3) 每模型预测器
         for model, elo_map in per_model_elo.items():
@@ -119,27 +155,27 @@ class BlendPredictor:
 
         # 3) 层间协方差（#3）：统一层与模型层共用方法特征 → 预测残差正相关，
         # blend 方差须含交叉项 2·w_u·w_m·cov，否则 CI 系统性偏窄、过度自信。
-        # 用各自 λ* 的 OOS 残差估计（统一层经 GroupKFold 留出，模型层经随机 K-Fold 留出）。
+        # 用各自 λ* 的 OOS 残差估计；统一层取 target 的 sim-加权 unified（无则 fallback）。
         self._cov = {}
-        if self.unified is not None and getattr(self.unified, "oos_by_key_", None):
-            u_oos = self.unified.oos_by_key_
-            for model, pm in self.models.items():
-                m_oos = getattr(pm, "oos_by_key_", {})
-                if not m_oos:
-                    continue
-                elo_map = per_model_elo.get(model, {})
-                # 取两层均有 OOS 预测的方法（统一层 key = f"{m}#{model}"）
-                common = [
-                    m for m in elo_map
-                    if f"{m}#{model}" in u_oos and m in m_oos
-                ]
-                if len(common) < 3:
-                    continue
-                y_true = np.array([elo_map[m] for m in common], dtype=np.float64)
-                r_u = y_true - np.array([u_oos[f"{m}#{model}"] for m in common])
-                r_m = y_true - np.array([m_oos[m] for m in common])
-                cov = float(np.mean(r_u * r_m) - np.mean(r_u) * np.mean(r_m))
-                self._cov[model] = cov
+        for model, pm in self.models.items():
+            u_src = self.unified.get(model) or self.unified_fallback
+            u_oos = getattr(u_src, "oos_by_key_", None) if u_src is not None else None
+            m_oos = getattr(pm, "oos_by_key_", {})
+            if not u_oos or not m_oos:
+                continue
+            elo_map = per_model_elo.get(model, {})
+            # 取两层均有 OOS 预测的方法（统一层 key = f"{m}#{model}"）
+            common = [
+                m for m in elo_map
+                if f"{m}#{model}" in u_oos and m in m_oos
+            ]
+            if len(common) < 3:
+                continue
+            y_true = np.array([elo_map[m] for m in common], dtype=np.float64)
+            r_u = y_true - np.array([u_oos[f"{m}#{model}"] for m in common])
+            r_m = y_true - np.array([m_oos[m] for m in common])
+            cov = float(np.mean(r_u * r_m) - np.mean(r_u) * np.mean(r_m))
+            self._cov[model] = cov
         return self
 
     # ---------- 权重 ----------
@@ -177,7 +213,10 @@ class BlendPredictor:
                     "w_model": 0.0, "w_unified": 0.0, "source": "fallback"}
 
         w_m, w_u = self.blend_weights(model)
-        u_mean, u_var = self._predict_one(self.unified, method, feat)
+        # 发现层：优先用 target 的 sim-加权 unified（从相似 donor 借），无则均匀 fallback
+        u_mean, u_var = self._predict_one(
+            self.unified.get(model) or self.unified_fallback, method, feat
+        )
         m_mean, m_var = (self._predict_one(self.models[model], method, feat)
                          if model in self.models else (None, None))
 
@@ -215,7 +254,8 @@ class BlendPredictor:
     # ---------- 诊断 ----------
     def summary(self) -> dict:
         return {
-            "unified_trained": self.unified is not None,
+            "unified_fallback_trained": self.unified_fallback is not None,
+            "unified_sim_weighted_models": sorted(self.unified.keys()),
             "models_trained": sorted(self.models.keys()),
             "samples_per_model": dict(self._model_n),
             "weights_per_model": {m: {"w_model": round(self.blend_weights(m)[0], 3),
@@ -247,7 +287,10 @@ class BlendPredictor:
     @staticmethod
     def cache_key(results: ResultsMatrix, method_catalog: list[str],
                   features: dict | None = None) -> str:
-        """预测器依赖 (R 内容 + 方法清单 + features 结构) 的指纹——三者不变才可复用。"""
+        """预测器依赖 (R 内容 + 方法清单 + features 结构 + 探针指纹) 的指纹——四者不变才可复用。
+
+        发现层：sim-加权 unified 依赖各模型指纹（probes.json），指纹变 → 缓存失效。
+        """
         # R 内容指纹：每模型列的 (method, score, ts)
         parts = []
         for model in sorted(results.all_models()):
@@ -257,10 +300,23 @@ class BlendPredictor:
         r_fp = hashlib.md5(("|".join(parts)).encode("utf-8")).hexdigest()
         cat_fp = hashlib.md5(",".join(method_catalog).encode("utf-8")).hexdigest()
         feat_fp = BlendPredictor._features_signature(features)
-        return f"blend_{r_fp[:12]}_{cat_fp[:8]}_{feat_fp[:8]}"
+        # 探针指纹签名（probes.json 的 {model: fingerprint} 内容）
+        try:
+            from llmsec.evaluation.model_fingerprint import load_probes
+
+            probes = load_probes()
+            probe_payload = "|".join(
+                f"{mdl}:{','.join(f'{k}:{v}' for k, v in sorted((e or {}).get('fingerprint', {}).items()))}"
+                for mdl, e in sorted(probes.items())
+            )
+            probe_fp = hashlib.md5(probe_payload.encode("utf-8")).hexdigest()[:8]
+        except Exception:
+            probe_fp = "noprobes"
+        return f"blend_{r_fp[:12]}_{cat_fp[:8]}_{feat_fp[:8]}_{probe_fp}"
 
     def save(self, path) -> None:
         save_artifact(path, {
+            "unified_fallback": self.unified_fallback,
             "unified": self.unified,
             "models": self.models,
             "_features": self._features,
@@ -279,7 +335,8 @@ class BlendPredictor:
         if not data:
             return None
         bp = cls(prior_k=data.get("prior_k", BLEND_PRIOR_K))
-        bp.unified = data.get("unified")
+        bp.unified_fallback = data.get("unified_fallback")
+        bp.unified = data.get("unified", {})
         bp.models = data.get("models", {})
         bp._features = data.get("_features", {})
         bp._catalog = data.get("_catalog", [])

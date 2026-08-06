@@ -1,8 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "llmsec"
 version = "1.0.0"
 description = "LLM 红队攻击测试工具——自适应评估、聚类分析、ELO 收敛"
 requires-python = ">=3.11"
+dependencies = [
+    # 核心：API 客户端 + Web 面板 + ELO/评估数学库
+    "openai>=2,<3",
+    "python-dotenv>=1,<2",
+    "requests>=2,<3",
+    "urllib3>=2,<3",
+    "fastapi>=0.100,<1",
+    "uvicorn>=0.20,<1",
+    "pydantic>=2,<3",
+    "jinja2>=3,<4",
+    "pandas>=2,<4",
+    "python-multipart>=0.0.6",
+    "numpy>=1.24",
+    "scikit-learn>=1.3",
+    "scipy>=1.10",
+    "optuna>=3,<4",
+]
+
+[project.optional-dependencies]
+# 聚类增强（hdbscan + sentence-transformers + tiktoken）
+# sentence-transformers 会拉入 torch（~2GB），仅聚类特征提取需要
+# 安装：pip install -e ".[cluster]" 或 pip install llmsec[cluster]
+cluster = [
+    "hdbscan>=0.8,<0.9",
+    "sentence-transformers>=2",
+    "tiktoken>=0.5",
+]
+# 开发：测试 + lint
+dev = [
+    "pytest>=8,<9",
+    "pytest-xdist>=3",
+    "ruff",
+]
+
+[project.scripts]
+llmsec = "llmsec.pipeline.runner:main"
+
+[tool.setuptools.packages.find]
+include = ["llmsec*"]
 
 [tool.ruff]
 target-version = "py311"

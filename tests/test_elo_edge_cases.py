@@ -13,7 +13,6 @@ from pathlib import Path
 import joblib
 import numpy as np
 
-import llmsec.evaluation.elo_cluster as ec
 from llmsec.evaluation.elo import ELOTracker
 from llmsec.evaluation.elo_cluster import ClusterEloPredictor, EloPredictorModel
 

@@ -1,0 +1,24 @@
+# docker-compose: 一键启动 LLMSEC Web 面板
+#
+# 用法：
+#   1. 复制 .env.example 为 .env，填入 API 密钥
+#   2. docker compose up
+#   3. 浏览器打开 http://localhost:8080
+#
+# 数据持久化：
+#   - output/ → 评估结果、ELO 状态、聚类产物
+#   - attacks/ → 攻击集（可拖拽上传）
+
+services:
+  llmsec:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./output:/app/output
+      - ./attacks:/app/attacks
+      - ./data:/app/data:ro
+      - ./.env:/app/.env:ro
+    environment:
+      - PYTHONIOENCODING=utf-8
+    restart: unless-stopped
