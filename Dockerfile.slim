@@ -1,0 +1,26 @@
+# LLMSEC 精简镜像（不含聚类/torch，~500MB）
+# 适合只做攻击评估、不需要聚类特征提取的用户
+#
+# docker run -p 8080:8080 -v $(pwd)/.env:/app/.env jinxiahz/llmsec:slim
+
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY pyproject.toml llmsec/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+RUN pip install --no-cache-dir -e .
+
+RUN mkdir -p /app/attacks /app/output /app/data
+
+VOLUME ["/app/output", "/app/attacks"]
+
+EXPOSE 8080
+
+CMD ["python", "-m", "uvicorn", "llmsec.server.dashboard_api:app", "--host", "0.0.0.0", "--port", "8080"]

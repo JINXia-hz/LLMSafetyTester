@@ -5,13 +5,15 @@
 #   2. docker compose up
 #   3. 浏览器打开 http://localhost:8080
 #
-# 数据持久化：
-#   - output/ → 评估结果、ELO 状态、聚类产物
-#   - attacks/ → 攻击集（可拖拽上传）
+# 镜像选择：
+#   jinxiahz/llmsec:latest — 完整版（含聚类 + torch，~3GB）
+#   jinxiahz/llmsec:slim   — 精简版（不含聚类，~500MB）
+# 本地构建：注释 image 行，取消 build 行注释
 
 services:
   llmsec:
-    build: .
+    image: jinxiahz/llmsec:latest
+    # build: .
     ports:
       - "8080:8080"
     volumes:

@@ -154,10 +154,17 @@ pip install -r llmsec/requirements.txt             # 核心（不含 torch）
 pip install -r llmsec/requirements-cluster.txt     # 完整（含聚类 + torch）
 ```
 
-**方式 C — Docker**
+**方式 C — Docker（一行启动，零安装）**
 
 ```bash
-docker compose up    # 自动构建 + 预缓存 embedding 模型，打开 http://localhost:8080
+# 完整版（含聚类特征提取 + 预缓存 embedding 模型）
+docker run -p 8080:8080 -v $(pwd)/.env:/app/.env -v llmsec-data:/app/output jinxiahz/llmsec
+
+# 精简版（不含聚类/torch，仅攻击评估，~500MB）
+docker run -p 8080:8080 -v $(pwd)/.env:/app/.env -v llmsec-data:/app/output jinxiahz/llmsec:slim
+
+# 或用 docker compose（自动管理卷 + 重启策略）
+docker compose up
 ```
 
 Python 3.11。`hdbscan`、`sentence-transformers`、`tiktoken` 为聚类模块的可选依赖（安装 `.[cluster]` 时拉入，会附带 `torch` ~2GB；只做攻击评估不需要）。
