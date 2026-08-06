@@ -81,17 +81,21 @@ def _evaluate_cut(coords: np.ndarray, labels: dict[str, int], methods: list[str]
         # 导致 json.dump(allow_nan=False) 崩溃整个聚类报告
         return {"silhouette": 0.0, "calinski_harabasz": 0.0, "davies_bouldin": 1e6}
 
-    def _safe(fn, default=0.0):
+    def _safe(fn, default=0.0, name=""):
         try:
             return float(fn(coords, y))
-        except Exception:
+        except Exception as e:
+            # T-1：逐 k 静默失败会污染 auto-k 合成 score（失败项=0→score 被拉低→chosen_k 偏移）。
+            # 补 per-k 日志让指标失败可见。
+            import logging
+            logging.getLogger(__name__).debug("k=%d 簇指标 %s 失败（用默认值 %s）: %s",
+                                              n_clusters, name, default, e)
             return default
 
     return {
-        "silhouette": round(_safe(silhouette_score), 4),
-        "calinski_harabasz": round(_safe(calinski_harabasz_score), 4),
-        # F-2 修复：DB 失败时用 1e6（有限大），不用 inf
-        "davies_bouldin": round(_safe(davies_bouldin_score, default=1e6), 4),
+        "silhouette": round(_safe(silhouette_score, name="silhouette"), 4),
+        "calinski_harabasz": round(_safe(calinski_harabasz_score, name="CH"), 4),
+        "davies_bouldin": round(_safe(davies_bouldin_score, default=1e6, name="DB"), 4),
     }
 
 
@@ -148,7 +152,20 @@ def select_knee(sweep: list[dict], flatten_ratio: float = KNEE_FLATTEN_RATIO) ->
     if not sweep:
         return 1, [1]
     scores = np.array([s["score"] for s in sweep], dtype=float)
-    chosen_idx = int(np.argmax(scores))
+    raw_idx = int(np.argmax(scores))
+    # A5 修复：对合成 score 做窗口=3 移动均值平滑，消除单点尖峰干扰。
+    # 但仅在原始峰值不显著（≤邻居 1.1×）时采纳平滑结果——真正的主峰（远高于邻居）
+    # 保持原始 argmax，防平滑把真实主峰拖低。
+    chosen_idx = raw_idx
+    if len(scores) >= 3:
+        kernel = np.ones(3) / 3.0
+        smoothed = np.convolve(scores, kernel, mode="same")
+        smoothed_idx = int(np.argmax(smoothed))
+        if smoothed_idx != raw_idx:
+            left = float(scores[raw_idx - 1]) if raw_idx > 0 else 0.0
+            right = float(scores[raw_idx + 1]) if raw_idx < len(scores) - 1 else 0.0
+            if float(scores[raw_idx]) <= max(left, right, 1e-9) * 1.1:
+                chosen_idx = smoothed_idx
 
     deltas = np.diff(scores)
     if (

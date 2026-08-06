@@ -129,7 +129,7 @@ def test_derive_elo_deterministic_and_monotone():
 
 def test_derive_elo_reconstructs_rounds_from_R():
     """#10 + Model B：R 带 round（extra）且单调时 derive_elo 按轮用 update_round 重建
-    _round_defender_elos，与 live tracker(update_round)逐位一致；旧记录无 round 回退逐场。"""
+    _round_defender_elos，与 live tracker(update_round)逐位一致。"""
     # 3 轮，每轮 2 场，带 round
     mat = ResultsMatrix()
     ts = 0
@@ -154,12 +154,27 @@ def test_derive_elo_reconstructs_rounds_from_R():
     # 防御方最终 Elo 也一致
     assert abs(live.get_defender_elo("def") - derived.get_defender_elo("def")) < 1e-9, "defender elo 不一致"
 
-    # 向后兼容：旧记录无 round → 不重建轮界（Model A 逐场回退）
+    # 向后兼容：旧记录无 round → 统一赋 round=0 → 一段一个大批次（Model B）
     old = ResultsMatrix()
     for i in range(5):
         old.upsert(f"old{i}", "def", 3.0, ts=i + 1)
     conv_old = derive_elo(old, "def").check_convergence("def", total_methods=10, tested_count=5)
-    assert conv_old["n_rounds"] == 0, f"旧记录无 round 却重建了轮界: n_rounds={conv_old['n_rounds']}"
+    assert conv_old["n_rounds"] == 1, f"无 round 应归为 1 轮: n_rounds={conv_old['n_rounds']}"
+
+    # 跨 run 累积：round 非单调 → 分段 Model B，两段各自产出轨迹点
+    multi = ResultsMatrix()
+    ts2 = 0
+    for rd in (0, 1, 2):  # run 1: round 0~2
+        for i in range(2):
+            ts2 += 1
+            multi.upsert(f"run1_{rd}_{i}", "def", 3.0, ts=ts2, extra={"round": rd})
+    for rd in (0, 1):  # run 2: round 0~1（round 回降 → 新段）
+        for i in range(2):
+            ts2 += 1
+            multi.upsert(f"run2_{rd}_{i}", "def", -2.0, ts=ts2, extra={"round": rd})
+    conv_multi = derive_elo(multi, "def").check_convergence("def", total_methods=20, tested_count=10)
+    # run1 有 3 轮 + run2 有 2 轮 = 5 个 record_round_end
+    assert conv_multi["n_rounds"] == 5, f"跨 run 分段应产出 5 轮: n_rounds={conv_multi['n_rounds']}"
 
 
 

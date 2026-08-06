@@ -116,22 +116,16 @@ def load_elo(output_dir, model: str | None = None) -> dict:
     """
     加载 ELO 攻击方评分（method → elo）。
 
-    优先从结果矩阵 R 派生（唯一真相，经 elo_access 缓存）；R 为空时读
-    output_dir/state/state.json（支持自定义 output_dir 的 state 快照）。
-    model 缺省取 R 中最新活跃模型。
+    始终从结果矩阵 R 派生（唯一真相，经 elo_access 缓存）。
+    model 缺省取 R 中最新活跃模型。R 为空时返回 {}（F3：不再回退 state.json 快照，
+    因快照不经指纹校验、可能与 R 不一致）。
     """
     from llmsec.evaluation.elo_access import active_model, attacker_ratings_for
 
     target = model or active_model()
     if target is not None:
-        ratings = attacker_ratings_for(target)
-        if ratings:
-            return ratings
-
-    # 回退：output_dir 下的 state 快照
-    state_file = Path(output_dir) / "state" / "state.json"
-    data = read_json(state_file)
-    return (data or {}).get("attacker_ratings", {})
+        return attacker_ratings_for(target)
+    return {}
 
 
 def load_allergy(output_dir) -> dict:
@@ -284,28 +278,18 @@ def build_method_stats(results: list[dict], elo_ratings: dict,
 def _load_elo_tracker(output_dir=None) -> ELOTracker | None:
     """加载完整 ELO 状态（攻击方+防御方），无数据返回 None。
 
-    优先读 output_dir/state/state.json（与 --output-dir 保持一致）；
-    该文件不存在时从 R 矩阵派生（唯一真相）。
+    F4 修复：始终从 R 矩阵派生（唯一真相）。原实现优先读 state.json 快照（不经指纹
+    校验、可能与 R 不一致），与 load_elo 的"R 优先"矛盾——同一份报告方法排名（R 派生）
+    与安全边界（state.json 快照）可能跨 run/跨模型，报告自相矛盾。
     """
-    if output_dir is not None:
-        candidate = Path(output_dir) / "state" / "state.json"
-        if candidate.exists():
-            tracker = ELOTracker()
-            tracker.load(str(candidate))
-            return tracker if tracker.attacker_ratings else None
-    # 从 R 派生
-    try:
-        from llmsec.core.results import ResultsMatrix
-        from llmsec.evaluation.elo import derive_elo
-        from llmsec.evaluation.elo_access import active_model
+    from llmsec.core.results import ResultsMatrix
+    from llmsec.evaluation.elo import derive_elo
+    from llmsec.evaluation.elo_access import active_model
 
-
-        R = ResultsMatrix.load()
-        model = active_model()
-        if model and R.n_for_model(model) > 0:
-            return derive_elo(R, model)
-    except Exception:
-        pass
+    R = ResultsMatrix.load()
+    model = active_model()
+    if model and R.n_for_model(model) > 0:
+        return derive_elo(R, model)
     return None
 
 

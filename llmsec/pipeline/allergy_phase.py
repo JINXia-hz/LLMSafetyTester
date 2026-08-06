@@ -211,7 +211,8 @@ def run_allergy_phase(method_records: dict[str, dict],
 
     if not boundary_elo:
         logger.warning("  ⚠ 无ELO数据，跳过过敏检测")
-        return {"total_tested": 0, "allergic": 0, "fpr": 0}
+        # S6 修复：返 fpr=None（未测）而非 fpr=0（伪"完美无过敏"）
+        return {"total_tested": 0, "allergic": 0, "fpr": None}
 
     # 取ELO边界附近的 n_window 个方法（一侧不足按距离补齐，上方取最近侧）
     candidates = select_twin_candidates(ranking, boundary_elo, n_window)
@@ -257,6 +258,7 @@ def run_allergy_phase(method_records: dict[str, dict],
         if target_refused:
             is_allergic = True
             judge_level = api_result.get("meta", {}).get("pred", "N/A")
+            judge_failed = False
         else:
             # M-15：Judge 故障降级关键词（对照 evaluate_single 的 H-6）
             try:
@@ -264,10 +266,14 @@ def run_allergy_phase(method_records: dict[str, dict],
                 is_allergic = jr["is_refusal"]
                 judge_level = jr["compliance_level"]
             except Exception as _e:
+                # S5：打标 judge_failed，下游汇总时可据此判 inconclusive
                 logger.warning(f"     ⚠ {method_name[:30]} Judge故障，降级关键词: {_e}")
                 is_allergic = any(p.lower() in content.lower() for p in FAST_REFUSAL_PATTERNS)
                 judge_level = "N/A"
-        return (method_name, safe_prompt, content, is_allergic, judge_level)
+                judge_failed = True
+            else:
+                judge_failed = False
+        return (method_name, safe_prompt, content, is_allergic, judge_level, judge_failed)
 
     if max_workers > 1:
         logger.info(f"     ⚡ 批内并行求值 (concurrency={max_workers})")
@@ -278,11 +284,14 @@ def run_allergy_phase(method_records: dict[str, dict],
 
     refused_count = 0
     total = 0
+    judge_failed_count = 0
     for res in raw:
         if res is None:
             continue
-        method_name, safe_prompt, content, is_allergic, judge_level = res
+        method_name, safe_prompt, content, is_allergic, judge_level, judge_failed = res
         total += 1
+        if judge_failed:
+            judge_failed_count += 1
         if is_allergic:
             refused_count += 1
         allergy_results.append({
@@ -291,6 +300,7 @@ def run_allergy_phase(method_records: dict[str, dict],
             "safe_prompt": safe_prompt[:200],
             "is_allergic": is_allergic,
             "judge_level": judge_level,
+            "judge_failed": judge_failed,
             "response_preview": content[:500],
         })
         sym = "🤧" if is_allergic else "✅"
@@ -308,6 +318,7 @@ def run_allergy_phase(method_records: dict[str, dict],
             "total": total, "allergic": refused_count,
             "fpr": round(fpr, 4),
             "false_positive_rate": round(fpr, 4),
+            "judge_failed_count": judge_failed_count,
         },
     })
 
@@ -317,7 +328,10 @@ def run_allergy_phase(method_records: dict[str, dict],
         "fpr": round(fpr, 4),
         "boundary_elo": boundary_elo,
         "methods_tested": twin_methods,
+        "judge_failed_count": judge_failed_count,
     }
+    if judge_failed_count > 0:
+        logger.warning(f"  ⚠ {judge_failed_count}/{total} 条过敏检测用了关键词降级，FPR 可能不准")
     logger.info(f"\n  📊 过敏检测完成: FPR={fpr*100:.1f}% ({refused_count}/{total})")
     logger.info("")
     return summary

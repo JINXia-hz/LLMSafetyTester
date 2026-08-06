@@ -306,13 +306,17 @@ def evaluate_single(prompt_text: str, expected_answer: int | None,
         }
 
     judge_result = None
+    judge_mode = "no_judge"  # S1：标记评分模式，供下游区分异质混合数据
     if use_judge and judge is not None:
+        judge_mode = "judge"
         try:
             judge_result = judge.evaluate(prompt_text, content, skip_prescreen=skip_prescreen)
         except Exception as e:
             # H-6 修复：Judge API 异常（重试耗尽/网络故障）降级到无 Judge 模式，
             # 不中断整批评估（原代码会让异常沿 evaluate_single → run_evaluation → main 一路抛出）
-            logger.warning(f"⚠️ Judge 评估失败，降级到无 Judge 模式: {e}")
+            # S1：打标 judge_mode=fallback_keyword，下游可据此过滤/加权/告警
+            judge_mode = "fallback_keyword"
+            logger.warning(f"⚠️ Judge 评估失败，降级到关键词模式: {e}")
     if judge_result is not None:
         is_refusal = judge_result["is_refusal"]
         is_harmful = judge_result["is_harmful"]
@@ -335,6 +339,7 @@ def evaluate_single(prompt_text: str, expected_answer: int | None,
             "judge_dangerousness": judge_result["dangerousness"],
             "judge_calls": judge_result["judge_calls"],
             "prescreen_result": judge_result["prescreen_result"],
+            "judge_mode": judge_mode,
             "error": None,
         }
     else:
@@ -354,6 +359,7 @@ def evaluate_single(prompt_text: str, expected_answer: int | None,
             "latency_ms": api_result["latency_ms"],
             "tokens_prompt": api_result["tokens_prompt"],
             "tokens_completion": api_result["tokens_completion"],
+            "judge_mode": judge_mode,
             "error": None,
         }
     return result
@@ -413,11 +419,12 @@ def load_records(input_file, args: argparse.Namespace) -> list[dict]:
     # 筛选
     if args.only:
         # M-14：按点分段精确前缀匹配，避免 '1.1' 误命中 '1.10.1'（裸 startswith 的坑）
+        # B6：用 .get() 防 method/id 缺键的坏行抛 KeyError 中断整批
         records = [
             r for r in records
-            if r["method"] == args.only
-            or r["id"] == args.only
-            or r["id"].startswith(args.only + ".")
+            if r.get("method") == args.only
+            or r.get("id") == args.only
+            or (r.get("id") or "").startswith(args.only + ".")
         ]
         if not records:
             logger.error(f"❌ 未找到匹配 {args.only}")
@@ -425,7 +432,7 @@ def load_records(input_file, args: argparse.Namespace) -> list[dict]:
     if args.start_from:
         # M-14：数值序比较，'1.10.1' >= '1.3.1' 应为 True
         sf = _id_tuple(args.start_from)
-        records = [r for r in records if _id_tuple(r["id"]) >= sf]
+        records = [r for r in records if _id_tuple(r.get("id") or "0") >= sf]
     if args.max_samples:
         records = records[: args.max_samples]
     return records
@@ -724,23 +731,20 @@ def update_elo(all_results: list[dict], summary: dict,
     if defender_name is None:
         defender_name = DEFENDER_NAME
     tracker = ELOTracker()
-    # Model B：结果带 round → 按 round 分组用 update_round（同步轮次，与 runner/derive_elo 一致）；
-    # 无 round（全量评估 legacy 单批次）→ 逐场 update()（per-match，向后兼容）
-    rounds_seq = [r.get("round") for r in all_results]
-    if rounds_seq and all(rd is not None for rd in rounds_seq):
-        from itertools import groupby
-        for rd, group in groupby(all_results, key=lambda r: r.get("round")):
-            matches = [(r.get("method", "unknown"), r.get("eval_score", 0)) for r in group]
-            tracker.update_round(defender_name, matches, round_idx=rd)
-    else:
-        for r in all_results:
-            tracker.update(
-                r.get("method", "unknown"), defender_name, r.get("eval_score", 0),
-                round_idx=r.get("round"),
-            )
-    # 记录轮次终点使 _round_defender_elos 非空——否则 compute_security_boundary
-    # 的 check_convergence 恒因 n_rounds=0 返回 ci_half=None（confidence 恒 0），
-    # 即便已实测大量方法。单批次只有 1 轮故仍无法估噪声（m<3），但数据结构完整。
+    # 始终走 Model B（同步轮次 + √N 聚合），与 runner/derive_elo 一致。
+    # legacy 无 round → 统一赋 0（一段一个大批次）。
+    from itertools import groupby
+
+    for r in all_results:
+        if r.get("round") is None:
+            r["round"] = 0
+    # M10：groupby 要求按键连续排序（写文件顺序是 rec1-r0,r1,...,rec2-r0,...）
+    sorted_results = sorted(all_results, key=lambda r: r["round"])
+    for rd, group in groupby(sorted_results, key=lambda r: r["round"]):
+        group_list = list(group)
+        matches = [(r.get("method", "unknown"), r.get("eval_score", 0)) for r in group_list]
+        statuses = [r.get("status", "") for r in group_list]
+        tracker.update_round(defender_name, matches, round_idx=rd, statuses=statuses)
     tracker.record_round_end(defender_name)
     state_path = STATE_DIR / f"state__{defender_name}.json"
     tracker.save(state_path)

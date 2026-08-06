@@ -78,12 +78,13 @@ K_DEF_DECAY_N0 = 10        # 防御方 K 衰减尺度：K_def = K / sqrt(max(1, 
 # 解释：防御方每场必上，累计场次越多其评级越稳。前 N0 场为"暖机期"（K_def=K 不衰减），
 #       之后开始衰减：n=10→32（暖机末）, n=40→16, n=90→10.7。
 # Model B（同步轮次）：n_def 按轮累积（每轮 +batch_size），K_def 取轮始值整轮一致；
-#       防御方聚合步长额外除以 √N（update_round），消"N×全K 求和"过冲（蒙特卡洛：误差 ~115→~13）。
+#       防御方聚合步长额外除以 √N（update_round），消"N×全K 求和"过冲。
+#       蒙特卡洛权威数字（elo.py 注释引用此处）：逐场更新（历史 Model A，已移除）误差 ~102，√N 缩放后 ~13。
 
 # ---- 收敛判定（漂移+噪声分解 → 单一 CI 口径）----
 # 用全部轮次轨迹做 OLS，分离"漂移"（朝真值移动，好事）与"噪声"（随机抖动），
 # 合成一个可解释的"防御方真值 Elo 的 95%CI 半宽"。停机 = converged 单一判据（elo.check_convergence）。
-CONV_WINDOW_MIN = 4        # 判收敛最少轮次（少于则直接判未收敛）
+CONV_WINDOW_MIN = 6        # 判收敛最少轮次（少于则直接判未收敛）；B1：原 4 对 OLS/Theil-Sen 过小
 CONV_CI_TARGET = 20.0      # 防御方真值 Elo 的 95%CI 半宽目标（单位 Elo 分）
 CONV_DRIFT_TARGET = 5.0    # 残余漂移目标（单位 Elo 分/轮）；>|此值| 视为仍在移动
 
@@ -200,7 +201,7 @@ HDBSCAN_MIN_CLUSTER_DIV = 40   # min_cluster_size = max(5, round(sqrt(n) * 40 / 
 #       注：HPO 框架目标是 conv_rounds（不含聚类质量），sweep 本参数需手动比 silhouette/簇效。
 # 解释：k 候选以 k0±2、上限 2*k0 几何取 ≤10 个，silhouette 选优。
 
-SUPERVISED_WEIGHT_CLIP = (0.2, 5.0)   # 弱监督特征权重裁剪范围（posterior.learn_supervised_weights）
+SUPERVISED_WEIGHT_CLIP = (0.5, 2.0)   # 弱监督特征权重裁剪范围（B4：原 [0.2,5.0] 过宽，单方向放大 5× 致簇塌缩）
 SUPERVISED_WEIGHT_MIN_SAMPLES = 5     # 有真实反应的样本少于此数时不做加权（权重全 1）
 # 解释：权重先归一到均值 1 再按 CLIP 裁剪——clip 后再归一会让最大值重新突破上限。
 

@@ -23,7 +23,7 @@ import hashlib
 
 from llmsec.core import config
 from llmsec.core.io import read_json, write_json
-from llmsec.core.results import ResultsMatrix, _coarse_status
+from llmsec.core.results import ResultsMatrix, _coarse_status, _file_lock
 from llmsec.evaluation.elo import ELOTracker, derive_elo
 
 _CACHE_VERSION = 2  # v2：ground_truth 统一 {m: {elo: ...}} 形态 + 补 attacker_pred_std
@@ -38,7 +38,7 @@ def _model_fingerprint(R: ResultsMatrix, model: str) -> str | None:
     if not col:
         return None
     payload = ",".join(
-        f"{m}:{r.eval_score}:{r.ts}" for m, r in sorted(col.items())
+        f"{m}:{r.eval_score}:{r.ts}:{r.extra.get('round')}" for m, r in sorted(col.items())
     )
     return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
@@ -55,7 +55,7 @@ def _load_cache() -> dict:
 
 def _save_cache(cache: dict) -> None:
     cache.setdefault("_version", _CACHE_VERSION)
-    write_json(config.ELO_CACHE_FILE, cache)
+    write_json(config.ELO_CACHE_FILE, cache, allow_nan=False)  # M12：派生缓存也禁 NaN
 
 
 # ============================================================
@@ -145,18 +145,26 @@ def publish_tracker(tracker: ELOTracker, model: str) -> None:
     if not hasattr(tracker, "attacker_ratings") or not hasattr(tracker, "history"):
         return
 
-    R = ResultsMatrix.load()
-    # 镜像 history → R（按 defender 归属，防跨模型错记）
-    for h in tracker.history:
-        if h.get("defender") == model:
-            # #10：round 经 extra 持久化进 R，使 derive_elo 能按轮分组重建收敛轨迹
-            extra = {"round": h["round"]} if h.get("round") is not None else None
-            R.upsert(
-                h["attacker"], model, h["eval_score"],
-                status=_coarse_status(h["eval_score"]),
-                extra=extra,
-            )
-    R.save()
+    # H5/H6 修复：整段 load→modify→save 纳入文件锁，防并发 publish 丢更新（TOCTOU）。
+    # 原 save() 内部锁只护字节级写、不护 RMW 临界区——两个并发 publish 各自 load 同一旧 R、
+    # 各自 upsert 自己的子集、各自 save → 后写者覆盖先写者。
+    with _file_lock(config.RESULTS_FILE):
+        R = ResultsMatrix.load()
+        # 镜像 history → R（按 defender 归属，防跨模型错记）
+        for h in tracker.history:
+            if h.get("defender") == model:
+                # #10：round 经 extra 持久化进 R，使 derive_elo 能按轮分组重建收敛轨迹
+                extra = {"round": h["round"]} if h.get("round") is not None else None
+                # F2 修复：透传 live tracker 的原始 status（fully_compliant/safe_redirect/…），
+                # 不用 _coarse_status 二次改写（原实现把 safe_redirect→irrelevant、
+                # partially_compliant→fully_compliant，语义丢失）。status 缺失时才兜底。
+                raw_status = h.get("status") or _coarse_status(h["eval_score"])
+                R.upsert(
+                    h["attacker"], model, h["eval_score"],
+                    status=raw_status,
+                    extra=extra,
+                )
+        R.save(_locked=True)  # 已在锁内，跳过 save 的内部锁防重入死锁
 
     fp = _model_fingerprint(R, model)
     # M-2：ratings/ground_truth 用 R 派生态（同键多次观测以末值为准），

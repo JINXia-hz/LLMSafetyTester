@@ -224,8 +224,10 @@ class ResultsMatrix:
         return sorted(self.model_column(model).values(), key=_key)
 
     # ---------- 持久化 ----------
-    def save(self, filepath: str | Path | None = None) -> Path:
+    def save(self, filepath: str | Path | None = None, *, _locked: bool = False) -> Path:
         # F-3 修复：权威存储用原子写 + .bak 轮转，避免崩溃/并发静默丢失全部历史观测
+        # _locked=True：调用方已持有 _file_lock（如 publish_tracker 的 load→modify→save
+        # 整段临界区），跳过内部锁以防同进程重入死锁（H5/H6 修复）
         filepath = Path(filepath) if filepath else RESULTS_FILE
         data = {
             "version": _SCHEMA_VERSION,
@@ -237,28 +239,43 @@ class ResultsMatrix:
             },
         }
         # 跨进程锁：dashboard 与实验并发写全局 R 时串行化（防交替写损坏）
-        with _file_lock(filepath):
-            write_json(filepath, data, backup=True)
+        # allow_nan=False（M12）：权威存储禁止 NaN/Infinity 字面量（浏览器 JSON.parse 报错）
+        if _locked:
+            write_json(filepath, data, backup=True, allow_nan=False)
+        else:
+            with _file_lock(filepath):
+                write_json(filepath, data, backup=True, allow_nan=False)
         return filepath
 
     @classmethod
     def load(cls, filepath: str | Path | None = None) -> ResultsMatrix:
-        # F-3 修复：权威存储用 strict 模式，损坏时备份残文件 + 警告（不静默清零）
+        # F1 修复：权威存储损坏时不再 reset 为空矩阵（空矩阵被下次 save 写回 = 永久丢失全部观测）。
+        # 改为：备份残文件 → 尝试 .bak 恢复 → 仍失败则 raise（让顶层决策，不静默糊弄）。
         filepath = Path(filepath) if filepath else RESULTS_FILE
+        data = None
         try:
             data = read_json(filepath, strict=True)
         except CorruptedFileError as e:
-            _logger.error(
-                "results.json 损坏，已备份为 %s.corrupt.bak 并重置为空矩阵。"
-                "派生 Elo/预测器将基于空矩阵重算。原因: %s",
-                filepath, e.cause,
-            )
+            _logger.error("results.json 损坏: %s。原因: %s", filepath, e.cause)
+            # 备份残文件供取证
             try:
                 import shutil
                 shutil.copy2(filepath, str(filepath) + ".corrupt.bak")
             except OSError:
                 pass
-            return cls()
+            # 尝试从 .bak 恢复（save() 每次写前都会备份）
+            bak = filepath.with_suffix(filepath.suffix + ".bak")
+            if bak.exists():
+                try:
+                    data = read_json(bak, strict=True)
+                    _logger.warning("已从备份 %s 恢复 results.json", bak)
+                except CorruptedFileError:
+                    pass
+            if data is None:
+                _logger.critical(
+                    "results.json 及备份均损坏，无法恢复。拒绝返回空矩阵以防永久数据丢失。"
+                )
+                raise
         if not data:
             return cls()
         mat = cls(methods=data.get("methods", []), models=data.get("models", []))

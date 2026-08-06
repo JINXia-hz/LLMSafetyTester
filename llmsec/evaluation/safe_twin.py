@@ -162,7 +162,11 @@ def generate_safe_twin(attack_prompt: str, client) -> dict | None:
                 "safe_prompt": data.get("safe_prompt", "").strip(),
                 "replacement": data.get("replacement", "").strip(),
             }
-        return {"safe_prompt": raw, "replacement": "无法解析JSON"}
+        # F5 修复：JSON 解析失败时返 None（由 generate_all_twins 跳过该条），
+        # 而非把 LLM 原始输出当 safe_prompt——若生成端被诱导复述了攻击骨架，
+        # "安全孪生"就成了有害 prompt，污染 FPR。
+        logger.warning("安全孪生 JSON 解析失败，跳过该条（不用 raw 兜底）")
+        return None
 
     try:
         return retry_call(_gen, retries=API_MAX_RETRIES, delay=API_RETRY_DELAY,

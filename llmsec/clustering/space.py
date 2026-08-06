@@ -47,6 +47,11 @@ def _spectral_knee(S: np.ndarray) -> int:
     dist = chord - y  # 谱在弦下方 → 距离为正
     knee = int(np.argmax(dist))
     if dist[knee] <= 0:
+        # P-1：谱太平滑（无拐点）→ 回退中位数。原实现无日志，簇几何无依据但看起来正常。
+        import logging
+        logging.getLogger(__name__).warning(
+            "奇异值谱无拐点（太平滑/TF-IDF/退化数据），截断维度回退到中位数 %d/%d", len(S) // 2, len(S),
+        )
         return len(S) // 2
     return knee + 1
 

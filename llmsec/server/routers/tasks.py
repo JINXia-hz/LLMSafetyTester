@@ -163,11 +163,6 @@ def _start_task(kind: str, argv: list[str]) -> dict:
     return _task_view(task_id, TASKS[task_id])
 
 
-@router.post("/api/run/generate")
-async def api_run_generate():
-    return _start_task("generate", ["-m", "llmsec.attacks.generate"])
-
-
 @router.post("/api/run/evaluate")
 async def api_run_evaluate(req: EvaluateRequest):
     # input 只允许 output/attacks/ 下的 jsonl 文件名，防路径穿越
@@ -219,11 +214,6 @@ async def api_run_evaluate(req: EvaluateRequest):
     view = _start_task("evaluate", argv)
     view["has_tax_probe"] = has_tax_probe
     return view
-
-
-@router.post("/api/run/cluster-analysis")
-async def api_run_cluster_analysis():
-    return _start_task("cluster-analysis", ["-m", "llmsec.evaluation.cluster_analysis"])
 
 
 @router.get("/api/tasks")

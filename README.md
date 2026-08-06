@@ -373,7 +373,7 @@ llmsec/                   # 纯源码包
 └── server/               # dashboard_api(Web面板) / routers / local_model_server
 
 attacks/                  # ★ 攻击集（用户可见，拖拽上传目标）
-├── exemple.jsonl         #   示例文件（随仓库分发）
+├── example.jsonl         #   示例文件（随仓库分发）
 └── *.jsonl               #   用户自行生成或导入
 
 data/                     # 静态参考数据（HarmBench 行为库 + 越狱模板）

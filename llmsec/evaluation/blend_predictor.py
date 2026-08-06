@@ -119,7 +119,10 @@ class BlendPredictor:
                 from llmsec.evaluation.model_fingerprint import donor_similarities, load_probes
 
                 probes = load_probes()
-            except Exception:
+            except Exception as e:
+                # B-4：probes 加载失败 → 全部 target 静默退化为均匀 fallback，核心 sim-加权能力消失。
+                # 原实现无 warning，排查困难。补 warning 让降级可见。
+                logger.warning("probes 加载失败，Blend 退化为均匀 universal（无 sim-加权）: %s", e)
                 probes = {}
             for target in models:
                 sims = donor_similarities(target, probes) if probes else {}
@@ -262,6 +265,32 @@ class BlendPredictor:
                                       "w_unified": round(self.blend_weights(m)[1], 3)}
                                   for m in self._model_n},
         }
+
+    def diagnostics(self) -> dict:
+        """看板"多模型层"诊断：summary() + 每 target 的 donor 相似度 + sim-加权/均匀的 λ。
+
+        暴露发现层 D+A 的实际状态——哪些 target 启用了 sim-加权、从哪些 donor 借、相似度多少，
+        以及 sim-加权 unified 与均匀 fallback 各自的正则化强度 λ。
+        """
+        base = self.summary()
+        try:
+            from llmsec.evaluation.model_fingerprint import donor_similarities, load_probes
+
+            probes = load_probes()
+        except Exception:
+            probes = {}
+        donor_sims = {t: donor_similarities(t, probes) for t in self.unified} if probes else {}
+        per_target_lambda: dict[str, float | None] = {
+            t: (float(pm.lambda_opt) if pm.lambda_opt is not None else None)
+            for t, pm in self.unified.items()
+        }
+        if self.unified_fallback is not None and self.unified_fallback.lambda_opt is not None:
+            per_target_lambda["_fallback_uniform"] = float(self.unified_fallback.lambda_opt)
+        base.update({
+            "donor_similarities": donor_sims,
+            "per_target_lambda": per_target_lambda,
+        })
+        return base
 
     # ---------- 持久化（PREDICTORS_DIR 派生缓存）----------
     @staticmethod

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 
 from llmsec.core.config import ATTACKS_DIR, CLUSTER_RESULT_FILE, OUTPUT_DIR
 from llmsec.core.io import read_json
@@ -564,15 +565,21 @@ async def api_model(run: str | None = None):
     run_dir = _run_dir(run)
     analysis = load_json(run_dir / "cluster_security_analysis.json") if run_dir else {}
     svd = analysis.get("svd_ridge")
-    if not svd:
-        msg = "该批次无 SVD-Ridge 预测模型诊断数据（需用新版 pipeline 运行后生成）"
+    blend = analysis.get("blend_predictor")
+    # 多目标 run：blend_predictor 在 multi_target_report.json
+    if not blend and run_dir and (run_dir / "multi_target_report.json").exists():
+        mt = load_json(run_dir / "multi_target_report.json")
+        blend = (mt or {}).get("blend_predictor")
+    if not svd and not blend:
+        msg = "该批次无预测模型诊断数据（需用新版 pipeline 运行后生成）"
         if analysis.get("svd_ridge_skipped"):
             msg += f"（{analysis['svd_ridge_skipped']}）"
         elif analysis.get("svd_ridge_error"):
             msg += f"（生成时出错: {analysis['svd_ridge_error']}）"
         return {"available": False, "run": run_dir.name if run_dir else None,
                 "reason": "no_model", "message": msg}
-    return {"available": True, "run": run_dir.name, "svd_ridge": svd}
+    return {"available": True, "run": run_dir.name if run_dir else None,
+            "svd_ridge": svd, "blend_predictor": blend}
 
 
 @router.get("/api/attack-sets")
@@ -611,6 +618,192 @@ async def api_targets():
     except Exception:
         targets = []
     return {"targets": targets}
+
+
+class AddTargetRequest(BaseModel):
+    name: str
+    model: str
+    base_url: str
+    api_key: str
+
+
+@router.post("/api/targets/add")
+async def api_targets_add(req: AddTargetRequest):
+    """「+」加目标：把新目标追加到 .env（TARGET_<N>_* 四件套 + 加入 TARGETS 列表）。
+
+    写前先备份 .env→.env.bak；原子写（保留原有注释/格式，只更新 TARGETS 行 + 追加四件套）。
+    api_key 写入 .env（gitignored），响应绝不回显明文。
+    """
+    import re
+    import shutil
+
+    from llmsec.core.config import PROJECT_ROOT
+    name = req.name.strip()
+    if not name or not req.base_url.strip():
+        raise HTTPException(400, "name 与 base_url 不能为空")
+    env_path = PROJECT_ROOT / ".env"
+    if not env_path.exists():
+        raise HTTPException(500, ".env 不存在，无法写入目标")
+    # 备份 + 读
+    try:
+        shutil.copy2(env_path, str(env_path) + ".bak")
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError as e:
+        raise HTTPException(500, f"读取/备份 .env 失败: {e}")
+
+    # 找已用最大 TARGET_<N>_ 索引 + 现有 TARGETS 列表
+    used_n = []
+    targets_line_idx = None
+    targets_names = []
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        if s.startswith("TARGETS="):
+            targets_line_idx = i
+            targets_names = [x.strip() for x in s[len("TARGETS="):].split(",") if x.strip()]
+        m = re.match(r"^TARGET_(\d+)_NAME\s*=", ln)
+        if m:
+            used_n.append(int(m.group(1)))
+    if name in targets_names:
+        raise HTTPException(400, f"目标名 {name!r} 已存在于 TARGETS")
+    next_n = (max(used_n) + 1) if used_n else 1
+    model = (req.model.strip() or name)
+
+    # 更新 TARGETS 行
+    new_targets_val = ",".join(targets_names + [name])
+    if targets_line_idx is not None:
+        lines[targets_line_idx] = f"TARGETS={new_targets_val}"
+    else:
+        lines.append(f"TARGETS={new_targets_val}")
+
+    # 追加四件套
+    block = [
+        "",
+        f"# ---- 看板新增目标 {name}（TARGET_{next_n}） ----",
+        f"TARGET_{next_n}_NAME={name}",
+        f"TARGET_{next_n}_MODEL={model}",
+        f"TARGET_{next_n}_BASE_URL={req.base_url.strip()}",
+        f"TARGET_{next_n}_API_KEY={req.api_key.strip()}",
+    ]
+    lines.extend(block)
+
+    # 原子写
+    tmp = env_path.with_suffix(".env.tmp")
+    try:
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp.replace(env_path)
+    except OSError as e:
+        raise HTTPException(500, f"写入 .env 失败: {e}")
+
+    # 重新加载 env 到当前进程（load_targets 会 load_env，但显式 set 更新本进程 os.environ）
+    import os
+
+    from llmsec.core.config import load_env
+    os.environ["TARGETS"] = new_targets_val
+    os.environ[f"TARGET_{next_n}_NAME"] = name
+    os.environ[f"TARGET_{next_n}_MODEL"] = model
+    os.environ[f"TARGET_{next_n}_BASE_URL"] = req.base_url.strip()
+    os.environ[f"TARGET_{next_n}_API_KEY"] = req.api_key.strip()
+    load_env()
+
+    return {"ok": True, "name": name, "model": model, "prefix": f"TARGET_{next_n}"}
+
+
+# ============================================================
+# 环境参数配置（连接配置：默认 TARGET / GENERATOR / JUDGE）
+# ============================================================
+def _update_env_vars(updates: dict) -> None:
+    """更新 .env 中指定 KEY=VALUE（存在则替换，不存在则追加）；先备份 .env.bak，原子写。
+
+    供 /api/env PUT 与未来其它 .env 写入复用。注意：只更新传入的 key，其余行/注释原样保留。
+    """
+    import os
+    import shutil
+
+    from llmsec.core.config import PROJECT_ROOT
+    env_path = PROJECT_ROOT / ".env"
+    if not env_path.exists():
+        raise HTTPException(500, ".env 不存在，无法写入")
+    try:
+        shutil.copy2(env_path, str(env_path) + ".bak")
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError as e:
+        raise HTTPException(500, f"读取/备份 .env 失败: {e}")
+
+    keys = set(updates.keys())
+    found: set[str] = set()
+    for i, ln in enumerate(lines):
+        s = ln.lstrip()
+        for k in keys:
+            if s.startswith(k + "="):
+                lines[i] = f"{k}={updates[k]}"
+                found.add(k)
+                break
+    for k in keys - found:
+        lines.append(f"{k}={updates[k]}")
+
+    tmp = env_path.with_name(env_path.name + ".tmp")
+    try:
+        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp.replace(env_path)
+    except OSError as e:
+        raise HTTPException(500, f"写入 .env 失败: {e}")
+    for k, v in updates.items():
+        os.environ[k] = v
+
+
+def _masked(key: str) -> str | None:
+    import os
+
+    v = os.getenv(key, "")
+    if not v:
+        return None
+    if len(v) <= 6:
+        return "****"
+    return v[:3] + "****" + v[-3:]
+
+
+@router.get("/api/env")
+async def api_env():
+    """返回当前连接配置（默认 TARGET / GENERATOR / JUDGE）；api_key 掩码显示。"""
+    from llmsec.core.config import load_env
+    load_env()
+    import os
+    return {
+        "target": {"base_url": os.getenv("TARGET_BASE_URL", ""), "model": os.getenv("TARGET_MODEL", ""),
+                   "api_key_masked": _masked("TARGET_API_KEY")},
+        "generator": {"base_url": os.getenv("GENERATOR_BASE_URL", ""), "model": os.getenv("GENERATOR_MODEL", ""),
+                      "api_key_masked": _masked("GENERATOR_API_KEY")},
+        "judge_model": os.getenv("JUDGE_MODEL", ""),
+    }
+
+
+class EnvUpdate(BaseModel):
+    target_base_url: str | None = None
+    target_model: str | None = None
+    target_api_key: str | None = None          # 留空=不改
+    generator_base_url: str | None = None
+    generator_model: str | None = None
+    generator_api_key: str | None = None
+    judge_model: str | None = None
+
+
+@router.put("/api/env")
+async def api_env_put(req: EnvUpdate):
+    """更新连接配置到 .env（仅写入提供的字段；api_key 留空则不变）。"""
+    mapping = {
+        "target_base_url": "TARGET_BASE_URL", "target_model": "TARGET_MODEL", "target_api_key": "TARGET_API_KEY",
+        "generator_base_url": "GENERATOR_BASE_URL", "generator_model": "GENERATOR_MODEL",
+        "generator_api_key": "GENERATOR_API_KEY", "judge_model": "JUDGE_MODEL",
+    }
+    updates: dict[str, str] = {}
+    for fld, envkey in mapping.items():
+        v = getattr(req, fld)
+        if v is not None and v.strip():
+            updates[envkey] = v.strip()
+    if not updates:
+        raise HTTPException(400, "未提供任何更新字段")
+    _update_env_vars(updates)
+    return {"ok": True, "updated": sorted(updates.keys())}
 
 
 @router.get("/api/targets/probe")

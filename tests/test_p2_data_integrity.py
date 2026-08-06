@@ -113,18 +113,39 @@ def test_f3_read_json_strict_true_raises():
         assert read_json(Path(d) / 'missing.json', default='X', strict=True) == 'X', 'F3: strict=True 文件不存在仍返回 default'
 
 def test_f3_results_matrix_load_corruption_backup():
-    """results.json 损坏时：load 备份残文件 + 返回空矩阵（不静默清零）。"""
+    """F1：results.json 损坏时 load 备份残文件 + 尝试 .bak 恢复 + 仍失败则 raise（不返空矩阵）。"""
+    from llmsec.core.io import CorruptedFileError
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / 'r.json'
         mat = ResultsMatrix()
         mat.upsert('DAN', 'qwen', 3.0, ts=1)
         mat.save(p)
         assert p.exists(), 'F3: 正常 save 后文件存在'
+        # 损坏 results.json
         p.write_text('{"version":1,"results":{"DAN":{"qwen":{', encoding='utf-8')
-        mat2 = ResultsMatrix.load(p)
-        assert mat2.n_for_model('qwen') == 0, 'F3: 损坏 results.json load 返回空矩阵'
+        # F1：无 .bak 可恢复时 raise（不再返空矩阵）
+        try:
+            ResultsMatrix.load(p)
+            raised = False
+        except CorruptedFileError:
+            raised = True
+        assert raised, 'F1: 损坏且无 .bak 时应 raise（不返空矩阵防永久数据丢失）'
         corrupt_bak = Path(str(p) + '.corrupt.bak')
-        assert corrupt_bak.exists(), 'F3: 损坏 results.json 已备份为 .corrupt.bak'
+        assert corrupt_bak.exists(), 'F1: 损坏 results.json 已备份为 .corrupt.bak'
+
+    # F1：有 .bak 时从备份恢复
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / 'r.json'
+        mat = ResultsMatrix()
+        mat.upsert('DAN', 'qwen', 3.0, ts=1)
+        mat.save(p)
+        mat.upsert('DAN2', 'qwen', 5.0, ts=2)
+        mat.save(p)  # 第二次 save → .bak 含第一次的数据（1 条记录）
+        # 损坏主文件
+        p.write_text('{corrupt', encoding='utf-8')
+        mat2 = ResultsMatrix.load(p)
+        # .bak 恢复成功（含第一次 save 的 1 条记录）
+        assert mat2.n_for_model('qwen') == 1, 'F1: 从 .bak 恢复成功（1 条记录）'
 
 def test_f3_state_load_corruption_no_crash():
     """state.json 损坏时：ELOTracker.load 备份 + 不抛（保持初始 ELO）。"""

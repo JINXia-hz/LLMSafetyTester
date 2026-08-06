@@ -96,6 +96,8 @@ def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict],
         tracker.attacker_ratings[method] = pred["elo"]
         if pred.get("std") is not None:
             tracker.attacker_pred_std[method] = pred["std"]
+        # S-0：透传预测来源标记，使下游 boundary/ranking 可区分严格预测与启发式兜底
+        tracker.attacker_pred_source[method] = pred.get("source", "unknown")
 
 
 
@@ -352,6 +354,7 @@ def run_attack_phase(records: list[dict],
         logger.info(f"     方法: {', '.join(m[:25] for m in seed_methods)}")
 
         seed_rows: list[tuple[str, float]] = []
+        seed_statuses: list[str] = []
         for method_name in seed_methods:
             rec = method_records[method_name]
             prompt_text = rec["prompt"]
@@ -371,6 +374,7 @@ def run_attack_phase(records: list[dict],
             tested.add(method_name)
             all_results.append(_build_attack_row(rec, result, 0, "seed"))
             seed_rows.append((method_name, result["eval_score"]))
+            seed_statuses.append(result.get("status", ""))
 
             score = result["eval_score"]
             sym = "✅" if score > 0 else ("🔶" if score > -1 else "❌")
@@ -380,7 +384,7 @@ def run_attack_phase(records: list[dict],
 
         # Model B 同步轮次 ELO：种子批用轮始快照一次性更新（与主循环语义统一）
         if seed_rows:
-            tracker.update_round(DEFENDER_NAME, seed_rows, round_idx=0)
+            tracker.update_round(DEFENDER_NAME, seed_rows, round_idx=0, statuses=seed_statuses)
 
         # 明细先于 state 落盘（同主循环顺序，防崩溃窗口丢数据）
         write_jsonl(attack_file, all_results)
@@ -455,6 +459,7 @@ def run_attack_phase(records: list[dict],
             raw_results = [_eval_one(m) for m in next_methods]
 
         round_rows: list[tuple[str, float]] = []
+        round_statuses: list[str] = []
         for method_name, result in zip(next_methods, raw_results):
             # API 错误（断网等）不更新 Elo、不记结果，方法保持未测状态以便下轮重试
             if result["status"] == "api_error":
@@ -465,6 +470,7 @@ def run_attack_phase(records: list[dict],
             tested.add(method_name)
             all_results.append(_build_attack_row(method_records[method_name], result, round_idx, "attack"))
             round_rows.append((method_name, result["eval_score"]))
+            round_statuses.append(result.get("status", ""))
             score = result["eval_score"]
             sym = "✅" if score > 0 else ("🔶" if score > -1 else "❌")
             logger.info(f"     → {method_name[:40]} {sym} score={score:.1f} {result['status']}")
@@ -473,7 +479,7 @@ def run_attack_phase(records: list[dict],
 
         # Model B 同步轮次 ELO：批内全部观测用轮始快照一次性更新（顺序无关、消除 batch↔K 耦合）
         if round_rows:
-            tracker.update_round(DEFENDER_NAME, round_rows, round_idx=round_idx)
+            tracker.update_round(DEFENDER_NAME, round_rows, round_idx=round_idx, statuses=round_statuses)
 
         # 落盘顺序：明细先于 state——若 state.json 已含本轮 GT 但 attack_results.jsonl
         # 还没写时崩溃，resume 会把本轮方法标为"已测"但明细永久丢失（ASR/税/threats 全失真）。

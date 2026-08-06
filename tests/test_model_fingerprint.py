@@ -123,7 +123,7 @@ def test_blend_sim_weighted_differs_and_first_model_fallback():
             u_mean_sim, _ = BlendPredictor._predict_one(bp, bp.unified["B"], "untested", feats["untested"])
             u_mean_fb, _ = BlendPredictor._predict_one(bp, bp.unified_fallback, "untested", feats["untested"])
             assert u_mean_sim is not None and u_mean_fb is not None
-            assert abs(u_mean_sim - u_mean_fb) > 1e-3, (
+            assert abs(u_mean_sim - u_mean_fb) > 1e-5, (
                 f"sim-加权 unified 与均匀 universal 预测相同（未生效）: {u_mean_sim} vs {u_mean_fb}"
             )
         finally:

@@ -13,7 +13,7 @@ const PLOT_FONT = { family: 'ui-sans-serif, system-ui, sans-serif', color: C.tex
 // ---------- 主题（绢本纸日 / 石窟夜色） ----------
 const THEME_CHART = {
   light: { text: '#2F343B', grid: '#E3D8B8', primary: '#46586B', muted: '#8A8571' },
-  dark:  { text: '#E4D8BE', grid: '#454D55', primary: '#7A96AF', muted: '#9A917B' },
+  dark:  { text: '#EFE3C6', grid: '#4B4136', primary: '#7E9AB4', muted: '#AC9F83' },  // 漆夜玄朱联动
 };
 let theme = localStorage.getItem('llmsec-theme') || 'light';
 
@@ -920,6 +920,38 @@ function drawPredCi(filter) {
 
 $('predCiSearch').addEventListener('input', e => drawPredCi(e.target.value));
 
+function renderBlendPanel(b) {
+  const simModels = b.unified_sim_weighted_models || [];
+  const donorSims = b.donor_similarities || {};
+  const lambdas = b.per_target_lambda || {};
+  const fallbackLam = lambdas._fallback_uniform;
+  const spm = b.samples_per_model || {};
+  $('blendSub').innerHTML =
+    `均匀 universal：${b.unified_fallback_trained ? '已训练' : '无'} · ` +
+    `fallback λ*：${fallbackLam != null ? fmtNum(fallbackLam, 4) : '—'} · ` +
+    `启用 sim-加权：${simModels.length} 个目标 · ` +
+    `已建模目标：${(b.models_trained || []).length}`;
+  const rows = (b.models_trained || []).map(t => {
+    const active = simModels.includes(t);
+    const sims = donorSims[t] || {};
+    const simStr = Object.keys(sims).length
+      ? Object.entries(sims).sort((a, c) => c[1] - a[1]).map(([dn, sv]) => `${esc(dn)}:${sv.toFixed(2)}`).join('、')
+      : '—';
+    const lam = lambdas[t];
+    return `<tr style="border-top:1px solid var(--c-border);">
+      <td class="py-1 pr-2 font-mono">${esc(t)}</td>
+      <td class="py-1 px-2 text-center">${active ? '<span style="color:var(--c-good)">✓ 启用</span>' : '<span style="color:var(--c-muted)">回退均匀</span>'}</td>
+      <td class="py-1 px-2" style="color: var(--c-muted);">${simStr}</td>
+      <td class="py-1 px-2 text-center">${lam != null ? fmtNum(lam, 4) : '—'}</td>
+      <td class="py-1 pl-2 text-center">${spm[t] ?? '—'}</td>
+    </tr>`;
+  }).join('');
+  $('blendBody').innerHTML = `<table class="w-full text-xs">
+    <thead><tr style="color: var(--c-muted);">
+      <th class="text-left py-1 pr-2">目标</th><th>sim-加权</th><th class="text-left py-1 px-2">donor 相似度</th><th>λ*</th><th>GT</th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
 async function loadModel() {
   try {
     const d = await api('/api/model' + runQuery());
@@ -930,7 +962,25 @@ async function loadModel() {
       return;
     }
     $('modelEmpty').classList.add('hidden'); $('modelBody').classList.remove('hidden');
+
+    // ---- 多模型层（BlendPredictor · 发现层 sim-加权迁移）----
+    const blend = d.blend_predictor;
+    if (blend && !blend.error && (blend.unified_fallback_trained || (blend.unified_sim_weighted_models || []).length)) {
+      $('blendPanel').style.display = '';
+      renderBlendPanel(blend);
+    } else {
+      $('blendPanel').style.display = 'none';
+    }
+
+    // ---- 单模型层（ClusterEloPredictor · SVD-Ridge）----
     const s = d.svd_ridge;
+    if (!s) {
+      // 多目标 run 可能只有多模型层，无单模型 SVD-Ridge 诊断
+      ['md_lambda', 'md_sigma', 'md_df', 'md_gt'].forEach(id => { const e = $(id); if (e) e.textContent = '-'; });
+      clearCharts(['chart_regpath', 'chart_pca', 'chart_importance', 'chart_pred_ci']);
+      predCiData = [];
+      return;
+    }
 
     setMetric('md_lambda', s.lambda_opt ?? null, v => fmtNum(v, 4));
     setMetric('md_sigma', s.sigma2 ?? null, v => fmtNum(v, 1));
@@ -989,6 +1039,235 @@ async function loadModel() {
 }
 
 // ---------- 运行控制 ----------
+// 任务 kind → 友好标签（HPO 等新 kind 在任务列表里显示中文）
+const TASK_LABELS = {
+  evaluate: '自适应评估', hpo: 'HPO 搜索',
+};
+function taskLabel(kind) { return TASK_LABELS[kind] || kind; }
+
+// ---- 运行控制：任务选择器（先选任务，再展开对应配置） ----
+function selectTask(task) {
+  document.querySelectorAll('.task-card').forEach(c => c.classList.toggle('active', c.dataset.task === task));
+  ['evaluate', 'hpo', 'env'].forEach(t => {
+    const f = $('form-' + t);
+    if (!f) return;
+    const show = t === task;
+    if (show && f.classList.contains('hidden')) {
+      f.classList.remove('hidden');
+      f.classList.remove('task-form'); void f.offsetWidth; f.classList.add('task-form');  // 重触发入场
+    } else if (!show) {
+      f.classList.add('hidden');
+    }
+  });
+}
+
+// ---- HPO 配置台 ----
+let _hpoParamsLoaded = false;
+let hpoParamsCache = [];
+
+async function loadHpoParams() {
+  try {
+    const d = await api('/api/hpo/params');
+    hpoParamsCache = d.params || [];
+    renderHpoFactors();
+  } catch (e) { setStatus('HPO 因子加载失败: ' + e.message); }
+}
+
+function renderHpoFactors() {
+  const box = $('hpoFactors');
+  if (!box) return;
+  box.innerHTML = hpoParamsCache.map(p => {
+    const isCat = p.type === 'categorical' || (p.choices && p.choices.length);
+    const cur = p.current != null ? `当前 ${p.current}` : 'CLI 参数';
+    const range = isCat
+      ? `<input type="text" data-f="${p.name}-choices" value="${(p.choices || []).join(',')}" style="width:11em;" title="逗号分隔候选">`
+      : `<input type="number" data-f="${p.name}-low" value="${p.low ?? ''}" title="下限">
+         <input type="number" data-f="${p.name}-high" value="${p.high ?? ''}" title="上限">
+         <input type="number" data-f="${p.name}-step" value="${p.step ?? ''}" title="步长">`;
+    return `<label class="factor-row" data-row="${p.name}">
+      <input type="checkbox" data-f="${p.name}-chk">
+      <span class="factor-name" title="${esc(p.group)} · ${esc(cur)}">${p.name}</span>
+      <span class="factor-cur">${esc(cur)}</span>
+      <span class="factor-range">${range}</span>
+    </label>`;
+  }).join('');
+  box.querySelectorAll('input[type=checkbox]').forEach(chk => {
+    chk.addEventListener('change', () => {
+      chk.closest('.factor-row').classList.toggle('on', chk.checked);
+      updateFactorCount();
+    });
+  });
+  updateFactorCount();
+}
+
+function updateFactorCount() {
+  const n = document.querySelectorAll('#hpoFactors input[type=checkbox]:checked').length;
+  const el = $('factorCount');
+  if (el) el.textContent = `已选 ${n}`;
+}
+
+function factorSelectAll(on) {
+  document.querySelectorAll('#hpoFactors input[type=checkbox]').forEach(chk => {
+    chk.checked = on;
+    chk.closest('.factor-row').classList.toggle('on', on);
+  });
+  updateFactorCount();
+}
+
+function toggleFactors() {
+  const d = $('factorDrawer'), t = $('factorToggle');
+  d.classList.toggle('open');
+  t.classList.toggle('open');
+}
+
+// 优化方向分段开关 + 时间预算快捷选择（一次性绑定）
+(function wireRunControls() {
+  document.querySelectorAll('#hpoDirSeg button').forEach(b => {
+    b.addEventListener('click', () => {
+      document.querySelectorAll('#hpoDirSeg button').forEach(x => x.classList.toggle('active', x === b));
+      $('hpoDir').value = b.dataset.v;
+    });
+  });
+  const clock = $('hpoWallClock'), pop = $('hpoWallPop');
+  if (clock && pop) {
+    clock.addEventListener('click', e => { e.stopPropagation(); pop.classList.toggle('hidden'); });
+    pop.querySelectorAll('button').forEach(b => {
+      b.addEventListener('click', () => { $('hpoWall').value = b.dataset.m; pop.classList.add('hidden'); });
+    });
+    document.addEventListener('click', e => { if (!pop.contains(e.target)) pop.classList.add('hidden'); });
+  }
+})();
+
+function collectHpoSpace() {
+  const space = {};
+  document.querySelectorAll('#hpoFactors input[type=checkbox]').forEach(chk => {
+    if (!chk.checked) return;
+    const name = chk.dataset.f.replace(/-chk$/, '');
+    const p = hpoParamsCache.find(x => x.name === name) || {};
+    const isCat = p.type === 'categorical' || (p.choices && p.choices.length);
+    if (isCat) {
+      const el = document.querySelector(`[data-f="${name}-choices"]`);
+      const choices = (el && el.value || '').split(',').map(s => s.trim()).filter(Boolean);
+      space[name] = { type: 'categorical', choices };
+    } else {
+      const lo = parseFloat(document.querySelector(`[data-f="${name}-low"]`).value);
+      const hi = parseFloat(document.querySelector(`[data-f="${name}-high"]`).value);
+      const st = parseFloat(document.querySelector(`[data-f="${name}-step"]`).value);
+      if (!isFinite(lo) || !isFinite(hi)) { throw new Error(`${name}: low/high 必填`); }
+      const spec = { type: p.type || 'float', low: lo, high: hi };
+      if (isFinite(st)) spec.step = st;
+      if (p.log) spec.log = true;
+      space[name] = spec;
+    }
+  });
+  return space;
+}
+
+function collectHpoConfig() {
+  return {
+    name: ($('hpoName').value || '').trim() || `dash-${Date.now()}`,
+    objective: { metric: $('hpoMetric').value, direction: $('hpoDir').value, aggregate: 'mean' },
+    strategy: $('hpoStrategy').value,
+    max_trials: intVal('hpoTrials', 12),
+    max_wall_minutes: intVal('hpoWall', 0),
+    repeats: intVal('hpoRepeats', 1),
+    fixed: { input: $('hpoInput').value },
+    space: collectHpoSpace(),
+    est_methods_per_trial: 50,
+  };
+}
+function intVal(id, dflt) { const v = parseInt($(id).value, 10); return isFinite(v) ? v : dflt; }
+
+async function hpoPreview() {
+  try {
+    const cfg = collectHpoConfig();
+    const r = await fetch('/api/hpo/preview', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || r.statusText);
+    const warn = (d.warnings || []).length ? ` · ⚠ ${d.warnings.join('; ')}` : '';
+    $('hpoPreview').innerHTML =
+      `<span style="color:var(--c-text);">${d.n_configs} configs × ${cfg.repeats} = <b>${d.n_trials}</b> trials</span> · ` +
+      `约 <b>${d.est_method_calls}</b> 次方法调用${warn}`;
+  } catch (e) { $('hpoPreview').innerHTML = `<span style="color:var(--c-warn);">预览失败: ${e.message}</span>`; }
+}
+
+async function startHpo() {
+  try {
+    const cfg = collectHpoConfig();
+    const res = await fetch('/api/run/hpo', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg),
+    });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.detail || res.statusText);
+    setStatus(`HPO study '${cfg.name}' 已启动（任务 ${d.id}）`);
+    startTaskPolling();
+    loadTasks();
+  } catch (e) { setStatus('HPO 启动失败: ' + e.message); }
+}
+
+// ---- 目标「+」弹窗 ----
+function openAddTarget() {
+  ['atName', 'atModel', 'atUrl', 'atKey'].forEach(id => { const e = $(id); if (e) e.value = ''; });
+  $('addTargetModal').classList.remove('hidden');
+}
+function closeAddTarget() { $('addTargetModal').classList.add('hidden'); }
+
+async function submitAddTarget() {
+  const name = $('atName').value.trim();
+  const url = $('atUrl').value.trim();
+  if (!name || !url) { setStatus('目标名与 base_url 必填'); return; }
+  try {
+    const res = await fetch('/api/targets/add', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name, model: $('atModel').value.trim() || name, base_url: url, api_key: $('atKey').value.trim() || 'none',
+      }),
+    });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.detail || res.statusText);
+    setStatus(`目标 ${name} 已写入 .env（${d.prefix}），刷新下拉…`);
+    closeAddTarget();
+    loadRunSection();  // 刷新下拉（含探活）
+  } catch (e) { setStatus('添加目标失败: ' + e.message); }
+}
+
+// ---- 连接配置（.env）----
+async function loadEnv() {
+  try {
+    const d = await api('/api/env');
+    const t = d.target || {}, g = d.generator || {};
+    if ($('envTUrl')) $('envTUrl').value = t.base_url || '';
+    if ($('envTModel')) $('envTModel').value = t.model || '';
+    if ($('envTKey')) $('envTKey').value = '';
+    if ($('envTKeyHint')) $('envTKeyHint').textContent = `当前：${t.api_key_masked || '未配置'}`;
+    if ($('envGUrl')) $('envGUrl').value = g.base_url || '';
+    if ($('envGModel')) $('envGModel').value = g.model || '';
+    if ($('envGKey')) $('envGKey').value = '';
+    if ($('envGKeyHint')) $('envGKeyHint').textContent = `当前：${g.api_key_masked || '未配置'}`;
+    if ($('envJudge')) $('envJudge').value = d.judge_model || '';
+  } catch (e) { /* 静默：未配置时不阻塞运行控制页 */ }
+}
+
+async function saveEnv() {
+  const body = {};
+  const collect = (id, key) => { const v = $(id).value.trim(); if (v) body[key] = v; };
+  collect('envTUrl', 'target_base_url'); collect('envTModel', 'target_model'); collect('envTKey', 'target_api_key');
+  collect('envGUrl', 'generator_base_url'); collect('envGModel', 'generator_model'); collect('envGKey', 'generator_api_key');
+  collect('envJudge', 'judge_model');
+  if (Object.keys(body).length === 0) { setStatus('未填写任何字段'); return; }
+  try {
+    const res = await fetch('/api/env', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.detail || res.statusText);
+    setStatus(`环境配置已保存（${(d.updated || []).join(', ')}）`);
+    loadEnv();  // 刷新掩码
+  } catch (e) { setStatus('环境配置保存失败: ' + e.message); }
+}
+
 async function loadRunSection() {
   try {
     const [sets, tgts] = await Promise.all([api('/api/attack-sets'), api('/api/targets')]);
@@ -1002,10 +1281,25 @@ async function loadRunSection() {
       opt.value = name; opt.textContent = label;
       sel.appendChild(opt);
     });
+    // HPO 配置台的攻击集下拉同步填充
+    const hpoSel = $('hpoInput');
+    if (hpoSel) {
+      hpoSel.innerHTML = '';
+      (sets.files || []).forEach(f => {
+        const name = typeof f === 'string' ? f : f.name;
+        const opt = document.createElement('option');
+        opt.value = name; opt.textContent = name;
+        hpoSel.appendChild(opt);
+      });
+    }
+    // HPO 因子清单（仅加载一次）
+    if (!_hpoParamsLoaded) { _hpoParamsLoaded = true; loadHpoParams(); }
+    // 环境参数配置（右卡）每次刷新（值可能被保存更新）
+    loadEnv();
     // 目标模型下拉（单选，来自 .env TARGETS）
     const tsel = $('evalTarget');
     if (tsel) {
-      tsel.innerHTML = '<option value="">（.env 默认）</option>';
+      tsel.innerHTML = '<option value="">全部目标（多模型扫描）</option>';
       (tgts.targets || []).forEach(t => {
         const opt = document.createElement('option');
         opt.value = t.name; opt.textContent = t.name;
@@ -1114,21 +1408,6 @@ function stopTaskPolling() {
   if (taskPollTimer) { clearInterval(taskPollTimer); taskPollTimer = null; }
 }
 
-async function startTask(kind) {
-  try {
-    const res = await fetch(`/api/run/${kind}`, { method: 'POST' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || res.status);
-    }
-    const view = await res.json();
-    setStatus(`${kind} 任务已启动`);
-    if (view.id) watchTask(view.id);
-    startTaskPolling();
-    await loadTasks();
-  } catch (e) { setStatus(`启动失败: ${e.message}`); }
-}
-
 async function startEvaluate() {
   try {
     const res = await fetch('/api/run/evaluate', {
@@ -1233,7 +1512,7 @@ function _buildTaskCard(t) {
   card.innerHTML = `
     <div class="flex items-center justify-between mb-1 gap-2 flex-wrap" data-role="header" style="cursor:pointer;">
       <div class="flex items-center gap-2"><span class="task-chevron" data-role="chevron">▶</span><span class="cluster-tag" data-role="badge"></span>
-        <span class="font-semibold">${esc(t.kind)}</span>
+        <span class="font-semibold">${esc(taskLabel(t.kind))}</span>
         <span class="text-xs" style="color: var(--c-muted);">${esc(t.started_at?.slice(11, 19) || '')}</span></div>
       <div class="flex items-center gap-3" data-role="meta">
         <span class="text-xs font-mono" style="color: var(--c-muted);">${esc(t.cmd)}</span>

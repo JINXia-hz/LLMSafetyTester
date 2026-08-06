@@ -118,8 +118,9 @@ def test_convergence_resists_false_positive():
     defender = "test-model"
 
     # 模拟多轮防御方 Elo 大幅波动（去趋势后噪声大 → CI 半宽远超 ±20 目标）
-    tracker._round_defender_elos[defender] = [1500.0, 1560.0, 1490.0, 1555.0, 1505.0]
-    tracker.defender_ratings[defender] = 1505.0
+    # B1：CONV_WINDOW_MIN=6，需 >= 6 轮才判收敛
+    tracker._round_defender_elos[defender] = [1500.0, 1560.0, 1490.0, 1555.0, 1505.0, 1545.0, 1495.0, 1510.0]
+    tracker.defender_ratings[defender] = 1510.0
 
     # 构造足够的方法数以满足覆盖率
     for i in range(50):
@@ -137,8 +138,9 @@ def test_convergence_true_positive():
     defender = "test-model"
 
     # 防御方 Elo 稳定在 ~1500（低噪声 + 低漂移 → CI 半宽 < ±20）
-    tracker.defender_ratings[defender] = 1501.0
-    tracker._round_defender_elos[defender] = [1495.0, 1502.0, 1498.0, 1501.0]
+    # B1：CONV_WINDOW_MIN=6，需 >= 6 轮才判收敛
+    tracker.defender_ratings[defender] = 1498.0
+    tracker._round_defender_elos[defender] = [1495.0, 1502.0, 1498.0, 1501.0, 1499.0, 1500.0, 1502.0, 1498.0]
 
     # 总方法 50，已测 15 => 覆盖率 30%
     for i in range(50):

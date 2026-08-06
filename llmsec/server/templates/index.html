@@ -22,6 +22,7 @@
   </script>
   <style>
     :root {
+      color-scheme: light;
       --c-bg: #EFE6D2;          /* 绢米 */
       --c-card: #F6EFDE;        /* 册页米白 */
       --c-sidebar: #46586B;     /* 石青 */
@@ -45,37 +46,39 @@
       --c-log-text: #CDBE9C;
       --c-plaque1: #46586B;
       --c-plaque2: #3A495A;
+      --c-border: var(--c-line);   /* 别名：dropZone/因子行等引用 */
       --serif: "KaiTi", "STKaiti", "Kaiti SC", "SimSun", serif;
     }
-    /* ---------- C-2 石窟夜色（暗色主题） ---------- */
+    /* ---------- C-2 漆夜玄朱（暗色主题）：黑地朱绘描金，取汉唐漆器正色 ---------- */
     [data-theme="dark"] {
-      --c-bg: #2A2F35;
-      --c-card: #353C43;
-      --c-sidebar: #22272C;
-      --c-sidebar-deep: #1B1F23;
-      --c-primary: #5A748C;
-      --c-accent: #C07358;
-      --c-warn: #C07358;
-      --c-safe: #84987A;
-      --c-ochre: #C49A54;
-      --c-deep: #96604A;
-      --c-gold: #B8963A;
-      --c-text: #E4D8BE;
-      --c-muted: #A79C85;
-      --c-line: #454D55;
+      color-scheme: dark;
+      --c-bg: #1C1814;            /* 玄黑（暖黑漆地） */
+      --c-card: #2B241D;          /* 漆黑提亮 */
+      --c-sidebar: #15120E;
+      --c-sidebar-deep: #0F0D0A;
+      --c-primary: #5E7A94;       /* 黛青（丹楹青天花之对比） */
+      --c-accent: #C0492B;        /* 朱 */
+      --c-warn: #C0492B;
+      --c-safe: #7E9478;
+      --c-ochre: #C99A52;
+      --c-deep: #96563C;
+      --c-gold: #D9B45C;          /* 戗金 */
+      --c-text: #EFE3C6;          /* 牙白 */
+      --c-muted: #AC9F83;
+      --c-line: #4B4136;
       --c-on-seal: #F8EFD8;
-      --c-topbar: #2F353B;
-      --c-input-bg: #2B3138;
-      --c-th-bg: #3E4650;
-      --c-btn-plain-bg: #454D55;
-      --c-log-bg: #1E2226;
-      --c-log-text: #CDBE9C;
-      --c-plaque1: #3E5266;
-      --c-plaque2: #31404F;
+      --c-topbar: #241F19;
+      --c-input-bg: #262019;
+      --c-th-bg: #3D342A;
+      --c-btn-plain-bg: #453B2F;
+      --c-log-bg: #171310;
+      --c-log-text: #D9C89E;
+      --c-plaque1: #33271E;       /* 玄漆匾额 */
+      --c-plaque2: #241C15;
     }
-    [data-theme="dark"] .badge-gt { background: rgba(132,152,122,.22); color: #A9BC9E; }
-    [data-theme="dark"] .badge-pred { background: rgba(90,116,140,.25); color: #9FB6C9; }
-    [data-theme="dark"] .report-body p, [data-theme="dark"] .report-body li { color: #C9BC9E; }
+    [data-theme="dark"] .badge-gt { background: rgba(126,148,120,.25); color: #B9C6AE; }
+    [data-theme="dark"] .badge-pred { background: rgba(94,122,148,.30); color: #ACC1D4; }
+    [data-theme="dark"] .report-body p, [data-theme="dark"] .report-body li { color: #CFC2A2; }
     [data-theme="dark"] .card:has(> .metric-value)::after {
       background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56' viewBox='0 0 56 56'%3E%3Cg fill='none' stroke='%23E4D8BE' stroke-width='1'%3E%3Crect x='16' y='16' width='24' height='24'/%3E%3Crect x='21' y='21' width='14' height='14' transform='rotate(45 28 28)'/%3E%3Ccircle cx='28' cy='28' r='3'/%3E%3C/g%3E%3C/svg%3E");
       opacity: .10;
@@ -235,7 +238,7 @@
     .card[data-task-id] .task-chevron { display: inline-block; color: var(--c-muted); transition: transform .15s; font-size: .7rem; }
     .card[data-task-id][data-collapsed="0"] .task-chevron { transform: rotate(90deg); }
     .card[data-task-id][data-collapsed="1"] .log-box { display: none; }
-    select, input[type="number"], input[type="text"] { border: 1px solid var(--c-line); border-radius: 4px; padding: 6px 10px; font-size: 0.85rem; background: var(--c-input-bg); color: var(--c-text); }
+    select, input[type="number"], input[type="text"], input[type="password"] { border: 1px solid var(--c-line); border-radius: 4px; padding: 6px 10px; font-size: 0.85rem; background: var(--c-input-bg); color: var(--c-text); }
     .cluster-tag { font-size: 0.72rem; padding: 2px 8px; border-radius: 2px; font-weight: 600; }
 
     /* ---------- 聚类投影点选 → 簇卡片描金闪高 ---------- */
@@ -332,11 +335,140 @@
       background-size: 200% 100%; opacity: .12; animation: skelSweep 1.6s linear infinite;
     }
 
+    /* ---------- 运行控制：任务选择卡 + 渐进式表单 ---------- */
+    .task-card {
+      display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+      background: var(--c-card); border: 1px solid var(--c-line); border-radius: 6px;
+      padding: 14px 16px; cursor: pointer; text-align: left;
+      transition: transform .15s ease, box-shadow .2s ease, border-color .2s ease;
+    }
+    .task-card:hover { transform: translateY(-2px); box-shadow: 0 4px 14px rgba(0,0,0,.10); }
+    .task-card.active { border-color: var(--c-gold); box-shadow: 0 0 0 1.5px var(--c-gold), 0 4px 14px rgba(191,160,60,.18); }
+    .task-seal {
+      width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
+      font-family: var(--serif); font-size: 15px; color: var(--c-on-seal);
+      background: var(--c-primary); border-radius: 3px;
+      box-shadow: inset 0 0 0 1.5px rgba(248,239,216,.35);
+    }
+    .task-card.active .task-seal { background: var(--c-accent); }
+    .task-name { font-family: var(--serif); font-weight: 700; font-size: 0.95rem; color: var(--c-text); }
+    .task-desc { font-size: 0.75rem; color: var(--c-muted); line-height: 1.5; }
+    .task-form { animation: secIn .22s ease both; }
+
+    /* 字段行：标签 + 控件 + 一行注释（取代 placeholder 墙） */
+    .field { display: flex; flex-direction: column; gap: 3px; }
+    .field-head { display: flex; align-items: center; gap: 8px; }
+    .field-label { flex: none; width: 4.5em; font-size: 0.78rem; color: var(--c-muted); }
+    .field-head > select, .field-head > input, .field-head .unit-wrap { flex: 1; min-width: 0; }
+    .field-hint { font-size: 0.68rem; color: var(--c-muted); padding-left: calc(4.5em + 8px); opacity: .85; }
+    .unit-wrap { position: relative; display: flex; align-items: center; }
+    .unit-wrap input { width: 100%; padding-right: 3.2em; }
+    .unit {
+      position: absolute; right: 8px; font-size: 0.68rem; color: var(--c-muted);
+      pointer-events: none; white-space: nowrap;
+    }
+    /* 分段开关（min/max 等二选一） */
+    .seg { display: flex; flex: none; border: 1px solid var(--c-line); border-radius: 4px; overflow: hidden; }
+    .seg button {
+      padding: 6px 10px; font-size: 0.72rem; background: var(--c-btn-plain-bg); color: var(--c-muted);
+      border: none; cursor: pointer; transition: background .15s, color .15s;
+    }
+    .seg button.active { background: var(--c-primary); color: #F3E9CE; }
+    /* 快捷弹层（时间预算等） */
+    .quick-btn {
+      flex: none; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
+      background: var(--c-btn-plain-bg); color: var(--c-text); border: 1px solid var(--c-line);
+      border-radius: 4px; cursor: pointer; transition: box-shadow .15s;
+    }
+    .quick-btn:hover { box-shadow: 0 0 0 1.5px var(--c-gold); }
+    .quick-pop {
+      position: absolute; right: 0; top: 34px; z-index: 70; min-width: 120px;
+      background: var(--c-card); border: 1px solid var(--c-gold); border-radius: 4px;
+      box-shadow: 0 6px 18px rgba(0,0,0,.18); overflow: hidden;
+      animation: secIn .15s ease both;
+    }
+    .quick-pop button {
+      display: block; width: 100%; text-align: left; padding: 7px 12px; font-size: 0.75rem;
+      background: none; border: none; color: var(--c-text); cursor: pointer;
+    }
+    .quick-pop button:hover { background: var(--c-th-bg); }
+    /* 因子抽屉 */
+    .factor-toggle {
+      width: 100%; display: flex; align-items: center; gap: 8px; margin-top: 10px;
+      padding: 8px 10px; border: 1px dashed var(--c-line); border-radius: 4px;
+      background: none; color: var(--c-text); font-size: 0.78rem; cursor: pointer;
+      font-family: var(--serif); transition: border-color .15s;
+    }
+    .factor-toggle:hover { border-color: var(--c-gold); }
+    .factor-toggle .caret { margin-left: auto; transition: transform .2s ease; color: var(--c-muted); }
+    .factor-toggle.open .caret { transform: rotate(90deg); }
+    .factor-count {
+      font-size: 0.68rem; padding: 0 8px; border-radius: 2px;
+      background: rgba(191,160,60,.16); color: var(--c-gold); font-weight: 700;
+    }
+    .factor-drawer { max-height: 0; overflow: hidden; transition: max-height .3s ease; }
+    .factor-drawer.open { max-height: 340px; overflow-y: auto; padding-bottom: 8px; }
+    .factor-row {
+      display: grid; grid-template-columns: auto minmax(0,1fr) auto auto; align-items: center;
+      gap: 8px; padding: 5px 2px; border-top: 1px solid var(--c-line); font-size: 0.75rem;
+    }
+    .factor-name { font-family: ui-monospace, Consolas, monospace; font-size: 0.72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .factor-cur { font-size: 0.68rem; color: var(--c-muted); white-space: nowrap; }
+    .factor-range { display: flex; gap: 4px; }
+    .factor-range input { width: 4.2em; font-size: 0.72rem; padding: 3px 6px; }
+    .factor-row:not(.on) .factor-range { opacity: .35; pointer-events: none; }
+    .factor-row:not(.on) .factor-name, .factor-row:not(.on) .factor-cur { opacity: .55; }
+    /* 连接配置分组小标题 */
+    .env-group {
+      font-family: var(--serif); font-weight: 700; font-size: 0.8rem; color: var(--c-text);
+      border-left: 4px solid var(--c-gold); padding-left: 8px; margin-top: 10px;
+    }
+    .env-group .env-sub { font-weight: 400; font-size: 0.68rem; color: var(--c-muted); margin-left: 6px; }
+
+    /* ---------- 运行控制：窄列 + 卷草纹侧饰带 + 全局雾霭/灯晕 ---------- */
+    /* 侧饰带放在 wrap 内边距里（padding 44px），不悬在元素外部——避免被裁切/宽度玄学 */
+    .run-wrap { position: relative; max-width: calc(56rem + 88px); margin: 0 auto; padding: 0 44px; }
+    /* 卷草（唐草忍冬 S 波）竖带 + 联珠纹内缘，描金低透明度，仅作暗纹 */
+    .run-wrap::before, .run-wrap::after {
+      content: ""; position: absolute; top: 4px; bottom: 4px; width: 28px; pointer-events: none;
+      opacity: .28;   /* 绢本上需更浓才可见；夜色另设 */
+      z-index: 6;     /* 压在雾层之上，防止被雾洗没 */
+      background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='120' viewBox='0 0 40 120'%3E%3Cg fill='none' stroke='%23BFA03C' stroke-width='1.7'%3E%3Cpath d='M18 0 C36 20 0 40 18 60 C36 80 0 100 18 120'/%3E%3Cpath d='M26 20 q8 -7 13 -7 q-2 8 -13 7'/%3E%3Cpath d='M10 52 q-8 7 -13 7 q2 -8 13 -7'/%3E%3Cpath d='M26 80 q8 -7 13 -7 q-2 8 -13 7'/%3E%3Ccircle cx='18' cy='60' r='2.8'/%3E%3C/g%3E%3Cg fill='%23BFA03C'%3E%3Ccircle cx='34' cy='6' r='1.9'/%3E%3Ccircle cx='34' cy='18' r='1.9'/%3E%3Ccircle cx='34' cy='30' r='1.9'/%3E%3Ccircle cx='34' cy='42' r='1.9'/%3E%3Ccircle cx='34' cy='54' r='1.9'/%3E%3Ccircle cx='34' cy='66' r='1.9'/%3E%3Ccircle cx='34' cy='78' r='1.9'/%3E%3Ccircle cx='34' cy='90' r='1.9'/%3E%3Ccircle cx='34' cy='102' r='1.9'/%3E%3Ccircle cx='34' cy='114' r='1.9'/%3E%3C/g%3E%3C/svg%3E") repeat-y center top / 28px 84px;
+    }
+    [data-theme="dark"] .run-wrap::before, [data-theme="dark"] .run-wrap::after { opacity: .13; }
+    .run-wrap::before { left: 6px; }
+    .run-wrap::after { right: 6px; }
+    @media (max-width: 1000px) { .run-wrap { padding: 0; } .run-wrap::before, .run-wrap::after { display: none; } }
+
+    /* 雾霭：feTurbulence 分形噪声真雾，贴在未选卡上（白天=白纱+暖灰双层，夜=牙白雾） */
+    .task-card { position: relative; overflow: hidden; }
+    .task-card:not(.active) { opacity: .85; }
+    .task-card:not(.active)::after {
+      content: ""; position: absolute; inset: -60%; pointer-events: none; opacity: .55;
+      background-repeat: no-repeat; background-size: 100% 100%, 100% 100%;
+      background-image:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='300'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.008 0.014' numOctaves='5' seed='3'/%3E%3CfeGaussianBlur stdDeviation='1.5'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 0.99 1.1 1.1 1.1 0 -0.75'/%3E%3C/filter%3E%3Crect width='400' height='300' filter='url(%23f)'/%3E%3C/svg%3E"),
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='300'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.01 0.02' numOctaves='4' seed='19'/%3E%3CfeColorMatrix values='0 0 0 0 0.62 0 0 0 0 0.58 0 0 0 0 0.45 1.5 1.5 1.5 0 -0.75'/%3E%3C/filter%3E%3Crect width='400' height='300' filter='url(%23f)'/%3E%3C/svg%3E");
+      animation: mistDrift 40s ease-in-out infinite alternate;
+    }
+    [data-theme="dark"] .task-card:not(.active)::after {
+      opacity: .36; background-size: 100% 100%;
+      background-image:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='300'%3E%3Cfilter id='f'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.008 0.014' numOctaves='5' seed='3'/%3E%3CfeGaussianBlur stdDeviation='1.5'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 0.98 0.9 0.9 0.9 0 -0.75'/%3E%3C/filter%3E%3Crect width='400' height='300' filter='url(%23f)'/%3E%3C/svg%3E");
+    }
+    @keyframes mistDrift { from { transform: translate(-4%, -2%) scale(1); } to { transform: translate(4%, 2%) scale(1.06); } }
+    /* 选中卡与表单同属"灯下之物"：同一描金光晕（夜色收敛衰变） */
+    .task-card.active { border-color: var(--c-gold); box-shadow: 0 0 0 1.5px var(--c-gold), 0 6px 22px rgba(191,160,60,.26); }
+    .task-form { box-shadow: 0 0 0 1.5px var(--c-gold), 0 6px 22px rgba(191,160,60,.20); }
+    [data-theme="dark"] .task-card.active { box-shadow: 0 0 0 1px var(--c-gold), 0 2px 9px rgba(217,180,92,.22); }
+    [data-theme="dark"] .task-form { box-shadow: 0 0 0 1px var(--c-gold), 0 2px 9px rgba(217,180,92,.16); }
+
     @media (prefers-reduced-motion: reduce) {
       .medal svg, .clouds, .seal-anim, .section.visible .card,
       .section-enter, .section-exit, .metric-value.loading::after, .chart-loading::before,
-      .splash-medal, .splash-seal, .splash-title, .splash-sub, .splash-line { animation: none !important; }
-      .nav-label, .nav-seal { transition: none !important; }
+      .splash-medal, .splash-seal, .splash-title, .splash-sub, .splash-line,
+      .task-card:not(.active)::after { animation: none !important; }
+      .nav-label, .nav-seal, .task-card, .factor-drawer, .factor-toggle .caret { transition: none !important; }
     }
   </style>
 </head>
@@ -382,7 +514,7 @@
         <button id="themeBtn" class="btn btn-plain text-xs ml-auto" title="切换石窟夜色 / 绢本纸日" style="font-family: var(--serif);">夜</button>
       </div>
 
-      <div class="p-6 max-w-6xl">
+      <div class="p-6 max-w-6xl mx-auto">   <!-- mx-auto：主区居中，消除"右空左挤" -->
 
         <!-- ============ 总览 ============ -->
         <section id="sec-overview" class="section visible">
@@ -527,9 +659,15 @@
           <div id="modelEmpty" class="card empty-state hidden">
             <svg class="empty-medal" viewBox="0 0 100 100" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.2"><rect x="12" y="12" width="76" height="76"/><rect x="24" y="24" width="52" height="52" transform="rotate(45 50 50)"/><rect x="33" y="33" width="34" height="34"/><circle cx="50" cy="50" r="10"/></g></svg>
             <div class="empty-title">暂无模型诊断数据</div>
-            <div class="empty-sub">该运行批次没有 SVD-Ridge 模型诊断数据（需用新版 pipeline 运行后生成）。</div>
+            <div class="empty-sub">该运行批次没有预测模型诊断数据（需用新版 pipeline 运行后生成）。</div>
           </div>
           <div id="modelBody">
+            <div class="card mb-4" id="blendPanel" style="display:none;">
+              <h3 class="font-semibold mb-2 text-sm">多模型层（BlendPredictor · 发现层 sim-加权迁移）</h3>
+              <div class="text-xs mb-2" style="color: var(--c-muted);" id="blendSub"></div>
+              <div id="blendBody" class="overflow-x-auto"></div>
+            </div>
+            <div class="text-xs mb-2 font-semibold" style="color: var(--c-muted);">单模型层（ClusterEloPredictor · SVD-Ridge）</div>
             <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
               <div class="card"><div class="metric-label">最优 λ*</div><div class="metric-value" id="md_lambda">-</div></div>
               <div class="card"><div class="metric-label">残差 σ²</div><div class="metric-value" id="md_sigma">-</div></div>
@@ -557,43 +695,189 @@
 
         <!-- ============ 运行控制 ============ -->
         <section id="sec-run" class="section">
-          <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
-            <div class="card">
-              <h3 class="font-semibold text-sm mb-2">生成攻击集</h3>
-              <p class="text-xs mb-3" style="color: var(--c-muted);">从 攻击分析.md 解析 L1 方法并生成攻击 prompt</p>
-              <button class="btn btn-primary w-full" onclick="startTask('generate')">开始生成</button>
-            </div>
-            <div class="card">
-              <h3 class="font-semibold text-sm mb-2">自适应评估</h3>
-              <div class="space-y-2 text-xs mb-3">
-                <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">目标模型</span><select id="evalTarget" class="flex-1"><option value="">（.env 默认）</option></select></div>
-                <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">攻击集</span><select id="evalInput" class="flex-1"></select></div>
-                <div id="dropZone" class="rounded-lg p-2 text-center cursor-pointer transition-colors" style="border: 2px dashed var(--c-border); color: var(--c-muted);">
-                  <span class="text-xs">拖拽 .jsonl 到此处导入，或<a href="#" id="dropBrowse" class="underline">点击选择</a></span>
-                  <input type="file" id="dropFile" accept=".jsonl" class="hidden">
-                </div>
-                <div class="text-xs" style="color: var(--c-muted); padding-left: 4rem;">按：越狱税仅在攻击集含数学探针时计算（启动评估时自动检测）</div>
-                <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">阶段</span>
-                  <select id="evalPhase" class="flex-1"><option value="all">全部</option><option value="1">仅攻击</option><option value="2">仅过敏</option></select></div>
-                <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">批大小</span><input type="number" id="evalBatch" value="5" min="1" max="12" class="flex-1"></div>
-                <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">最大轮次</span><input type="number" id="evalRounds" value="15" min="1" max="50" class="flex-1"></div>
-                <div class="flex items-center gap-2"><span class="w-16" style="color: var(--c-muted);">采样器</span>
-                  <select id="evalSampler" class="flex-1"><option value="hybrid">hybrid</option><option value="gap">gap</option><option value="infogain">infogain</option><option value="coordinate">coordinate</option></select></div>
-              </div>
-              <button class="btn btn-accent w-full" onclick="startEvaluate()">启动评估</button>
-            </div>
-            <div class="card">
-              <h3 class="font-semibold text-sm mb-2">聚类安全分析</h3>
-              <p class="text-xs mb-3" style="color: var(--c-muted);">基于当前 ELO 与聚类结果重新生成簇级分析</p>
-              <button class="btn btn-primary w-full" onclick="startTask('cluster-analysis')">运行分析</button>
-            </div>
+         <div class="run-wrap">
+          <!-- 任务选择器：先选要做什么，再展开对应配置 -->
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+            <button class="task-card active" data-task="evaluate" onclick="selectTask('evaluate')">
+              <span class="task-seal">评</span>
+              <span class="task-name">自适应评估</span>
+              <span class="task-desc">ELO 驱动逐轮采样，测安全边界 + 过敏检测，输出综合报告</span>
+            </button>
+            <button class="task-card" data-task="hpo" onclick="selectTask('hpo')">
+              <span class="task-seal">搜</span>
+              <span class="task-name">HPO 超参搜索</span>
+              <span class="task-desc">grid / random / bayesian 扫描调参旋钮，找最快收敛的配置</span>
+            </button>
+            <button class="task-card" data-task="env" onclick="selectTask('env')">
+              <span class="task-seal">连</span>
+              <span class="task-name">连接配置</span>
+              <span class="task-desc">目标 / 生成模型 / Judge 的 API 连接，写入 .env</span>
+            </button>
           </div>
+
+          <!-- 自适应评估 -->
+          <div class="card task-form mb-4" id="form-evaluate">
+            <h3 class="font-semibold text-sm mb-3">自适应评估</h3>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-3">
+              <div class="field">
+                <div class="field-head"><span class="field-label">目标模型</span>
+                  <select id="evalTarget"><option value="">全部目标（多模型扫描）</option></select>
+                  <button class="quick-btn" onclick="openAddTarget()" title="添加目标模型" style="font-weight:700;">＋</button>
+                </div>
+                <div class="field-hint">默认扫描 .env 里声明的全部目标；＋ 添加新目标</div>
+              </div>
+              <div class="field">
+                <div class="field-head"><span class="field-label">攻击集</span><select id="evalInput"></select></div>
+                <div class="field-hint">越狱税需文件名含 baseline 的带探针攻击集</div>
+              </div>
+              <div class="field">
+                <div class="field-head"><span class="field-label">阶段</span>
+                  <select id="evalPhase"><option value="all">攻击 + 过敏（完整）</option><option value="1">仅攻击</option><option value="2">仅过敏</option></select></div>
+              </div>
+              <div class="field">
+                <div class="field-head"><span class="field-label">采样器</span>
+                  <select id="evalSampler"><option value="hybrid">hybrid（先覆盖后精搜）</option><option value="gap">gap（贴边界）</option><option value="infogain">infogain（信息增益）</option><option value="coordinate">coordinate（簇坐标）</option></select></div>
+              </div>
+              <div class="field">
+                <div class="field-head"><span class="field-label">批大小</span>
+                  <div class="unit-wrap"><input type="number" id="evalBatch" value="5" min="1" max="12"><span class="unit">种方法/轮</span></div></div>
+              </div>
+              <div class="field">
+                <div class="field-head"><span class="field-label">最大轮次</span>
+                  <div class="unit-wrap"><input type="number" id="evalRounds" value="15" min="1" max="50"><span class="unit">轮</span></div></div>
+                <div class="field-hint">达到收敛判据会提前停机，不会跑满</div>
+              </div>
+            </div>
+            <div id="dropZone" class="rounded-lg p-2 mt-3 text-center cursor-pointer transition-colors" style="border: 2px dashed var(--c-line); color: var(--c-muted);">
+              <span class="text-xs">拖拽 .jsonl 到此处导入新攻击集，或<a href="#" id="dropBrowse" class="underline">点击选择</a></span>
+              <input type="file" id="dropFile" accept=".jsonl" class="hidden">
+            </div>
+            <button class="btn btn-accent w-full mt-3" onclick="startEvaluate()">启动评估</button>
+          </div>
+
+          <!-- HPO 超参搜索 -->
+          <div class="card task-form mb-4 hidden" id="form-hpo">
+            <h3 class="font-semibold text-sm mb-3">HPO 超参搜索</h3>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-3">
+              <div class="field">
+                <div class="field-head"><span class="field-label">Study 名</span><input id="hpoName" placeholder="留空自动生成"></div>
+                <div class="field-hint">结果与断点续跑存 output/experiments/&lt;名&gt;/</div>
+              </div>
+              <div class="field">
+                <div class="field-head"><span class="field-label">攻击集</span><select id="hpoInput"></select></div>
+              </div>
+              <div class="field">
+                <div class="field-head"><span class="field-label">优化目标</span>
+                  <select id="hpoMetric" class="flex-1"><option value="conv_rounds">conv_rounds（收敛轮次）</option><option value="defender_elo">defender_elo（防御方 ELO）</option><option value="asr">asr（攻击成功率）</option><option value="ci_half">ci_half（边界 CI 半宽）</option></select>
+                  <div class="seg" id="hpoDirSeg"><button type="button" data-v="minimize" class="active">最小化</button><button type="button" data-v="maximize">最大化</button></div>
+                  <input type="hidden" id="hpoDir" value="minimize">
+                </div>
+                <div class="field-hint">默认往"收敛轮次最少"方向搜</div>
+              </div>
+              <div class="field">
+                <div class="field-head"><span class="field-label">搜索策略</span>
+                  <select id="hpoStrategy"><option value="bayesian">bayesian（贝叶斯，推荐）</option><option value="random">random（随机）</option><option value="grid">grid（网格）</option></select></div>
+              </div>
+              <div class="field">
+                <div class="field-head"><span class="field-label">试验预算</span>
+                  <div class="unit-wrap"><input id="hpoTrials" type="number" value="12" min="1" max="500"><span class="unit">组参数</span></div></div>
+                <div class="field-hint">最多尝试多少组参数组合</div>
+              </div>
+              <div class="field">
+                <div class="field-head"><span class="field-label">时间预算</span>
+                  <div class="unit-wrap"><input id="hpoWall" type="number" value="0" min="0"><span class="unit">分钟</span></div>
+                  <div style="position: relative; flex: none;">
+                    <button class="quick-btn" id="hpoWallClock" title="快捷选择时长" type="button">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+                    </button>
+                    <div id="hpoWallPop" class="quick-pop hidden">
+                      <button type="button" data-m="30">30 分钟</button>
+                      <button type="button" data-m="60">1 小时</button>
+                      <button type="button" data-m="120">2 小时</button>
+                      <button type="button" data-m="480">8 小时</button>
+                      <button type="button" data-m="0">不限</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="field-hint">0 = 不限；超时在当前 config 边界收尾</div>
+              </div>
+              <div class="field">
+                <div class="field-head"><span class="field-label">重复次数</span>
+                  <div class="unit-wrap"><input id="hpoRepeats" type="number" value="1" min="1" max="5"><span class="unit">次/组</span></div></div>
+                <div class="field-hint">同配置换 seed 重复，抹平随机波动</div>
+              </div>
+            </div>
+            <button class="factor-toggle" id="factorToggle" type="button" onclick="toggleFactors()">
+              选择搜索因子 <span class="factor-count" id="factorCount">已选 0</span> <span class="caret">▸</span>
+            </button>
+            <div class="factor-drawer" id="factorDrawer">
+              <div class="flex items-center gap-3 py-2 text-xs" style="color: var(--c-muted);">
+                <span>勾选参与搜索的旋钮，范围可改：</span>
+                <a href="#" class="underline" onclick="factorSelectAll(true);return false;">全选</a>
+                <a href="#" class="underline" onclick="factorSelectAll(false);return false;">清空</a>
+              </div>
+              <div id="hpoFactors"></div>
+            </div>
+            <div class="flex items-center gap-3 mt-3">
+              <button class="btn btn-plain text-xs" onclick="hpoPreview()">预估规模</button>
+              <button class="btn btn-primary flex-1 text-xs" onclick="startHpo()">启动 HPO</button>
+            </div>
+            <div id="hpoPreview" class="text-xs mt-2" style="color: var(--c-muted);"></div>
+          </div>
+
+          <!-- 连接配置 -->
+          <div class="card task-form mb-4 hidden" id="form-env">
+            <h3 class="font-semibold text-sm mb-1">连接配置</h3>
+            <p class="text-xs mb-2" style="color: var(--c-muted);">写入 .env，下一次评估生效；密钥只显示掩码，留空表示不修改。</p>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-3">
+              <div>
+                <div class="env-group">默认目标模型<span class="env-sub">单目标模式 / 兜底</span></div>
+                <div class="space-y-2 mt-2">
+                  <div class="field"><div class="field-head"><span class="field-label">Base URL</span><input id="envTUrl"></div></div>
+                  <div class="field"><div class="field-head"><span class="field-label">模型名</span><input id="envTModel"></div></div>
+                  <div class="field"><div class="field-head"><span class="field-label">API Key</span><input id="envTKey" type="password" placeholder="留空保持不变"></div>
+                    <div class="field-hint" id="envTKeyHint"></div></div>
+                </div>
+              </div>
+              <div>
+                <div class="env-group">生成模型<span class="env-sub">攻击生成 / 安全孪生 / 报告叙事</span></div>
+                <div class="space-y-2 mt-2">
+                  <div class="field"><div class="field-head"><span class="field-label">Base URL</span><input id="envGUrl"></div></div>
+                  <div class="field"><div class="field-head"><span class="field-label">模型名</span><input id="envGModel"></div></div>
+                  <div class="field"><div class="field-head"><span class="field-label">API Key</span><input id="envGKey" type="password" placeholder="留空保持不变"></div>
+                    <div class="field-hint" id="envGKeyHint"></div></div>
+                </div>
+                <div class="env-group">Judge<span class="env-sub">缺省回退生成模型</span></div>
+                <div class="field mt-2"><div class="field-head"><span class="field-label">模型名</span><input id="envJudge"></div></div>
+              </div>
+            </div>
+            <button class="btn btn-primary w-full text-xs mt-4" onclick="saveEnv()">保存到 .env</button>
+          </div>
+
           <div class="card">
             <div class="flex items-center justify-between mb-3">
               <h3 class="font-semibold text-sm">任务列表</h3>
               <button class="btn btn-plain text-xs" onclick="loadTasks()">刷新</button>
             </div>
             <div id="taskList" class="space-y-3 text-sm" ></div>
+          </div>
+         </div><!-- /run-wrap -->
+
+          <!-- 添加目标模型弹窗 -->
+          <div id="addTargetModal" class="fixed inset-0 hidden flex items-center justify-center" style="background:rgba(0,0,0,0.45);z-index:50;">
+            <div class="card" style="max-width:420px;width:90%;">
+              <h3 class="font-semibold text-sm mb-3">添加目标模型（写入 .env）</h3>
+              <div class="space-y-3 text-xs">
+                <div class="field"><div class="field-head"><span class="field-label">目标名</span><input id="atName" placeholder="如 my-model"></div></div>
+                <div class="field"><div class="field-head"><span class="field-label">模型名</span><input id="atModel" placeholder="留空则 = 目标名"></div></div>
+                <div class="field"><div class="field-head"><span class="field-label">Base URL</span><input id="atUrl" placeholder="如 http://host:port/v1"></div></div>
+                <div class="field"><div class="field-head"><span class="field-label">API Key</span><input id="atKey" type="password" placeholder="无则留空"></div></div>
+              </div>
+              <div class="flex gap-2 mt-3">
+                <button class="btn btn-plain flex-1 text-xs" onclick="closeAddTarget()">取消</button>
+                <button class="btn btn-primary flex-1 text-xs" onclick="submitAddTarget()">写入并加入</button>
+              </div>
+            </div>
           </div>
         </section>
 

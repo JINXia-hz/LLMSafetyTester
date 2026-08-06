@@ -71,12 +71,30 @@ def build_svd_ridge_summary(tracker: ELOTracker) -> dict | None:
     汇总 SVD-Ridge Elo 预测模型的诊断信息：
     - 正则化路径（λ vs K-Fold 验证误差）与最优 λ
     - 特征重要性（Ridge 系数绝对值排序）
-    - 未测方法的预测 Elo 置信区间（均值 ± 1.96σ）
+    - 未测方法的预测 Elo 置信区间（均值 ± t·σ）
+
+    H7 修复：derive_elo 路径从不调 predict_batch → model.w 恒 None → 诊断恒空。
+    此处检测到未训练时，用 artifacts 特征按需训练一次再取诊断。
     """
     predictor = getattr(tracker, "predictor", None)
     model = getattr(predictor, "model", None) if predictor else None
-    if model is None or model.w is None:
+    if model is None:
         return None
+
+    # H7：derive 路径下 model.w 为 None——按需训练
+    if model.w is None:
+        feats = predictor.artifacts.get("features", {}) if predictor.artifacts else {}
+        if not feats or predictor.ground_truth_count() < predictor.min_cluster_size:
+            return None
+        # 构造最小 method_records（build_prior_features 接受空 record）
+        method_records = {m: {} for m in feats}
+        try:
+            predictor.predict_batch(method_records)
+        except Exception as e:
+            logger.warning("SVD-Ridge 模型按需训练失败，跳过诊断: %s", e)
+            return None
+        if model.w is None:
+            return None
 
     predictions = {}
     for method, pred in (predictor.last_predictions or {}).items():
@@ -97,6 +115,31 @@ def build_svd_ridge_summary(tracker: ELOTracker) -> dict | None:
         "n_ground_truth": predictor.ground_truth_count(),
         "predictions": predictions,
     }
+
+
+def build_blend_predictor_summary(tracker: ELOTracker, defender_name: str | None = None) -> dict | None:
+    """构建 BlendPredictor（多模型 sim-加权）并返回诊断：发现层 donor 相似度 / sim-加权状态。
+
+    供看板"多模型层"展示——live 冷启动实际用的预测器（区别于 ClusterEloPredictor 单模型层）。
+    特征不可用 / R 为空时返回 None（看板显示"无多模型诊断"）。
+    """
+    pred = getattr(tracker, "predictor", None)
+    feats = pred.artifacts.get("features", {}) if pred and pred.artifacts else {}
+    if not feats:
+        return None
+    try:
+        from llmsec.core.results import ResultsMatrix
+        from llmsec.evaluation.blend_predictor import load_or_fit_blend_predictor
+
+        R = ResultsMatrix.load()
+        if not R.all_models():
+            return None
+        catalog = sorted(feats.keys())
+        bp = load_or_fit_blend_predictor(R, feats, method_catalog=catalog)
+        return bp.diagnostics()
+    except Exception as e:
+        logger.warning("BlendPredictor 诊断生成失败: %s", e, exc_info=True)
+        return {"error": str(e)}
 
 
 # ============================================================
@@ -245,6 +288,14 @@ def analyze_clusters(
     except Exception as e:
         logger.warning("SVD-Ridge 诊断生成失败: %s", e, exc_info=True)
         analysis["svd_ridge_error"] = str(e)
+
+    # BlendPredictor（多模型 sim-加权）诊断——看板"多模型层"（live 冷启动实际用的预测器）
+    try:
+        bp_summary = build_blend_predictor_summary(tracker, defender_name)
+        if bp_summary:
+            analysis["blend_predictor"] = bp_summary
+    except Exception as e:
+        logger.warning("BlendPredictor 诊断写入失败: %s", e)
 
     return analysis
 

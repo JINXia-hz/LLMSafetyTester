@@ -117,7 +117,7 @@ def test_cluster_tree_and_cut():
         assert r.status_code == 400, '非法 k 被 400 拦截'
 def test_run_endpoints_post_only():
     """任务端点只接受 POST（前端曾用 GET 调用导致 405）。"""
-    for ep in ['/api/run/generate', '/api/run/cluster-analysis', '/api/run/evaluate']:
+    for ep in ['/api/run/evaluate', '/api/run/hpo']:
         r = client.get(ep)
         assert r.status_code == 405, f'GET {ep} 应 405，实际 {r.status_code}'
 def test_state_snapshot_priority(monkeypatch, tmp_path):

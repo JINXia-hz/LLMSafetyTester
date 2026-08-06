@@ -116,16 +116,16 @@ class InfoGainSampler(AttackSampler):
     全局信息增益采样器。
 
     对每个候选方法打分：
-        score = gap
+        score = gap_n
                 - alpha * uncertainty
-                + beta  * cluster_visit_count[cluster_id]
+                + beta  * cluster_visit_norm[cluster_id]
                 - gamma * success_potential
 
-    分值越低越优先。兼顾：
-    - 接近 defender 边界（信息量大）
-    - 测试次数少 / 结果方差大（需要探索）
-    - 簇覆盖（避免扎堆同一类攻击）
-    - 成功潜力高（优先可能突破的方向）：已测方法取历史成功率；
+    分值越低越优先。四项均归一化到 [0,1)：
+    - gap_n = gap/(gap+ELO_SCALE)（接近 defender 边界，信息量大）
+    - uncertainty（测试次数少 / 结果方差大，需要探索）
+    - cluster_visit_norm = visit/(visit+1)（簇覆盖，避免扎堆同一类攻击）
+    - success_potential（成功潜力高优先）：已测方法取历史成功率；
       未测方法历史成功率恒 0（gamma 曾是死参数，M-10），改用 Elo 期望胜率
       E = 1 / (1 + 10^(-(att_pred - def) / ELO_SCALE))（注入的预测 attacker Elo
       对 defender Elo），预测强于 defender 的方法更可能突破、更优先。
@@ -167,16 +167,28 @@ class InfoGainSampler(AttackSampler):
             gap = abs(att_elo - def_elo)
             uncertainty = tracker.get_attacker_uncertainty(method)
             cid = self._method_to_cluster(method)
-            visit_count = self.cluster_visit_count.get(cid, 0)
+            visit_raw = self.cluster_visit_count.get(cid, 0)
+            # visit_count 归一化到 [0,1)（饱和函数 visit/(visit+1)）：原裸整数无界，
+            # 3 轮后 beta*visit ≈ 9 压垮 gap/uncertainty/success 全部信号（各 ∈[0,1]），
+            # 使 InfoGain 退化为纯簇轮询。归一化后四项真正等量级平权。
+            visit_count = visit_raw / (visit_raw + 1.0)
 
-            # 成功潜力（M-10）：已测方法用历史成功率；未测方法 get_attacker_success_rate
-            # 恒 0（候选池恒为未测时 gamma 是死参数），改用 Elo 期望胜率
+            # 成功潜力（M-10）：已测方法用历史成功率；未测方法用 Elo 期望胜率
             # E = 1/(1 + 10^(-(att-def)/ELO_SCALE)) 估计突破概率。
+            # B3：GT 少时预测聚在 INITIAL_ELO → success≈0.5 恒定 → gamma 退化为死参数。
+            # 乘预测不确定性调节因子：预测越不确定，success_potential 越向 0.5（中性）收缩，
+            # 使 gamma 项在冷启动期接近常数（不干扰其它三项的排序），随 GT 增长恢复区分力。
             n_tests = tracker.attacker_stats.get(method, {}).get("n_matches", 0)
             if n_tests > 0:
                 success_potential = tracker.get_attacker_success_rate(method)
             else:
-                success_potential = 1.0 / (1.0 + 10.0 ** (-(att_elo - def_elo) / ELO_SCALE))
+                raw_success = 1.0 / (1.0 + 10.0 ** (-(att_elo - def_elo) / ELO_SCALE))
+                pred_unc = tracker.get_attacker_uncertainty(method)
+                # B3：乘预测可信度——GT 少时预测聚在 INITIAL_ELO → success≈0.5 恒定。
+                # 冷启动期 pred_unc≈1 → confidence_factor≈0.5（保留一半信号不完全抹杀）；
+                # GT 增长后 pred_unc 降低 → 恢复区分力。
+                confidence_factor = 1.0 - pred_unc * 0.5
+                success_potential = 0.5 + (raw_success - 0.5) * confidence_factor
 
             # #6：gap 归一化到 [0,1)（gap/(gap+ELO_SCALE)），与 uncertainty/visit/success 同量级；
             # 原始 Elo 级 gap（0~上千）压制其它项，使 InfoGain 实际退化为 GapMin。
@@ -287,7 +299,10 @@ class CoordinateDescentSampler(AttackSampler):
             # #6：avg_gap 归一化到 [0,1)（avg_gap/(avg_gap+ELO_SCALE)），让 tested_count
             # 重新成为簇间协调的主导信号（原 Elo 级 avg_gap 会淹没 tested_count）
             avg_gap_n = avg_gap / (avg_gap + ELO_SCALE)
-            score = tested_count + avg_gap_n - self.min_tests_per_cluster * avg_success
+            # tested_count 归一化到 [0,1)（tc/(tc+min_per_cluster)）：原裸整数无界，
+            # 任一簇测 ≥4 次后该项主导，簇选择退化为"最少测试簇"（量纲事故非设计）。
+            tested_n = tested_count / (tested_count + float(self.min_tests_per_cluster))
+            score = tested_n + avg_gap_n - self.min_tests_per_cluster * avg_success
             if best_score is None or score < best_score:
                 best_score = score
                 best_cid = cid

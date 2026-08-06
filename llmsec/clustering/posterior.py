@@ -115,10 +115,11 @@ def learn_supervised_weights(
         logger.info("弱监督信号为零（特征与反应无相关），跳过特征加权")
         return np.ones(d)
 
-    # #13：原 corr/corr.mean() 对噪声特征数敏感（大量 corr≈0 拉低均值 → 强特征撞上限被压扁）。
+    # #13 + B4：原 corr/corr.mean() 对噪声特征数敏感（大量 corr≈0 拉低均值 → 强特征撞上限被压扁）。
+    # corr.mean() 改为只在 valid 列上取均值（零方差无效列的 corr=0 不参与基线计算）。
     # 改 1+(corr−mean)：均值≈1、偏离有界、对噪声特征数稳健；所有 corr 相等时 w 全 1（退化为不加权）。
-    # 顺序仍"先归一后 clip"：clip 后均值略偏离 1，但逐元素落在 clip 内，保护意义不变。
-    w = 1.0 + (corr - corr.mean()) if corr.mean() > 0 else np.ones(d)
+    mean_corr = float(corr[valid].mean()) if valid.any() else 0.0
+    w = 1.0 + (corr - mean_corr) if mean_corr > 0 else np.ones(d)
     w = np.clip(w, clip[0], clip[1])
 
     logger.info(
@@ -135,6 +136,7 @@ def reaction_validation(
     labels: dict[str, int],
     reactions: dict[str, dict],
     min_group: int = RV_MIN_GROUP,
+    metric_weighted: bool = False,
 ) -> dict:
     """
     簇效验证：不同簇的机器反应是否有显著差异。
@@ -152,6 +154,8 @@ def reaction_validation(
         labels: {method: cluster_id}（噪声 -1 单独作为一组）
         reactions: compute_method_reactions 的输出（只用真实 GT）
         min_group: 每簇至少这么多个已测方法才参与检验
+        metric_weighted: 聚类度量是否被真实反应派生的弱监督权重调制（M5）。
+            True 时显著性可能因循环依赖而膨胀，verdict 会附警告。
 
     返回: {
         "available": bool,
@@ -159,6 +163,7 @@ def reaction_validation(
         "eta2": float, "epsilon2": float,
         "effective": bool, "status": str, "verdict": str,
         "n_total": int, "n_groups": int, "adequate_n": int, "underpowered": bool,
+        "metric_weighted": bool,
         "per_cluster": {cid: {"n_tested", "mean_score", "win_rate"}},
     }
     """
@@ -215,7 +220,9 @@ def reaction_validation(
 
     # 4 分支判定（完整 2×2 矩阵）
     p_min = min(p_anova, p_kw)
-    significant = p_min < RV_ALPHA
+    # M6 修复：对同一原假设并行跑 ANOVA + KW 再取 min(p)，实际 Ⅰ类错误 ≈ 2α。
+    # Bonferroni 校正：p_min × n_tests < α（n_tests=2）
+    significant = p_min * 2 < RV_ALPHA
     large_effect = eta2 > RV_EFFECT_THRESHOLD or epsilon2 > RV_EFFECT_THRESHOLD
 
     if significant and large_effect:
@@ -246,6 +253,11 @@ def reaction_validation(
             verdict = (f"p={p_min:.2f} 且 eta²={eta2:.2f}：不同簇的机器反应确实无差异，"
                        f"特征抓到的文本结构与该机器关心的不相关，特征抽象需升级")
 
+    # M5：循环依赖警告——聚类度量被同一反应变量加权时，显著性系统性膨胀
+    weight_warn = ""
+    if metric_weighted:
+        weight_warn = "⚠ 注意：本次聚类的度量空间已由同一反应变量弱监督加权，显著性可能膨胀。"
+
     logger.info(
         "簇效验证: p_anova=%.4f, p_kw=%.4f, eta²=%.3f, ε²=%.3f, n=%d/%d → [%s] %s",
         p_anova, p_kw, eta2, epsilon2, n_total, adequate_n, status, verdict,
@@ -258,10 +270,11 @@ def reaction_validation(
         "epsilon2": round(float(epsilon2), 4),
         "effective": effective,
         "status": status,
-        "verdict": verdict,
+        "verdict": (weight_warn + verdict) if weight_warn else verdict,
         "n_total": n_total,
         "n_groups": k_groups,
         "adequate_n": adequate_n,
         "underpowered": underpowered,
+        "metric_weighted": metric_weighted,
         "per_cluster": per_cluster,
     }

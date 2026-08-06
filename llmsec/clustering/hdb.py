@@ -96,6 +96,7 @@ def run_hdbscan_clustering(
         min_cluster_size=min_cluster_size,
         min_samples=1,
         metric="euclidean",
+        cluster_selection_method="eom",  # A6：显式指定，防库升级改默认值静默漂移
     )
     flat_arr = clf.fit_predict(coords)
     flat_labels = {m: int(v) for m, v in zip(methods, flat_arr)}
@@ -172,7 +173,7 @@ def run_hdbscan_clustering(
     if reactions:
         from llmsec.clustering.posterior import reaction_validation
 
-        rv = reaction_validation(labels, reactions)
+        rv = reaction_validation(labels, reactions, metric_weighted=feature_weights is not None)
         rv["validated_on"] = f"ward_cut_k{k_best}"
         report["reaction_validation"] = rv
 

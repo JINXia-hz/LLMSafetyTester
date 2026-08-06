@@ -134,12 +134,41 @@ def read_json(path, default=None, *, strict: bool = False):
         return default
 
 
-def write_json(path, obj, indent: int = 2, *, atomic: bool = True, backup: bool = False) -> None:
+def _json_numpy_default(obj):
+    """json.dump 的 default 处理器：numpy 标量/数组 → Python 原生类型（M12）。
+
+    防止任何路径漏转 numpy 类型（如 np.float64 混进 ratings dict）时 json.dump 抛
+    TypeError；对权威存储 results.json 尤为关键。
+    """
+    import numpy as _np
+    if isinstance(obj, _np.integer):
+        return int(obj)
+    if isinstance(obj, _np.floating):
+        return float(obj)
+    if isinstance(obj, _np.bool_):
+        return bool(obj)
+    if isinstance(obj, _np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def write_json(
+    path,
+    obj,
+    indent: int = 2,
+    *,
+    atomic: bool = True,
+    backup: bool = False,
+    allow_nan: bool = True,
+) -> None:
     """写入单个 JSON 对象（自动创建父目录，ensure_ascii=False）。
 
     atomic=True（默认）：写 <path>.tmp → flush+fsync → os.replace。
         os.replace 在 Windows/Linux 上均为原子操作，崩溃中途不会留下半截文件。
     backup=True：写前把现有文件复制为 <path>.bak（权威存储的最后一道兜底）。
+    allow_nan=False（M12）：权威存储应设 False——NaN/Infinity 会写出非法 JSON 字面量，
+        Python json.load 能读但浏览器 JSON.parse 报 SyntaxError。设 False 时遇 NaN 直接抛错。
+    default=_json_numpy_default（M12）：numpy 标量/数组自动转原生，防漏转 TypeError。
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -153,7 +182,8 @@ def write_json(path, obj, indent: int = 2, *, atomic: bool = True, backup: bool 
         tmp = path.with_suffix(path.suffix + ".tmp")
         try:
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(obj, f, ensure_ascii=False, indent=indent)
+                json.dump(obj, f, ensure_ascii=False, indent=indent,
+                          allow_nan=allow_nan, default=_json_numpy_default)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, path)
@@ -166,7 +196,8 @@ def write_json(path, obj, indent: int = 2, *, atomic: bool = True, backup: bool 
             raise
     else:
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=indent)
+            json.dump(obj, f, ensure_ascii=False, indent=indent,
+                      allow_nan=allow_nan, default=_json_numpy_default)
 
 
 # ============================================================
