@@ -1,20 +1,7 @@
-# Pre-commit 质量门禁（与 .github/workflows/ci.yml 同口径：ruff check + pytest）
-# 一次性安装：pip install pre-commit && pre-commit install
-# 临时跳过（WIP 快速提交）：git commit --no-verify
 repos:
-  - repo: local
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.1
     hooks:
-      - id: ruff-check
-        name: ruff check (llmsec/ tests/)
-        entry: ruff check llmsec/ tests/
-        language: system
-        types: [python]
-        pass_filenames: false
-        always_run: true
-      - id: pytest
-        name: pytest (tests/)
-        entry: python -m pytest tests/ -q --tb=short
-        language: system
-        types: [python]
-        pass_filenames: false
-        always_run: true
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format

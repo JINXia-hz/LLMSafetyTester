@@ -1,26 +1,28 @@
 # docker-compose: 一键启动 LLMSEC Web 面板
 #
-# 用法（零预处理，无需 cp .env.example .env）：
-#   docker compose up
+# 用法（从仓库根目录运行）：
+#   docker compose -f docker/docker-compose.yml up
 #   浏览器打开 http://localhost:8080
 #   在「运行控制」→「环境参数配置」中填入 API Key / URL / 模型即可
 #
 # 镜像选择：
 #   jinxiahz/llmsec:latest — 完整版（含聚类 + torch，~3GB）
-#   jinxahz/llmsec:slim   — 精简版（不含聚类，~500MB）
+#   jinxiahz/llmsec:slim   — 精简版（不含聚类，~500MB）
 # 本地构建：注释 image 行，取消 build 行注释
 
 services:
   llmsec:
     image: jinxiahz/llmsec:latest
-    # build: .
+    # build:
+    #   context: ..
+    #   dockerfile: docker/Dockerfile
     ports:
       - "8080:8080"
     volumes:
       # output 卷持久化评估结果 + .env 配置（entrypoint 自动创建/恢复 .env）
-      - ./output:/app/output
-      - ./attacks:/app/attacks
-      - ./data:/app/data:ro
+      - ../output:/app/output
+      - ../attacks:/app/attacks
+      - ../data:/app/data:ro
     environment:
       - PYTHONIOENCODING=utf-8
     restart: unless-stopped
