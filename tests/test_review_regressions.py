@@ -24,11 +24,6 @@ from llmsec.evaluation.elo import ELOTracker
 # FR-1: runner.py save/write_jsonl 顺序
 # ============================================================
 def test_fr1_write_jsonl_before_save():
-    """种子阶段和主循环的 write_jsonl 应在 tracker.save 之前调用。
-
-    验证方式：检查 run_attack_phase 源码中 write_jsonl 出现在 tracker.save 之前。
-    （源码级断言，防未来重构时顺序回退。）
-    """
     import inspect
 
     from llmsec.pipeline import runner
@@ -71,10 +66,6 @@ def test_fr2_blend_predictor_has_logger():
 # FR-3: elo_cluster.py stale GT 过滤
 # ============================================================
 def test_fr3_svd_ridge_filters_stale_gt():
-    """_predict_batch_svd_ridge 不用 stale GT 方法训练（fit 传入过滤后的 train_gt）。
-
-    验证方式：检查源码中 fit() 调用传入的是 train_gt 而非 self.ground_truth。
-    """
     import inspect
 
     from llmsec.evaluation.elo_cluster import ClusterEloPredictor
@@ -152,11 +143,6 @@ def test_fr6_no_judge_harmless_score_is_zero():
 # FR-7: evaluator.py update_elo 补 record_round_end
 # ============================================================
 def test_fr7_evaluator_update_elo_has_round_end():
-    """update_elo 在回放后调 record_round_end，使 check_convergence 有轨迹数据。
-
-    验证方式：① 源码包含 record_round_end 调用；② 运行后 convergence_notes
-    不含 "尚无完整轮次"（n_rounds==0 时的特征消息）。
-    """
     import inspect
 
     from llmsec.evaluation.evaluator import update_elo

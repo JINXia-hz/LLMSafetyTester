@@ -128,8 +128,6 @@ def test_derive_elo_deterministic_and_monotone():
 
 
 def test_derive_elo_reconstructs_rounds_from_R():
-    """#10 + Model B：R 带 round（extra）且单调时 derive_elo 按轮用 update_round 重建
-    _round_defender_elos，与 live tracker(update_round)逐位一致。"""
     # 3 轮，每轮 2 场，带 round
     mat = ResultsMatrix()
     ts = 0

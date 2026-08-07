@@ -45,4 +45,4 @@ jobs:
       - name: Run tests
         env:
           PYTHONIOENCODING: utf-8
-        run: python -m pytest tests/ -q --tb=short
+        run: python -m pytest tests/ -q -n auto --tb=short

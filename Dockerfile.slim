@@ -1,7 +1,7 @@
 # LLMSEC 精简镜像（不含聚类/torch，~500MB）
 # 适合只做攻击评估、不需要聚类特征提取的用户
 #
-# docker run -p 8080:8080 -v $(pwd)/.env:/app/.env jinxiahz/llmsec:slim
+# docker run -p 8080:8080 -v llmsec-data:/app/output jinxiahz/llmsec:slim
 
 FROM python:3.11-slim
 
@@ -19,8 +19,13 @@ RUN pip install --no-cache-dir -e .
 
 RUN mkdir -p /app/attacks /app/output /app/data
 
+# 入口脚本：自动创建/恢复 .env（无需宿主机预处理）
+COPY docker-entrypoint.sh /app/
+RUN chmod +x /app/docker-entrypoint.sh
+
 VOLUME ["/app/output", "/app/attacks"]
 
 EXPOSE 8080
 
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["python", "-m", "uvicorn", "llmsec.server.dashboard_api:app", "--host", "0.0.0.0", "--port", "8080"]

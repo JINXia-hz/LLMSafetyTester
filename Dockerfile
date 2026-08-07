@@ -3,11 +3,10 @@
 # 构建：
 #   docker build -t llmsec .
 #
-# 运行（Web 面板）：
-#   docker run -p 8080:8080 -v $(pwd)/.env:/app/.env -v llmsec-data:/app/output llmsec
+# 运行（Web 面板，零预处理——.env 由 entrypoint 自动创建，看板 UI 配置）：
+#   docker run -p 8080:8080 -v llmsec-data:/app/output llmsec
 #
-# .env 挂载提供 API 密钥；output 卷持久化评估结果。
-# 仅核心评估（不含聚类）可注释掉 cluster 相关行，大幅减小镜像体积。
+# output 卷持久化评估结果 + .env 配置（重启不丢）。
 
 FROM python:3.11-slim AS base
 
@@ -34,9 +33,14 @@ RUN pip install --no-cache-dir -e .
 # 创建数据目录
 RUN mkdir -p /app/attacks /app/output /app/data
 
+# 入口脚本：自动创建/恢复 .env（无需宿主机预处理）
+COPY docker-entrypoint.sh /app/
+RUN chmod +x /app/docker-entrypoint.sh
+
 VOLUME ["/app/output", "/app/attacks"]
 
 EXPOSE 8080
 
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 # 默认启动 Web 面板
 CMD ["python", "-m", "uvicorn", "llmsec.server.dashboard_api:app", "--host", "0.0.0.0", "--port", "8080"]

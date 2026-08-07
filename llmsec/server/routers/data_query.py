@@ -642,14 +642,16 @@ async def api_targets_add(req: AddTargetRequest):
     if not name or not req.base_url.strip():
         raise HTTPException(400, "name 与 base_url 不能为空")
     env_path = PROJECT_ROOT / ".env"
-    if not env_path.exists():
-        raise HTTPException(500, ".env 不存在，无法写入目标")
-    # 备份 + 读
-    try:
-        shutil.copy2(env_path, str(env_path) + ".bak")
-        lines = env_path.read_text(encoding="utf-8").splitlines()
-    except OSError as e:
-        raise HTTPException(500, f"读取/备份 .env 失败: {e}")
+    if env_path.is_dir():
+        raise HTTPException(500, ".env 是目录而非文件——通常是 Docker 挂载了不存在的 .env 导致（请先在宿主机 cp .env.example .env）")
+    # 读（.env 不存在 → 自动新建）
+    if env_path.exists():
+        try:
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+        except OSError as e:
+            raise HTTPException(500, f"读取 .env 失败: {e}")
+    else:
+        lines = []
 
     # 找已用最大 TARGET_<N>_ 索引 + 现有 TARGETS 列表
     used_n = []
@@ -705,6 +707,14 @@ async def api_targets_add(req: AddTargetRequest):
     os.environ[f"TARGET_{next_n}_API_KEY"] = req.api_key.strip()
     load_env()
 
+    # 持久化到 output 卷（docker 重启后 entrypoint 从此恢复 .env）
+    try:
+        from llmsec.core.config import OUTPUT_DIR
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(env_path, OUTPUT_DIR / ".env.bak")
+    except OSError:
+        pass
+
     return {"ok": True, "name": name, "model": model, "prefix": f"TARGET_{next_n}"}
 
 
@@ -721,13 +731,15 @@ def _update_env_vars(updates: dict) -> None:
 
     from llmsec.core.config import PROJECT_ROOT
     env_path = PROJECT_ROOT / ".env"
-    if not env_path.exists():
-        raise HTTPException(500, ".env 不存在，无法写入")
-    try:
-        shutil.copy2(env_path, str(env_path) + ".bak")
-        lines = env_path.read_text(encoding="utf-8").splitlines()
-    except OSError as e:
-        raise HTTPException(500, f"读取/备份 .env 失败: {e}")
+    if env_path.is_dir():
+        raise HTTPException(500, ".env 是目录而非文件——通常是 Docker 挂载了不存在的 .env 导致（请先在宿主机 cp .env.example .env）")
+    if env_path.exists():
+        try:
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+        except OSError as e:
+            raise HTTPException(500, f"读取 .env 失败: {e}")
+    else:
+        lines = []  # .env 不存在 → 自动新建（下方追加逻辑填充内容）
 
     keys = set(updates.keys())
     found: set[str] = set()
@@ -749,6 +761,14 @@ def _update_env_vars(updates: dict) -> None:
         raise HTTPException(500, f"写入 .env 失败: {e}")
     for k, v in updates.items():
         os.environ[k] = v
+
+    # 持久化到 output 卷（docker 重启后 entrypoint 从此恢复 .env）
+    try:
+        from llmsec.core.config import OUTPUT_DIR
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(env_path, OUTPUT_DIR / ".env.bak")
+    except OSError:
+        pass  # output 卷不可写（如 :ro 挂载）不阻塞功能
 
 
 def _masked(key: str) -> str | None:

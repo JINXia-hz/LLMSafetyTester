@@ -154,24 +154,28 @@ pip install -r llmsec/requirements.txt             # 核心（不含 torch）
 pip install -r llmsec/requirements-cluster.txt     # 完整（含聚类 + torch）
 ```
 
-**方式 C — Docker（一行启动，零安装）**
+**方式 C — Docker（一行启动，零安装、零配置文件）**
 
 ```bash
-# 完整版（含聚类特征提取 + 预缓存 embedding 模型）
-docker run -p 8080:8080 -v $(pwd)/.env:/app/.env -v llmsec-data:/app/output jinxiahz/llmsec
+# 完整版（含聚类特征提取 + 预缓存 embedding 模型，~3GB）
+docker run -p 8080:8080 -v llmsec-data:/app/output jinxiahz/llmsec
 
 # 精简版（不含聚类/torch，仅攻击评估，~500MB）
-docker run -p 8080:8080 -v $(pwd)/.env:/app/.env -v llmsec-data:/app/output jinxiahz/llmsec:slim
+docker run -p 8080:8080 -v llmsec-data:/app/output jinxahz/llmsec:slim
 
 # 或用 docker compose（自动管理卷 + 重启策略）
 docker compose up
 ```
 
+容器启动后浏览器打开 `http://localhost:8080`，在「运行控制」页面配置即可——无需手动编辑 `.env`（entrypoint 自动从模板创建，配置经 UI 写入并持久化到 output 卷，`docker restart` 不丢）。
+
 Python 3.11。`hdbscan`、`sentence-transformers`、`tiktoken` 为聚类模块的可选依赖（安装 `.[cluster]` 时拉入，会附带 `torch` ~2GB；只做攻击评估不需要）。
 
 ### 2. 配置环境
 
-复制 `.env.example` 为 `.env`，填入目标模型与生成模型配置。
+**Docker 用户**：跳过本步，直接在浏览器「运行控制 → 环境参数配置」中填写 API Key / URL / 模型，保存即生效。
+
+**pip 安装用户**：复制 `.env.example` 为 `.env`，填入目标模型与生成模型配置。
 
 ### 3. 三步跑通
 
