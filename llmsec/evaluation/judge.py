@@ -373,10 +373,11 @@ class Judge:
                 "judge_calls": 0,
             }
 
-        # 快速预筛
+        # 预筛：ML 模型优先，不存在时内部回退关键词（prescreen_ml.predict）
         prescreen = None
         if not skip_prescreen:
-            prescreen = fast_prescreen(stripped)
+            from llmsec.evaluation.prescreen_ml import predict as _prescreen
+            prescreen = _prescreen(stripped)
             if prescreen == "refusal":
                 return {
                     "compliance_level": "C",

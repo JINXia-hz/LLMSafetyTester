@@ -827,9 +827,10 @@ async def api_env_put(req: EnvUpdate):
 
 
 @router.get("/api/targets/probe")
-async def api_targets_probe():
-    """探查所有目标模型的 API 可通性。
+async def api_targets_probe(name: str | None = None):
+    """探查目标模型的 API 可通性。
 
+    ?name=xxx 时只探单个目标（用于添加/编辑后即时反馈）。
     对每个目标发送最轻量请求（OpenAI models.list 或 HTTP GET），5s 超时。
     返回 [{name, model, reachable, latency_ms, error}]。
     api_key / base_url 绝不出后端。
@@ -843,6 +844,9 @@ async def api_targets_probe():
         targets_cfg = load_targets()
     except Exception:
         return {"targets": []}
+
+    if name:
+        targets_cfg = {k: v for k, v in targets_cfg.items() if k == name}
 
     async def _probe_one(name, cfg):
         backend = target_backend(name)

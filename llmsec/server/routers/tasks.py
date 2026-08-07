@@ -61,6 +61,7 @@ class EvaluateRequest(BaseModel):
     sampler_gamma: float | None = None
     coordinate_rounds: int | None = None
     target: str | None = Field(default=None, pattern=r"^[\w.\-:]+$")
+    targets: str | None = None      # 多目标子集（逗号分隔，前端探活后只传可达的）
 
 
 def _refresh_task_status(t: dict) -> None:
@@ -211,6 +212,9 @@ async def api_run_evaluate(req: EvaluateRequest):
         if declared and req.target not in declared:
             raise HTTPException(status_code=400, detail=f"目标未在 TARGETS 中声明: {req.target!r}")
         argv += ["--target", req.target]
+    elif req.targets:
+        # 前端探活后只传可达目标的子集（逗号分隔）
+        argv += ["--targets", req.targets]
     view = _start_task("evaluate", argv)
     view["has_tax_probe"] = has_tax_probe
     return view

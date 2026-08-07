@@ -1216,6 +1216,60 @@ function openAddTarget() {
 }
 function closeAddTarget() { $('addTargetModal').classList.add('hidden'); }
 
+// ---- 目标探活缓存 ----
+let probeCache = {};  // {name: {reachable, latency_ms, error}}
+
+async function refreshProbeCache(targetName) {
+  try {
+    const url = targetName ? `/api/targets/probe?name=${encodeURIComponent(targetName)}` : '/api/targets/probe';
+    const d = await api(url);
+    (d.targets || []).forEach(t => { probeCache[t.name] = t; });
+    updateProbeUI();
+  } catch { /* 静默：探活失败不阻塞 */ }
+}
+
+function updateProbeUI() {
+  const tsel = $('evalTarget');
+  const hint = $('probeHint');
+  if (!tsel) return;
+  // 更新下拉项灰显
+  [...tsel.options].forEach(opt => {
+    if (!opt.value) return; // 跳过"全部目标"
+    const info = probeCache[opt.value];
+    if (info && !info.reachable) {
+      opt.textContent = `⚠ ${opt.value}（不可通）`;
+      opt.disabled = true;
+      opt.title = info.error || '连接失败';
+    } else {
+      opt.textContent = opt.value;
+      opt.disabled = false;
+      opt.title = '';
+    }
+  });
+  // 当前选中被禁用时回退
+  if (tsel.selectedOptions[0] && tsel.selectedOptions[0].disabled) tsel.value = '';
+  // 统计可达数 + 提示
+  if (hint) {
+    const all = Object.keys(probeCache);
+    const ok = all.filter(n => probeCache[n].reachable);
+    if (all.length === 0) { hint.textContent = ''; return; }
+    if (tsel.value === '') {
+      // "全部目标" 模式
+      if (ok.length === 0) {
+        hint.textContent = '❌ 无可达目标'; hint.style.color = 'var(--c-warn)';
+      } else if (ok.length < all.length) {
+        hint.textContent = `✅ ${ok.length}/${all.length} 可达：${ok.join('、')}`;
+        hint.style.color = 'var(--c-muted)';
+      } else {
+        hint.textContent = `✅ 全部 ${ok.length} 个目标可达`;
+        hint.style.color = 'var(--c-muted)';
+      }
+    } else {
+      hint.textContent = '';
+    }
+  }
+}
+
 async function submitAddTarget() {
   const name = $('atName').value.trim();
   const url = $('atUrl').value.trim();
@@ -1231,7 +1285,8 @@ async function submitAddTarget() {
     if (!res.ok) throw new Error(d.detail || res.statusText);
     setStatus(`目标 ${name} 已写入 .env（${d.prefix}），刷新下拉…`);
     closeAddTarget();
-    loadRunSection();  // 刷新下拉（含探活）
+    await loadRunSection();  // 刷新下拉
+    refreshProbeCache(name);  // 探单个新目标通性
   } catch (e) { setStatus('添加目标失败: ' + e.message); }
 }
 
@@ -1267,6 +1322,10 @@ async function saveEnv() {
     if (!res.ok) throw new Error(d.detail || res.statusText);
     setStatus(`环境配置已保存（${(d.updated || []).join(', ')}）`);
     loadEnv();  // 刷新掩码
+    // 若改了 TARGET_* → 重新探活（legacy 单目标可能变了）
+    if ((d.updated || []).some(k => k.startsWith('TARGET_'))) {
+      refreshProbeCache();
+    }
   } catch (e) { setStatus('环境配置保存失败: ' + e.message); }
 }
 
@@ -1307,27 +1366,9 @@ async function loadRunSection() {
         opt.value = t.name; opt.textContent = t.name;
         tsel.appendChild(opt);
       });
-      // 后台探查可通性，禁用不可通的目标（不阻塞 UI）
-      if ((tgts.targets || []).length > 0) {
-        api('/api/targets/probe').then(d => {
-          const unreachable = new Set(
-            (d.targets || []).filter(t => !t.reachable).map(t => t.name)
-          );
-          if (unreachable.size === 0) return;
-          [...tsel.options].forEach(opt => {
-            if (unreachable.has(opt.value)) {
-              const info = (d.targets || []).find(t => t.name === opt.value);
-              opt.textContent = `⚠ ${opt.value}（不可通）`;
-              opt.disabled = true;
-              opt.title = info ? info.error : '连接失败';
-            }
-          });
-          // 当前选中项被禁用时回退到默认
-          if (tsel.selectedOptions[0] && tsel.selectedOptions[0].disabled) {
-            tsel.value = '';
-          }
-        }).catch(() => {});
-      }
+      tsel.addEventListener('change', updateProbeUI);
+      // 后台探查可通性（不阻塞 UI）
+      refreshProbeCache();
     }
     await loadTasks();
   } catch (e) { setStatus('运行控制加载失败: ' + e.message); }
