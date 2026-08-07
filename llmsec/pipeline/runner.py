@@ -519,6 +519,16 @@ def main():
     logger.info("  💡 想看原始数据 → 打开 runner_report.json")
     logger.info("=" * 60)
 
+    # 自动重训 ML 预筛模型（<1s，不阻塞；数据不足时静默跳过）
+    try:
+        from llmsec.evaluation.prescreen_ml import train as _retrain
+        result = _retrain()
+        if result.get("trained"):
+            logger.info(f"  🧠 ML 预筛模型已自动更新: {result['n_samples']} 条数据, "
+                  f"CV accuracy={result['cv_accuracy']:.3f}")
+    except Exception as e:
+        logger.debug(f"ML 预筛自动重训跳过: {e}")
+
 
 # ============================================================
 # 延迟导入（打破与子模块的循环依赖；子模块在函数体内 from runner import …）
