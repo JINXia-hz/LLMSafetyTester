@@ -1453,17 +1453,34 @@ function stopTaskPolling() {
 
 async function startEvaluate() {
   try {
+    const target = ($('evalTarget') && $('evalTarget').value) || null;
+    const body = {
+      phase: $('evalPhase').value,
+      input: $('evalInput').value,
+      batch_size: parseInt($('evalBatch').value, 10) || 10,
+      max_rounds: parseInt($('evalRounds').value, 10) || 5,
+      sampler: $('evalSampler').value,
+    };
+    if (target) {
+      // 单目标：直接传
+      body.target = target;
+    } else {
+      // "全部目标" → 只传探活可达的
+      const reachable = Object.keys(probeCache).filter(n => probeCache[n].reachable);
+      if (reachable.length === 0) {
+        setStatus('❌ 无可达目标，请检查 API 配置或等待探活完成');
+        return;
+      }
+      if (reachable.length === 1) {
+        body.target = reachable[0];  // 单个可达 → 走单目标路径（更高效）
+      } else {
+        body.targets = reachable.join(',');
+      }
+    }
     const res = await fetch('/api/run/evaluate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        phase: $('evalPhase').value,
-        input: $('evalInput').value,
-        batch_size: parseInt($('evalBatch').value, 10) || 10,
-        max_rounds: parseInt($('evalRounds').value, 10) || 5,
-        sampler: $('evalSampler').value,
-        target: ($('evalTarget') && $('evalTarget').value) || null,
-      }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
