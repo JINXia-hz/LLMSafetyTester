@@ -1,4 +1,4 @@
-"""evaluation.model_fingerprint — 模型防御指纹（发现层 D+A）
+"""evaluation.predictors.fingerprint — 模型防御指纹（发现层 D+A）
 
 每个模型冷启动时跑 D-optimal 哨兵种子（特征驱动、矩阵独立），种子评估后的
 per-seed Elo 向量即该模型的"防御指纹"。两模型指纹的相关系数量化行为相似度，
@@ -9,7 +9,7 @@ per-seed Elo 向量即该模型的"防御指纹"。两模型指纹的相关系�
 同维度直接可比。
 
 用法:
-    from llmsec.evaluation.model_fingerprint import compute_fingerprint, save_probe, donor_similarities
+    from llmsec.evaluation.predictors.fingerprint import compute_fingerprint, save_probe, donor_similarities
     fp = compute_fingerprint(tracker, seed_methods)
     save_probe(model, fp, seed_methods)
     sims = donor_similarities(model)   # {donor: 相关系数}

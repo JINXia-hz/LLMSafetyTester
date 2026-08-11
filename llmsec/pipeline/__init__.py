@@ -2,12 +2,15 @@
 llmsec.pipeline — 编排流水线子包
 
   - runner：三阶段自适应安全评估编排器（原根目录 runner.py）
+  - attack_phase：Phase 1 自适应攻击阶段
+  - allergy_phase：Phase 2 过敏检测阶段
+  - tax：Jailbreak Tax（token 开销）统计与格式化
   - probe：受害者 PCAP Judge API 探测脚本（原根目录 probe_victim.py）
 
 子模块采用惰性导入，避免 `python -m llmsec.pipeline.xxx` 时的 runpy 重复加载告警。
 """
 
-__all__ = ["runner", "probe"]
+__all__ = ["runner", "attack_phase", "allergy_phase", "tax", "probe"]
 
 
 def __getattr__(name: str):

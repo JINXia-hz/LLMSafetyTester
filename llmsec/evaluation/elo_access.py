@@ -33,13 +33,11 @@ _CACHE_VERSION = 2  # v2：ground_truth 统一 {m: {elo: ...}} 形态 + 补 atta
 # 指纹 / 缓存底层
 # ============================================================
 def _model_fingerprint(R: ResultsMatrix, model: str) -> str | None:
-    """该模型列的内容指纹（方法 + 分数 + ts 的确定性哈希）。无结果返回 None。"""
-    col = R.model_column(model)
-    if not col:
+    """该模型列的内容指纹（方法 + 分数 + ts + round 的确定性哈希）。无结果返回 None。"""
+    # M-37：复用 ResultsMatrix.column_payload，替代内联拼接
+    payload = R.column_payload(model, extra_fields=("round",))
+    if payload is None:
         return None
-    payload = ",".join(
-        f"{m}:{r.eval_score}:{r.ts}:{r.extra.get('round')}" for m, r in sorted(col.items())
-    )
     return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
 

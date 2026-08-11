@@ -15,6 +15,7 @@ from __future__ import annotations
 import itertools
 import math
 import random
+from collections import defaultdict, deque
 
 from llmsec.experiments.schema import FactorSpec, StudyConfig
 
@@ -82,21 +83,33 @@ class BayesianSearch(SearchEngine):
                 self._study.enqueue_trial({k: params[k] for k in self._param_order if k in params})
             except Exception:
                 pass
+        # 多槽 pending：params_key → deque[trial_obj]。支持多个 config 并行在飞（batched ask/tell），
+        # 同参数重复建议时按 FIFO 匹配。Optuna study.ask/tell 原生支持多在飞 trial，TPE 仅用已完成
+        # trial 建模，在飞的自动排除（故同 batch 内 config 互不可见，跨 batch 才互相增强——并行牺牲
+        # 少许样本效率换 K× 墙钟提速）。
+        self._pending: dict = defaultdict(deque)
+
+    @staticmethod
+    def _key(params: dict) -> str:
+        import json
+        return json.dumps(params, sort_keys=True, ensure_ascii=False)
 
     def ask(self) -> dict | None:
-        # 用固定 trial 对象构造，避免 ask/tell 接口在多线程下的复杂性
         trial = self._study.ask()
         params = {}
         for name in self._param_order:
             params[name] = _suggest(self._study, trial, name, self.config.space[name])
-        self._pending = (trial, params)  # 暂存，tell 时提交
+        self._pending[self._key(params)].append(trial)  # 入队（支持重复参数）
         return params
 
     def tell(self, params: dict, value: float) -> None:
-        trial = getattr(self, "_pending", None)
-        if trial is None:
+        q = self._pending.get(self._key(params))
+        if not q:
+            # 无匹配在飞 trial（续跑灌入的历史 / 重复 tell）——静默跳过
             return
-        trial_obj, _ = trial
+        trial_obj = q.popleft()
+        if not q:
+            del self._pending[self._key(params)]
         try:
             self._study.tell(trial_obj, float(value))
         except (ValueError, TypeError) as e:
@@ -105,7 +118,6 @@ class BayesianSearch(SearchEngine):
             logging.getLogger("llmsec.experiments.search").error(
                 "Optuna study.tell 失败（trial 结果未记录）: %s", e, exc_info=True)
             raise
-        self._pending = None
 
 
 def build_search(config: StudyConfig, completed: list[dict] | None = None,

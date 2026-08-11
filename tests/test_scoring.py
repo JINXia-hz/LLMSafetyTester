@@ -10,9 +10,9 @@
 """
 
 from llmsec.core.config import JudgeConfig
-from llmsec.evaluation.evaluator import extract_math_answer
 from llmsec.evaluation.judge import Judge, fast_prescreen
 from llmsec.evaluation.judge import parse_compliance_level as pcl
+from llmsec.evaluation.scoring import extract_math_answer
 
 
 def test_compliance_level_no_broad_fallback():

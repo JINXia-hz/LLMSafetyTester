@@ -20,6 +20,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 
+from llmsec.clustering import parse_cluster_id
 from llmsec.core.config import (
     CLUSTER_REPORT_FILE,
     CLUSTER_RESULT_FILE,
@@ -51,7 +52,9 @@ def load_cluster_artifacts(path: Path | str | None = None) -> dict | None:
         return None
     try:
         return joblib.load(path)
-    except (EOFError, ValueError, ImportError) as e:
+    # M-38：类 refactor 后 joblib.load 会抛 AttributeError/ModuleNotFoundError（pickle
+    # 反序列化找不到旧类路径），原只捕 EOF/Value/Import 会漏，让诊断 CLI 整体崩溃
+    except (EOFError, ValueError, ImportError, AttributeError, ModuleNotFoundError) as e:
         logger.error("聚类 artifacts 加载失败（%s）: %s", path, e)
         return None
 
@@ -117,10 +120,10 @@ def build_svd_ridge_summary(tracker: ELOTracker) -> dict | None:
     }
 
 
-def build_blend_predictor_summary(tracker: ELOTracker, defender_name: str | None = None) -> dict | None:
+def build_blend_predictor_summary(tracker: ELOTracker) -> dict | None:
     """构建 BlendPredictor（多模型 sim-加权）并返回诊断：发现层 donor 相似度 / sim-加权状态。
 
-    供看板"多模型层"展示——live 冷启动实际用的预测器（区别于 ClusterEloPredictor 单模型层）。
+    供看板"多模型层"展示——live 冷启动实际用的预测器（区别于 ColdStartPredictor 单模型层）。
     特征不可用 / R 为空时返回 None（看板显示"无多模型诊断"）。
     """
     pred = getattr(tracker, "predictor", None)
@@ -129,7 +132,7 @@ def build_blend_predictor_summary(tracker: ELOTracker, defender_name: str | None
         return None
     try:
         from llmsec.core.results import ResultsMatrix
-        from llmsec.evaluation.blend_predictor import load_or_fit_blend_predictor
+        from llmsec.evaluation.predictors.blend import load_or_fit_blend_predictor
 
         R = ResultsMatrix.load()
         if not R.all_models():
@@ -204,11 +207,7 @@ def analyze_clusters(
     # 按簇分组
     clusters = defaultdict(list)
     for method, cid in labels.items():
-        try:
-            cid = int(cid)
-        except (ValueError, TypeError):
-            cid = -1
-        clusters[cid].append(method)
+        clusters[parse_cluster_id(cid)].append(method)
 
     # 从 history 计算每个方法的 eval_score 历史（用于 ASR）
     method_scores: dict[str, list[float]] = defaultdict(list)
@@ -291,7 +290,7 @@ def analyze_clusters(
 
     # BlendPredictor（多模型 sim-加权）诊断——看板"多模型层"（live 冷启动实际用的预测器）
     try:
-        bp_summary = build_blend_predictor_summary(tracker, defender_name)
+        bp_summary = build_blend_predictor_summary(tracker)
         if bp_summary:
             analysis["blend_predictor"] = bp_summary
     except Exception as e:

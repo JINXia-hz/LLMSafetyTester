@@ -13,6 +13,8 @@ from pathlib import Path
 
 
 def load_json(p: Path):
+    if p is None:
+        return None
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
@@ -21,13 +23,28 @@ def load_json(p: Path):
         return None
 
 
+def _find_artifact(work_dir: Path, filename: str) -> Path | None:
+    """定位 trial 产物文件。
+
+    两种落盘布局：
+      • 普通模式：runner 写到 work_dir/<filename>
+      • work-dir 隔离模式（HPO trial）：runner 写到 work_dir/<target>/<filename>（runs_dir=work_dir，
+        run_dir=runs_dir/target）。HPO trial 单目标，故恰好一个 target 子目录。
+    """
+    root = work_dir / filename
+    if root.exists():
+        return root
+    matches = list(work_dir.glob(f"*/{filename}"))
+    return matches[0] if matches else None
+
+
 def extract_metrics(work_dir: Path, max_rounds: int | None = None) -> dict:
     """
     从一个 trial 的 work_dir 提取度量字典。
 
     返回（至少含 conv_rounds、defender_elo、asr、ci_half、coverage、fpr、tested）。
     """
-    report = load_json(work_dir / "runner_report.json")
+    report = load_json(_find_artifact(work_dir, "runner_report.json"))
     metrics: dict = {"work_dir": str(work_dir)}
 
     if report:
@@ -58,8 +75,9 @@ def extract_metrics(work_dir: Path, max_rounds: int | None = None) -> dict:
 
 def _conv_rounds_from_state(work_dir: Path, max_rounds: int | None) -> int | float | None:
     """从 state.json 轮次轨迹回放 check_convergence，返回首个收敛轮数；未收敛给惩罚值。"""
-    state = load_json(work_dir / "state.json")
-    if not state:
+    state_path = _find_artifact(work_dir, "state.json")
+    state = load_json(state_path)
+    if not state or state_path is None:
         return None
     import sys
     root = str(Path(__file__).resolve().parents[2])
@@ -69,7 +87,7 @@ def _conv_rounds_from_state(work_dir: Path, max_rounds: int | None) -> int | flo
         from llmsec.evaluation.elo import ELOTracker
         from llmsec.params import CONV_CI_TARGET
         tracker = ELOTracker()
-        tracker.load(str(work_dir / "state.json"))
+        tracker.load(str(state_path))
         defender = state.get("defender_ratings") and next(iter(state["defender_ratings"]))
         if not defender:
             return None

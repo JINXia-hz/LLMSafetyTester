@@ -23,15 +23,14 @@ Phase 3: 综合评判
   10. 输出统一报告 → output/runs/<时间戳>/runner_report.json
 
 用法:
-    python runner.py                                    # 全流程
-    python runner.py --phase 1                          # 仅攻击阶段
-    python runner.py --phase 2                          # 仅过敏阶段
-    python runner.py --max-rounds 3 --batch-size 10     # 自定义参数
+    python -m llmsec.pipeline.runner                                    # 全流程
+    python -m llmsec.pipeline.runner --phase 1                          # 仅攻击阶段
+    python -m llmsec.pipeline.runner --phase 2                          # 仅过敏阶段
+    python -m llmsec.pipeline.runner --max-rounds 3 --batch-size 10     # 自定义参数
 """
 
 import argparse
 import os
-import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -40,41 +39,19 @@ from pathlib import Path
 from openai import OpenAI
 
 from llmsec.core.config import (
-    OUTPUT_DIR,
     PROJECT_ROOT,
     RUNS_DIR,
-    SAFE_TWINS_FILE,  # noqa: F401 — allergy_phase 经 runner 命名空间 lazy import
-    STATE_DIR,
     GeneratorConfig,
     TargetConfig,
 )
-from llmsec.core.io import (
-    append_jsonl,  # noqa: F401 — allergy_phase lazy import
-    iter_jsonl,  # noqa: F401 — allergy_phase lazy import
-    read_json,
-    read_jsonl,
-    write_json,
-    write_jsonl,  # noqa: F401 — attack_phase lazy import + tests monkeypatch
-)
+from llmsec.core.io import read_jsonl, write_json
 from llmsec.core.logging import setup_console
 from llmsec.core.seed import get_global_seed
-from llmsec.core.text import strip_math_tax  # noqa: F401 — allergy_phase lazy import
-from llmsec.evaluation import (
-    FAST_REFUSAL_PATTERNS,  # noqa: F401 — allergy_phase lazy import
-    ELOTracker,
-    Judge,
-    create_judge_client,
-    evaluate_single,  # noqa: F401 — attack_phase lazy import + tests monkeypatch
-    generate_safe_twin,  # noqa: F401 — allergy_phase lazy import
-    measure_math_baseline,
-    publish_tracker,
-)
+from llmsec.evaluation import ELOTracker, Judge, create_judge_client
+from llmsec.evaluation.elo_access import publish_tracker
 from llmsec.params import (
-    API_DELAY,  # noqa: F401 — allergy_phase lazy import
     DEFAULT_BATCH_SIZE,
     DEFAULT_MAX_ROUNDS,
-    MAX_TWIN_WINDOW,  # noqa: F401 — allergy_phase lazy import
-    MIN_TWIN_WINDOW,  # noqa: F401 — allergy_phase lazy import
     RIDGE_REFIT_THRESHOLD,
     SAMPLER_COORD_MIN_PER_CLUSTER,
     SAMPLER_HYBRID_EXPLORE_ROUNDS,
@@ -82,66 +59,38 @@ from llmsec.params import (
     SAMPLER_INFOGAIN_BETA,
     SAMPLER_INFOGAIN_GAMMA,
 )
-from llmsec.reporting import (
-    build_method_stats,
-    build_tree,
-    generate_narrative,
-    load_elo,
-    load_prompt_metadata,
-)
-from llmsec.targets import PCAP_JUDGE_URL, PCAP_MODEL_VERSION, call_target  # noqa: F401
+from llmsec.pipeline.allergy_phase import run_allergy_phase
+from llmsec.pipeline.attack_phase import run_attack_phase
+from llmsec.targets import PCAP_JUDGE_URL, PCAP_MODEL_VERSION
 
 logger = get_logger(__name__)
 setup_console()
 
 # ============================================================
-# 配置（惰性 from_env：改 env 后新建进程即生效，不再 import 期固化）
+# 配置（import 期 from_env 固化：改 env 后须重启进程才生效）
 # ============================================================
 _tcfg = TargetConfig.from_env()
 _gcfg = GeneratorConfig.from_env()
-TARGET_API_KEY = _tcfg.api_key
 TARGET_BASE_URL = _tcfg.base_url
 TARGET_MODEL = _tcfg.model
 GENERATOR_API_KEY = _gcfg.api_key
 GENERATOR_BASE_URL = _gcfg.base_url
-GENERATOR_MODEL = _gcfg.model
 
 # 目标后端类型（路由协议，非连接配置）
 TARGET_TYPE = os.getenv("TARGET_TYPE", "openai")
-
-# 防御方（目标模型）名称：PCAP 模式使用 PCAP_MODEL_VERSION，其它模式使用 TARGET_MODEL
-if TARGET_TYPE == "pcap_judge":
-    DEFENDER_NAME = PCAP_MODEL_VERSION
-else:
-    DEFENDER_NAME = TARGET_MODEL
-
-
-# ============================================================
-# 辅助函数
-# ============================================================
-def load_prompt_records(filepath) -> list[dict]:
-    """加载攻击prompt的JSONL文件（委托 core.io.read_jsonl）。"""
-    return read_jsonl(filepath)
 
 
 # ============================================================
 # Phase 2: 过敏检测
 # ============================================================
-# 过敏检测逻辑见 llmsec/pipeline/allergy_phase.py
-# （select_twin_candidates / run_allergy_phase / adaptive_twin_window / get_or_create_twin）。
-
-
-# ============================================================
-# 多目标编排（--targets）
-# ============================================================
-# 多目标编排见 llmsec/pipeline/multi_target.py（run_multi_target_phase）。
+# 过敏检测逻辑见 llmsec/pipeline/allergy_phase.py。
 
 
 # ============================================================
 # 主流程
 # ============================================================
 def _positive_int(value: str) -> int:
-    """argparse 类型：要求 >=1 的整数（用于 --max-rounds），非法值抛 argparse 错误。"""
+    """argparse 类型：要求 >=1 的整数，非法值抛 argparse 错误。"""
     try:
         iv = int(value)
     except ValueError:
@@ -172,12 +121,12 @@ def main():
                         help="运行阶段: all/1(攻击)/2(过敏)")
     parser.add_argument("--input", type=str, default="attacks/l1.jsonl",
                         help="攻击集输入文件")
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
-                        help=f"每轮测试的攻击数（默认{DEFAULT_BATCH_SIZE}）")
+    parser.add_argument("--batch-size", type=_positive_int, default=DEFAULT_BATCH_SIZE,
+                        help=f"每轮测试的攻击数（默认{DEFAULT_BATCH_SIZE}，必须 >= 1）")
     parser.add_argument("--max-rounds", type=_positive_int, default=DEFAULT_MAX_ROUNDS,
                         help=f"最大自适应轮次（默认{DEFAULT_MAX_ROUNDS}，必须 >= 1）")
-    parser.add_argument("--twin-window", type=int, default=None,
-                        help="过敏检测方法数上限；未指定时按ELO边界置信度自适应（置信度越低窗口越大）")
+    parser.add_argument("--twin-window", type=_positive_int, default=None,
+                        help="过敏检测方法数上限（必须 >= 1）；未指定时按ELO边界置信度自适应（置信度越低窗口越大）")
     parser.add_argument("--ridge-refit-threshold", type=int, default=RIDGE_REFIT_THRESHOLD,
                         help=f"新增 ground truth 方法数达到多少时触发 SVD-Ridge 重跑 K-Fold（默认 {RIDGE_REFIT_THRESHOLD}）；"
                              "未达阈值则用现有 λ* 快速 refit")
@@ -192,14 +141,14 @@ def main():
                         help=f"InfoGain 簇覆盖权重（默认 {SAMPLER_INFOGAIN_BETA}）")
     parser.add_argument("--sampler-gamma", type=float, default=SAMPLER_INFOGAIN_GAMMA,
                         help=f"InfoGain 成功潜力权重（默认 {SAMPLER_INFOGAIN_GAMMA}）")
-    parser.add_argument("--coordinate-rounds", type=int, default=SAMPLER_HYBRID_EXPLORE_ROUNDS,
-                        help=f"Hybrid 模式下前多少轮使用 InfoGain 探索（默认 {SAMPLER_HYBRID_EXPLORE_ROUNDS}）")
-    parser.add_argument("--coord-min-per-cluster", type=int, default=SAMPLER_COORD_MIN_PER_CLUSTER,
-                        help=f"坐标下降采样器每簇最少实测数（默认 {SAMPLER_COORD_MIN_PER_CLUSTER}）")
+    parser.add_argument("--coordinate-rounds", type=_positive_int, default=SAMPLER_HYBRID_EXPLORE_ROUNDS,
+                        help=f"Hybrid 模式下前多少轮使用 InfoGain 探索（默认 {SAMPLER_HYBRID_EXPLORE_ROUNDS}，必须 >= 1）")
+    parser.add_argument("--coord-min-per-cluster", type=_positive_int, default=SAMPLER_COORD_MIN_PER_CLUSTER,
+                        help=f"坐标下降采样器每簇最少实测数（默认 {SAMPLER_COORD_MIN_PER_CLUSTER}，必须 >= 1）")
     parser.add_argument("--targets", type=str, default=None,
                         help="多目标：逗号分隔的目标名子集（取自 .env TARGETS）；"
                              "指定后 Phase 1 逐目标攻击，结果写入 results 矩阵 R，"
-                             "结束后派生每模型 Elo + 训练混合预测器。缺省=旧单目标流程")
+                             "结束后派生每模型 Elo + 训练混合预测器。缺省=跑全部声明目标")
     parser.add_argument("--target", type=str, default=None,
                         help="单目标：按名称选择一个 .env 声明的目标进行常规评估"
                              "（走单目标流程，结果写入 R 矩阵）。与 --targets 互斥")
@@ -215,9 +164,11 @@ def main():
                              "评估纯函数并行、ELO 串行(Model B 同步轮次)，结果与并发度无关")
     parser.add_argument("--no-parallel", action="store_true",
                         help="禁用批内并行求值（等价 --concurrency 0，串行）")
+    parser.add_argument("--target-concurrency", type=_positive_int, default=1,
+                        help="多目标并发数（默认 1=串行，必须 >= 1；总并发 API = target_concurrency × concurrency）")
     args = parser.parse_args()
 
-    # 实验隔离模式默认跑满预算（ci_half@预算目标要求每个 trial 同预算）；CLI 显式可覆盖
+    # work_dir 实验模式强制跑满预算：ci_half@固定预算可比性要求每个 trial 同预算
     if args.work_dir:
         args.no_early_stop = True
     if args.no_parallel:
@@ -236,23 +187,21 @@ def main():
         import llmsec.core.results as _res
         _res.RESULTS_FILE = wd / "results.json"
         _cfg.ELO_CACHE_FILE = wd / "elo_cache.json"
-        # M-17：特征缓存/聚类产物同样隔离——elo_cluster 动态读 core.config 的这两个
+        # M-17：特征缓存/聚类产物同样隔离——predictors/cold_start 动态读 core.config 的这两个
         # 路径（仿 elo_access），重绑后 fit_features/_should_refresh_features 读写均落 work-dir
         _cfg.FEATURE_CACHE_FILE = wd / "feature_cache.pkl"
         _cfg.CLUSTER_RESULT_FILE = wd / "cluster_result.pkl"
         logger.info(f"🧪 实验隔离模式: work-dir={wd}（全局 state/results/elo_cache 不被触碰）")
 
     # 本次运行目录（原模块级 datetime.now() import 副作用移入 main）；
-    # 秒级时间戳撞名时追加 _2/_3 后缀，避免同秒两个 run 互相覆盖产物
-    runs_dir = _allocate_runs_dir(RUNS_DIR, datetime.now().strftime("%Y-%m-%d_%H%M%S"))
+    # 秒级时间戳撞名时追加 _2/_3 后缀，避免同秒两个 run 互相覆盖产物。
     # 实验隔离模式：所有 per-run 产物（report/attack_results/state快照/...）直接写 work-dir
+    # （work-dir 已在上面 mkdir，不再走时间戳分配）
     if args.work_dir:
         runs_dir = Path(args.work_dir)
-    runner_report_file = runs_dir / "runner_report.json"
-    runner_attack_file = runs_dir / "attack_results.jsonl"
-    runner_allergy_file = runs_dir / "allergy.json"
-    runner_sampler_log_file = runs_dir / "sampler_log.jsonl"
-    runner_cluster_analysis_file = runs_dir / "cluster_security_analysis.json"
+    else:
+        runs_dir = _allocate_runs_dir(RUNS_DIR, datetime.now().strftime("%Y-%m-%d_%H%M%S"))
+        runs_dir.mkdir(parents=True, exist_ok=True)
 
     # 加载攻击集（相对路径锚到仓库根：attacks/l1.jsonl → repo_root/attacks/l1.jsonl）
     input_path = os.path.join(PROJECT_ROOT, args.input) if not os.path.isabs(args.input) else args.input
@@ -261,7 +210,7 @@ def main():
         logger.info("   提示: python -m llmsec.attacks.generate 或 python -m llmsec.attacks.harmbench")
         sys.exit(1)
 
-    records = load_prompt_records(input_path)
+    records = read_jsonl(input_path)
 
     # 按方法分组
     method_records = {}
@@ -270,254 +219,271 @@ def main():
         if m not in method_records:
             method_records[m] = r
 
-    target_desc = {
-        "pcap_judge": f"PCAP Judge @ {PCAP_JUDGE_URL} (模型: {PCAP_MODEL_VERSION})",
-        "local_sim": f"本地模拟 @ {TARGET_BASE_URL} (模型: {TARGET_MODEL})",
-        "openai": f"OpenAI @ {TARGET_BASE_URL} (模型: {TARGET_MODEL})",
-    }.get(TARGET_TYPE, f"{TARGET_TYPE} @ {TARGET_BASE_URL} (模型: {TARGET_MODEL})")
-
     logger.info(f"📂 加载 {len(records)} 条攻击prompt，涵盖 {len(method_records)} 种攻击方法")
-    logger.info(f"🎯 攻击目标: {target_desc}")
-    logger.info(f"   模式: {TARGET_TYPE}")
     logger.info("")
 
-    # 初始化客户端
-    twin_client = OpenAI(api_key=GENERATOR_API_KEY, base_url=GENERATOR_BASE_URL)
+    # 初始化客户端（twin_client 仅 Phase 2 过敏检测使用，不跑 Phase 2 就不构造）
+    do_phase1 = args.phase in ("all", "1")
+    do_phase2 = args.phase in ("all", "2")
+    twin_client = OpenAI(api_key=GENERATOR_API_KEY, base_url=GENERATOR_BASE_URL) if do_phase2 else None
     judge_client = create_judge_client()
     judge = Judge(judge_client)
-    tracker = ELOTracker()
 
-    # 将 CLI 聚类参数同步给 predictor
-    tracker.predictor.ridge_refit_threshold = args.ridge_refit_threshold
-
-    os.makedirs(runs_dir, exist_ok=True)
-
-    # ---- 目标分发：多模型为默认（除非 --target 显式指定单模型）----
-    # 1) --target <name>        → 单目标命名分支（显式单模型）
-    # 2) --targets <a,b,c>      → 多目标指定列表
-    # 3) 都没指定 + ≥2 声明目标  → 默认全部声明目标（多模型默认）
-    # 4) 都没指定 + ≤1 声明目标  → 单目标默认流程（下方）
+    # ---- 确定目标列表 ----
     from llmsec.targets import available_targets
 
     declared = available_targets()
     if args.target and args.targets:
         logger.error("❌ --target 与 --targets 互斥")
         sys.exit(1)
-
     if args.target:
-        # 显式单模型
         if args.target not in declared:
             logger.error(f"❌ 未声明的目标: {args.target}（可用: {sorted(declared)}）")
             sys.exit(1)
-        global DEFENDER_NAME
-        DEFENDER_NAME = args.target
-        from llmsec.targets import set_active_target
-        set_active_target(args.target)
-        logger.info(f"🎯 已选择目标: {args.target} (model={declared[args.target].model} @ {declared[args.target].base_url})")
-    elif args.targets or len(declared) >= 2:
-        # 多目标：显式 --targets，或默认 ≥2 声明目标时全部扫描
-        if not args.targets:
-            args.targets = ",".join(declared.keys())
-            logger.info(f"🎯 未指定单模型，默认多模型扫描 {len(declared)} 个目标: {list(declared.keys())}")
-        return run_multi_target_phase(args, records, method_records, runs_dir, judge, twin_client)
-    # else: ≤1 声明目标且未显式指定 → 走单目标默认流程（下方）
-
-    # ---- Phase 1 ----
-    attack_summary = {}
-    if args.phase in ("all", "1"):
-        # 如用户要求强制重训练，先重建特征缓存再进入 Phase 1
-        if args.refresh_features:
-            logger.info("  🔄 强制重建特征缓存 ...")
-            tracker.predictor.fit_features(records)
-            _inject_predicted_elos(tracker, method_records, DEFENDER_NAME)
-            logger.info("  ✅ 强制重建完成，已更新所有方法预测 Elo")
-
-        attack_summary = run_attack_phase(
-            records, judge, tracker,
-            batch_size=args.batch_size, max_rounds=args.max_rounds,
-            attack_file=runner_attack_file,
-            sampler=args.sampler,
-            sampler_alpha=args.sampler_alpha,
-            sampler_beta=args.sampler_beta,
-            sampler_gamma=args.sampler_gamma,
-            coordinate_rounds=args.coordinate_rounds,
-            coord_min_per_cluster=args.coord_min_per_cluster,
-            sampler_log_file=runner_sampler_log_file,
-            cluster_analysis_file=(None if args.work_dir else runner_cluster_analysis_file),
-            skip_final_clustering=bool(args.work_dir),  # 隔离模式跳过聚类落盘
-            state_file=(str(Path(args.work_dir) / "state.json") if args.work_dir
-                        else (str(STATE_DIR / f"state__{args.target}.json") if args.target
-                              else str(runs_dir / "state.json"))),  # per-run 快照（不再写全局 STATE_FILE）
-            no_early_stop=args.no_early_stop,
-            concurrency=args.concurrency,
-        )
-        # publish_tracker 在 run_attack_phase 每轮已调用（写 R + elo_cache），
-        # main() 末尾再次 publish 做最终同步——此处不再重复镜像 R。
-    else:
-        # 仅过敏阶段：从 per-run/per-target 快照或 R 派生加载 ELO。
-        if args.work_dir:
-            tracker.load(str(Path(args.work_dir) / "state.json"))
-        elif args.target:
-            tracker.load(str(STATE_DIR / f"state__{args.target}.json"))
-        else:
-            # 从 R 派生（唯一真相），不再读全局 state.json
-            from llmsec.core.results import ResultsMatrix as _RM
-            from llmsec.evaluation.elo import derive_elo as _de
-
-            _R = _RM.load()
-            if _R.n_for_model(DEFENDER_NAME) > 0:
-                _derived = _de(_R, DEFENDER_NAME, method_catalog=list(method_records.keys()))
-                tracker.attacker_ratings = _derived.attacker_ratings
-                tracker.defender_ratings = _derived.defender_ratings
-                tracker.ground_truth_methods = _derived.ground_truth_methods
-                tracker._round_defender_elos = _derived._round_defender_elos
-                tracker._defender_match_count = _derived._defender_match_count
-        if not tracker.attacker_ratings:
-            logger.warning("⚠ 无ELO数据，请先运行 Phase 1")
+        args.targets = args.target
+    elif not args.targets:
+        if not declared:
+            logger.error("❌ 无可用目标，请在 .env 中声明 TARGETS 或通过看板配置")
             sys.exit(1)
+        args.targets = ",".join(declared.keys())
 
-    # ---- Phase 2 ----
-    allergy_summary = {}
-    if args.phase in ("all", "2"):
-        boundary_info = tracker.compute_security_boundary(DEFENDER_NAME)
-        n_window = adaptive_twin_window(
-            boundary_info, len(method_records),
-            allergy_summary=allergy_summary, user_window=args.twin_window
+    names = [n.strip() for n in args.targets.split(",") if n.strip()]
+    if not names:
+        logger.error(f"❌ --targets 解析为空: {args.targets!r}（请给出逗号分隔的目标名）")
+        sys.exit(1)
+    invalid = [n for n in names if n not in declared]
+    if invalid:
+        logger.error(f"❌ 未声明的目标: {invalid}（可用: {sorted(declared)}）")
+        sys.exit(1)
+
+    # 多目标时各目标后端配置取自 .env TARGETS、彼此可能不同，单目标才按 TARGET_TYPE 描述
+    if len(names) > 1:
+        logger.info(f"🎯 攻击目标: {len(names)} 个（{', '.join(names)}），逐目标评估")
+    else:
+        target_desc = {
+            "pcap_judge": f"PCAP Judge @ {PCAP_JUDGE_URL} (模型: {PCAP_MODEL_VERSION})",
+            "local_sim": f"本地模拟 @ {TARGET_BASE_URL} (模型: {TARGET_MODEL})",
+            "openai": f"OpenAI @ {TARGET_BASE_URL} (模型: {TARGET_MODEL})",
+        }.get(TARGET_TYPE, f"{TARGET_TYPE} @ {TARGET_BASE_URL} (模型: {TARGET_MODEL})")
+        logger.info(f"🎯 攻击目标: {target_desc}")
+        logger.info(f"   模式: {TARGET_TYPE}")
+
+    # ---- 1. 快照：R + 特征（运行前一次性获取，运行期间不读不写 R）----
+    from llmsec.core.results import ResultsMatrix
+
+    catalog = list(method_records.keys())
+    R_snapshot = ResultsMatrix.load()
+    R_snapshot.set_method_catalog(catalog)
+    _feat_tracker = ELOTracker()
+    _feat_tracker.predictor.fit_features(records)
+    features = _feat_tracker.predictor.artifacts.get("features", {})
+
+    concurrency = args.concurrency
+    target_concurrency = min(args.target_concurrency, len(names))
+
+    # ---- 2. 核心评估函数（per-target，完全独立，不读不写 R）----
+    def _eval_one_target(name: str):
+        """运行单个目标：评估→报告。返回 (tracker, info)。不写 R。"""
+        from llmsec.targets import set_active_target
+
+        run_dir = runs_dir / name
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        tracker = ELOTracker()
+        tracker.predictor.ridge_refit_threshold = args.ridge_refit_threshold
+        if features:
+            tracker.predictor.artifacts = _feat_tracker.predictor.artifacts
+
+        info: dict = {"target": name, "model": declared[name].model}
+
+        # Phase 1：攻击
+        # M6：多目标共享全局 CLUSTER_RESULT_FILE，各目标 final_fit 写同一文件会互相覆盖——
+        # 串行时仅 names 顺序最后一个目标落盘；并发时无安全落盘方，全部跳过。
+        # work_dir 实验模式重绑了隔离的 CLUSTER_RESULT_FILE，不受影响。
+        skip_final_clustering = (
+            not args.work_dir
+            and (target_concurrency > 1 or name != names[-1])
         )
-        logger.info(f"  📏 本次过敏检测窗口：{n_window} 个方法 "
-              f"(ELO边界置信度={boundary_info.get('confidence', 0)*100:.0f}%)")
-        allergy_summary = run_allergy_phase(
-            method_records, twin_client, judge, tracker,
-            n_window=n_window,
-            allergy_file=runner_allergy_file,
-            concurrency=args.concurrency,
-        )
+        attack_summary: dict = {}
+        if do_phase1:
+            attack_file = run_dir / "attack_results.jsonl"
+            try:
+                attack_summary = run_attack_phase(
+                    records, judge, tracker,
+                    batch_size=args.batch_size, max_rounds=args.max_rounds,
+                    attack_file=attack_file,
+                    sampler=args.sampler,
+                    sampler_alpha=args.sampler_alpha,
+                    sampler_beta=args.sampler_beta,
+                    sampler_gamma=args.sampler_gamma,
+                    coordinate_rounds=args.coordinate_rounds,
+                    coord_min_per_cluster=args.coord_min_per_cluster,
+                    sampler_log_file=run_dir / "sampler_log.jsonl",
+                    cluster_analysis_file=run_dir / "cluster_security_analysis.json",
+                    skip_final_clustering=skip_final_clustering,
+                    state_file=str(run_dir / "state.json"),
+                    no_early_stop=args.no_early_stop,
+                    force_refresh=args.refresh_features,
+                    concurrency=concurrency,
+                    defender_name=name,
+                    r_snapshot=R_snapshot,
+                )
+            except Exception as e:
+                logger.warning(f"  ⚠ {name} 攻击失败: {e}", exc_info=True)
+                # 攻击中途失败不应丢掉已测 ground truth——先尽力落盘再返回
+                try:
+                    tracker.save(run_dir / "state.json")
+                except Exception:
+                    logger.warning(f"  ⚠ {name} 攻击失败后 state 落盘也失败", exc_info=True)
+                return None, {**info, "error": str(e)}
+        else:
+            state_path = run_dir / "state.json"
+            if not state_path.exists():
+                logger.error(f"❌ {name}: --phase 2 需要 Phase 1 的 state.json（{state_path} 不存在）"
+                             "——请先运行 --phase all 或 --phase 1")
+                sys.exit(2)
+            tracker.load(str(state_path))
 
-    # ---- Phase 3 ----
-    # 越狱税基线测量：攻击集带探针时，用裸数学探针测正常正确率作对照
-    tax_block = attack_summary.get("jailbreak_tax", {})
-    if tax_block.get("probed", 0) > 0:
-        logger.info("  📐 测量越狱税基线（裸数学探针对照）...")
+        conv = tracker.check_convergence(
+            name, total_methods=len(catalog), tested_count=len(tracker.ground_truth_methods))
+        boundary = tracker.compute_security_boundary(name)
+        info.update({
+            "defender_elo": round(tracker.get_defender_elo(name), 1),
+            "this_run_tested": len(tracker.ground_truth_methods),
+            "converged": conv["converged"], "ci_half": conv["ci_half"],
+            "drift": conv["drift"], "confidence": boundary.get("confidence", 0),
+        })
+
+        # Phase 2：过敏
+        allergy_smmry: dict = {}
+        if do_phase2 and tracker.attacker_ratings:
+            set_active_target(name)
+            from llmsec.pipeline.allergy_phase import adaptive_twin_window
+            n_window = adaptive_twin_window(
+                boundary, len(method_records), user_window=args.twin_window)
+            allergy_file = run_dir / "allergy.json"
+            try:
+                allergy_smmry = run_allergy_phase(
+                    method_records, twin_client, judge, tracker,
+                    n_window=n_window, allergy_file=allergy_file,
+                    concurrency=concurrency, defender_name=name)
+            except Exception as e:
+                logger.warning(f"  ⚠ {name} 过敏检测失败: {e}")
+                allergy_smmry = {}
+            info["fpr"] = allergy_smmry.get("fpr")
+            info["allergic"] = allergy_smmry.get("allergic")
+
+        # ---- 3. 报告：先于写 R（报告从 local tracker 生成，R 此刻还是干净的）----
+        # reporting 负责生成全部产物（runner_report.json 完整版 + security_tree.json + security_report.md）
         try:
-            baseline = measure_math_baseline()
-            if baseline.get("accuracy") is not None and tax_block.get("attack_accuracy") is not None:
-                tax_block["baseline_accuracy"] = baseline["accuracy"]
-                tax_block["accuracy_drop"] = round(
-                    baseline["accuracy"] - tax_block["attack_accuracy"], 4)
-                tax_block["baseline"] = baseline
-        except Exception as e:
-            logger.warning(f"  ⚠ 越狱税基线测量失败（跳过基线对照）: {e}")
+            tracker.save(run_dir / "state.json")
+        except Exception:
+            logger.warning(f"  ⚠ {name} state 落盘失败", exc_info=True)
 
-    # ---- 生成报告 + 发布 ----
-    # 单目标 main 的报告/publish/save 链各自独立 try，某一步失败不阻止后续产物落盘
-    try:
-        report = generate_final_report(attack_summary, allergy_summary, tracker,
-                                       report_file=runner_report_file)
-        write_json(runner_report_file, report)
-    except Exception as e:
-        logger.warning(f"  ⚠ 最终报告生成失败: {e}")
-
-    try:
-        # R-cutover：把本次 live tracker 的结果发布进 R（唯一真相）+ Elo 派生缓存。
-        publish_tracker(tracker, DEFENDER_NAME)
-    except Exception as e:
-        logger.warning(f"  ⚠ publish_tracker（写 R 矩阵）失败: {e}")
-
-    try:
-        # run 内 state 快照：dashboard 按 run 查看历史时优先读快照
-        tracker.save(runs_dir / "state.json")
-    except Exception as e:
-        logger.warning(f"  ⚠ state 快照保存失败: {e}")
-
-    # cluster_report.json 快照
-    global_cluster_report = OUTPUT_DIR / "cluster_report.json"
-    if global_cluster_report.exists():
         try:
-            shutil.copy2(global_cluster_report, runs_dir / "cluster_report.json")
+            from llmsec.reporting.final_report import generate_reports
+            generate_reports(
+                run_dir=run_dir,
+                tracker=tracker,
+                defender_name=name,
+                attack_summary=attack_summary,
+                allergy_summary=allergy_smmry,
+                total_methods=len(catalog),
+            )
         except Exception as e:
-            logger.warning(f"  ⚠ cluster_report 快照失败: {e}")
+            logger.warning(f"  报告生成失败（回退精简版）: {e}")
+            # 精简兜底
+            write_json(run_dir / "runner_report.json", {
+                "generated_at": datetime.now().isoformat(),
+                "target_model": name,
+                "security_level": "inconclusive",
+                "attack_phase": {"asr": None, "total_tested": info.get("this_run_tested", 0)},
+                "elo": {"boundary_elo": info.get("defender_elo"),
+                        "ci_half": info.get("ci_half"),
+                        "converged": info.get("converged")},
+                "allergy": {"fpr": info.get("fpr")},
+            })
 
-    # ---- 生成树形 + 叙事报告（仅使用 runner 自己的数据） ----
-    results = read_jsonl(runner_attack_file)
-    elo_data = load_elo(OUTPUT_DIR)
-    allergy_data = read_json(runner_allergy_file, default={})
-    metadata = load_prompt_metadata()
+        return tracker, info
 
-    generated_files = [runner_report_file, runs_dir / "state.json"]
+    # ============================================================
+    # Phase A+B：评估 + 报告（并发，不写 R）
+    # ============================================================
+    results: dict[str, dict] = {}
+    trackers: dict[str, ELOTracker | None] = {}
 
-    if results:
+    def _eval_and_report(name: str) -> tuple[str, ELOTracker | None, dict]:
+        """评估单个目标 + 生成报告。不写 R。返回 (name, tracker, info)。"""
+        logger.info(f"\n{'='*60}\n  🎯 {name}\n{'='*60}")
+        tracker, info = _eval_one_target(name)
+        if tracker:
+            logger.info(f"  📄 {name}: ELO≈{info.get('defender_elo',0):.0f}  "
+                  f"CI±{info.get('ci_half','?')}  "
+                  f"{'✓收敛' if info.get('converged') else '⚠未收敛'}"
+                  + (f"  FPR={info.get('fpr')}" if info.get("fpr") is not None else ""))
+        else:
+            logger.info(f"  ❌ {name}: {info.get('error', '失败')}")
+        return name, tracker, info
+
+    if target_concurrency <= 1:
+        for name in names:
+            n, tr, info = _eval_and_report(name)
+            results[n] = info
+            trackers[n] = tr
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        logger.info(f"  ⚡ 并发度: {target_concurrency}")
+        if not args.work_dir:
+            logger.info("  多目标并发：final 聚类落盘全部跳过（无安全落盘方）")
+        with ThreadPoolExecutor(max_workers=target_concurrency) as ex:
+            futures = {ex.submit(_eval_and_report, name): name for name in names}
+            for fut in as_completed(futures):
+                name = futures[fut]
+                try:
+                    n, tr, info = fut.result()
+                    results[n] = info
+                    trackers[n] = tr
+                except Exception as e:
+                    results[name] = {"target": name, "error": str(e)}
+                    trackers[name] = None
+
+    # ============================================================
+    # Phase C：写入 R（主线程串行，所有评估+报告完成后）
+    # ============================================================
+    logger.info(f"\n{'='*60}\n  💾 写入 R 矩阵\n{'='*60}")
+    for name in names:
+        tracker = trackers.get(name)
+        if tracker is None:
+            continue
         try:
-            logger.info("🌳 生成层级安全报告...")
-            ms = build_method_stats(results, elo_data, metadata)
-            tree = build_tree(ms, allergy_data, elo_data,
-                              tax_info=attack_summary.get("jailbreak_tax"))
-            tree_path = runs_dir / "security_tree.json"
-            write_json(tree_path, tree)
-            generated_files.append(tree_path)
-
-            markdown = generate_narrative(tree, OUTPUT_DIR)
-            md_path = runs_dir / "security_report.md"
-            md_path.parent.mkdir(parents=True, exist_ok=True)
-            md_path.write_text(markdown, encoding="utf-8")
-            generated_files.append(md_path)
+            publish_tracker(tracker, name)
+            logger.info(f"  {name}: {len(tracker.ground_truth_methods)} 条 → R")
         except Exception as e:
-            logger.warning(f"  ⚠ 树形/叙事报告生成失败: {e}")
+            logger.error(f"  ❌ {name} 写入 R 失败: {e}")
 
-    if Path(runner_attack_file).exists():
-        generated_files.append(runner_attack_file)
-    if Path(runner_allergy_file).exists():
-        generated_files.append(runner_allergy_file)
-    if Path(runner_sampler_log_file).exists():
-        generated_files.append(runner_sampler_log_file)
-    if Path(runner_cluster_analysis_file).exists():
-        generated_files.append(runner_cluster_analysis_file)
+    # ============================================================
+    # Phase D：清理（trackers 离开作用域 → GC）
+    # ============================================================
+    trackers.clear()
 
-    # ---- 清晰的文件清单 ----
-    generated_files = [str(f) for f in generated_files]
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("  📋 输出文件")
-    logger.info("=" * 60)
-    # 按类别分组
-    reports = [f for f in generated_files if f.endswith(".md") or "runner_report" in f]
-    data = [f for f in generated_files if f.endswith(".json") and "state" not in f.lower() and "allergy" not in f.lower() and "tree" not in f.lower() and "runner_report" not in f]
-    jsonl_files = [f for f in generated_files if f.endswith(".jsonl") and "attack_results" not in f]
-    allergy = [f for f in generated_files if "allergy" in f.lower()]
-    state = [f for f in generated_files if "state" in f.lower()]
-    tree_files = [f for f in generated_files if "tree" in f.lower()]
-    detail = [f for f in generated_files if ("攻击结果" in f or "attack_results" in f)]
+    # ---- 汇总日志 ----
+    logger.info(f"\n{'='*60}\n  📊 汇总\n{'='*60}")
+    R_final = ResultsMatrix.load()
+    for name in names:
+        info = results.get(name, {})
+        if "error" in info:
+            logger.info(f"  {name}: ❌ {info['error']}")
+        else:
+            logger.info(f"  {name:28s} ELO≈{info.get('defender_elo',0):6.0f}  "
+                  f"R累计{R_final.n_for_model(name)}  "
+                  f"CI±{info.get('ci_half','?')}  "
+                  f"{'✓' if info.get('converged') else '⚠'}"
+                  + (f"  FPR={info.get('fpr')}" if info.get("fpr") is not None else ""))
 
-    if reports:
-        logger.info("  人类可读报告:")
-        for f in reports:
-            logger.info(f"    📄 {Path(f).name}")
-    if data:
-        logger.info("  结构数据:")
-        for f in data:
-            logger.info(f"    📊 {Path(f).name}")
-    if jsonl_files:
-        logger.info("  日志数据:")
-        for f in jsonl_files:
-            logger.info(f"    📜 {Path(f).name}")
-    if detail:
-        logger.info("  攻击详情（含响应原文，可人工复核）:")
-        for f in detail:
-            logger.info(f"    🗡️  {Path(f).name}")
-    if allergy:
-        logger.info("  过敏检测详情:")
-        for f in allergy:
-            logger.info(f"    🤧 {Path(f).name}")
-    if state:
-        logger.info("  运行状态:")
-        for f in state:
-            logger.info(f"    📁 {Path(f).name}")
-    if tree_files:
-        logger.info("  树形数据:")
-        for f in tree_files:
-            logger.info(f"    🌳 {Path(f).name}")
-    logger.info("\n  💡 想快速看结论 → 打开 security_report.md")
-    logger.info("  💡 想看原始数据 → 打开 runner_report.json")
-    logger.info("=" * 60)
+    logger.info(f"\n  📁 产出: {runs_dir}/")
+    for name in names:
+        if (runs_dir / name / "runner_report.json").exists():
+            logger.info(f"    {name}/runner_report.json")
 
     # 自动重训 ML 预筛模型（<1s，不阻塞；数据不足时静默跳过）
     try:
@@ -529,28 +495,15 @@ def main():
     except Exception as e:
         logger.debug(f"ML 预筛自动重训跳过: {e}")
 
+    return {"targets": names, "per_target": results}
 
-# ============================================================
-# 延迟导入（打破与子模块的循环依赖；子模块在函数体内 from runner import …）
-# ============================================================
-from llmsec.pipeline.allergy_phase import (  # noqa: E402, F401
-    adaptive_twin_window,
-    run_allergy_phase,
-)
-from llmsec.pipeline.attack_phase import (  # noqa: E402, F401
-    _inject_predicted_elos,
-    run_attack_phase,
-)
-from llmsec.pipeline.multi_target import run_multi_target_phase  # noqa: E402, F401
-from llmsec.pipeline.tax import format_tax_line  # noqa: E402, F401
-from llmsec.reporting.final_report import generate_final_report  # noqa: E402, F401
 
 if __name__ == "__main__":
     # 优先使用项目根目录下的 .venv，避免系统 Python 缺少依赖。
     # 注意：必须在 __main__ 内而非模块顶层，否则 import 本模块（如测试）会被杀进程。
     _PROJECT_ROOT = Path(__file__).resolve().parents[2]
     _VENV_PYTHON = _PROJECT_ROOT / ".venv" / "Scripts" / "python.exe"
-    if _VENV_PYTHON.exists() and sys.executable != str(_VENV_PYTHON):
+    if _VENV_PYTHON.exists() and os.path.realpath(sys.executable) != os.path.realpath(str(_VENV_PYTHON)):
         _proc = subprocess.run(
             [str(_VENV_PYTHON), "-m", "llmsec.pipeline.runner"] + sys.argv[1:],
             cwd=_PROJECT_ROOT,

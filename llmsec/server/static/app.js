@@ -1,1688 +1,207 @@
-/* LLMSEC 安全评估工作台前端逻辑 */
-
-// ---------- 全局状态与常量 ----------
-// 绢本金碧 · 唐化配色：石青主色、土红撞色、描金点缀
-const C = {
-  primary: '#46586B', accent: '#A85B43', warn: '#A85B43',
-  safe: '#75876B', ochre: '#B98A44', deep: '#7A4A35', gold: '#BFA03C',
-  muted: '#8A8571', text: '#2F343B',
-};
-const PLOT_CFG = { responsive: true, displayModeBar: false };
-const PLOT_FONT = { family: 'ui-sans-serif, system-ui, sans-serif', color: C.text };
-
-// ---------- 主题（绢本纸日 / 石窟夜色） ----------
-const THEME_CHART = {
-  light: { text: '#2F343B', grid: '#E3D8B8', primary: '#46586B', muted: '#8A8571' },
-  dark:  { text: '#EFE3C6', grid: '#4B4136', primary: '#7E9AB4', muted: '#AC9F83' },  // 漆夜玄朱联动
-};
-let theme = localStorage.getItem('llmsec-theme') || 'light';
-
-function tangLayout() {
-  const t = THEME_CHART[theme];
-  const axis = { gridcolor: t.grid, zerolinecolor: t.grid };
-  return {
-    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
-    font: { family: PLOT_FONT.family, color: t.text },
-    xaxis: axis, yaxis: { ...axis },
-    polar: { bgcolor: 'rgba(0,0,0,0)', radialaxis: axis, angularaxis: axis },
-  };
-}
-
-// Plotly 统一走绢本金碧主题模板（深合并，业务 layout 的 xaxis/yaxis 不会被底色覆盖）
-const _newPlot = Plotly.newPlot.bind(Plotly);
-Plotly.newPlot = (id, traces, layout = {}, cfg) => {
-  const base = tangLayout();
-  const merged = {
-    ...base, ...layout,
-    font: { ...base.font, ...(layout.font || {}) },
-    xaxis: { ...base.xaxis, ...(layout.xaxis || {}) },
-    yaxis: { ...base.yaxis, ...(layout.yaxis || {}) },
-    polar: layout.polar ? { ...base.polar, ...layout.polar } : undefined,
-  };
-  if (!layout.polar) delete merged.polar;
-  return _newPlot(id, traces, merged, cfg);
-};
-
-// 匾额等级印章：等级 → 印字
-const SEAL_CHARS = { safe: '安', allergic: '警', vulnerable: '伤', broken: '破', inconclusive: '?' };
-function setBanner(level) {
-  $('ov_banner').className = 'banner plaque mb-2 level-' + level;
-  const seal = $('ov_seal');
-  seal.className = 'seal level-' + level;
-  seal.textContent = SEAL_CHARS[level] || '?';
-  seal.classList.remove('seal-anim'); void seal.offsetWidth; seal.classList.add('seal-anim'); // 重触发盖印
-}
-
-let currentRun = '';           // '' = 最新
-let activeSection = 'overview';
-let lastOverview = null;       // 最近一次总览数据（批次对比用）
-const loaded = {};             // section -> 已加载的 run
-
-const $ = id => document.getElementById(id);
-const fmtPct = v => (v == null ? 'N/A' : (v * 100).toFixed(1) + '%');
-const fmtNum = (v, d = 1) => (v == null ? 'N/A' : Number(v).toFixed(d));
-
-// ---------- 动效基础设施 ----------
-const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-// 数字滚动：值变化时 500ms rAF 插值（ease-out cubic）；null/初设/未变化/reduced-motion 直接写终值
-function setMetric(id, num, fmt) {
-  const el = $(id);
-  if (!el) return;
-  const prev = el._v;
-  el._v = num;
-  if (num == null || prev == null || prev === num || REDUCED_MOTION) {
-    el.textContent = fmt(num);
-    return;
-  }
-  cancelAnimationFrame(el._raf);
-  const t0 = performance.now(), dur = 500;
-  const step = t => {
-    if (el._v !== num) return;                     // 已被更新的值取代，旧动画静默终止
-    const k = Math.min(1, (t - t0) / dur);
-    const e = 1 - Math.pow(1 - k, 3);
-    el.textContent = fmt(prev + (num - prev) * e);
-    if (k < 1) el._raf = requestAnimationFrame(step);
-  };
-  el._raf = requestAnimationFrame(step);
-}
-
-// 盖印开卷 splash 收尾：淡出后移除节点；每会话标记在播完时才写入
-function dismissSplash() {
-  const sp = $('splash');
-  if (!sp) return;
-  try { sessionStorage.setItem('llmsec-splashed', '1'); } catch (e) { /* 隐私模式 */ }
-  sp.classList.add('splash-out');
-  setTimeout(() => sp.remove(), 350);
-}
-// 阶段字幕（展卷…→览批次…→绘丹青…）
-function splashStage(t) { const el = $('splashStage'); if (el) el.textContent = t; }
-window.addEventListener('load', () => setTimeout(dismissSplash, 4000));  // 兜底：防 API 挂起死白屏
-
-// 骨架屏：section 数据拉取期间给指标卡数值位/图表容器铺描金呼吸块
-const SECTION_SKELETONS = {
-  overview: { metrics: ['ov_asr', 'ov_fpr', 'ov_boundary', 'ov_conf', 'ov_tested', 'ov_above', 'ov_tax'], charts: ['chart_radar', 'chart_harm'] },
-  threats: { metrics: [], charts: ['chart_top_threats', 'chart_convergence'] },
-  clusters: { metrics: ['cl_methods', 'cl_n', 'cl_sil', 'cl_db'], charts: ['chart_projection', 'chart_dendrogram', 'chart_rv', 'chart_cluster_cover'] },
-  model: { metrics: ['md_lambda', 'md_sigma', 'md_df', 'md_gt'], charts: ['chart_regpath', 'chart_pca', 'chart_importance', 'chart_pred_ci'] },
-};
-function toggleSkeletons(sec, on) {
-  const cfg = SECTION_SKELETONS[sec];
-  if (!cfg) return;
-  cfg.metrics.forEach(id => $(id)?.classList.toggle('loading', on));
-  cfg.charts.forEach(id => {
-    const el = $(id);
-    if (!el) return;
-    el.classList.toggle('chart-loading', on);
-    if (on) el.style.height = '';   // 清掉上次钉住的高度，让本次渲染重新测量
-    // 修复"图表被下方内容覆盖"：chart-loading 的 min-height 会让 Plotly 把容器当作
-    // 已定高（不设内联高度），撤骨架后容器坍缩（Plotly 的 svg 是绝对定位）。
-    // 撤骨架时若已渲染，按 Plotly 计算高度把容器钉住。
-    if (!on && el.classList.contains('js-plotly-plot') && !el.style.height) {
-      el.style.height = (el._fullLayout?.height || 450) + 'px';
-    }
-  });
-}
-
-async function api(path) {
-  const res = await fetch(path);
-  if (!res.ok) throw new Error(`${path} → ${res.status}`);
-  return res.json();
-}
-function runQuery() { return currentRun ? `?run=${encodeURIComponent(currentRun)}` : ''; }
-function setStatus(msg) { $('status').textContent = msg || ''; }
-
-// HTML 转义：服务器字符串插入 innerHTML 前统一过这道
-const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
-  .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-// markdown → 安全 HTML（marked 不过滤原始 HTML，必须过 DOMPurify）
-const mdSafe = md => DOMPurify.sanitize(marked.parse(md || ''));
-// 清空图表：切到无数据批次时避免上一批次的图残留
-function clearCharts(ids) {
-  ids.forEach(id => { const el = $(id); if (el) { Plotly.purge(el); el.innerHTML = ''; } });
-}
-
-// ---------- 导航 ----------
-const SECTIONS = ['overview', 'threats', 'report', 'clusters', 'model', 'run'];
-let _secToken = 0;   // 翻页过渡令牌：快速连点时作废旧过渡
-document.querySelectorAll('#nav .nav-item').forEach(el => {
-  el.addEventListener('click', () => {
-    const target = el.dataset.section;
-    document.querySelectorAll('#nav .nav-item').forEach(n => n.classList.remove('active'));
-    el.classList.add('active');
-    history.replaceState(null, '', '#' + target);  // 板块可直达/可收藏
-    const next = $('sec-' + target);
-    if (target === activeSection && next.classList.contains('visible')) return;
-    activeSection = target;
-    const cur = document.querySelector('.section.visible');
-    const tok = ++_secToken;
-    const show = () => {
-      if (tok !== _secToken) return;               // 已被更新的点击作废
-      document.querySelectorAll('.section').forEach(s => s.classList.remove('visible', 'section-enter', 'section-exit'));
-      next.classList.add('visible', 'section-enter');
-      next.addEventListener('animationend', () => next.classList.remove('section-enter'), { once: true });
-      loadSection(target);
-    };
-    if (REDUCED_MOTION || !cur || cur === next) {
-      show();
-    } else {
-      cur.classList.add('section-exit');           // 先退出（.14s），再进场
-      setTimeout(show, 140);
-    }
-  });
-});
-
-function loadSection(name) {
-  if (loaded[name] === currentRun) return;
-  loaded[name] = currentRun;
-  toggleSkeletons(name, true);
-  Promise.resolve(({ overview: loadOverview, threats: loadThreats, report: loadReport,
-     clusters: loadClusters, model: loadModel, run: loadRunSection })[name]())
-    .finally(() => toggleSkeletons(name, false));   // 渲染（含空数据分支）完成后撤骨架
-}
-function invalidate() { for (const k in loaded) delete loaded[k]; loadSection(activeSection); }
-
-// ---------- 主题切换（依赖 $ 与 invalidate，定义于此） ----------
-function applyTheme(t, rerender = true) {
-  theme = t;
-  localStorage.setItem('llmsec-theme', t);
-  document.documentElement.dataset.theme = t === 'dark' ? 'dark' : '';
-  const tc = THEME_CHART[t];
-  PLOT_FONT.color = tc.text;
-  C.primary = tc.primary; C.muted = tc.muted;   // 图表系列色随主题微调
-  $('themeBtn').textContent = t === 'dark' ? '昼' : '夜';   // 楷体单字（印章语言），title 已说明含义
-  if (rerender) invalidate();                    // 重绘当前板块图表
-}
-$('themeBtn').addEventListener('click', () => applyTheme(theme === 'dark' ? 'light' : 'dark'));
-
-// ---------- 运行批次 ----------
-async function loadRuns() {
-  const data = await api('/api/runs');
-  const sel = $('runSelect');
-  sel.innerHTML = '<option value="">最新</option>';
-  const cmp = $('cmpSelect');
-  // 占位空项：默认不选中任何批次，避免"未选择"分支成死代码
-  cmp.innerHTML = '<option value="">选择对比批次…</option>';
-  data.runs.forEach(r => {
-    const opt = document.createElement('option');
-    opt.value = r.name;
-    // 富化条目：印字等级 + 目标模型 + ASR，一眼分辨批次质量（option 纯文本，无法上色）
-    opt.textContent = r.has_report
-      ? `${SEAL_CHARS[r.security_level] || '▫'} ${r.name} · ${r.target_model || '?'} · ASR ${fmtPct(r.asr)}`
-      : `${r.name} (无报告)`;
-    sel.appendChild(opt);
-    cmp.appendChild(opt.cloneNode(true));   // 批次对比下拉共用同一清单
-  });
-  // 任务完成后列表会重建：保留用户已选批次，避免被弹回"最新"
-  if (currentRun && [...sel.options].some(o => o.value === currentRun)) sel.value = currentRun;
-}
-$('runSelect').addEventListener('change', e => { currentRun = e.target.value; invalidate(); });
-$('refreshBtn').addEventListener('click', async () => { await loadRuns(); invalidate(); });
-
-// ---------- 总览 ----------
-async function loadOverview() {
-  loadTrend();   // 趋势是跨批次全局数据，与当前批次无关，独立加载独立失败
-  try {
-    const d = await api('/api/overview' + runQuery());
-    if (!d.available) {
-      lastOverview = null;
-      setBanner('inconclusive');
-      $('ov_target').textContent = '目标模型: -';
-      $('ov_verdict').textContent = d.message || '暂无运行数据';
-      $('ov_recommendation').textContent = '';
-      ['ov_asr', 'ov_fpr', 'ov_boundary', 'ov_conf', 'ov_tested', 'ov_above', 'ov_tax']
-        .forEach(id => { $(id).textContent = '-'; $(id)._v = null; });
-      $('ov_tax_sub').textContent = '';
-      clearCharts(['chart_radar', 'chart_harm']);
-      return;
-    }
-    const level = d.security_level || 'inconclusive';
-    lastOverview = d;
-    if (cmpActive) renderCompare();   // 切批次后对比面板"当前"列同步重渲染
-    setBanner(level);
-    $('ov_target').textContent = `目标模型: ${d.target_model || '-'}  ·  批次 ${d.run}`;
-    $('ov_verdict').textContent = d.overall_verdict || level.toUpperCase();
-    $('ov_recommendation').textContent = d.recommendation ? '按：' + d.recommendation : '';
-    // stale_report 提示：存在更新批次时展示；切回最新批次（无 message）时清除旧文案
-    setStatus(d.message || '');
-
-    setMetric('ov_asr', d.asr, fmtPct);
-    setMetric('ov_fpr', d.fpr, fmtPct);
-    setMetric('ov_boundary', d.boundary_elo, v => fmtNum(v, 0));
-    setMetric('ov_conf', d.boundary_confidence, fmtPct);
-    $('ov_tested').textContent = `${d.total_tested}/${d.total_methods}`;
-    $('ov_above').textContent = d.predicted_above_boundary != null
-      ? `${d.methods_above_boundary} (实测${d.tested_above_boundary}/预测${d.predicted_above_boundary})`
-      : d.methods_above_boundary;
-
-    // 越狱税：优先基线对比呈现；null = 该批未测（攻击集无数学探针）
-    if (d.jailbreak_tax_baseline_accuracy != null && d.jailbreak_tax_attack_accuracy != null) {
-      $('ov_tax').textContent = `${fmtPct(d.jailbreak_tax_baseline_accuracy)} → ${fmtPct(d.jailbreak_tax_attack_accuracy)}`;
-      const drop = d.jailbreak_tax_drop != null ? `退化 ${fmtPct(d.jailbreak_tax_drop)}` : '';
-      const probed = d.jailbreak_tax_probed != null ? `探针 ${d.jailbreak_tax_probed} 条` : '';
-      $('ov_tax_sub').textContent = [drop, probed].filter(Boolean).join(' · ');
-    } else if (d.jailbreak_tax_mean != null) {
-      $('ov_tax').textContent = fmtNum(d.jailbreak_tax_mean, 2);
-      const hi = d.jailbreak_tax_high_ratio != null ? `高税占比 ${fmtPct(d.jailbreak_tax_high_ratio)}` : '';
-      const probed = d.jailbreak_tax_probed != null ? `探针 ${d.jailbreak_tax_probed} 条` : '';
-      $('ov_tax_sub').textContent = ['无基线对照', hi, probed].filter(Boolean).join(' · ');
-    } else {
-      $('ov_tax').textContent = '未测试';
-      $('ov_tax_sub').textContent = '攻击集无数学探针';
-    }
-
-    // 雷达图（闭合）
-    const r = d.radar;
-    Plotly.newPlot('chart_radar', [{
-      type: 'scatterpolar',
-      r: [...r.values, r.values[0]],
-      theta: [...r.labels, r.labels[0]],
-      fill: 'toself',
-      fillcolor: 'rgba(70,88,107,0.18)',
-      line: { color: C.primary, width: 2 },
-      marker: { size: 6, color: C.primary },
-    }], {
-      polar: { radialaxis: { range: [0, 1], tickformat: '.0%', tickfont: { size: 10 } } },
-      margin: { t: 24, b: 24, l: 62, r: 62 }, font: PLOT_FONT, showlegend: false,
-    }, PLOT_CFG);
-
-    const harm = Object.entries(d.harm_type_asr || {}).sort((a, b) => b[1] - a[1]);
-    if (!harm.length) {
-      clearCharts(['chart_harm']);
-      $('chart_harm').innerHTML = '<div class="text-xs py-8 text-center" style="color: var(--c-muted);">该批次无类别统计数据</div>';
-    } else {
-      Plotly.newPlot('chart_harm', [{
-        x: harm.map(i => i[0]), y: harm.map(i => i[1]), type: 'bar',
-        text: harm.map(i => fmtPct(i[1])), textposition: 'auto',
-        marker: { color: C.accent },
-      }], { yaxis: { tickformat: '.0%', range: [0, 1] }, margin: { t: 10 }, font: PLOT_FONT }, PLOT_CFG);
-    }
-  } catch (e) { setStatus('总览加载失败: ' + e.message); }
-}
-
-// ---------- 安全趋势（跨批次，/api/trend） ----------
-let trendTarget = '';          // '' = 全部目标
-let trendTargetCounts = {};    // {target: 批次数}，仅在"全部"视图时从完整数据统计
-async function loadTrend() {
-  const el = $('chart_trend');
-  if (!el) return;
-  try {
-    const d = await api('/api/trend' + (trendTarget ? '?target=' + encodeURIComponent(trendTarget) : ''));
-    // "全部"视图时统计各目标批次数（供 chip 标签显示）
-    if (!trendTarget) {
-      trendTargetCounts = {};
-      (d.trend || []).forEach(p => {
-        trendTargetCounts[p.target] = (trendTargetCounts[p.target] || 0) + 1;
-      });
-    }
-    // 目标过滤 chips：有目标时始终渲染（含"全部"按钮），不再因选中后 targets 缩为 1 而消失
-    const chips = $('trendTargets');
-    chips.innerHTML = '';
-    const allTargets = d.targets || [];
-    if (allTargets.length > 0) {
-      const mk = (val, label) => {
-        const b = document.createElement('button');
-        b.className = 'btn text-xs ' + (trendTarget === val ? 'btn-primary' : 'btn-plain');
-        b.textContent = label;
-        b.onclick = () => { trendTarget = val; loadTrend(); };
-        chips.appendChild(b);
-      };
-      mk('', '全部');
-      allTargets.forEach(t => {
-        const n = trendTargetCounts[t] || 0;
-        mk(t, n > 0 ? `${t} (${n})` : t);
-      });
-    }
-    const pts = d.trend || [];
-    if (!pts.length) {
-      $('trendMeta').textContent = '';
-      el.innerHTML = '<div class="text-xs py-8 text-center" style="color: var(--c-muted);">暂无带报告的批次，趋势无从谈起</div>';
-      return;
-    }
-    $('trendMeta').textContent = `（${pts.length} 个批次 · 全局数据，不随批次切换）`;
-    // 按目标分组：每目标两条 trace——ELO 实线（左轴）+ ASR 点线（右轴）
-    // target 为 null 的批次归入"未知目标"，避免分组键/trace 名出现 'null'
-    const byTarget = {};
-    pts.forEach(p => { const k = p.target || '未知目标'; (byTarget[k] = byTarget[k] || []).push(p); });
-    const traces = [];
-    Object.entries(byTarget).forEach(([t, arr], i) => {
-      const color = CLUSTER_COLORS[i % CLUSTER_COLORS.length];
-      arr.sort((a, b) => (a.run < b.run ? -1 : 1));
-      const xs = arr.map(p => p.run);
-      traces.push({
-        x: xs, y: arr.map(p => p.elo), type: 'scatter', mode: 'lines+markers',
-        name: `${t} · ELO`, line: { color, width: 2 }, marker: { size: 6, color },
-        hovertemplate: '%{x}<br>ELO %{y:.0f}<extra>' + esc(t) + '</extra>',
-      });
-      traces.push({
-        x: xs, y: arr.map(p => p.asr), type: 'scatter', mode: 'lines+markers',
-        name: `${t} · ASR`, yaxis: 'y2',
-        line: { color, width: 1.5, dash: 'dot' }, marker: { size: 5, symbol: 'circle-open', color },
-        hovertemplate: '%{x}<br>ASR %{y:.1%}<extra>' + esc(t) + '</extra>',
-      });
-    });
-    Plotly.newPlot('chart_trend', traces, {
-      margin: { t: 10 }, height: 320, font: PLOT_FONT,
-      xaxis: { tickangle: -30, tickfont: { size: 10 } },
-      yaxis: { title: 'ELO' },
-      yaxis2: { overlaying: 'y', side: 'right', tickformat: '.0%', title: 'ASR', range: [0, 1] },
-      legend: { orientation: 'h', y: -0.32, font: { size: 10 } },
-    }, PLOT_CFG);
-  } catch (e) { $('trendMeta').textContent = '（趋势加载失败）'; }
-}
-
-// ---------- 批次对比 ----------
-let cmpActive = false;
-$('cmpBtn').addEventListener('click', () => {
-  cmpActive = !cmpActive;
-  $('cmpPanel').classList.toggle('hidden', !cmpActive);
-  $('cmpSelect').classList.toggle('hidden', !cmpActive);
-  $('cmpHint').classList.toggle('hidden', !cmpActive);
-  $('cmpBtn').className = 'btn text-xs ' + (cmpActive ? 'btn-accent' : 'btn-plain');
-  if (cmpActive) renderCompare();
-});
-$('cmpSelect').addEventListener('change', renderCompare);
-
-function cmpRow(name, cur, oth, delta, goodWhenDown, suffix = '') {
-  let cls = 'cmp-delta-flat', txt = '—';
-  if (delta != null && Math.abs(delta) > 1e-9) {
-    const good = goodWhenDown ? delta < 0 : delta > 0;
-    cls = good ? 'cmp-delta-up-good' : 'cmp-delta-up-bad';
-    txt = (delta > 0 ? '+' : '') + delta + suffix;
-  }
-  return `<tr><td>${name}</td><td>${cur}</td><td>${oth}</td><td class="${cls}">${txt}</td></tr>`;
-}
-
-async function renderCompare() {
-  const other = $('cmpSelect').value;
-  if (!other || !lastOverview || !lastOverview.available) {
-    if (!other) { $('cmpTable').innerHTML = '<span class="text-xs" style="color: var(--c-muted);">选择一个对比批次</span>'; clearCharts(['chart_cmp_radar']); }
-    return;
-  }
-  if (lastOverview.run === other) {
-    $('cmpTable').innerHTML = '<span class="text-xs" style="color: var(--c-muted);">与当前批次相同，换个批次试试</span>';
-    clearCharts(['chart_cmp_radar']);
-    return;
-  }
-  try {
-    const o = await api('/api/overview?run=' + encodeURIComponent(other));
-    if (!o.available) { $('cmpTable').innerHTML = '<span class="text-xs" style="color: var(--c-muted);">该批次无总览数据</span>'; return; }
-    const a = lastOverview;
-
-    // 雷达叠加：当前=石青，对比=土红
-    const r = a.radar;
-    Plotly.newPlot('chart_cmp_radar', [
-      { type: 'scatterpolar', r: [...r.values, r.values[0]], theta: [...r.labels, r.labels[0]],
-        fill: 'toself', fillcolor: 'rgba(70,88,107,0.15)', name: a.run,
-        line: { color: C.primary, width: 2 }, marker: { size: 5, color: C.primary } },
-      { type: 'scatterpolar', r: [...o.radar.values, o.radar.values[0]], theta: [...o.radar.labels, o.radar.labels[0]],
-        fill: 'toself', fillcolor: 'rgba(168,91,67,0.12)', name: o.run,
-        line: { color: C.accent, width: 2, dash: 'dot' }, marker: { size: 5, color: C.accent } },
-    ], {
-      polar: { radialaxis: { range: [0, 1], tickformat: '.0%', tickfont: { size: 10 } } },
-      margin: { t: 24, b: 24, l: 62, r: 62 }, font: PLOT_FONT,
-      showlegend: true, legend: { orientation: 'h', y: -0.12, font: { size: 10 } },
-    }, PLOT_CFG);
-
-    // 增量表（红=变差，绿=变好）
-    const pctD = (x, y) => (x == null || y == null) ? null : +(((y - x) * 100).toFixed(1));
-    const numD = (x, y) => (x == null || y == null) ? null : +(y - x).toFixed(1);
-    $('cmpTable').innerHTML = `<table>
-      <tr><th>指标</th><th>当前 ${esc(a.run)}</th><th>对比 ${esc(o.run)}</th><th>Δ</th></tr>
-      ${cmpRow('ASR 攻击成功率', fmtPct(a.asr), fmtPct(o.asr), pctD(a.asr, o.asr), true, '%')}
-      ${cmpRow('FPR 误杀率', fmtPct(a.fpr), fmtPct(o.fpr), pctD(a.fpr, o.fpr), true, '%')}
-      ${cmpRow('ELO 安全边界', fmtNum(a.boundary_elo, 0), fmtNum(o.boundary_elo, 0), numD(a.boundary_elo, o.boundary_elo), false)}
-      ${cmpRow('边界置信度', fmtPct(a.boundary_confidence), fmtPct(o.boundary_confidence), pctD(a.boundary_confidence, o.boundary_confidence), false, '%')}
-      ${cmpRow('已测方法', `${a.total_tested}/${a.total_methods}`, `${o.total_tested}/${o.total_methods}`, numD(a.total_tested, o.total_tested), false)}
-      ${cmpRow('边界以上威胁', a.methods_above_boundary, o.methods_above_boundary, numD(a.methods_above_boundary, o.methods_above_boundary), true)}
-    </table>`;
-  } catch (e) { $('cmpTable').innerHTML = '<span class="text-xs">对比加载失败: ' + esc(e.message) + '</span>'; }
-}
-
-// ---------- 威胁表格：点击表头排序 ----------
-let threatRows = [];
-let threatSort = { key: 'elo', dir: -1 };   // 默认 ELO 降序
-const THREAT_KEY = { elo: t => t.elo ?? -Infinity, asr: t => t.asr ?? -Infinity, tax: t => t.mean_jailbreak_tax ?? -Infinity, tested: t => t.tested ? 1 : 0 };
-
-function renderThreatTable() {
-  const tbody = $('threatTable');
-  tbody.innerHTML = '';
-  const get = THREAT_KEY[threatSort.key];
-  const rows = [...threatRows].sort((a, b) => (get(a) - get(b)) * threatSort.dir);
-  rows.forEach(t => {
-    const tr = document.createElement('tr');
-    tr.style.borderTop = '1px solid #E3D8B8';
-    const badge = t.tested
-      ? '<span class="badge badge-gt">实测</span>'
-      : '<span class="badge badge-pred">预测</span>';
-    const ci = t.ci95 ? `[${fmtNum(t.ci95[0], 0)}, ${fmtNum(t.ci95[1], 0)}]` : '-';
-    tr.innerHTML = `<td class="py-2 pr-4 font-mono text-xs">${esc(t.method)}</td>
-      <td class="py-2 pr-4 font-semibold">${fmtNum(t.elo)}</td>
-      <td class="py-2 pr-4">${t.asr != null ? fmtPct(t.asr) : '-'}</td>
-      <td class="py-2 pr-4">${t.mean_jailbreak_tax != null ? fmtNum(t.mean_jailbreak_tax, 2) : '-'}</td>
-      <td class="py-2 pr-4">${badge}</td><td class="py-2 text-xs">${ci}</td>`;
-    tbody.appendChild(tr);
-  });
-  document.querySelectorAll('#sec-threats th[data-sort]').forEach(th => {
-    th.classList.toggle('sort-asc', th.dataset.sort === threatSort.key && threatSort.dir === 1);
-    th.classList.toggle('sort-desc', th.dataset.sort === threatSort.key && threatSort.dir === -1);
-  });
-}
-document.querySelectorAll('#sec-threats th[data-sort]').forEach(th => {
-  th.addEventListener('click', () => {
-    const k = th.dataset.sort;
-    threatSort = threatSort.key === k ? { key: k, dir: -threatSort.dir } : { key: k, dir: -1 };
-    renderThreatTable();
-  });
-});
-
-// ---------- 威胁看板 ----------
-async function loadThreats() {
-  try {
-    const [d, elo] = await Promise.all([api('/api/threats' + runQuery()), api('/api/elo' + runQuery())]);
-    if (!d.available) {
-      clearCharts(['chart_top_threats', 'chart_convergence']);
-      $('threatTable').innerHTML = '';
-      $('defenseList').innerHTML = '<span style="color: var(--c-muted);">无数据</span>';
-      $('upsetList').innerHTML = '<span style="color: var(--c-muted);">无数据</span>';
-      return;
-    }
-
-    // 防御方当前 ELO 描金参考线：威胁条与防御边界的相对位置一目了然
-    const defEntries = Object.entries(elo.round_defender_elos || {});
-    let defShapes = [], defAnno = [];
-    if (defEntries.length && defEntries[0][1].length) {
-      const dv = defEntries[0][1];
-      const curElo = dv[dv.length - 1];
-      defShapes = [{ type: 'line', x0: curElo, x1: curElo, yref: 'paper', y0: 0, y1: 1,
-                     line: { color: C.gold, width: 1.5, dash: 'dash' } }];
-      defAnno = [{ x: curElo, y: 1, yref: 'paper', text: '防御方 ELO', showarrow: false,
-                   xanchor: 'left', yanchor: 'bottom', font: { size: 10, color: C.gold } }];
-    }
-
-    const top = (d.top_threats || []).slice(0, 10);
-    Plotly.newPlot('chart_top_threats', [{
-      y: top.map(t => t.method).reverse(),
-      x: top.map(t => t.elo).reverse(),
-      type: 'bar', orientation: 'h',
-      text: top.map(t => fmtNum(t.elo, 0)).reverse(), textposition: 'auto',
-      marker: { color: top.map(t => t.tested ? C.warn : C.muted).reverse() },
-    }], { margin: { t: 10 }, height: 380, font: PLOT_FONT,
-          xaxis: { title: 'ELO（红=实测，灰=预测）' },
-          shapes: defShapes, annotations: defAnno }, PLOT_CFG);
-
-    // 收敛曲线
-    const series = Object.entries(elo.round_defender_elos || {});
-    if (series.length) {
-      const [name, vals] = series[0];
-      Plotly.newPlot('chart_convergence', [{
-        x: vals.map((_, i) => i + 1), y: vals, type: 'scatter', mode: 'lines+markers',
-        line: { color: C.primary, width: 2 }, marker: { size: 7 },
-        name,
-      }], { margin: { t: 10 }, height: 380, font: PLOT_FONT,
-            xaxis: { title: '轮次' }, yaxis: { title: `防御方 ELO（${name}）` } }, PLOT_CFG);
-    }
-
-    // 威胁表格（数据入缓存，交给可排序渲染器）
-    threatRows = d.top_threats || [];
-    renderThreatTable();
-
-    // 防御强项
-    const dl = $('defenseList');
-    dl.innerHTML = '';
-    (d.strong_defenses || []).slice(0, 8).forEach(t => {
-      dl.innerHTML += `<div class="flex justify-between"><span class="font-mono text-xs">${esc(t.method)}</span>
-        <span style="color: var(--c-safe); font-weight:600;">ELO ${fmtNum(t.elo, 0)}</span></div>`;
-    });
-    if (!dl.innerHTML) dl.innerHTML = '<span style="color: var(--c-muted);">无数据</span>';
-
-    // 意外盲区（兼容 list / {weakness:[...]} 两种结构）
-    const ul = $('upsetList');
-    ul.innerHTML = '';
-    let upsets = d.upsets || [];
-    if (!Array.isArray(upsets)) upsets = upsets.weakness || [];
-    upsets.slice(0, 8).forEach(u => {
-      ul.innerHTML += `<div class="flex justify-between">
-        <span class="font-mono text-xs">${esc(u.attacker || u.method || '')}</span>
-        <span style="color: var(--c-warn); font-weight:600;">gap ${fmtNum(u.elo_gap ?? u.surprise, 0)}</span></div>`;
-    });
-    if (!ul.innerHTML) ul.innerHTML = '<span style="color: var(--c-muted);">无数据</span>';
-  } catch (e) { setStatus('威胁看板加载失败: ' + e.message); }
-}
+/* app.js — 入口：报告渲染 + 打印 PDF（绢本存档）+ 阅读进度 + 启动；依赖 core/sections/analysis/run-control（按序先加载） */
 
 // ---------- 报告 ----------
+// 最近一次报告的结构化缓存（PDF 打印用）：{run, headTitle, head, sections:[{title, content}]}
+let lastReport = null;
+
 async function loadReport() {
   try {
     const d = await api('/api/report-md' + runQuery());
     const nav = $('reportNav'), body = $('reportBody');
     nav.innerHTML = ''; body.innerHTML = '';
+    lastReport = null;
     if (!d.available) {
       body.innerHTML = '<div class="card text-sm" style="color: var(--c-muted);">该批次没有 security_report.md</div>';
       return;
     }
-    // 原始 .md 下载（打印美化交给浏览器打印）
+    // .md 原始下载；PDF 走浏览器打印（美化文档见 buildPrintDoc / @media print）
     nav.innerHTML = `<div class="report-nav-title">目录</div>
-      <a href="/api/report/download${runQuery()}" class="block px-2 py-1 mb-2 rounded text-xs font-semibold text-center"
-      style="border: 1px solid var(--c-gold); color: var(--c-gold);">下载报告 (.md)</a>`;
+      <a href="/api/report/download${runQuery()}" class="block px-2 py-1 mb-1 rounded text-xs font-semibold text-center"
+      style="border: 1px solid var(--c-gold); color: var(--c-gold);">下载 .md</a>
+      <button id="btnPdf" class="block w-full px-2 py-1 mb-2 rounded text-xs font-semibold text-center"
+      title="在打印对话框中选择「另存为 PDF」；建议取消勾选「页眉和页脚」"
+      style="border: 1px solid var(--c-primary); color: var(--c-primary);">下载 PDF</button>`;
     // 按 ## 分段
     const chunks = d.markdown.split(/^## /m);
     const head = chunks[0];
     const headTitle = (head.match(/^# (.+)$/m) || [])[1] || '安全评估报告';
-    body.innerHTML += `<div class="card report-body report-head"><h1>${esc(headTitle)}</h1>${mdSafe(head.replace(/^# .+$/m, ''))}</div>`;
-    chunks.slice(1).forEach((chunk, i) => {
+    const sections = chunks.slice(1).map(chunk => {
       const nl = chunk.indexOf('\n');
-      const title = nl > 0 ? chunk.slice(0, nl).trim() : chunk.trim();
-      const content = nl > 0 ? chunk.slice(nl + 1) : '';
+      return {
+        title: (nl > 0 ? chunk.slice(0, nl) : chunk).trim(),
+        content: nl > 0 ? chunk.slice(nl + 1) : '',
+      };
+    });
+    lastReport = { run: d.run, headTitle, head: head.replace(/^# .+$/m, '').trim(), sections };
+    body.innerHTML += `<div class="card report-body report-head"><h1>${esc(headTitle)}</h1>${mdSafe(head.replace(/^# .+$/m, ''))}</div>`;
+    sections.forEach((sec, i) => {
       const anchor = `rep-${i}`;
-      nav.innerHTML += `<a href="#${anchor}" class="rep-link block px-2 py-1 rounded hover:bg-stone-100" style="color: var(--c-primary);">${esc(title)}</a>`;
+      nav.innerHTML += `<a href="#${anchor}" class="rep-link block px-2 py-1 rounded hover:bg-stone-100" style="color: var(--c-primary);">${esc(sec.title)}</a>`;
       const div = document.createElement('div');
       div.className = 'card report-body';
       div.id = anchor;
-      div.innerHTML = `<h2>${esc(title)}</h2>${mdSafe(content)}`;
+      div.innerHTML = `<h2>${esc(sec.title)}</h2>${mdSafe(sec.content)}`;
       body.appendChild(div);
     });
+    // 注意：必须在 innerHTML 变更全部结束后再挂监听——上面的 += 会重建 nav 子树、丢弃已挂监听器
+    $('btnPdf').addEventListener('click', printReport);
+    if (PRINT_PREVIEW) enterPrintPreview();   // ?printdoc=1：屏幕预览打印版
   } catch (e) { setStatus('报告加载失败: ' + e.message); }
 }
 
-// ---------- 聚类分析 ----------
-const CLUSTER_COLORS = [
-  '#46586B', '#A85B43', '#75876B', '#B98A44', '#7A4A35', '#8a7ba8', '#BFA03C',
-  '#5f8d8b', '#a87b7b', '#96896f', '#845f8d', '#63855a', '#c07a5a', '#a8948a',
+// ---------- 打印 PDF「绢本存档」：封面 + 目录 + 五个板块 live 排印 ----------
+// printAll 流程：加 body.printing-all 平铺所有板块（plotly 真实渲染）→ 加载五板块数据 →
+// 图表重排 → window.print()；afterprint 卸 class 恢复屏幕。浏览器页眉页脚无法由 CSS 去除，
+// 需用户在打印对话框取消勾选（按钮 title 有提示）。
+const PRINT_PREVIEW = new URLSearchParams(location.search).has('printdoc');
+const PRINT_PARTS = [
+  ['sec-overview', '壹 · 总览'],
+  ['sec-threats', '贰 · 威胁看板'],
+  ['sec-report', '叁 · 安全评估报告'],
+  ['sec-clusters', '肆 · 聚类分析'],
+  ['sec-model', '伍 · 预测模型'],
 ];
-let projMethod = 'pca';
+let _printPrevTheme = null;   // 印前若为夜色则临时切绢本浅色，印完恢复
+let _printPrep = false;       // 整备中标志：防 loadReport → enterPrintPreview 递归
 
-async function loadProjection(method) {
-  projMethod = method;
-  $('projPcaBtn').className = 'btn text-xs ' + (method === 'pca' ? 'btn-primary' : 'btn-plain');
-  $('projTsneBtn').className = 'btn text-xs ' + (method === 'tsne' ? 'btn-primary' : 'btn-plain');
+// 封面元数据（目标模型/等级/时间）取总览缓存；直达报告页时缓存为空，补拉一次
+async function ensureOverview() {
+  if (lastOverview) return;
   try {
-    const d = await api('/api/cluster-projection?method=' + method);
-    if (!d.available) { $('projMeta').textContent = '（无聚类 artifacts）'; return; }
+    const d = await api('/api/overview' + runQuery());
+    if (d && d.available) lastOverview = d;
+  } catch (e) { /* 拉不到则封面省略对应字段 */ }
+}
 
-    const byCluster = {};
-    d.points.forEach(p => { (byCluster[p.cluster] = byCluster[p.cluster] || []).push(p); });
-    const traces = Object.entries(byCluster).map(([cid, pts], i) => ({
-      x: pts.map(p => p.x),
-      y: pts.map(p => p.y),
-      type: 'scatter', mode: 'markers',
-      name: cid === '-1' ? '噪声' : pts[0].cluster_name,
-      customdata: pts.map(p => p.cluster),   // 点选联动簇卡片用
-      marker: {
-        size: 9,
-        color: CLUSTER_COLORS[i % CLUSTER_COLORS.length],
-        opacity: pts.map(p => p.tested ? 0.95 : 0.4),
-      },
-      text: pts.map(p =>
-        `${p.method}<br>${p.cluster_name}` +
-        (p.elo != null ? `<br>ELO ${p.elo}` : '') +
-        (p.tested ? '<br>实测' : '<br>预测')),
-      hovertemplate: '%{text}<extra></extra>',
-    }));
+async function printReport() {
+  if (_printPrep) return;
+  setStatus('正在整备打印文档…');
+  await preparePrintDoc();
+  setStatus('');
+  window.print();
+}
 
-    const meta = method === 'pca' && d.explained_variance
-      ? `两维解释方差 ${(d.explained_variance[0] * 100).toFixed(1)}% + ${(d.explained_variance[1] * 100).toFixed(1)}%`
-      : method === 'tsne' ? `perplexity=${d.perplexity}` : '';
-    $('projMeta').textContent = `（${d.n} 种方法 · ${meta} · 实心=实测 空心=预测 · 点选可定位簇卡片 · 数据来自最近一次聚类，全局）`;
-
-    Plotly.newPlot('chart_projection', traces, {
-      margin: { t: 10 }, height: 520, font: PLOT_FONT,
-      xaxis: { title: method === 'pca' ? 'PC1' : 't-SNE 1' },
-      yaxis: { title: method === 'pca' ? 'PC2' : 't-SNE 2' },
-      legend: { orientation: 'h', y: -0.18, font: { size: 10 } },
-    }, PLOT_CFG);
-
-    // 点选投影点 → 滚动到对应簇卡片并描金闪高（k 切割视图的簇 id 语义不同，不联动）
-    const gd = $('chart_projection');
-    if (gd.removeAllListeners) gd.removeAllListeners('plotly_click');
-    gd.on('plotly_click', ev => {
-      const cid = ev.points && ev.points[0] && ev.points[0].customdata;
-      if (cid == null) return;
-      const card = document.getElementById('clcard-' + cid);
-      if (!card) return;
-      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      card.classList.remove('clcard-flash'); void card.offsetWidth;   // 重触发
-      card.classList.add('clcard-flash');
-      setTimeout(() => card.classList.remove('clcard-flash'), 1600);
+// 打印整备：浅色 + 封面/目录 + 部件题签 + 五板块加载渲染 + 图表重排
+async function preparePrintDoc() {
+  _printPrep = true;
+  try {
+    _printPrevTheme = theme;
+    if (theme === 'dark') applyTheme('light');          // 纸质走绢本浅色
+    document.body.classList.add('printing-all');
+    await ensureOverview();
+    buildPrintDoc();
+    addPrintPartTitles();
+    // 各 loader 内部已 try/catch 兜底，五板块并行拉取渲染
+    await Promise.all([loadOverview(), loadThreats(), loadReport(), loadClusters(), loadModel()]);
+    // 隐藏期渲染的 plotly 图表尺寸为 0，板块可见后统一重排到可打印幅面
+    if (window.Plotly) document.querySelectorAll('.js-plotly-plot').forEach(gd => {
+      try { Plotly.Plots.resize(gd); } catch (e) { /* 单图失败不阻塞 */ }
     });
-  } catch (e) { $('projMeta').textContent = '（投影加载失败: ' + e.message + '）'; }
+    await new Promise(r => setTimeout(r, 400));          // 等重排与楷体字形落位
+    await _freezeChartsAsImages();                       // 图表转 PNG：根治跨页（见函数注）
+  } finally { _printPrep = false; }
 }
 
-async function loadClusters() {
-  try {
-    loadProjection(projMethod);
-    loadClusterTree();
-    const d = await api('/api/clusters' + runQuery());
-    if (!d.available) {
-      ['cl_methods', 'cl_n', 'cl_sil', 'cl_db'].forEach(id => { $(id).textContent = '-'; $(id)._v = null; });
-      $('rvBanner').className = 'banner level-inconclusive mb-3';
-      $('rvBanner').style.padding = '12px 16px';
-      $('rvVerdict').textContent = '暂无聚类数据';
-      $('rvStats').textContent = d.reason === 'no_cluster' ? '该批次无聚类分析结果，可先在"运行控制"跑聚类安全分析' : '';
-      $('clusterCards').innerHTML = '';
-      clearCharts(['chart_cluster_cover', 'chart_rv']);
-      return;
-    }
-    setMetric('cl_methods', d.n_methods ?? null, v => (v == null ? '-' : fmtNum(v, 0)));
-    setMetric('cl_n', d.n_clusters ?? null, v => (v == null ? '-' : fmtNum(v, 0)));
-    setMetric('cl_sil', d.validation?.silhouette ?? null, v => fmtNum(v, 4));
-    setMetric('cl_db', d.validation?.davies_bouldin ?? null, v => fmtNum(v, 4));
-
-    const cl = (d.clusters || []).slice(0, 20);
-    Plotly.newPlot('chart_cluster_cover', [
-      {
-        x: cl.map(c => c.name), y: cl.map(c => c.size), type: 'bar', name: '簇规模',
-        marker: { color: C.primary },
-      },
-      {
-        x: cl.map(c => c.name), y: cl.map(c => c.test_coverage), type: 'scatter',
-        mode: 'lines+markers', name: '测试覆盖率', yaxis: 'y2',
-        line: { color: C.accent, width: 2 },
-      },
-    ], {
-      margin: { t: 10 }, font: PLOT_FONT,
-      yaxis: { title: '方法数' },
-      yaxis2: { overlaying: 'y', side: 'right', tickformat: '.0%', range: [0, 1] },
-      legend: { orientation: 'h', y: 1.12 },
-    }, PLOT_CFG);
-
-    const riskSet = new Set(d.high_risk_clusters || []);
-    const blindSet = new Set(d.blind_spot_clusters || []);
-    const stableSet = new Set(d.stable_clusters || []);
-
-    // ---- 簇效验证卡片 ----
-    const rv = d.reaction_validation;
-    if (rv && rv.available) {
-      // 4 分支判定：effective/promising → 绿（好消息）；weak/ineffective → 红
-      const rvStatus = rv.status || (rv.effective ? 'effective' : 'ineffective');
-      const rvPositive = rvStatus === 'effective' || rvStatus === 'promising';
-      $('rvBanner').className = 'banner mb-3 ' + (rvPositive ? 'level-safe' : 'level-broken');
-      $('rvBanner').style.padding = '12px 16px';
-      $('rvVerdict').innerHTML = `<span class="seal-chip">${rvPositive ? '显著' : '存疑'}</span>${esc(rv.verdict)}`;
-      let rvStats = `p_anova=${rv.p_anova} · p_kruskal=${rv.p_kruskal} · eta²=${rv.eta2} · ε²=${rv.epsilon2}`;
-      if (rv.underpowered) rvStats += ` · n=${rv.n_total}/${rv.adequate_n}（不足）`;
-      $('rvStats').textContent = rvStats;
-      const pcs = Object.entries(rv.per_cluster || {}).sort((a, b) => b[1].mean_score - a[1].mean_score);
-      if (pcs.length) {
-        Plotly.newPlot('chart_rv', [{
-          x: pcs.map(([cid]) => cid === '-1' ? '稀疏区' : `簇${cid}`),
-          y: pcs.map(([, v]) => v.mean_score),
-          type: 'bar',
-          text: pcs.map(([, v]) => `${v.mean_score.toFixed(2)} (n=${v.n_tested})`),
-          textposition: 'auto',
-          marker: { color: pcs.map(([, v]) => v.mean_score > 0 ? C.warn : C.primary) },
-        }], { margin: { t: 10 }, height: 260, font: PLOT_FONT,
-              yaxis: { title: '簇内平均机器反应 (eval_score)' } }, PLOT_CFG);
-      }
-    } else {
-      $('rvBanner').className = 'banner level-inconclusive mb-3';
-      $('rvBanner').style.padding = '12px 16px';
-      $('rvVerdict').textContent = '暂无簇效验证数据';
-      $('rvStats').textContent = (rv && rv.reason) ? rv.reason : '需在新版聚类流程（post-test HDBSCAN）运行后生成';
-      $('chart_rv').innerHTML = '';
-    }
-
-    const wrap = $('clusterCards');
-    wrap.innerHTML = '';
-
-    // HDBSCAN 密度视图的稀疏区（关键层切割无噪声，稀疏区来自密度视图）
-    const hdb = d.hdbscan;
-    if (hdb && hdb.n_noise > 0) {
-      const sparseName = (hdb.cluster_names || {})['-1'] || '稀疏区（低密度噪声）';
-      const sparseMembers = Object.entries(hdb.method_labels || {})
-        .filter(([, c]) => c === -1).map(([m]) => m);
-      const div = document.createElement('div');
-      div.className = 'card';
-      div.id = 'clcard--1';   // 投影噪声点（cluster=-1）点选联动的落点
-      div.style.background = '#F2EBD8';
-      div.innerHTML = `
-        <div class="flex items-center justify-between">
-          <div class="font-semibold text-sm">
-            <span class="cluster-tag" style="background:#EAE2CC;color:#7C7663;">稀疏区</span> ${esc(sparseName)}</div>
-          <div class="text-xs" style="color: var(--c-muted);">${hdb.n_noise} 种方法 · HDBSCAN 密度视图（共 ${hdb.n_clusters} 个密度簇）</div>
-        </div>
-        <div class="text-xs mt-2 truncate" style="color: var(--c-muted);">${esc(sparseMembers.slice(0, 24).join('、'))}${sparseMembers.length > 24 ? ' …' : ''}</div>`;
-      wrap.appendChild(div);
-    }
-
-    (d.clusters || []).forEach(c => {
-      let tag = '', bg = '#F6EFDE';
-      if (String(c.id) === '-1') { tag = '<span class="cluster-tag" style="background:#EAE2CC;color:#7C7663;">稀疏区</span>'; bg = '#F2EBD8'; }
-      else if (riskSet.has(c.id)) { tag = '<span class="cluster-tag" style="background:#F0DBCF;color:#9a4a35;">高风险</span>'; bg = '#F6E9E0'; }
-      else if (blindSet.has(c.id)) { tag = '<span class="cluster-tag" style="background:#F1E4CC;color:#a0663f;">盲区</span>'; bg = '#F6EFE0'; }
-      else if (stableSet.has(c.id)) { tag = '<span class="cluster-tag" style="background:#DFE5D4;color:#4f7351;">稳定</span>'; bg = '#EDF0E4'; }
-      const div = document.createElement('div');
-      div.className = 'card';
-      div.id = 'clcard-' + c.id;   // 投影点选联动的落点
-      div.style.background = bg;
-      div.innerHTML = `
-        <div class="flex items-center justify-between">
-          <div class="font-semibold text-sm">${esc(c.name)} ${tag}</div>
-          <div class="text-xs" style="color: var(--c-muted);">
-            ${c.size} 种方法 · 覆盖 ${fmtPct(c.test_coverage)} · 平均 ELO ${fmtNum(c.mean_elo, 0)} · ASR ${fmtPct(c.asr)}
-          </div>
-        </div>
-        <div class="text-xs mt-2 truncate" style="color: var(--c-muted);">${esc((c.members || []).slice(0, 24).join('、'))}${(c.members || []).length > 24 ? ' …' : ''}</div>`;
-      wrap.appendChild(div);
-    });
-  } catch (e) { setStatus('聚类分析加载失败: ' + e.message); }
-}
-
-// ---------- 层次树（树图 + 缩放切割） ----------
-let treeData = null;
-let treeK = null;
-
-function treeCutHeight(k) {
-  const h = treeData.merge_heights, n = treeData.n;
-  if (k <= 1) return h.length ? h[h.length - 1] * 1.05 : 1;
-  if (k >= n) return 0;
-  return (h[n - k - 1] + h[n - k]) / 2;
-}
-
-function cutLineShape(h) {
-  return { type: 'line', x0: 0, x1: 1, xref: 'paper', y0: h, y1: h,
-           line: { color: C.warn, width: 1.5, dash: 'dash' } };
-}
-
-async function loadClusterTree() {
-  try {
-    const d = await api('/api/cluster-tree');
-    if (!d.available) { $('treeMeta').textContent = '（无层次树数据，需新版树聚类运行后生成）'; return; }
-    treeData = d;
-    treeK = d.chosen_k;
-    $('treeK').textContent = treeK;
-    $('treeMeta').textContent = `（${d.n} 种方法 · auto-k=${d.chosen_k} · 数据来自最近一次聚类，全局）`;
-    const presets = $('treePresets');
-    presets.innerHTML = '';
-    (d.top_ks || []).forEach(k => {
-      const b = document.createElement('button');
-      b.className = 'btn btn-plain text-xs';
-      b.textContent = 'k=' + k;
-      b.onclick = () => setTreeK(k);
-      presets.appendChild(b);
-    });
-    drawDendrogram();
-  } catch (e) { $('treeMeta').textContent = '（树图加载失败）'; }
-}
-
-function drawDendrogram() {
-  const d = treeData;
-  const xs = [], ys = [];
-  d.icoord.forEach((x4, i) => {
-    const y4 = d.dcoord[i];
-    xs.push(x4[0], x4[1], x4[2], x4[3], null);
-    ys.push(y4[0], y4[1], y4[2], y4[3], null);
-  });
-  const traces = [{
-    x: xs, y: ys, type: 'scatter', mode: 'lines',
-    line: { color: C.primary, width: 1.2 }, hoverinfo: 'skip',
-  }];
-  // 叶子方法名：隐形散点只供 hover（scipy dendrogram 叶子 x = 10*i+5）
-  if (d.leaves && d.leaves.length) {
-    traces.push({
-      x: d.leaves.map((_, i) => i * 10 + 5), y: d.leaves.map(() => 0),
-      type: 'scatter', mode: 'markers',
-      marker: { size: 14, opacity: 0 },
-      text: d.leaves, hovertemplate: '%{text}<extra></extra>',
-    });
-  }
-  Plotly.newPlot('chart_dendrogram', traces, {
-    margin: { t: 10 }, height: 300, font: PLOT_FONT, showlegend: false,
-    xaxis: { showticklabels: false, title: `${d.n} 种方法（叶节点，hover 看方法名）` },
-    yaxis: { title: '合并距离' },
-    shapes: [cutLineShape(treeCutHeight(treeK))],
-  }, PLOT_CFG);
-}
-
-async function setTreeK(k) {
-  if (!treeData) return;
-  treeK = Math.max(2, Math.min(k, treeData.n - 1));
-  $('treeK').textContent = treeK;
-  Plotly.relayout('chart_dendrogram', { shapes: [cutLineShape(treeCutHeight(treeK))] });
-  try {
-    const d = await api('/api/cluster-cut?k=' + treeK);
-    if (d.available) renderCutClusters(d);
-  } catch (e) { setStatus('树切割失败: ' + e.message); }
-}
-
-function zoomTree(delta) { setTreeK((treeK || 2) + delta); }
-
-function renderCutClusters(d) {
-  $('treeMeta').textContent = `（树切割视图 k=${d.k} · 点"复位"回到分析视图）`;
-  const wrap = $('clusterCards');
-  wrap.innerHTML = '';
-  d.clusters.forEach((c, i) => {
-    const color = CLUSTER_COLORS[i % CLUSTER_COLORS.length];
-    const div = document.createElement('div');
-    div.className = 'card';
-    div.innerHTML = `
-      <div class="flex items-center justify-between">
-        <div class="font-semibold text-sm">
-          <span class="cluster-tag" style="background:${color}22;color:${color};">k=${d.k}</span> ${esc(c.name)}</div>
-        <div class="text-xs" style="color: var(--c-muted);">${c.size} 种方法 · 平均 ELO ${fmtNum(c.mean_elo, 0)}</div>
-      </div>
-      <div class="text-xs mt-2 truncate" style="color: var(--c-muted);">${esc(c.members.slice(0, 24).join('、'))}${c.members.length > 24 ? ' …' : ''}</div>`;
-    wrap.appendChild(div);
-  });
-}
-
-async function resetTreeCut() {
-  await loadClusters();
-}
-
-// ---------- 预测模型 ----------
-// 预测 CI 图数据缓存（搜索高亮重绘用）
-let predCiData = [];
-
-function predCiTrace(items, marker) {
-  return {
-    x: items.map(p => p.rank),
-    y: items.map(p => p.elo),
-    type: 'scatter', mode: 'markers',
-    text: items.map(p => p.method),
-    hovertemplate: '%{text}<br>预测 ELO %{y:.0f}<extra></extra>',
-    error_y: {
-      type: 'data', symmetric: false,
-      // 钳制到 ±800：历史脏数据（std 爆炸的旧 run）不再压扁 y 轴
-      array: items.map(p => p.ci95 ? Math.min(p.ci95[1] - p.elo, 800) : 0),
-      arrayminus: items.map(p => p.ci95 ? Math.min(p.elo - p.ci95[0], 800) : 0),
-      color: C.muted, thickness: 1.2, width: 3,
-    },
-    marker,
-  };
-}
-
-function drawPredCi(filter) {
-  const info = $('predCiInfo');
-  if (!predCiData.length) { if (info) info.textContent = ''; return; }
-  const data = predCiData.map((p, i) => ({ ...p, rank: i + 1 }));
-  const q = (filter || '').trim().toLowerCase();
-  let traces;
-  if (!q) {
-    if (info) info.textContent = `${data.length} 个未测方法`;
-    traces = [predCiTrace(data, { size: 7, color: C.primary })];
-  } else {
-    const hit = data.filter(p => p.method.toLowerCase().includes(q));
-    const miss = data.filter(p => !p.method.toLowerCase().includes(q));
-    traces = [];
-    if (miss.length) traces.push(predCiTrace(miss, { size: 4, color: C.muted, opacity: 0.25 }));
-    if (hit.length) traces.push(predCiTrace(hit, { size: 11, color: C.accent }));
-    if (info) {
-      info.innerHTML = hit.length
-        ? `匹配 ${hit.length} 个：` + hit.slice(0, 8).map(p => `${esc(p.method)} (${fmtNum(p.elo, 0)})`).join('、') + (hit.length > 8 ? ' …' : '')
-        : '无匹配方法';
-    }
-  }
-  Plotly.newPlot('chart_pred_ci', traces, {
-    margin: { t: 10 }, height: 380, font: PLOT_FONT, showlegend: false,
-    dragmode: 'zoom',  // 框选放大，双击复位
-    xaxis: { showticklabels: false, title: '方法（按预测 Elo 升序）' },
-    yaxis: { title: '预测 ELO ± 1.96σ' },
-  }, PLOT_CFG);
-}
-
-$('predCiSearch').addEventListener('input', e => drawPredCi(e.target.value));
-
-function renderBlendPanel(b) {
-  const simModels = b.unified_sim_weighted_models || [];
-  const donorSims = b.donor_similarities || {};
-  const lambdas = b.per_target_lambda || {};
-  const fallbackLam = lambdas._fallback_uniform;
-  const spm = b.samples_per_model || {};
-  $('blendSub').innerHTML =
-    `均匀 universal：${b.unified_fallback_trained ? '已训练' : '无'} · ` +
-    `fallback λ*：${fallbackLam != null ? fmtNum(fallbackLam, 4) : '—'} · ` +
-    `启用 sim-加权：${simModels.length} 个目标 · ` +
-    `已建模目标：${(b.models_trained || []).length}`;
-  const rows = (b.models_trained || []).map(t => {
-    const active = simModels.includes(t);
-    const sims = donorSims[t] || {};
-    const simStr = Object.keys(sims).length
-      ? Object.entries(sims).sort((a, c) => c[1] - a[1]).map(([dn, sv]) => `${esc(dn)}:${sv.toFixed(2)}`).join('、')
-      : '—';
-    const lam = lambdas[t];
-    return `<tr style="border-top:1px solid var(--c-border);">
-      <td class="py-1 pr-2 font-mono">${esc(t)}</td>
-      <td class="py-1 px-2 text-center">${active ? '<span style="color:var(--c-good)">✓ 启用</span>' : '<span style="color:var(--c-muted)">回退均匀</span>'}</td>
-      <td class="py-1 px-2" style="color: var(--c-muted);">${simStr}</td>
-      <td class="py-1 px-2 text-center">${lam != null ? fmtNum(lam, 4) : '—'}</td>
-      <td class="py-1 pl-2 text-center">${spm[t] ?? '—'}</td>
-    </tr>`;
-  }).join('');
-  $('blendBody').innerHTML = `<table class="w-full text-xs">
-    <thead><tr style="color: var(--c-muted);">
-      <th class="text-left py-1 pr-2">目标</th><th>sim-加权</th><th class="text-left py-1 px-2">donor 相似度</th><th>λ*</th><th>GT</th>
-    </tr></thead><tbody>${rows}</tbody></table>`;
-}
-
-async function loadModel() {
-  try {
-    const d = await api('/api/model' + runQuery());
-    if (!d.available) {
-      $('modelEmpty').classList.remove('hidden'); $('modelBody').classList.add('hidden');
-      predCiData = [];
-      clearCharts(['chart_regpath', 'chart_pca', 'chart_importance', 'chart_pred_ci']);
-      return;
-    }
-    $('modelEmpty').classList.add('hidden'); $('modelBody').classList.remove('hidden');
-
-    // ---- 多模型层（BlendPredictor · 发现层 sim-加权迁移）----
-    const blend = d.blend_predictor;
-    if (blend && !blend.error && (blend.unified_fallback_trained || (blend.unified_sim_weighted_models || []).length)) {
-      $('blendPanel').style.display = '';
-      renderBlendPanel(blend);
-    } else {
-      $('blendPanel').style.display = 'none';
-    }
-
-    // ---- 单模型层（ClusterEloPredictor · SVD-Ridge）----
-    const s = d.svd_ridge;
-    if (!s) {
-      // 多目标 run 可能只有多模型层，无单模型 SVD-Ridge 诊断
-      ['md_lambda', 'md_sigma', 'md_df', 'md_gt'].forEach(id => { const e = $(id); if (e) e.textContent = '-'; });
-      clearCharts(['chart_regpath', 'chart_pca', 'chart_importance', 'chart_pred_ci']);
-      predCiData = [];
-      return;
-    }
-
-    setMetric('md_lambda', s.lambda_opt ?? null, v => fmtNum(v, 4));
-    setMetric('md_sigma', s.sigma2 ?? null, v => fmtNum(v, 1));
-    const pca = s.pca_summary || {};
-    $('md_df').textContent = pca.effective_df != null ? `${fmtNum(pca.effective_df, 1)}/${pca.n_features}` : '-';
-    setMetric('md_gt', s.n_ground_truth ?? null, v => (v == null ? '-' : fmtNum(v, 0)));
-
-    // 正则化路径
-    const rp = s.regularization_path || {};
-    if ((rp.cv_errors || []).length) {
-      Plotly.newPlot('chart_regpath', [{
-        x: rp.lambda_candidates, y: rp.cv_errors, type: 'scatter', mode: 'lines+markers',
-        line: { color: C.primary, width: 2 }, marker: { size: 5 },
-      }], {
-        margin: { t: 10 }, font: PLOT_FONT,
-        xaxis: { type: 'log', title: 'λ (log)' }, yaxis: { title: 'CV 误差' },
-        shapes: [{
-          type: 'line', x0: s.lambda_opt, x1: s.lambda_opt, yref: 'paper', y0: 0, y1: 1,
-          line: { color: C.warn, width: 1.5, dash: 'dash' },
-        }],
-        annotations: [{
-          x: Math.log10(s.lambda_opt), y: 1, yref: 'paper', text: `λ*=${fmtNum(s.lambda_opt, 4)}`,
-          showarrow: false, font: { size: 11, color: C.warn },
-        }],
-      }, PLOT_CFG);
-    }
-
-    // PCA 解释方差
-    if ((pca.explained_variance_ratio || []).length) {
-      const idx = pca.explained_variance_ratio.map((_, i) => i + 1);
-      Plotly.newPlot('chart_pca', [
-        { x: idx, y: pca.explained_variance_ratio, type: 'bar', name: '解释方差比', marker: { color: C.primary } },
-        { x: idx, y: pca.cumulative_variance_ratio, type: 'scatter', mode: 'lines+markers', name: '累计', line: { color: C.accent, width: 2 } },
-      ], {
-        margin: { t: 10 }, font: PLOT_FONT, xaxis: { title: '主成分' },
-        yaxis: { tickformat: '.0%' }, legend: { orientation: 'h', y: 1.12 },
-      }, PLOT_CFG);
-    }
-
-    // 特征重要性
-    const imp = (s.feature_importance || []).slice(0, 20);
-    Plotly.newPlot('chart_importance', [{
-      y: imp.map(f => f.feature).reverse(),
-      x: imp.map(f => f.abs_coef).reverse(),
-      type: 'bar', orientation: 'h',
-      marker: { color: imp.map(f => f.coef >= 0 ? C.primary : C.accent).reverse() },
-    }], { margin: { t: 10 }, height: 480, font: PLOT_FONT,
-          xaxis: { title: '|系数|（青=正向，橙=负向）' } }, PLOT_CFG);
-
-    // 预测 CI 散点：整数序号 x 轴（标签不可读且截断会撞名叠点），搜索高亮 + 框选缩放
-    predCiData = Object.entries(s.predictions || {})
-      .map(([m, p]) => ({ method: m, ...p }))
-      .sort((a, b) => a.elo - b.elo);
-    drawPredCi($('predCiSearch').value);
-  } catch (e) { setStatus('预测模型加载失败: ' + e.message); }
-}
-
-// ---------- 运行控制 ----------
-// 任务 kind → 友好标签（HPO 等新 kind 在任务列表里显示中文）
-const TASK_LABELS = {
-  evaluate: '自适应评估', hpo: 'HPO 搜索',
-};
-function taskLabel(kind) { return TASK_LABELS[kind] || kind; }
-
-// ---- 运行控制：任务选择器（先选任务，再展开对应配置） ----
-function selectTask(task) {
-  document.querySelectorAll('.task-card').forEach(c => c.classList.toggle('active', c.dataset.task === task));
-  ['evaluate', 'hpo', 'env'].forEach(t => {
-    const f = $('form-' + t);
-    if (!f) return;
-    const show = t === task;
-    if (show && f.classList.contains('hidden')) {
-      f.classList.remove('hidden');
-      f.classList.remove('task-form'); void f.offsetWidth; f.classList.add('task-form');  // 重触发入场
-    } else if (!show) {
-      f.classList.add('hidden');
-    }
-  });
-}
-
-// ---- HPO 配置台 ----
-let _hpoParamsLoaded = false;
-let hpoParamsCache = [];
-
-async function loadHpoParams() {
-  try {
-    const d = await api('/api/hpo/params');
-    hpoParamsCache = d.params || [];
-    renderHpoFactors();
-  } catch (e) { setStatus('HPO 因子加载失败: ' + e.message); }
-}
-
-function renderHpoFactors() {
-  const box = $('hpoFactors');
-  if (!box) return;
-  box.innerHTML = hpoParamsCache.map(p => {
-    const isCat = p.type === 'categorical' || (p.choices && p.choices.length);
-    const cur = p.current != null ? `当前 ${p.current}` : 'CLI 参数';
-    const range = isCat
-      ? `<input type="text" data-f="${p.name}-choices" value="${(p.choices || []).join(',')}" style="width:11em;" title="逗号分隔候选">`
-      : `<input type="number" data-f="${p.name}-low" value="${p.low ?? ''}" title="下限">
-         <input type="number" data-f="${p.name}-high" value="${p.high ?? ''}" title="上限">
-         <input type="number" data-f="${p.name}-step" value="${p.step ?? ''}" title="步长">`;
-    return `<label class="factor-row" data-row="${p.name}">
-      <input type="checkbox" data-f="${p.name}-chk">
-      <span class="factor-name" title="${esc(p.group)} · ${esc(cur)}">${p.name}</span>
-      <span class="factor-cur">${esc(cur)}</span>
-      <span class="factor-range">${range}</span>
-    </label>`;
-  }).join('');
-  box.querySelectorAll('input[type=checkbox]').forEach(chk => {
-    chk.addEventListener('change', () => {
-      chk.closest('.factor-row').classList.toggle('on', chk.checked);
-      updateFactorCount();
-    });
-  });
-  updateFactorCount();
-}
-
-function updateFactorCount() {
-  const n = document.querySelectorAll('#hpoFactors input[type=checkbox]:checked').length;
-  const el = $('factorCount');
-  if (el) el.textContent = `已选 ${n}`;
-}
-
-function factorSelectAll(on) {
-  document.querySelectorAll('#hpoFactors input[type=checkbox]').forEach(chk => {
-    chk.checked = on;
-    chk.closest('.factor-row').classList.toggle('on', on);
-  });
-  updateFactorCount();
-}
-
-function toggleFactors() {
-  const d = $('factorDrawer'), t = $('factorToggle');
-  d.classList.toggle('open');
-  t.classList.toggle('open');
-}
-
-// 优化方向分段开关 + 时间预算快捷选择（一次性绑定）
-(function wireRunControls() {
-  document.querySelectorAll('#hpoDirSeg button').forEach(b => {
-    b.addEventListener('click', () => {
-      document.querySelectorAll('#hpoDirSeg button').forEach(x => x.classList.toggle('active', x === b));
-      $('hpoDir').value = b.dataset.v;
-    });
-  });
-  const clock = $('hpoWallClock'), pop = $('hpoWallPop');
-  if (clock && pop) {
-    clock.addEventListener('click', e => { e.stopPropagation(); pop.classList.toggle('hidden'); });
-    pop.querySelectorAll('button').forEach(b => {
-      b.addEventListener('click', () => { $('hpoWall').value = b.dataset.m; pop.classList.add('hidden'); });
-    });
-    document.addEventListener('click', e => { if (!pop.contains(e.target)) pop.classList.add('hidden'); });
-  }
-})();
-
-function collectHpoSpace() {
-  const space = {};
-  document.querySelectorAll('#hpoFactors input[type=checkbox]').forEach(chk => {
-    if (!chk.checked) return;
-    const name = chk.dataset.f.replace(/-chk$/, '');
-    const p = hpoParamsCache.find(x => x.name === name) || {};
-    const isCat = p.type === 'categorical' || (p.choices && p.choices.length);
-    if (isCat) {
-      const el = document.querySelector(`[data-f="${name}-choices"]`);
-      const choices = (el && el.value || '').split(',').map(s => s.trim()).filter(Boolean);
-      space[name] = { type: 'categorical', choices };
-    } else {
-      const lo = parseFloat(document.querySelector(`[data-f="${name}-low"]`).value);
-      const hi = parseFloat(document.querySelector(`[data-f="${name}-high"]`).value);
-      const st = parseFloat(document.querySelector(`[data-f="${name}-step"]`).value);
-      if (!isFinite(lo) || !isFinite(hi)) { throw new Error(`${name}: low/high 必填`); }
-      const spec = { type: p.type || 'float', low: lo, high: hi };
-      if (isFinite(st)) spec.step = st;
-      if (p.log) spec.log = true;
-      space[name] = spec;
-    }
-  });
-  return space;
-}
-
-function collectHpoConfig() {
-  return {
-    name: ($('hpoName').value || '').trim() || `dash-${Date.now()}`,
-    objective: { metric: $('hpoMetric').value, direction: $('hpoDir').value, aggregate: 'mean' },
-    strategy: $('hpoStrategy').value,
-    max_trials: intVal('hpoTrials', 12),
-    max_wall_minutes: intVal('hpoWall', 0),
-    repeats: intVal('hpoRepeats', 1),
-    fixed: { input: $('hpoInput').value },
-    space: collectHpoSpace(),
-    est_methods_per_trial: 50,
-  };
-}
-function intVal(id, dflt) { const v = parseInt($(id).value, 10); return isFinite(v) ? v : dflt; }
-
-async function hpoPreview() {
-  try {
-    const cfg = collectHpoConfig();
-    const r = await fetch('/api/hpo/preview', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg),
-    });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.detail || r.statusText);
-    const warn = (d.warnings || []).length ? ` · ⚠ ${d.warnings.join('; ')}` : '';
-    $('hpoPreview').innerHTML =
-      `<span style="color:var(--c-text);">${d.n_configs} configs × ${cfg.repeats} = <b>${d.n_trials}</b> trials</span> · ` +
-      `约 <b>${d.est_method_calls}</b> 次方法调用${warn}`;
-  } catch (e) { $('hpoPreview').innerHTML = `<span style="color:var(--c-warn);">预览失败: ${e.message}</span>`; }
-}
-
-async function startHpo() {
-  try {
-    const cfg = collectHpoConfig();
-    const res = await fetch('/api/run/hpo', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg),
-    });
-    const d = await res.json();
-    if (!res.ok) throw new Error(d.detail || res.statusText);
-    setStatus(`HPO study '${cfg.name}' 已启动（任务 ${d.id}）`);
-    startTaskPolling();
-    loadTasks();
-  } catch (e) { setStatus('HPO 启动失败: ' + e.message); }
-}
-
-// ---- 目标「+」弹窗 ----
-function openAddTarget() {
-  ['atName', 'atModel', 'atUrl', 'atKey'].forEach(id => { const e = $(id); if (e) e.value = ''; });
-  $('addTargetModal').classList.remove('hidden');
-}
-function closeAddTarget() { $('addTargetModal').classList.add('hidden'); }
-
-// ---- 目标探活缓存 ----
-let probeCache = {};  // {name: {reachable, latency_ms, error}}
-
-async function refreshProbeCache(targetName) {
-  try {
-    const url = targetName ? `/api/targets/probe?name=${encodeURIComponent(targetName)}` : '/api/targets/probe';
-    const d = await api(url);
-    (d.targets || []).forEach(t => { probeCache[t.name] = t; });
-    updateProbeUI();
-  } catch { /* 静默：探活失败不阻塞 */ }
-}
-
-function updateProbeUI() {
-  const tsel = $('evalTarget');
-  const hint = $('probeHint');
-  if (!tsel) return;
-  // 更新下拉项灰显
-  [...tsel.options].forEach(opt => {
-    if (!opt.value) return; // 跳过"全部目标"
-    const info = probeCache[opt.value];
-    if (info && !info.reachable) {
-      opt.textContent = `⚠ ${opt.value}（不可通）`;
-      opt.disabled = true;
-      opt.title = info.error || '连接失败';
-    } else {
-      opt.textContent = opt.value;
-      opt.disabled = false;
-      opt.title = '';
-    }
-  });
-  // 当前选中被禁用时回退
-  if (tsel.selectedOptions[0] && tsel.selectedOptions[0].disabled) tsel.value = '';
-  // 统计可达数 + 提示
-  if (hint) {
-    const all = Object.keys(probeCache);
-    const ok = all.filter(n => probeCache[n].reachable);
-    if (all.length === 0) { hint.textContent = ''; return; }
-    if (tsel.value === '') {
-      // "全部目标" 模式
-      if (ok.length === 0) {
-        hint.textContent = '❌ 无可达目标'; hint.style.color = 'var(--c-warn)';
-      } else if (ok.length < all.length) {
-        hint.textContent = `✅ ${ok.length}/${all.length} 可达：${ok.join('、')}`;
-        hint.style.color = 'var(--c-muted)';
-      } else {
-        hint.textContent = `✅ 全部 ${ok.length} 个目标可达`;
-        hint.style.color = 'var(--c-muted)';
-      }
-    } else {
-      hint.textContent = '';
-    }
-  }
-}
-
-async function submitAddTarget() {
-  const name = $('atName').value.trim();
-  const url = $('atUrl').value.trim();
-  if (!name || !url) { setStatus('目标名与 base_url 必填'); return; }
-  try {
-    const res = await fetch('/api/targets/add', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name, model: $('atModel').value.trim() || name, base_url: url, api_key: $('atKey').value.trim() || 'none',
-      }),
-    });
-    const d = await res.json();
-    if (!res.ok) throw new Error(d.detail || res.statusText);
-    setStatus(`目标 ${name} 已写入 .env（${d.prefix}），刷新下拉…`);
-    closeAddTarget();
-    await loadRunSection();  // 刷新下拉
-    refreshProbeCache(name);  // 探单个新目标通性
-  } catch (e) { setStatus('添加目标失败: ' + e.message); }
-}
-
-// ---- 连接配置（.env）----
-async function loadEnv() {
-  try {
-    const d = await api('/api/env');
-    const t = d.target || {}, g = d.generator || {};
-    if ($('envTUrl')) $('envTUrl').value = t.base_url || '';
-    if ($('envTModel')) $('envTModel').value = t.model || '';
-    if ($('envTKey')) $('envTKey').value = '';
-    if ($('envTKeyHint')) $('envTKeyHint').textContent = `当前：${t.api_key_masked || '未配置'}`;
-    if ($('envGUrl')) $('envGUrl').value = g.base_url || '';
-    if ($('envGModel')) $('envGModel').value = g.model || '';
-    if ($('envGKey')) $('envGKey').value = '';
-    if ($('envGKeyHint')) $('envGKeyHint').textContent = `当前：${g.api_key_masked || '未配置'}`;
-    if ($('envJudge')) $('envJudge').value = d.judge_model || '';
-  } catch (e) { /* 静默：未配置时不阻塞运行控制页 */ }
-}
-
-async function saveEnv() {
-  const body = {};
-  const collect = (id, key) => { const v = $(id).value.trim(); if (v) body[key] = v; };
-  collect('envTUrl', 'target_base_url'); collect('envTModel', 'target_model'); collect('envTKey', 'target_api_key');
-  collect('envGUrl', 'generator_base_url'); collect('envGModel', 'generator_model'); collect('envGKey', 'generator_api_key');
-  collect('envJudge', 'judge_model');
-  if (Object.keys(body).length === 0) { setStatus('未填写任何字段'); return; }
-  try {
-    const res = await fetch('/api/env', {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
-    const d = await res.json();
-    if (!res.ok) throw new Error(d.detail || res.statusText);
-    setStatus(`环境配置已保存（${(d.updated || []).join(', ')}）`);
-    loadEnv();  // 刷新掩码
-    // 若改了 TARGET_* → 重新探活（legacy 单目标可能变了）
-    if ((d.updated || []).some(k => k.startsWith('TARGET_'))) {
-      refreshProbeCache();
-    }
-  } catch (e) { setStatus('环境配置保存失败: ' + e.message); }
-}
-
-async function loadRunSection() {
-  try {
-    const [sets, tgts] = await Promise.all([api('/api/attack-sets'), api('/api/targets')]);
-    const sel = $('evalInput');
-    sel.innerHTML = '';
-    (sets.files || []).forEach(f => {
-      const opt = document.createElement('option');
-      // f 可能是字符串（旧格式）或对象 {name, size_kb, mtime, n_records}
-      const name = typeof f === 'string' ? f : f.name;
-      const label = typeof f === 'string' ? f : `${f.name} (${f.n_records}条 ${f.size_kb}KB)`;
-      opt.value = name; opt.textContent = label;
-      sel.appendChild(opt);
-    });
-    // HPO 配置台的攻击集下拉同步填充
-    const hpoSel = $('hpoInput');
-    if (hpoSel) {
-      hpoSel.innerHTML = '';
-      (sets.files || []).forEach(f => {
-        const name = typeof f === 'string' ? f : f.name;
-        const opt = document.createElement('option');
-        opt.value = name; opt.textContent = name;
-        hpoSel.appendChild(opt);
-      });
-    }
-    // HPO 因子清单（仅加载一次）
-    if (!_hpoParamsLoaded) { _hpoParamsLoaded = true; loadHpoParams(); }
-    // 环境参数配置（右卡）每次刷新（值可能被保存更新）
-    loadEnv();
-    // 目标模型下拉（单选，来自 .env TARGETS）
-    const tsel = $('evalTarget');
-    if (tsel) {
-      tsel.innerHTML = '<option value="">全部目标（多模型扫描）</option>';
-      (tgts.targets || []).forEach(t => {
-        const opt = document.createElement('option');
-        opt.value = t.name; opt.textContent = t.name;
-        tsel.appendChild(opt);
-      });
-      tsel.addEventListener('change', updateProbeUI);
-      // 后台探查可通性（不阻塞 UI）
-      refreshProbeCache();
-    }
-    await loadTasks();
-  } catch (e) { setStatus('运行控制加载失败: ' + e.message); }
-  setupDropZone();
-}
-
-// 攻击集拖拽上传
-function setupDropZone() {
-  const dz = $('dropZone');
-  if (!dz) return;
-  if (dz.dataset.bound) return;        // 幂等：loadRunSection 每次切页都会重跑，避免重复绑定 click 监听器（弹窗弹多次的根因）
-  dz.dataset.bound = '1';
-  const fileInput = $('dropFile');
-  const browse = $('dropBrowse');
-
-  function uploadFile(file) {
-    if (!file.name.endsWith('.jsonl')) { setStatus('只支持 .jsonl 文件'); return; }
-    const fd = new FormData();
-    fd.append('file', file);
-    setStatus(`上传中: ${file.name}...`);
-    fetch('/api/attack-sets/upload', { method: 'POST', body: fd })
-      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e)))
-      .then(d => {
-        setStatus(`已导入 ${d.name}（${d.n_records}条 ${d.size_kb}KB）`);
-        loadRunSection(); // 刷新下拉
-      })
-      .catch(e => setStatus(`上传失败: ${e.detail || e.message || e}`));
-  }
-
-  // 拖拽
-  dz.addEventListener('dragover', e => { e.preventDefault(); dz.style.borderColor = 'var(--c-accent)'; });
-  dz.addEventListener('dragleave', () => { dz.style.borderColor = 'var(--c-border)'; });
-  dz.addEventListener('drop', e => {
-    e.preventDefault();
-    dz.style.borderColor = 'var(--c-border)';
-    if (e.dataTransfer.files.length > 0) uploadFile(e.dataTransfer.files[0]);
-  });
-  // 点击选择
-  dz.addEventListener('click', () => fileInput.click());
-  if (browse) browse.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); fileInput.click(); });
-  // 阻止 input 自身合成 click 冒泡到 dz，否则 dz 的 click handler 会再次调 fileInput.click() → 选择框弹两次
-  fileInput.addEventListener('click', e => e.stopPropagation());
-  fileInput.addEventListener('change', () => {
-    if (fileInput.files.length > 0) uploadFile(fileInput.files[0]);
-    fileInput.value = '';
-  });
-}
-
-// 任务完成监听：启动后轮询至终态，自动刷新批次列表与当前页数据
-// （SSE 流不可用时的回退路径）
-// Fix 2: watchTimers 按 taskId 去重，防 SSE 反复断线时 interval 无限堆叠
-const watchTimers = new Map();
-function watchTask(taskId) {
-  if (watchTimers.has(taskId)) clearInterval(watchTimers.get(taskId));
-  const timer = setInterval(async () => {
+// 图表转 PNG：Plotly 内部 position:absolute 的 SVG 会被浏览器忽略 break-inside:avoid，
+// 落到页底的图会被从中间切开。转成 <img>（单一内联元素）后 break-inside:avoid 100% 生效。
+// 逐图 try/catch——无数据/未初始化/转图失败的图跳过（保留实时图，最多仍可能跨页，不报错）。
+async function _freezeChartsAsImages() {
+  if (!window.Plotly || typeof Plotly.toImage !== 'function') return;   // partial build 无 toImage → 跳过
+  const tasks = [];
+  document.querySelectorAll('.js-plotly-plot').forEach(gd => {
+    const fl = gd._fullLayout;
+    if (!fl) return;   // 未初始化（无数据）图跳过
     try {
-      const t = await api('/api/tasks/' + taskId);
-      if (t.status === 'running') return;
-      clearInterval(timer);
-      watchTimers.delete(taskId);
-      setStatus(`任务 ${t.kind} ${t.status === 'success' ? '已完成' : '失败'}，数据已刷新`);
-      await loadRuns();
-      invalidate();
-    } catch (e) { clearInterval(timer); watchTimers.delete(taskId); }
-  }, 3000);
-  watchTimers.set(taskId, timer);
-}
-function stopWatchTask(taskId) {
-  if (watchTimers.has(taskId)) { clearInterval(watchTimers.get(taskId)); watchTimers.delete(taskId); }
-}
-
-// Fix 1: 自适应轮询——仅在存在运行中任务时才 2s 刷 taskList，无任务时停止
-// （原无条件 setInterval 在任务结束后仍持续重建 DOM，是"停止后仍刷新"的主因）
-let taskPollTimer = null;
-function startTaskPolling() {
-  if (taskPollTimer) return;
-  taskPollTimer = setInterval(() => { if (activeSection === 'run') loadTasks(); }, 2000);
-}
-function stopTaskPolling() {
-  if (taskPollTimer) { clearInterval(taskPollTimer); taskPollTimer = null; }
-}
-
-async function startEvaluate() {
-  try {
-    const target = ($('evalTarget') && $('evalTarget').value) || null;
-    const body = {
-      phase: $('evalPhase').value,
-      input: $('evalInput').value,
-      batch_size: parseInt($('evalBatch').value, 10) || 10,
-      max_rounds: parseInt($('evalRounds').value, 10) || 5,
-      sampler: $('evalSampler').value,
-    };
-    if (target) {
-      // 单目标：直接传
-      body.target = target;
-    } else {
-      // "全部目标" → 只传探活可达的
-      const reachable = Object.keys(probeCache).filter(n => probeCache[n].reachable);
-      if (reachable.length === 0) {
-        setStatus('❌ 无可达目标，请检查 API 配置或等待探活完成');
-        return;
-      }
-      if (reachable.length === 1) {
-        body.target = reachable[0];  // 单个可达 → 走单目标路径（更高效）
-      } else {
-        body.targets = reachable.join(',');
-      }
-    }
-    const res = await fetch('/api/run/evaluate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || res.status);
-    }
-    const view = await res.json();
-    setStatus('评估任务已启动' + (view.has_tax_probe === false ? '（该攻击集无数学探针，越狱税将不计算）' : ''));
-    if (view.id) watchTask(view.id);
-    startTaskPolling();
-    await loadTasks();
-  } catch (e) { setStatus(`启动失败: ${e.message}`); }
-}
-
-const TASK_STATUS = {
-  running: ['运行中', 'background:rgba(70,88,107,.14);color:#46586B;'],
-  queued: ['排队中', 'background:rgba(200,170,60,.18);color:#8a7218;'],
-  success: ['完成', 'background:rgba(117,135,107,.20);color:#55694B;'],
-  failed: ['失败', 'background:#F0DBCF;color:#9a4a35;'],
-  cancelled: ['已取消', 'background:#EAE2CC;color:#7C7663;'],
-};
-
-// 运行中任务的 SSE 日志流：任务 id → { es, text, el }
-// text 持久保存，列表每 2s 重建 DOM 时重新灌回，日志不丢
-const taskStreams = new Map();
-
-function closeTaskStream(id) {
-  const s = taskStreams.get(id);
-  if (s) { try { s.es.close(); } catch (e) { /* ignore */ } taskStreams.delete(id); }
-}
-
-function attachTaskStream(t, logEl) {
-  const existing = taskStreams.get(t.id);
-  if (existing) {
-    existing.el = logEl;                       // 挂到本轮新建的 log-box 上
-    logEl.textContent = existing.text || t.log_tail || '(暂无输出)';
-    logEl.scrollTop = logEl.scrollHeight;
-    return;
-  }
-  const es = new EventSource('/api/tasks/' + encodeURIComponent(t.id) + '/stream');
-  const s = { es, text: '', el: logEl };
-  taskStreams.set(t.id, s);
-  es.onmessage = ev => {
-    s.text += ev.data + '\n';
-    if (s.el) { s.el.textContent = s.text; s.el.scrollTop = s.el.scrollHeight; }
-  };
-  es.addEventListener('done', ev => {
-    closeTaskStream(t.id);
-    let info = {};
-    try { info = JSON.parse(ev.data); } catch (e) { /* ignore */ }
-    setStatus(`任务 ${t.kind} 已结束（${info.status || '未知'}），数据已刷新`);
-    loadRuns();
-    invalidate();
-    loadTasks();
+      const w = Math.round(gd.clientWidth || fl.width || 680);
+      const h = Math.round(fl.height || 360);
+      tasks.push(
+        Plotly.toImage(gd, { format: 'png', width: w, height: h, scale: 2 })
+          .then(url => {
+            const img = document.createElement('img');
+            img.className = 'print-chart';
+            img.src = url;
+            gd.parentNode.insertBefore(img, gd.nextSibling);
+            gd.classList.add('print-hidden-plot');
+          })
+          .catch(() => { /* 单图失败不阻塞 */ })
+      );
+    } catch (e) { /* 同步异常（如尺寸读取失败）跳过该图 */ }
   });
-  es.onerror = () => {
-    // SSE 断线/不可用 → 关闭（阻止浏览器自动重连）并回退轮询
-    closeTaskStream(t.id);
-    if (!watchTimers.has(t.id)) watchTask(t.id);  // Fix 2: 防已有 timer 时重复创建
-  };
+  await Promise.all(tasks);
 }
 
-async function cancelTask(id, kind) {
-  if (!confirm(`确定取消任务 ${kind}？子进程将被终止。`)) return;
-  try {
-    const res = await fetch('/api/tasks/' + encodeURIComponent(id) + '/cancel', { method: 'POST' });
-    if (res.status === 409) {
-      setStatus('任务已结束，无需取消');
-    } else if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || res.status);
-    } else {
-      setStatus(`已取消任务 ${kind}`);
-    }
-    // Fix 3: 取消后立即停止客户端轮询与 SSE，不等下次 poll 发现
-    stopWatchTask(id);
-    closeTaskStream(id);
-    await loadTasks();
-  } catch (e) { setStatus('取消失败: ' + e.message); }
-}
-
-// Fix 4: 增量 DOM 更新——不再每次 innerHTML='' 全清重建（消除闪烁/滚动丢失/SSE el 失效）
-function _buildTaskCard(t) {
-  const [label, style] = TASK_STATUS[t.status] || [t.status, ''];
-  const card = document.createElement('div');
-  card.className = 'card task-card';
-  card.style.padding = '10px 14px';
-  card.dataset.taskId = t.id;
-  card.dataset.status = '';   // 留空，让 _updateTaskCard 首次按状态自动折叠/展开
-  card.innerHTML = `
-    <div class="flex items-center justify-between mb-1 gap-2 flex-wrap" data-role="header" style="cursor:pointer;">
-      <div class="flex items-center gap-2"><span class="task-chevron" data-role="chevron">▶</span><span class="cluster-tag" data-role="badge"></span>
-        <span class="font-semibold">${esc(taskLabel(t.kind))}</span>
-        <span class="text-xs" style="color: var(--c-muted);">${esc(t.started_at?.slice(11, 19) || '')}</span></div>
-      <div class="flex items-center gap-3" data-role="meta">
-        <span class="text-xs font-mono" style="color: var(--c-muted);">${esc(t.cmd)}</span>
-        <a class="text-xs" style="color: var(--c-primary);" href="/api/tasks/${encodeURIComponent(t.id)}/log?download=1">⬇ 完整日志</a>
+// 封面 + 目录 → #printRoot（正文五个板块直接排印 live DOM，不在此复制）
+function buildPrintDoc() {
+  const root = $('printRoot');
+  if (!root) return false;
+  const ov = lastOverview || {};
+  const sealChar = SEAL_CHARS[ov.security_level] || '录';   // 无等级数据时用「录」（存档之意）
+  const runName = (lastReport && lastReport.run) || ov.run || currentRun || '最新批次';
+  const meta = [['批次', runName]];
+  if (ov.target_model) meta.push(['目标模型', ov.target_model]);
+  if (ov.generated_at) meta.push(['评估时间', String(ov.generated_at).replace('T', ' ').slice(0, 19)]);
+  const title = (lastReport && lastReport.headTitle) || '目标模型安全评估报告';
+  root.innerHTML = `
+    <div class="pdoc-cover"><div class="pdoc-frame"><div class="pdoc-frame-inner">
+      <div class="pdoc-cover-main">
+        <div class="pdoc-vtitle">${esc(title)}</div>
+        <div class="pdoc-cover-side">
+          <div class="pdoc-seal">${esc(sealChar)}</div>
+          <div class="pdoc-meta">${meta.map(([k, v]) =>
+            `<div class="pdoc-meta-row"><span class="pdoc-meta-k">${esc(k)}</span><span class="pdoc-meta-v">${esc(v)}</span></div>`).join('')}</div>
+        </div>
       </div>
-    </div>
-    <div class="log-box mt-2" data-role="log"></div>`;
-  // 点击头部切换展开/收起（取消按钮、下载链接不触发）
-  card.querySelector('[data-role="header"]').addEventListener('click', e => {
-    if (e.target.closest('button, a')) return;
-    card.dataset.collapsed = (card.dataset.collapsed === '1') ? '0' : '1';
+    </div></div></div>
+    <div class="pdoc-toc">
+      <div class="pdoc-toc-title">目　录</div>
+      ${PRINT_PARTS.map(([, label]) => `<div class="pdoc-toc-row">${esc(label)}</div>`).join('')}
+    </div>`;
+  return true;
+}
+
+function addPrintPartTitles() {
+  document.querySelectorAll('.print-part').forEach(el => el.remove());
+  PRINT_PARTS.forEach(([id, label]) => {
+    const sec = $(id);
+    if (!sec) return;
+    const div = document.createElement('div');
+    div.className = 'print-part';
+    div.textContent = label;
+    sec.insertBefore(div, sec.firstChild);
   });
-  _updateTaskCard(card, t);
-  return card;
-}
-function _updateTaskCard(card, t) {
-  // 仅在状态变化时自动折叠/展开（running 展开；queued/终态收起）。轮询不干预手动操作
-  if (card.dataset.status !== t.status) {
-    card.dataset.collapsed = (t.status === 'running') ? '0' : '1';
-    card.dataset.status = t.status;
-  }
-  const [label, style] = TASK_STATUS[t.status] || [t.status, ''];
-  // badge：仅在文本/样式变化时写 DOM
-  const badge = card.querySelector('[data-role="badge"]');
-  if (badge.textContent !== label) { badge.textContent = label; badge.setAttribute('style', style); }
-  // cancel 按钮：按状态增删（仅状态转换时操作）
-  const meta = card.querySelector('[data-role="meta"]');
-  const cancelBtn = meta.querySelector('[data-cancel]');
-  if ((t.status === 'running' || t.status === 'queued') && !cancelBtn) {
-    const btn = document.createElement('button');
-    btn.className = 'btn btn-plain text-xs';
-    btn.dataset.cancel = '';
-    btn.textContent = '⏹ 取消';
-    btn.onclick = () => cancelTask(t.id, t.kind);
-    meta.appendChild(btn);
-  } else if (t.status !== 'running' && t.status !== 'queued' && cancelBtn) {
-    cancelBtn.remove();
-  }
-  // 日志：有活跃 SSE 流时不碰（流自己管 textContent），无流时从 log_tail 更新
-  const logEl = card.querySelector('[data-role="log"]');
-  if (!taskStreams.has(t.id)) {
-    const text = t.log_tail || '(暂无输出)';
-    if (logEl.textContent !== text) logEl.textContent = text;
-  }
 }
 
-async function loadTasks() {
-  try {
-    const data = await api('/api/tasks');
-    const wrap = $('taskList');
-    const runningIds = new Set();
-    const seenIds = new Set();
-
-    if (!data.tasks.length) {
-      if (!wrap.querySelector('[data-empty]')) {
-        wrap.innerHTML = '<span data-empty style="color: var(--c-muted);">暂无任务</span>';
-      }
-      [...taskStreams.keys()].forEach(id => closeTaskStream(id));
-      [...watchTimers.keys()].forEach(id => stopWatchTask(id));
-      stopTaskPolling();
-      return;
-    }
-    const empty = wrap.querySelector('[data-empty]');
-    if (empty) empty.remove();
-
-    // 索引现有卡片
-    const cardMap = new Map();
-    wrap.querySelectorAll('.card[data-task-id]').forEach(c => cardMap.set(c.dataset.taskId, c));
-
-    data.tasks.forEach(t => {
-      seenIds.add(t.id);
-      let card = cardMap.get(t.id);
-      if (!card) {
-        card = _buildTaskCard(t);
-        wrap.appendChild(card);
-      } else {
-        _updateTaskCard(card, t);
-      }
-      if (t.status === 'running') {
-        runningIds.add(t.id);
-        const logEl = card.querySelector('[data-role="log"]');
-        logEl.scrollTop = logEl.scrollHeight;
-        attachTaskStream(t, logEl);   // SSE 直播；失败自动回退轮询
-      }
-    });
-    // 移除消失任务的卡片
-    cardMap.forEach((card, id) => { if (!seenIds.has(id)) card.remove(); });
-    // 终态/消失任务的流：关闭清理
-    [...taskStreams.keys()].forEach(id => { if (!runningIds.has(id)) closeTaskStream(id); });
-    [...watchTimers.keys()].forEach(id => { if (!runningIds.has(id)) stopWatchTask(id); });
-
-    // Fix 1: 无运行中任务时停止轮询（消除"停止后仍刷新"）；有任务时确保轮询
-    // 仅当有排队中任务时才轮询（探测 queued→running 晋级）；单任务运行靠 SSE 直播 + done 事件刷新
-    const hasQueued = data.tasks.some(t => t.status === 'queued');
-    if (hasQueued) startTaskPolling(); else stopTaskPolling();
-  } catch (e) { /* 静默 */ }
+// 印完（含取消）恢复屏幕现场；预览模式保留，由「退出预览」按钮清理
+function cleanupPrintDoc() {
+  document.body.classList.remove('printing-all', 'preview-print');
+  document.querySelectorAll('.print-part').forEach(el => el.remove());
+  // 撤销图表转图：移除打印图片、恢复实时 Plotly，重绘回屏幕尺寸
+  document.querySelectorAll('.print-chart').forEach(el => el.remove());
+  document.querySelectorAll('.print-hidden-plot').forEach(el => el.classList.remove('print-hidden-plot'));
+  const root = $('printRoot');
+  if (root) root.innerHTML = '';
+  if (_printPrevTheme === 'dark') applyTheme('dark');
+  _printPrevTheme = null;
+  const btn = $('pdocExit');
+  if (btn) btn.remove();
+  invalidate();   // 清 loaded 缓存重绘，防打印态 resize 尺寸残留
 }
-
-// ---------- 键盘导航 ----------
-document.addEventListener('keydown', e => {
-  if (e.target.matches('input, select, textarea') || e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.key >= '1' && e.key <= '6') {
-    document.querySelectorAll('#nav .nav-item')[+e.key - 1]?.click();
-  } else if (e.key === 'r') {
-    $('refreshBtn').click();
-  } else if (e.key === '/') {
-    e.preventDefault();
-    (activeSection === 'model' ? $('predCiSearch') : $('runSelect')).focus();
-  }
+window.addEventListener('afterprint', () => {
+  if (!document.body.classList.contains('preview-print')) cleanupPrintDoc();
 });
+
+// ?printdoc=1 屏幕预览：与打印同款的平铺排布，便于查验样式
+async function enterPrintPreview() {
+  if (_printPrep) return;
+  await preparePrintDoc();
+  document.body.classList.add('preview-print');
+  if (!$('pdocExit')) {
+    const btn = document.createElement('button');
+    btn.id = 'pdocExit'; btn.className = 'pdoc-exit'; btn.textContent = '退出预览';
+    btn.addEventListener('click', cleanupPrintDoc);
+    document.body.appendChild(btn);
+  }
+}
 
 // ---------- 阅读进度条 + 报告目录 scrollspy ----------
 window.addEventListener('scroll', () => {

@@ -137,7 +137,7 @@ python -m llmsec.pipeline.runner [--phase {all,1,2}] [--input FILE] [--batch-siz
 ```
 
 - `--phase`：`all`（攻击+过敏）、`1`（仅攻击）、`2`（仅过敏）
-- `--input`：攻击集路径，相对 `output/` 目录
+- `--input`：攻击集路径，相对仓库根目录（如 `attacks/l1.jsonl`）
 - `--target`：指定单个目标模型（不传则扫描全部声明目标）
 - `--concurrency`：批内并行求值并发度（不传=全并发；0=串行）
 

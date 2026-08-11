@@ -16,6 +16,7 @@ import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict
 
+from llmsec.clustering import parse_cluster_id
 from llmsec.evaluation.elo import ELOTracker
 from llmsec.params import (
     ELO_SCALE,
@@ -31,6 +32,9 @@ class AttackSampler(ABC):
     """攻击方法采样器抽象基类。"""
 
     def __init__(self, **kwargs):
+        # 故意吸收并忽略 kwargs：build_sampler(**kwargs) → 子类 __init__(**kwargs)
+        # → super().__init__(**kwargs) 的穿透式参数链需要此 sink 吞掉基类不关心的
+        # 采样器特定参数（alpha/beta/gamma 等），否则会抛 TypeError。非死代码。
         pass
 
     def set_cluster_info(
@@ -71,15 +75,7 @@ class AttackSampler(ABC):
     def _method_to_cluster(self, method: str) -> int:
         """辅助：从 cluster_report 中查方法的簇 ID。"""
         labels = (self.cluster_report or {}).get("method_labels", {})
-        cid = labels.get(method, -1)
-        try:
-            return int(cid)
-        except Exception:
-            return -1
-
-    def reset(self):
-        """重置采样器内部状态（如轮询计数）。子类可覆盖。"""
-        pass
+        return parse_cluster_id(labels.get(method, -1))
 
 
 # ============================================================
@@ -145,9 +141,6 @@ class InfoGainSampler(AttackSampler):
         # 记录每个簇被选中的次数，用于簇覆盖惩罚
         self.cluster_visit_count: dict[int, int] = defaultdict(int)
 
-    def reset(self):
-        self.cluster_visit_count.clear()
-
     def select(
         self,
         candidates: list[str],
@@ -179,6 +172,9 @@ class InfoGainSampler(AttackSampler):
             # 乘预测不确定性调节因子：预测越不确定，success_potential 越向 0.5（中性）收缩，
             # 使 gamma 项在冷启动期接近常数（不干扰其它三项的排序），随 GT 增长恢复区分力。
             n_tests = tracker.attacker_stats.get(method, {}).get("n_matches", 0)
+            # 半死状态说明：生产路径 candidates 恒为未测方法（n_tests=0），
+            # 此已测分支只在单测/复用场景可达；保留以对"已测方法用历史成功率"的
+            # 设计意图，但不依赖其在生产中生效
             if n_tests > 0:
                 success_potential = tracker.get_attacker_success_rate(method)
             else:
@@ -236,26 +232,14 @@ class CoordinateDescentSampler(AttackSampler):
         self.min_tests_per_method = min_tests_per_method
         self.min_tests_per_cluster = min_tests_per_cluster
         self._cluster_queue: list[int] = []
-        self._current_cluster: int | None = None
         self._cluster_test_count: dict[int, int] = defaultdict(int)
-        self._round_count = 0
-
-    def reset(self):
-        self._cluster_queue.clear()
-        self._current_cluster = None
-        self._cluster_test_count.clear()
-        self._round_count = 0
 
     def _build_cluster_queue(self, candidates: list[str]) -> list[int]:
         """根据 cluster_report 构建待探索簇队列。"""
         labels = (self.cluster_report or {}).get("method_labels", {})
         clusters = set()
         for m in candidates:
-            cid = labels.get(m, -1)
-            try:
-                cid = int(cid)
-            except (ValueError, TypeError):
-                cid = -1
+            cid = parse_cluster_id(labels.get(m, -1))
             if cid != -1:
                 clusters.add(cid)
         if not clusters:
@@ -301,8 +285,12 @@ class CoordinateDescentSampler(AttackSampler):
             avg_gap_n = avg_gap / (avg_gap + ELO_SCALE)
             # tested_count 归一化到 [0,1)（tc/(tc+min_per_cluster)）：原裸整数无界，
             # 任一簇测 ≥4 次后该项主导，簇选择退化为"最少测试簇"（量纲事故非设计）。
-            tested_n = tested_count / (tested_count + float(self.min_tests_per_cluster))
-            score = tested_n + avg_gap_n - self.min_tests_per_cluster * avg_success
+            # 分母 max(1.0, ...) 防护：min_tests_per_cluster=0 且 tested_count=0 时 0/0
+            tested_n = tested_count / (tested_count + max(1.0, float(self.min_tests_per_cluster)))
+            # avg_success 本身已在 [0,1]，直接作为第三项——三项量纲一致，
+            # 任一项都不会压制其余信号。原公式 `min_tests_per_cluster * avg_success`
+            # 第三项幅值达 ±4，完全淹没了归一化的 tested_n / avg_gap_n。
+            score = tested_n + avg_gap_n - avg_success
             if best_score is None or score < best_score:
                 best_score = score
                 best_cid = cid
@@ -328,12 +316,10 @@ class CoordinateDescentSampler(AttackSampler):
         if not candidates:
             return []
 
-        self._round_count += 1
         def_elo = tracker.get_defender_elo(defender_name)
 
         # 选择当前聚焦的簇
         current_cid = self._pick_next_cluster(candidates, tracker, defender_name)
-        self._current_cluster = current_cid
 
         # 在选定簇内选择最接近边界且未充分测试的方法
         cluster_methods = [
@@ -350,9 +336,12 @@ class CoordinateDescentSampler(AttackSampler):
             n_tests = stats.get("n_matches", 0)
             # 未充分测试的方法优先；同测试次数下按 gap 排序
             # M-11 修复：min_tests_per_method 真正生效——未达最小测试数的方法大幅降分优先
+            # gap 项钳到 <1（gap/(gap+ELO_SCALE)）：原 gap/1000.0 在 gap>1000 时
+            # 超过 1 个测试位次，打破"先按测试次数、再按 gap"的排序语义
+            gap_n = gap / (gap + ELO_SCALE)
             if n_tests < self.min_tests_per_method:
-                return n_tests - 10000 + gap / 1000.0
-            return n_tests + gap / 1000.0
+                return n_tests - 10000 + gap_n
+            return n_tests + gap_n
 
         cluster_methods.sort(key=method_score)
         selected = cluster_methods[:n]
@@ -442,11 +431,6 @@ class HybridSampler(AttackSampler):
         super().set_cluster_info(cluster_report)
         self._info_sampler.set_cluster_info(cluster_report)
         self._coord_sampler.set_cluster_info(cluster_report)
-
-    def reset(self):
-        self._round_count = 0
-        self._info_sampler.reset()
-        self._coord_sampler.reset()
 
     def select(
         self,

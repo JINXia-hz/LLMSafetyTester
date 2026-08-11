@@ -18,7 +18,7 @@ core.results — 结果矩阵 R（唯一真相存储）
   }
 
 本模块只负责存储与访问；Elo 派生见 evaluation.elo.derive_elo；
-预测器派生见 evaluation.elo_cluster。
+预测器派生见 evaluation.predictors（cold_start / blend）。
 """
 
 from __future__ import annotations
@@ -177,6 +177,23 @@ class ResultsMatrix:
     def model_column(self, model: str) -> dict[str, MatchResult]:
         """返回 {method: MatchResult}——该模型列的全部结果。"""
         return {m: col[model] for m, col in self._r.items() if model in col}
+
+    def column_payload(self, model: str, extra_fields: tuple[str, ...] = ()) -> str | None:
+        """该模型列的确定性内容串（method:score:ts[:extra] 按方法排序拼接）。无结果返回 None。
+
+        供 elo_access / predictors.blend 构造缓存失效指纹（M-37），替代二者各自重复的
+        `",".join(f"{m}:{r.eval_score}:{r.ts}...")` 拼接。调用方自行 md5 包装。
+        """
+        col = self.model_column(model)
+        if not col:
+            return None
+        parts = []
+        for m, r in sorted(col.items()):
+            seg = f"{m}:{r.eval_score}:{r.ts}"
+            for fld in extra_fields:
+                seg += f":{r.extra.get(fld)}"
+            parts.append(seg)
+        return ",".join(parts)
 
     def method_row(self, method: str) -> dict[str, MatchResult]:
         """返回 {model: MatchResult}——该方法行跨全部模型的结果。"""

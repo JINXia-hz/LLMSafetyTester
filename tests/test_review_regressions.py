@@ -26,8 +26,8 @@ from llmsec.evaluation.elo import ELOTracker
 def test_fr1_write_jsonl_before_save():
     import inspect
 
-    from llmsec.pipeline import runner
-    src = inspect.getsource(runner.run_attack_phase)
+    from llmsec.pipeline.attack_phase import run_attack_phase
+    src = inspect.getsource(run_attack_phase)
     # 找到所有 write_jsonl 和 tracker.save 的位置
     lines = src.splitlines()
     write_jsonl_lines = [i for i, l in enumerate(lines) if 'write_jsonl(attack_file' in l]
@@ -58,8 +58,8 @@ def test_fr2_dashboard_api_has_logger():
 
 def test_fr2_blend_predictor_has_logger():
     """blend_predictor.py 有 logger 定义，降级路径不抛 NameError。"""
-    from llmsec.evaluation import blend_predictor as bp
-    assert hasattr(bp, 'logger'), 'FR-2: blend_predictor 有 logger 属性'
+    from llmsec.evaluation.predictors import blend as bp
+    assert hasattr(bp, 'logger'), 'FR-2: blend 有 logger 属性'
 
 
 # ============================================================
@@ -68,8 +68,8 @@ def test_fr2_blend_predictor_has_logger():
 def test_fr3_svd_ridge_filters_stale_gt():
     import inspect
 
-    from llmsec.evaluation.elo_cluster import ClusterEloPredictor
-    src = inspect.getsource(ClusterEloPredictor._predict_batch_svd_ridge)
+    from llmsec.evaluation.predictors.cold_start import ColdStartPredictor
+    src = inspect.getsource(ColdStartPredictor._predict_batch_svd_ridge)
     # 确保有 train_gt 的定义
     assert 'train_gt' in src, 'FR-3: _predict_batch_svd_ridge 定义了 train_gt'
     # 确认 fit 调用用 train_gt（而非 self.ground_truth）
@@ -89,8 +89,8 @@ def test_fr4_stale_attacker_ratings_cleaned():
     """resume 时 stale attacker_ratings / history 被同步清理。"""
     import inspect
 
-    from llmsec.pipeline import runner
-    src = inspect.getsource(runner.run_attack_phase)
+    from llmsec.pipeline.attack_phase import run_attack_phase
+    src = inspect.getsource(run_attack_phase)
     # 确认清理逻辑包含 attacker_ratings.pop
     assert 'tracker.attacker_ratings.pop' in src, (
         'FR-4: resume 清理应包含 attacker_ratings.pop'
@@ -111,10 +111,10 @@ def test_fr5_boundary_early_return_keys_consistent():
     early_keys = set(early.keys())
 
     # 正常路径
-    tr.update("attack_a", "def_x", 3.0)
-    tr.update("attack_b", "def_x", 0.0)
+    tr.update_round("def_x", [("attack_a", 3.0)])
+    tr.update_round("def_x", [("attack_b", 0.0)])
     for _ in range(5):
-        tr.update("attack_c", "def_x", 1.0)
+        tr.update_round("def_x", [("attack_c", 1.0)])
         tr.record_round_end("def_x")
     normal = tr.compute_security_boundary("def_x")
     normal_keys = set(normal.keys())
@@ -130,7 +130,7 @@ def test_fr5_boundary_early_return_keys_consistent():
 # ============================================================
 def test_fr6_no_judge_harmless_score_is_zero():
     """_eval_no_judge 的 no_harm 分数应是 0.0（对齐 judge 边界分），不是 -0.5。"""
-    from llmsec.evaluation.evaluator import _eval_no_judge
+    from llmsec.evaluation.scoring import _eval_no_judge
     # 短响应（< NO_JUDGE_MIN_LEN）= 无害
     result = _eval_no_judge(math_score=None, content="hi")
     assert result['eval_score'] == 0.0, (
@@ -268,20 +268,16 @@ def test_fr12_no_sample_cf_dead_code():
 
 
 # ============================================================
-# 附加：single-target main() try/except 保护
+# 附加：main() 统一编排（原 single-target try/except 测试已过时）
 # ============================================================
 def test_fr13_single_target_main_has_try_except():
-    """单目标 main() 的报告/publish/save 链有 try/except 保护。"""
+    """统一路径后 main() 内含编排逻辑（不再委托 separate module）。"""
     import inspect
 
     from llmsec.pipeline import runner
     src = inspect.getsource(runner.main)
-    # 确认关键调用被 try 包裹
-    assert 'except Exception as e' in src, 'FR-13: main() 含 except Exception'
-    # 确认 measure_math_baseline 有 try
-    measure_section = [l for l in src.splitlines() if 'measure_math_baseline' in l]
-    assert measure_section, 'FR-13: measure_math_baseline 在 main() 中'
-    # 检查 try 出现在 measure_math_baseline 附近
+    assert '_eval_one_target' in src, 'main() 含 per-target 编排'
+    assert 'publish_tracker' in src, 'main() 含 R 写入'
     lines = src.splitlines()
     for i, l in enumerate(lines):
         if 'measure_math_baseline' in l:

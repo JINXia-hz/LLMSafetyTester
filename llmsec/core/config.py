@@ -3,7 +3,7 @@ core.config — 统一配置入口
 
 职责：
   1. 幂等加载项目根目录 .env（替代原 7 处逐字重复的 load_dotenv 调用）
-  2. 集中管理路径常量（历史三套路径已统一裁决为 output/state/、output/attacks/，
+  2. 集中管理路径常量（历史三套路径已统一裁决为 output/state/、attacks/，
      即 runner.py 现行约定；旧路径仅作读取兼容回退，写入只写新路径）
   3. TargetConfig / GeneratorConfig / JudgeConfig dataclass + from_env()
 """
@@ -80,7 +80,7 @@ CLUSTER_MATRIX_FILE = OUTPUT_DIR / "cluster_matrix.csv"
 CLUSTER_FEATURES_FILE = OUTPUT_DIR / "cluster_features.json"
 # 聚类 artifacts 已按写者拆分为两个文件（原 cluster_artifacts.pkl 由两个写者混写不同
 # schema，后写覆盖会导致下游 KeyError）：
-#   - feature_cache.pkl：先验特征缓存，仅 elo_cluster.fit_features 写
+#   - feature_cache.pkl：先验特征缓存，仅 predictors/cold_start.py fit_features 写
 #   - cluster_result.pkl：完整聚类产物，hdb 写、final_fit 增补
 FEATURE_CACHE_FILE = OUTPUT_DIR / "feature_cache.pkl"
 CLUSTER_RESULT_FILE = OUTPUT_DIR / "cluster_result.pkl"
@@ -223,6 +223,22 @@ def target_backend(name: str) -> str:
             if t:
                 return t
     return os.getenv("TARGET_TYPE", "openai")
+
+
+def resolve_defender_name(target_model: str) -> str:
+    """解析防御方（被攻击模型）名称：pcap 模式用 PCAP_MODEL_VERSION，其它用 target_model。
+
+    替代 evaluator.py / safe_twin.py / runner.py 重复的三元表达式（M-35）。
+    R 矩阵的结果列、过敏结果、画像 ASR 都按此名索引——三处必须口径一致，
+    否则 pcap 模式下 FPR 与 ASR 会查不同列导致画像错配。
+
+    PCAP_MODEL_VERSION 从 llmsec.targets 惰性读取（避免 core.config ↔ targets 循环导入），
+    取值与原各模块顶层 `from llmsec.targets import PCAP_MODEL_VERSION` 一致（import 期冻结）。
+    """
+    if os.getenv("TARGET_TYPE", "openai") == "pcap_judge":
+        from llmsec.targets import PCAP_MODEL_VERSION
+        return PCAP_MODEL_VERSION
+    return target_model
 
 
 @dataclass

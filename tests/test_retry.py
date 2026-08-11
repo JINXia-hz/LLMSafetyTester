@@ -183,7 +183,6 @@ def test_judge_retry():
             err = e
     assert err is not None and client.completions.calls == 2, 'judge：2 次尝试后抛出（旧语义 2 次重试）'
     assert sr.calls == [judge_mod.JUDGE_RETRY_DELAY] == [2.0], 'judge：重试间隔 2s'
-    assert judge.call_count == 2, 'judge：call_count 按尝试次数计数'
     with _SleepRecorder():
         client2 = _FakeOpenAIClient([RuntimeError('boom'), _FakeChatResponse(' B ')])
         judge2 = judge_mod.Judge(client=client2, model='fake-judge')

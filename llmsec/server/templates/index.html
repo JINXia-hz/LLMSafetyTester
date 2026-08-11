@@ -245,7 +245,52 @@
     .log-box { background: var(--c-log-bg); color: var(--c-log-text); font-family: ui-monospace, Consolas, monospace; font-size: 0.75rem; border-radius: 4px; border-top: 2px solid var(--c-gold); padding: 12px; height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
     .card[data-task-id] .task-chevron { display: inline-block; color: var(--c-muted); transition: transform .15s; font-size: .7rem; }
     .card[data-task-id][data-collapsed="0"] .task-chevron { transform: rotate(90deg); }
-    .card[data-task-id][data-collapsed="1"] .log-box { display: none; }
+    .card[data-task-id][data-collapsed="1"] .progress-box { display: none; }
+    /* ---- 任务进度：真·终端窗口（标题栏 + 主体，固定高度不自适应）---- */
+    .progress-box { margin-top: 8px; width: 100%; background: var(--c-log-bg); color: var(--c-log-text);
+      font-family: ui-monospace, Consolas, monospace; font-size: 0.78rem; border-radius: 6px;
+      display: flex; flex-direction: column; height: 280px; min-height: 280px; max-height: 280px;
+      overflow: hidden; box-sizing: border-box;
+      border: 1px solid rgba(0,0,0,.28); box-shadow: inset 0 1px 0 rgba(255,255,255,.04); }
+    /* 任务列表卡（data-task-id）覆盖 .task-card 的 align-items:flex-start，
+       让头部行与终端盒都拉满整行宽度——否则盒宽会随内容从窄变宽。 */
+    .card[data-task-id] { align-items: stretch; }
+    .term-header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; flex: none;
+      background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(0,0,0,.20));
+      border-bottom: 1px solid rgba(0,0,0,.32); }
+    .term-dots { display: inline-flex; gap: 5px; }
+    .term-dots i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; opacity: .9; }
+    .term-dots i:nth-child(1) { background: var(--c-accent); }
+    .term-dots i:nth-child(2) { background: var(--c-gold); }
+    .term-dots i:nth-child(3) { background: var(--c-safe); }
+    .term-title { color: var(--c-log-text); opacity: .68; font-size: .72rem; letter-spacing: .02em; }
+    .term-body { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
+      padding: 8px 12px; white-space: pre; line-height: 1.75; }
+    .prog-line { white-space: pre; }
+    .prog-line.pg-idle { color: var(--c-muted); opacity: .8; }
+    .prog-line.pg-active { color: var(--c-log-text); }
+    .prog-line .pg-mark { color: var(--c-gold); }
+    .prog-line .pg-delta.up { color: #9CB58E; }
+    .prog-line .pg-delta.down { color: #D89A82; }
+    /* 盲文进度条：⣿/⣦(填充,金色) + ⣀(空槽,暗色)，等高不串行 */
+    .prog-line .pg-bar-txt { letter-spacing: 0; }
+    .prog-line .pg-bf { color: var(--c-gold); }
+    .prog-line .pg-em { color: var(--c-muted); opacity: .4; }
+    .prog-line .pg-status { color: var(--c-muted); }
+    /* ---- 头部极简进度条（始终可见：运行中按 pct 填充 / 无 pct 流光 / 终态固定色）---- */
+    .mini-bar { display: inline-block; width: 150px; height: 4px; border-radius: 2px;
+      background: var(--c-line); overflow: hidden; position: relative; flex: none; }
+    .mini-bar > i { display: block; height: 100%; width: 0; background: var(--c-gold);
+      transition: width .35s ease; }
+    .mini-bar.sim > i { width: 42% !important; border-radius: 2px;
+      background: linear-gradient(90deg, transparent, var(--c-gold), transparent);
+      background-size: 200% 100%; animation: skelSweep 1.4s linear infinite; }
+    .mini-bar.queued > i { width: 30% !important; background: var(--c-muted); opacity: .55;
+      animation: miniBreathe 1.8s ease-in-out infinite; }
+    .mini-bar.done > i { width: 100% !important; background: var(--c-safe); }
+    .mini-bar.failed > i { width: 100% !important; background: var(--c-accent); }
+    .mini-bar.cancelled > i { width: 100% !important; background: var(--c-muted); }
+    @keyframes miniBreathe { 50% { opacity: .12; } }
     select, input[type="number"], input[type="text"], input[type="password"] { border: 1px solid var(--c-line); border-radius: 4px; padding: 6px 10px; font-size: 0.85rem; background: var(--c-input-bg); color: var(--c-text); }
     .cluster-tag { font-size: 0.72rem; padding: 2px 8px; border-radius: 2px; font-weight: 600; }
 
@@ -466,9 +511,134 @@
       { animation: none !important; }
       .nav-label, .nav-seal, .task-card, .factor-drawer, .factor-toggle .caret { transition: none !important; }
     }
+
+    /* ---------- 打印文档「宣纸档案」：纸本文书气质，与屏幕端同宗而异媒 ---------- */
+    /* 屏幕隐藏；仅 @media print 或 ?printdoc=1 预览（body.preview-print）时显示 */
+    #printRoot { display: none; }
+    /* 强制输出底色/朱砂/描金——浏览器默认省墨会丢弃背景色 */
+    #printRoot, #printRoot * { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+    @page { size: A4; margin: 0; }   /* margin:0 让封面/目录满铺不溢出；正文边距由 main>div max-width 提供 */
+    #printRoot, .print-part { display: none; }
+    body.printing-all #printRoot, body.preview-print #printRoot { display: block; }
+    body.printing-all .print-part, body.preview-print .print-part { display: flex; }
+    body.printing-all, body.preview-print { background: #F1E6C9; }   /* 唐纸暖底（区别于屏幕绢米） */
+    /* 平铺五个板块（运行控制不印），隐藏侧边栏/顶栏/杂项；内容宽度压到可打印幅面，图表按此渲染 */
+    body.printing-all .section, body.preview-print .section { display: block !important; }
+    body.printing-all .section .card, body.preview-print .section .card { animation: none !important; }
+    body.printing-all #sec-run, body.preview-print #sec-run,
+    body.printing-all aside, body.preview-print aside,
+    body.printing-all #topbar, body.preview-print #topbar,
+    body.printing-all #readProgress, body.preview-print #readProgress,
+    body.printing-all #splash, body.preview-print #splash,
+    body.printing-all #addTargetModal, body.preview-print #addTargetModal { display: none !important; }
+    body.printing-all main > div, body.preview-print main > div { max-width: 180mm !important; }
+
+    /* 图表转 PNG：打印态隐藏实时 Plotly、只显图片（图片是单一内联元素，break-inside:avoid 100% 生效，绝不跨页） */
+    .print-chart { display: none; }
+    body.printing-all .print-hidden-plot, body.preview-print .print-hidden-plot { display: none !important; }
+    body.printing-all .print-chart, body.preview-print .print-chart { display: block; max-width: 100%; max-height: 240mm; margin: 0 auto; break-inside: avoid; }
+    /* 打印态隐藏屏幕交互杂物：批次对比面板、趋势目标 chips、报告侧栏目录（纸面无用） */
+    body.printing-all #cmpPanel, body.preview-print #cmpPanel,
+    body.printing-all #cmpSelect, body.preview-print #cmpSelect,
+    body.printing-all #cmpBtn, body.preview-print #cmpBtn,
+    body.printing-all #cmpHint, body.preview-print #cmpHint,
+    body.printing-all #trendTargets, body.preview-print #trendTargets,
+    body.printing-all #reportNav, body.preview-print #reportNav { display: none !important; }
+    /* 纸面卡片：去阴影、奶油底、描金细框（挂轴装池感），与屏幕端配色区隔 */
+    body.printing-all .section .card, body.preview-print .section .card {
+      background: #FBF6E6 !important; border: 1px solid #C9B68A; box-shadow: none !important;
+    }
+
+    /* 屏幕预览退出钮 */
+    .pdoc-exit {
+      display: none; position: fixed; top: 14px; right: 14px; z-index: 99;
+      padding: 6px 14px; border: 1px solid #A63A2E; border-radius: 4px;
+      background: #FBF7EE; color: #A63A2E; font-size: 13px; cursor: pointer;
+    }
+    body.preview-print .pdoc-exit { display: block; }
+
+    /* 部件题签：壹·总览 … 伍·预测模型（JS 印前插入各 section 开头，印后移除） */
+    .print-part {
+      align-items: center; gap: 3mm; margin: 0 0 4mm; padding: 2mm 0;
+      font-family: "KaiTi", "STKaiti", "Kaiti SC", serif; font-size: 17pt; font-weight: 700;
+      letter-spacing: .12em; color: #2A251E;
+      border-top: .6px solid #A98A4B; border-bottom: 1.2px solid #A98A4B;   /* 上下描金双栏线 */
+    }
+    .print-part::before { content: ""; flex-shrink: 0; width: 3.4mm; height: 3.4mm; background: #A63A2E; transform: rotate(45deg); box-shadow: inset 0 0 0 .8mm rgba(255,255,255,.35); }
+
+    @media print {
+      body.printing-all, body.printing-all * { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+      .pdoc-exit { display: none !important; }   /* 预览退出钮只存在屏幕上 */
+      body.printing-all .section { page-break-before: always; }
+      body.printing-all .card { box-shadow: none !important; break-inside: avoid; }
+      body.printing-all .report-body, body.printing-all #clusterCards .card { break-inside: auto; }  /* 长文允许跨页 */
+      body.printing-all main button, body.printing-all main select, body.printing-all main input,
+      body.printing-all #sec-report .w-48, body.printing-all .modebar { display: none !important; }
+    }
+
+    /* 封面：负边距满铺整页；双线描金函套框 + 四角菱花 + 竖排楷题 + 朱砂白文印 */
+    #printRoot { color: #2A251E; font-family: "SimSun", "Songti SC", "Noto Serif CJK SC", serif; }
+    .pdoc-cover {
+      box-sizing: border-box; width: 210mm; height: 297mm; margin: 0;
+      overflow: hidden; background: #FBF7EE; padding: 9mm;
+    }
+    .pdoc-frame { height: 100%; box-sizing: border-box; border: 3.5px double #A98A4B; padding: 3mm; }
+    .pdoc-frame-inner {
+      position: relative; height: 100%; box-sizing: border-box; border: 1px solid #A98A4B;
+      display: flex; align-items: center; justify-content: center; padding: 12mm;
+      background:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56' viewBox='0 0 56 56'%3E%3Cg fill='none' stroke='%23A98A4B' stroke-width='1' stroke-opacity='0.6'%3E%3Crect x='16' y='16' width='24' height='24'/%3E%3Crect x='21' y='21' width='14' height='14' transform='rotate(45 28 28)'/%3E%3Ccircle cx='28' cy='28' r='3'/%3E%3C/g%3E%3C/svg%3E") no-repeat left 5mm top 5mm / 15mm,
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56' viewBox='0 0 56 56'%3E%3Cg fill='none' stroke='%23A98A4B' stroke-width='1' stroke-opacity='0.6'%3E%3Crect x='16' y='16' width='24' height='24'/%3E%3Crect x='21' y='21' width='14' height='14' transform='rotate(45 28 28)'/%3E%3Ccircle cx='28' cy='28' r='3'/%3E%3C/g%3E%3C/svg%3E") no-repeat right 5mm top 5mm / 15mm,
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56' viewBox='0 0 56 56'%3E%3Cg fill='none' stroke='%23A98A4B' stroke-width='1' stroke-opacity='0.6'%3E%3Crect x='16' y='16' width='24' height='24'/%3E%3Crect x='21' y='21' width='14' height='14' transform='rotate(45 28 28)'/%3E%3Ccircle cx='28' cy='28' r='3'/%3E%3C/g%3E%3C/svg%3E") no-repeat left 5mm bottom 5mm / 15mm,
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56' viewBox='0 0 56 56'%3E%3Cg fill='none' stroke='%23A98A4B' stroke-width='1' stroke-opacity='0.6'%3E%3Crect x='16' y='16' width='24' height='24'/%3E%3Crect x='21' y='21' width='14' height='14' transform='rotate(45 28 28)'/%3E%3Ccircle cx='28' cy='28' r='3'/%3E%3C/g%3E%3C/svg%3E") no-repeat right 5mm bottom 5mm / 15mm;
+    }
+    /* 内层联珠虚线（唐式函套套层） */
+    .pdoc-frame-inner::before {
+      content: ""; position: absolute; inset: 3mm; border: .6px dotted #A98A4B; pointer-events: none;
+    }
+    /* 顶部回纹菱花带（避开四角菱花，居中横陈） */
+    .pdoc-frame-inner::after {
+      content: ""; position: absolute; top: 6.5mm; left: 16mm; right: 16mm; height: 5mm; pointer-events: none;
+      background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cg fill='none' stroke='%23A98A4B' stroke-width='.8' stroke-opacity='.65'%3E%3Crect x='4' y='4' width='4' height='4' transform='rotate(45 6 6)'/%3E%3Crect x='2' y='2' width='8' height='8'/%3E%3C/g%3E%3C/svg%3E") repeat-x center / 5mm;
+    }
+    .pdoc-cover-main {
+      width: 100%; display: flex; align-items: center; justify-content: center; gap: 18mm;
+      background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='100' viewBox='0 0 100 100'%3E%3Cg fill='none' stroke='%23A98A4B' stroke-width='1' stroke-opacity='0.16'%3E%3Crect x='12' y='12' width='76' height='76'/%3E%3Crect x='24' y='24' width='52' height='52' transform='rotate(45 50 50)'/%3E%3Crect x='33' y='33' width='34' height='34'/%3E%3Ccircle cx='50' cy='50' r='10'/%3E%3C/g%3E%3C/svg%3E") no-repeat center / 88mm;
+    }
+    .pdoc-vtitle {
+      writing-mode: vertical-rl; font-family: "KaiTi", "STKaiti", "Kaiti SC", serif;
+      font-size: 29pt; letter-spacing: .24em; color: #2A251E; max-height: 190mm;
+    }
+    .pdoc-cover-side { display: flex; flex-direction: column; align-items: center; gap: 9mm; max-width: 52mm; }
+    .pdoc-seal {
+      width: 17mm; height: 17mm; background: #A63A2E; color: #FBF7EE;
+      font-family: "KaiTi", "STKaiti", "Kaiti SC", serif; font-size: 21pt; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 1.5mm; box-shadow: inset 0 0 0 1.2mm rgba(251,247,238,.4);
+    }
+    .pdoc-meta { width: 100%; font-size: 9pt; }
+    .pdoc-meta-row { display: flex; gap: 2.5mm; padding: 1.6mm 0; border-bottom: .4px solid #D8C9A6; }
+    .pdoc-meta-k { flex-shrink: 0; color: #A63A2E; font-family: "KaiTi", "STKaiti", "Kaiti SC", serif; letter-spacing: .15em; }
+    .pdoc-meta-v { color: #2A251E; word-break: break-all; }
+
+    /* 目录页：五部清单（页码由浏览器打印决定，不标） */
+    .pdoc-toc {
+      box-sizing: border-box; width: 210mm; height: 297mm; margin: 0;
+      overflow: hidden; background: #FBF7EE; padding: 30mm 28mm;
+      break-before: page; page-break-before: always;
+    }
+    .pdoc-toc-title {
+      font-family: "KaiTi", "STKaiti", "Kaiti SC", serif; font-size: 15pt; text-align: center;
+      letter-spacing: .5em; text-indent: .5em; color: #2A251E;
+      width: 58%; margin: 0 auto 9mm; padding-bottom: 2.5mm; border-bottom: 1px solid #A98A4B;
+    }
+    .pdoc-toc-row { padding: 3.2mm 2mm; border-bottom: .4px dotted #C4B493; font-size: 12pt; }
+    .pdoc-toc-row::before { content: "◆"; color: #A98A4B; font-size: 6pt; margin-right: 3mm; }
   </style>
 </head>
 <body>
+  <!-- 打印文档容器：封面 + 目录（printAll/buildPrintDoc 填充）；DOM 序在最前，打印时先出封面 -->
+  <div id="printRoot" aria-hidden="true"></div>
   <div id="readProgress"></div>
   <!-- 盖印开卷 splash：仅 html.js-splash（每会话首次）时可见，app.js dismissSplash() 收尾 -->
   <div id="splash" aria-hidden="true">
@@ -503,7 +673,7 @@
     <!-- ============ 主区域 ============ -->
     <main class="flex-1 min-w-0">
       <!-- 顶栏 -->
-      <div class="flex items-center gap-3 px-6 py-4" style="background: var(--c-topbar); border-bottom: 1px solid var(--c-line);">
+      <div id="topbar" class="flex items-center gap-3 px-6 py-4" style="background: var(--c-topbar); border-bottom: 1px solid var(--c-line);">
         <label class="text-sm font-medium">运行批次:</label>
         <select id="runSelect" class="min-w-[240px]"><option value="">最新</option></select>
         <button id="refreshBtn" class="btn btn-plain">刷新</button>
@@ -664,7 +834,7 @@
               <div class="text-xs mb-2" style="color: var(--c-muted);" id="blendSub"></div>
               <div id="blendBody" class="overflow-x-auto"></div>
             </div>
-            <div class="text-xs mb-2 font-semibold" style="color: var(--c-muted);">单模型层（ClusterEloPredictor · SVD-Ridge）</div>
+            <div class="text-xs mb-2 font-semibold" style="color: var(--c-muted);">单模型层（ColdStartPredictor · SVD-Ridge）</div>
             <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
               <div class="card"><div class="metric-label">最优 λ*</div><div class="metric-value" id="md_lambda">-</div></div>
               <div class="card"><div class="metric-label">残差 σ²</div><div class="metric-value" id="md_sigma">-</div></div>
@@ -882,6 +1052,10 @@
     </main>
   </div>
 
+  <script src="/static/js/core.js" defer></script>
+  <script src="/static/js/sections.js" defer></script>
+  <script src="/static/js/analysis.js" defer></script>
+  <script src="/static/js/run-control.js" defer></script>
   <script src="/static/app.js" defer></script>
 </body>
 </html>

@@ -176,3 +176,54 @@ def test_orchestration_mock():
     assert not (second_count != 0), f"❌ 断点续跑应 0 新 trial，实际 {second_count}"
 
 
+def test_run_trial_strips_task_id_env(monkeypatch, tmp_path):
+    """run_trial 子进程 env 不得继承 LLMSEC_TASK_ID（防 trial 污染 HPO 任务进度文件）。"""
+    import os
+
+    import llmsec.experiments.executor as ex
+
+    os.environ["LLMSEC_TASK_ID"] = "leak-test"
+    captured = {}
+
+    class FakeCP:
+        returncode = 0
+
+    def fake_run(*args, **kwargs):
+        captured['env'] = kwargs.get('env')
+        return FakeCP()
+
+    monkeypatch.setattr(ex.subprocess, "run", fake_run)
+    monkeypatch.setattr(ex, "capture_manifest", lambda *a, **k: {})  # 避免 platform/git 子调用被 fake_run 误伤
+    monkeypatch.setattr(ex, "extract_metrics", lambda *a, **k: {})
+    try:
+        ex.run_trial({"input": "attacks/l1.jsonl", "target": "x"}, 1, tmp_path, "st", 0, 30)
+    finally:
+        os.environ.pop("LLMSEC_TASK_ID", None)
+
+    assert "LLMSEC_TASK_ID" not in (captured.get('env') or {}), \
+        "trial 子进程 env 必须剥离 LLMSEC_TASK_ID"
+    print('✅ run_trial 剥离 LLMSEC_TASK_ID 通过')
+
+
+def test_capture_manifest(tmp_path):
+    """capture_manifest 落盘 manifest.json 且字段完整、攻击集 sha1 可算。"""
+    import json
+
+    from llmsec.core.config import PROJECT_ROOT
+    from llmsec.experiments.manifest import capture_manifest
+
+    attack = PROJECT_ROOT / "attacks" / "l1.jsonl"
+    capture_manifest(tmp_path, ["python", "-m", "llmsec.pipeline.runner"],
+                     {"LLMSEC_PARAM_K": "1"}, 7, str(attack), {"input": "attacks/l1.jsonl"})
+    p = tmp_path / "manifest.json"
+    assert p.exists(), "manifest.json 应落盘"
+    d = json.loads(p.read_text(encoding="utf-8"))
+    for k in ["captured_at", "git", "python", "platform", "seed", "config", "argv",
+              "env_override", "attack_set", "attack_set_sha1", "params_snapshot",
+              "env_redacted", "library_versions"]:
+        assert k in d, f"manifest 缺字段 {k}"
+    assert d["seed"] == 7
+    assert d["attack_set_sha1"], "l1.jsonl 存在 → sha1 应非空（M-路径修复验证）"
+    print('✅ capture_manifest 通过')
+
+

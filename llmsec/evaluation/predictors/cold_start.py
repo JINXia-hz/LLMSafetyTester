@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """
-基于聚类的 Elo 冷启动预测器。
+evaluation.predictors.cold_start — Elo 冷启动预测器（编排层）。
 
 核心职责：
 1. 维护一个只包含真实评估数据的 ground_truth_elo 库。
-2. 在 ground_truth 数据增长到一定量时，重新训练聚类模型（动态聚类）。
-3. 为新攻击方法预测初始 Elo：找到最近簇，取该簇内 ground truth 方法的平均 Elo。
-4. 聚类输入严格只用真实数据，预测值不参与聚类，避免"死数据"污染。
+2. 前置特征缓存（fit_features）供 SVD-Ridge 预测与 D-optimality 种子使用；
+   聚类只在整个测试流程结束后进行（final_fit，HDBSCAN），聚类输入严格只用真实数据。
+3. 为新攻击方法预测初始 Elo：SVD-Ridge 批量预测为主（predict_batch），
+   同后缀/同基底变体平均与全局平均为兜底（predict）。
+
+本文件只含编排器 ColdStartPredictor（GT 库 / 特征缓存 / 工件持久化 / 变体兜底 /
+预测分发）。纯 ML 模型见 svd_ridge.py 的 EloPredictorModel。
+ClusterEloPredictor → ColdStartPredictor 改名（M-42：原名暗示聚类，实为预测器）。
 
 用法：
-    from llmsec.evaluation import ClusterEloPredictor
+    from llmsec.evaluation.predictors.cold_start import ColdStartPredictor
 
-    predictor = ClusterEloPredictor()
+    predictor = ColdStartPredictor()
     predictor.update_ground_truth("DAN", 1650)
     predictor.fit(attack_records, eval_results, force=True)
     elo_info = predictor.predict("新攻击")
@@ -19,6 +24,7 @@
 
 import hashlib
 import os
+import random
 import re
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +37,7 @@ from llmsec.clustering import (
     extract_all_features,
     extract_intent_features,
     extract_textual_features,
+    parse_cluster_id,
 )
 from llmsec.clustering.features import (
     DEFENSE_FEATURE_NAMES,
@@ -47,12 +54,9 @@ from llmsec.core.config import INITIAL_ELO
 from llmsec.core.io import save_artifact
 from llmsec.core.logging import get_logger
 from llmsec.core.seed import get_global_seed as _global_seed
+from llmsec.evaluation.predictors.active_learning import greedy_d_optimal
+from llmsec.evaluation.predictors.svd_ridge import EloPredictorModel
 from llmsec.params import (
-    RIDGE_DEGENERATE_COL_EPS,
-    RIDGE_LAMBDA_COUNT,
-    RIDGE_LAMBDA_MAX,
-    RIDGE_LAMBDA_MIN,
-    RIDGE_N_FOLDS,
     RIDGE_PRED_STD_CAP_MIN,
     RIDGE_PRED_STD_CAP_MULT,
     RIDGE_REFIT_THRESHOLD,
@@ -60,6 +64,12 @@ from llmsec.params import (
 
 # 特征提取代码版本：提取逻辑 / 特征块结构变更时 +1，使旧特征缓存与 ridge w 失效（M-5/M-6）
 FEATURE_EXTRACTION_VERSION = 1
+
+# 无模型方差可用时（GT 为空 / 变体兜底 / 全局平均）的保守 std 启发值（Elo 分）：
+# 原实现挪用 RIDGE_PRED_STD_CAP_MIN（=200，本是 std 上限的绝对下限）当兜底 std，
+# 与 _predict_batch_svd_ridge 里 confidence 硬编码的 std/200 实为同一拍脑袋常数，
+# 此处收口为单一模块级常量，取 200 = 半个 ELO_SCALE 量级，经验值
+_FALLBACK_STD = 200.0
 
 
 
@@ -95,388 +105,7 @@ def _cluster_files() -> tuple[Path, Path]:
     return config.FEATURE_CACHE_FILE, config.CLUSTER_RESULT_FILE
 
 
-class EloPredictorModel:
-    """
-    基于 SVD 的 Ridge 回归 Elo 预测模型。
-
-    - 用已测方法的特征向量 X 和真实 Elo y（中心化后）训练模型。
-    - 对特征矩阵做 SVD：X = UΣV^T，Ridge 解 w(λ) = V (Σ² + λI)^(-1) Σ U^T y。
-    - 用 K-Fold 交叉验证在正则化路径 λ ∈ logspace(-3, 4, 24) 上选择最优 λ。
-    - SVD 同时提供主成分视角：解释方差比与有效自由度 df(λ) 由 get_pca_summary 输出。
-    - 贝叶斯解释：Ridge 等价于高斯先验的 MAP；
-      预测均值 E = y_mean + X_test @ w，预测方差 σ²_噪声 · (1 + diag(X_test (X^T X + λI)^(-1) X_test^T))。
-      σ²_噪声 用自由度修正的 in-sample 残差 RSS/(n−df_eff) 估计（M1：避免 CV-MSE 双重计数）。
-    """
-
-    BLOCK_ORDER = ("textual", "embedding", "technique", "intent", "prior")
-
-    def __init__(self, lambda_candidates=None, n_folds: int = RIDGE_N_FOLDS):
-        self.lambda_candidates = (
-            np.logspace(RIDGE_LAMBDA_MIN, RIDGE_LAMBDA_MAX, RIDGE_LAMBDA_COUNT)
-            if lambda_candidates is None else lambda_candidates
-        )
-        self.n_folds = n_folds
-        self.w: np.ndarray | None = None
-        self.x_mean: np.ndarray | None = None
-        self.x_std: np.ndarray | None = None
-        # 退化列掩码：True=保留。GT 子集内近常数的列（x_std 触地板）在子集外稍偏离
-        # 就会产生 ~1e8 的标准化值，使 MAP 方差爆炸；fit/predict 时这些列置零
-        self.col_keep: np.ndarray | None = None
-        self.y_std: float = 0.0  # GT Elo 标准差（预测 std 封顶用）
-        self.y_mean: float = 0.0
-        self.lambda_opt: float | None = None
-        self.sigma2: float | None = None
-        self.cv_mse_at_lambda: float | None = None  # CV-MSE at λ*（诊断用，非 σ²_噪声；M1）
-        self.xtx_inv: np.ndarray | None = None
-        self.cv_errors: list[float] = []
-        self.block_dims: dict[str, int] = {}
-        self.feature_names: list[str] = []
-        # SVD / 主成分诊断
-        self.singular_values: np.ndarray | None = None
-        self.n_samples: int = 0
-        self.effective_df: float | None = None
-        # 训练计数（供缓存与测试断言）
-        self.fit_count: int = 0
-        # OOS 预测（λ* 下逐折留出，键=ground_truth 方法名）——供 BlendPredictor 估计层间残差协方差（#3）
-        self.oos_by_key_: dict[str, float] = {}
-
-    @classmethod
-    def _features_to_matrix(
-        cls,
-        features_dict: dict,
-        methods: list[str],
-        block_dims: dict[str, int] | None = None,
-    ) -> tuple[np.ndarray, dict[str, int]]:
-        """
-        把 features dict 转换为特征矩阵 X（textual + embedding + technique + intent + prior）。
-
-        - block_dims=None（训练）：各块按块内最大维度零填充，返回实际维度。
-        - block_dims 给定（预测）：严格按该维度截断/零填充，保证与训练时的 w 对齐。
-        """
-        blocks: dict[str, list[np.ndarray]] = {b: [] for b in cls.BLOCK_ORDER}
-        dims = dict(block_dims) if block_dims is not None else {b: 0 for b in cls.BLOCK_ORDER}
-        for m in methods:
-            feat = features_dict.get(m, {})
-            for b in cls.BLOCK_ORDER:
-                vec = np.atleast_1d(
-                    np.asarray(feat.get(b, np.zeros(0)), dtype=np.float64)
-                )
-                blocks[b].append(vec)
-                if block_dims is None:
-                    dims[b] = max(dims[b], vec.shape[0])
-
-        rows = []
-        for i in range(len(methods)):
-            parts = []
-            for b in cls.BLOCK_ORDER:
-                vec = blocks[b][i]
-                if vec.shape[0] < dims[b]:
-                    vec = np.pad(vec, (0, dims[b] - vec.shape[0]))
-                elif vec.shape[0] > dims[b]:
-                    vec = vec[: dims[b]]
-                parts.append(vec)
-            rows.append(np.concatenate(parts))
-        return np.array(rows, dtype=np.float64), dims
-
-    def _resolve_feature_names(self, name_blocks: dict | None) -> list[str]:
-        """按块顺序生成与 w 对齐的特征名列表，缺失的用通用名补齐。"""
-        names = []
-        for b in self.BLOCK_ORDER:
-            dim = self.block_dims.get(b, 0)
-            block_names = list((name_blocks or {}).get(b, []))[:dim]
-            block_names += [f"{b}_{i}" for i in range(len(block_names), dim)]
-            names.extend(block_names)
-        return names
-
-    def fit(
-        self,
-        features_dict: dict,
-        ground_truth: dict,
-        feature_name_blocks: dict | None = None,
-        lambda_override: float | None = None,
-        groups: dict | None = None,
-        sample_weights: dict | None = None,
-    ) -> "EloPredictorModel":
-        """
-        用 ground truth 训练 Ridge 回归模型。
-
-        参数:
-            features_dict: {method: features}，需包含所有 ground truth 方法
-            ground_truth: {method: {"elo": float, ...}}
-            feature_name_blocks: 各特征块的特征名（用于特征重要性输出）
-            lambda_override: 指定 λ 时跳过 K-Fold 直接 refit w（快速通道，
-                用于 ground truth 小幅增长时的增量更新）
-            groups: {method_key: group_id}，按组做 GroupKFold（统一预测器场景：
-                同方法跨模型样本同组，防 CV 泄漏，#4）。None 时走随机 K-Fold。
-            sample_weights: {method: weight}，加权 Ridge 的样本权重（发现层 D+A：
-                BlendPredictor 按 donor 相似度加权池化）。对**原始** X/y 行乘 √w，
-                下游标准化/CV/SVD 自动成加权版——数学等价 min Σw_i(y_i−x_iβ)²+λ||β||²
-                的解 = 标准 Ridge 在 (√w·X, √w·y) 上；predict 时新点不缩放（仅训练加权）。
-        """
-        methods = sorted(ground_truth.keys())
-        if not methods:
-            raise ValueError("ground_truth 为空，无法训练")
-
-        X, self.block_dims = self._features_to_matrix(features_dict, methods)
-        y = np.array([ground_truth[m]["elo"] for m in methods], dtype=np.float64)
-        self.feature_names = self._resolve_feature_names(feature_name_blocks)
-
-        # X 标准化 + y 中心化（截距项：否则零均值的 X_scaled @ w 无法表达 ~1500 的基准 Elo）
-        # H2 修复：标准化统计量必须在加权之前用**原始** X/y 计算——原实现先乘 √w 再算
-        # mean/std，导致 self.x_mean/x_std 被 √w 衰减，与 predict 端的原始尺度 x* 不一致。
-        self.x_mean = X.mean(axis=0)
-        raw_std = X.std(axis=0)
-        # 退化列：GT 子集内近常数（std 触 1e-8 地板）的列在子集外稍偏离就会产生
-        # ~1e8 的标准化值，MAP 方差随之爆炸（均值不受影响：该方向 w=0）。
-        # 标准化后置零：w 与杠杆都不再有贡献。已知合法 embedding 列 std ≥ 0.017，阈值安全。
-        self.col_keep = raw_std >= RIDGE_DEGENERATE_COL_EPS
-        self.x_std = raw_std + 1e-8
-        X_scaled = (X - self.x_mean) / self.x_std
-        X_scaled[:, ~self.col_keep] = 0.0
-        self.y_mean = float(y.mean())
-        self.y_std = float(y.std())
-        y_c = y - self.y_mean
-
-        # 加权 Ridge（发现层 sample_weights）：对**标准化后**的 X_scaled/y_c 行乘 √w，
-        # 数学等价 min Σwᵢ(yᵢ−xᵢβ)²+λ‖β‖² 的解 = 标准 Ridge on (√w·X, √w·y)；
-        # predict 时新点不缩放（仅训练加权）。标准化统计量保持原始尺度（H2）。
-        # _sw 默认全 1（A2：K-Fold 内部也需按折加权）
-        _sw = np.ones(len(methods), dtype=np.float64)
-        if sample_weights is not None:
-            _w = np.array(
-                [max(float(sample_weights.get(m, 1.0)), 0.0) for m in methods],
-                dtype=np.float64,
-            )
-            _sw = np.sqrt(_w)
-            X_scaled = X_scaled * _sw[:, None]
-            y_c = y_c * _sw
-
-        n = len(X_scaled)
-        self.n_samples = n
-        best_error = None
-        self.oos_by_key_ = {}  # 每次 fit 重置；仅完整 K-Fold 路径填充（供 #3 协方差估计）
-
-        if lambda_override is not None:
-            # 快速通道：复用既有 λ，不重跑 K-Fold（OOS 不可得，#3 协方差退回 in-sample/零）
-            self.lambda_opt = float(lambda_override)
-        else:
-            # 选 fold 划分：groups 非空 → GroupKFold（同方法跨模型样本同组，防 CV 泄漏，#4）；
-            # 否则随机 K-Fold（H-9 余数均衡）
-            if groups is not None:
-                group_arr = np.asarray([groups.get(m, m) for m in methods])
-                unique_groups = list(dict.fromkeys(group_arr.tolist()))
-                if len(unique_groups) >= 2:
-                    from sklearn.model_selection import GroupKFold
-
-                    k_g = min(self.n_folds, len(unique_groups))
-                    splits = list(GroupKFold(n_splits=k_g).split(X_scaled, groups=group_arr))
-                else:
-                    splits = self._random_kfold_splits(n)
-            else:
-                splits = self._random_kfold_splits(n)
-            k = len(splits)
-            if k < 2:
-                # 样本太少，直接用中等 λ
-                self.lambda_opt = 1.0
-                self.cv_errors = []
-            else:
-                # K-Fold 选 λ（#1 性能优化：每折只算一次 SVD，全部 λ 向量化求解）
-                lambda_arr = np.asarray(self.lambda_candidates, dtype=np.float64)
-                fold_errors = np.zeros((k, len(lambda_arr)), dtype=np.float64)
-                # A2：每折存 fold-local y_mean，OOS 预测还原 Elo 尺度时需加各自折的 y_mean
-                fold_cache: list[tuple[np.ndarray, np.ndarray, float]] = []
-                for i, (train_idx, test_idx) in enumerate(splits):
-                    # A2 修复：per-fold 标准化——用训练折统计量缩放，消除 CV 泄漏
-                    # （原实现在全 GT 上算 mean/std → 测试折边际分布泄漏进缩放 → CV 偏乐观）
-                    X_tr_raw = X[train_idx]
-                    fm = X_tr_raw.mean(axis=0)
-                    fs = X_tr_raw.std(axis=0) + 1e-8
-                    fk = fs >= RIDGE_DEGENERATE_COL_EPS
-                    X_tr = (X_tr_raw - fm) / fs
-                    X_tr[:, ~fk] = 0.0
-                    X_te = (X[test_idx] - fm) / fs
-                    X_te[:, ~fk] = 0.0
-                    # 加权（与最终模型一致的 √w 变换）
-                    X_tr = X_tr * _sw[train_idx, None]
-                    X_te = X_te * _sw[test_idx, None]
-                    # y 用训练折均值中心化（非全 GT 均值）
-                    ym = float(y[train_idx].mean())
-                    y_tr = (y[train_idx] - ym) * _sw[train_idx]
-                    y_te = (y[test_idx] - ym) * _sw[test_idx]
-
-                    U_t, S_t, Vt_t = np.linalg.svd(X_tr, full_matrices=False)
-                    Ut_y = U_t.T @ y_tr
-                    XVt = X_te @ Vt_t.T
-                    scale = S_t[:, None] / (S_t[:, None] ** 2 + lambda_arr[None, :])
-                    preds = XVt @ (scale * Ut_y[:, None])
-                    fold_errors[i] = np.mean((preds - y_te[:, None]) ** 2, axis=0)
-                    fold_cache.append((test_idx, preds, ym))
-
-                avg_errors = fold_errors.mean(axis=0)
-                se_errors = fold_errors.std(axis=0) / (k ** 0.5)
-                self.cv_errors = avg_errors.tolist()
-
-                # A3 修复：1-SE 规则——在 min(CV)+SE 范围内选最大 λ（更正则、更稳），
-                # 原 raw argmin 在 24 网格点 + 小 n 下易挑到"侥幸最低"的偏小 λ
-                min_pos = int(np.argmin(avg_errors))
-                min_cv = float(avg_errors[min_pos])
-                se_at_min = float(se_errors[min_pos]) if np.isfinite(se_errors[min_pos]) else 0.0
-                threshold = min_cv + se_at_min
-                eligible = np.where(avg_errors <= threshold)[0]
-                # 1-SE 仅在 CV 曲线有结构时生效：超过半数 λ eligible 说明曲线过平（无信号或 SE 过大），
-                # 1-SE 会盲目推到最大 λ（过正则），此时回退 raw argmin
-                if len(eligible) > len(lambda_arr) // 2:
-                    best_pos = min_pos
-                else:
-                    best_pos = int(eligible[-1]) if len(eligible) > 0 else min_pos
-                best_error = float(avg_errors[best_pos])
-                self.lambda_opt = float(lambda_arr[best_pos])
-
-                # OOS 预测（λ*）：从逐折预测矩阵取 best_pos 列 → #3 协方差估计用
-                for test_idx, preds, ym in fold_cache:
-                    star = preds[:, best_pos] + ym  # A2：用各自折的 y_mean 还原 Elo 尺度
-                    for pos, ti in enumerate(test_idx):
-                        self.oos_by_key_[methods[ti]] = float(star[pos])
-
-        # 用最优 λ 在全数据上训练最终模型（截断数值近零奇异值保证稳定）
-        U, S, Vt = np.linalg.svd(X_scaled, full_matrices=False)
-        s_max = S.max() if S.size else 0.0
-        keep = max(1e-10 * s_max, 1e-12) < S
-        self.singular_values = S
-        shrink = np.where(keep, S / (S**2 + self.lambda_opt), 0.0)
-        self.w = Vt.T @ (shrink * (U.T @ y_c))
-
-        # 有效自由度 df(λ) = Σ σᵢ²/(σᵢ²+λ)：Ridge 收缩后的有效维度
-        self.effective_df = float(np.sum(S**2 / (S**2 + self.lambda_opt))) if S.size else 0.0
-
-        # 残差方差 σ²_噪声（M1 修复）：用自由度修正的 in-sample 残差 RSS/(n−df_eff)
-        # 估计**不可约观测噪声**。原实现用 CV-MSE（已含参数不确定性），再在方差公式里乘
-        # (1+杠杆) 等于把参数不确定性算了两遍 → CI 系统性偏宽。
-        # CV-MSE 保留为 cv_mse_at_lambda 诊断字段。
-        self.cv_mse_at_lambda = float(best_error) if (best_error is not None and np.isfinite(best_error)) else None
-        if lambda_override is not None and self.sigma2 is not None:
-            pass  # 快速通道保留上次 σ²（in-sample 残差在强正则下趋近 0，过于乐观）
-        else:
-            residuals = y_c - X_scaled @ self.w
-            rss = float(np.sum(residuals**2))
-            df_resid = max(1, n - int(round(self.effective_df)))
-            self.sigma2 = rss / df_resid
-
-        # M-7：σ² 下限——GT Elo 全相同时 σ²=0 → std=0、confidence=1.0（"绝对确定"的
-        # 零宽 CI），冷启动早期会误导 infogain 采样的不确定性项。有上限封顶却无下限。
-        self.sigma2 = max(self.sigma2, 1e-6)
-
-        # 保存 (X^T X + λI)^(-1) 用于 MAP 方差
-        XTX = X_scaled.T @ X_scaled
-        self.xtx_inv = np.linalg.inv(XTX + self.lambda_opt * np.eye(XTX.shape[0]))
-
-        self.fit_count += 1
-        logger.info(
-            "EloPredictorModel 训练完成: n=%d, λ*=%.4f, σ²=%.2f, df=%.1f/%d",
-            n, self.lambda_opt, self.sigma2, self.effective_df, X_scaled.shape[1],
-        )
-        return self
-
-    def _random_kfold_splits(self, n: int) -> list[tuple[np.ndarray, np.ndarray]]:
-        """随机 K-Fold（H-9 余数均衡：前 r 折各多 1 个，防小 GT 时偏选大 λ）。
-
-        返回 [(train_idx, test_idx), ...]；n 不足 2 折时返回 []。
-        """
-        k = min(self.n_folds, n)
-        if k < 2:
-            return []
-        indices = np.arange(n)
-        rng = np.random.default_rng(_global_seed())
-        rng.shuffle(indices)
-        fold_size = n // k
-        remainder = n % k
-        splits = []
-        for i in range(k):
-            start = i * fold_size + min(i, remainder)
-            end = start + fold_size + (1 if i < remainder else 0)
-            test_idx = indices[start:end]
-            train_idx = np.concatenate([indices[:start], indices[end:]])
-            splits.append((train_idx, test_idx))
-        return splits
-
-    def predict(self, features_dict: dict, methods: list[str]) -> tuple[np.ndarray, np.ndarray]:
-        """
-        批量预测 Elo 均值和 MAP 方差。
-
-        返回: (means, variances)，shape 均为 (len(methods),)
-        """
-        if self.w is None:
-            raise ValueError("模型未训练")
-
-        # 严格按训练时的块维度对齐，避免维度不匹配导致静默失败
-        X, _ = self._features_to_matrix(features_dict, methods, block_dims=self.block_dims)
-        X_scaled = (X - self.x_mean) / self.x_std
-        if self.col_keep is not None:
-            X_scaled[:, ~self.col_keep] = 0.0
-
-        means = self.y_mean + X_scaled @ self.w
-        # 预测方差 = 不可约噪声 σ² + 参数不确定 σ²·x'(XᵀX+λI)⁻¹x
-        variances = self.sigma2 * (
-            1.0 + np.sum((X_scaled @ self.xtx_inv) * X_scaled, axis=1)
-        )
-        return means, variances
-
-    def get_regularization_path(self) -> dict:
-        """返回正则化路径信息，用于可视化。"""
-        return {
-            "lambda_candidates": self.lambda_candidates.tolist(),
-            "cv_errors": self.cv_errors,
-            "lambda_opt": self.lambda_opt,
-            "cv_mse_at_lambda": self.cv_mse_at_lambda,
-        }
-
-    def get_pca_summary(self, top_n: int = 20) -> dict:
-        """
-        返回 SVD 主成分诊断：奇异值谱、解释方差比、累计解释方差、有效自由度。
-        用于评估降维效果（df 远小于特征数说明 Ridge/SVD 起到了压缩作用）。
-        """
-        if self.singular_values is None:
-            return {}
-        S = self.singular_values
-        var = S**2
-        total = float(var.sum())
-        ratio = var / total if total > 0 else np.zeros_like(var)
-        cumulative = np.cumsum(ratio)
-        return {
-            "n_samples": self.n_samples,
-            "n_features": int(len(self.w)) if self.w is not None else 0,
-            "singular_values": [round(float(s), 6) for s in S[:top_n]],
-            "explained_variance_ratio": [round(float(r), 6) for r in ratio[:top_n]],
-            "cumulative_variance_ratio": [round(float(c), 6) for c in cumulative[:top_n]],
-            "effective_df": round(self.effective_df, 4) if self.effective_df is not None else None,
-            "lambda_opt": self.lambda_opt,
-        }
-
-    def get_feature_importance(self, top_n: int = 20) -> list[dict]:
-        """按 Ridge 系数×原始 std 降序返回特征重要性（A4 修复）。
-
-        w 是标准化空间的系数，裸 |w| 会系统性高估训练时方差大的特征。
-        |w_i| × x_std_i 还原原始尺度，跨特征可比。
-        """
-        if self.w is None:
-            return []
-        names = self.feature_names or [f"x_{i}" for i in range(len(self.w))]
-        # A4：importance = |w_i| × x_std_i（原始尺度重要性，跨特征可比）
-        x_std = self.x_std if self.x_std is not None else np.ones(len(self.w))
-        importance = np.abs(self.w) * x_std
-        order = np.argsort(-importance)
-        return [
-            {
-                "feature": names[i],
-                "coef": round(float(self.w[i]), 4),
-                "abs_coef": round(float(abs(self.w[i])), 4),
-                "importance": round(float(importance[i]), 4),
-            }
-            for i in order[:top_n]
-        ]
-
-
-class ClusterEloPredictor:
+class ColdStartPredictor:
     """
     新攻击方法的 Elo 冷启动预测器。
 
@@ -488,6 +117,9 @@ class ClusterEloPredictor:
     def __init__(
         self,
         ridge_refit_threshold: int = RIDGE_REFIT_THRESHOLD,
+        # 命名是历史残留：聚类已移到 final_fit（HDBSCAN 自行定簇），此参数实为
+        # SVD-Ridge 训练所需的最小 ground truth 数（< 该值走变体/全局平均兜底）。
+        # 不改名——影响面大（runner/HPO/看板多处按现名注入）
         min_cluster_size: int = 3,
     ):
         self.ridge_refit_threshold = ridge_refit_threshold
@@ -584,9 +216,6 @@ class ClusterEloPredictor:
                 "last_updated_at": now,
             }
 
-    def is_ground_truth(self, method: str) -> bool:
-        return method in self.ground_truth
-
     def ground_truth_count(self) -> int:
         return len(self.ground_truth)
 
@@ -657,10 +286,6 @@ class ClusterEloPredictor:
         GT 为空时 M = λI，自动退化为最大杠杆点，覆盖特征空间。
         特征不可用时回退随机采样。
         """
-        import random
-
-        from llmsec.evaluation.active_learning import greedy_d_optimal
-
         candidates = [m for m in method_records if m not in self.ground_truth]
         if not candidates:
             return []
@@ -685,7 +310,7 @@ class ClusterEloPredictor:
             return feat
 
         cand_features = {m: _vec(m) for m in candidates}
-        X, dims = EloPredictorModel._features_to_matrix(cand_features, candidates)
+        X, dims = EloPredictorModel.features_to_matrix(cand_features, candidates)
         mean, std = X.mean(axis=0), X.std(axis=0) + 1e-8
         X_scaled = (X - mean) / std
 
@@ -693,7 +318,7 @@ class ClusterEloPredictor:
         X_gt = None
         if gt_methods:
             gt_feats = {m: _vec(m) for m in gt_methods}
-            Xg, _ = EloPredictorModel._features_to_matrix(
+            Xg, _ = EloPredictorModel.features_to_matrix(
                 gt_feats, gt_methods, block_dims=dims
             )
             X_gt = (Xg - mean) / std
@@ -716,7 +341,7 @@ class ClusterEloPredictor:
         4. 全局 ground truth 简单平均
         """
         labels = self.artifacts.get("labels", {}) if self.artifacts else {}
-        cid = int(labels.get(method, -1)) if method in labels else -1
+        cid = parse_cluster_id(labels.get(method, -1))
         gt_count = self.ground_truth_count()
 
         # H-10 修复：所有分支统一经 _make_result 构造，保证 schema 一致（含 std/ci95）。
@@ -766,7 +391,9 @@ class ClusterEloPredictor:
     def _make_result(elo, source, cluster_id, confidence, based_on_gt_count, std=None):
         """构造预测结果 dict，保证 schema 一致（含 std/ci95，防下游 KeyError）。"""
         if std is None:
-            std = float(RIDGE_PRED_STD_CAP_MIN)
+            std = _FALLBACK_STD
+        # 兜底分支的 std 是启发值（非模型方差），ci95 用正态 1.96 而非 t 分位数——
+        # t 的自由度无从谈起；模型路径（_predict_batch_svd_ridge）才用 t 分位数
         ci95 = [round(elo - 1.96 * std, 2), round(elo + 1.96 * std, 2)]
         return {
             "elo": elo,
@@ -781,7 +408,7 @@ class ClusterEloPredictor:
     @staticmethod
     def _fallback_std() -> float:
         """回退分支的保守 std（无模型方差可用时的高不确定性标记）。"""
-        return float(RIDGE_PRED_STD_CAP_MIN)
+        return _FALLBACK_STD
 
     # ============================================================
     # SVD-Ridge 批量预测
@@ -906,7 +533,9 @@ class ClusterEloPredictor:
         std_cap = max(RIDGE_PRED_STD_CAP_MULT * y_std, RIDGE_PRED_STD_CAP_MIN)
         # M2 修复：小样本下 CI 用 t 分位数替代 1.96——n=5 时 t₀.₉₇₅(3)≈3.18 比 1.96 宽 62%
         n_gt = len(gt_methods)
-        df_eff = self.model.effective_df or 0.0
+        # M-39：用 is None 显式判空——effective_df=0.0 是合法自由度，原 `or 0.0`
+        # 语义上虽结果相同，但 is None 更清晰表达"缺失才兜底"的意图
+        df_eff = self.model.effective_df if self.model.effective_df is not None else 0.0
         t_q = float(_t_dist.ppf(0.975, max(1, n_gt - int(round(df_eff)))))
         for m, mean, var in zip(methods, means, variances):
             std = min(float(np.sqrt(max(float(var), 0.0))), std_cap)
@@ -914,10 +543,12 @@ class ClusterEloPredictor:
             results[m] = {
                 "elo": elo,
                 "source": "svd_ridge",
-                "cluster_id": int(labels.get(m, -1)) if m in labels else -1,
+                "cluster_id": parse_cluster_id(labels.get(m, -1)),
                 "std": round(std, 2),
                 "ci95": [round(elo - t_q * std, 2), round(elo + t_q * std, 2)],
-                "confidence": round(1.0 / (1.0 + std / 200.0), 4),
+                # confidence 的 std/200 与兜底 std 同源（_FALLBACK_STD，经验值）：
+                # std=200 时 confidence=0.5，随 std 增大单调衰减
+                "confidence": round(1.0 / (1.0 + std / _FALLBACK_STD), 4),
                 "based_on_gt_count": self.ground_truth_count(),
             }
 
@@ -1145,8 +776,14 @@ class ClusterEloPredictor:
         n_noise = 0
         cluster_names = {}
         if self.artifacts:
-            n_clusters = len(set(self.artifacts.get("labels", {}).values()) - {-1})
-            n_noise = sum(1 for v in self.artifacts.get("labels", {}).values() if v == -1)
+            # M-40：归一化 label 为 int 再统计——原 set() - {-1} 在 label 为字符串 "-1"
+            # 时集合差不生效，会少计噪声簇 / 多计真实簇
+            from llmsec.clustering import parse_cluster_id
+
+            raw_labels = self.artifacts.get("labels", {})
+            norm_labels = [parse_cluster_id(v) for v in raw_labels.values()]
+            n_clusters = len(set(norm_labels) - {-1})
+            n_noise = sum(1 for v in norm_labels if v == -1)
             cluster_names = self.artifacts.get("cluster_names", {})
 
         return {
@@ -1188,10 +825,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.status:
-        predictor = ClusterEloPredictor()
+        predictor = ColdStartPredictor()
         status = predictor.get_status()
         logger.info("=" * 60)
-        logger.info("📊 ClusterEloPredictor 状态")
+        logger.info("📊 ColdStartPredictor 状态")
         logger.info("=" * 60)
         logger.info(f"  ground truth 方法数: {status['ground_truth_count']}")
         logger.info(f"  预测缓存方法数: {status['predicted_count']}")

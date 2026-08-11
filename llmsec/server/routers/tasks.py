@@ -62,6 +62,8 @@ class EvaluateRequest(BaseModel):
     coordinate_rounds: int | None = None
     target: str | None = Field(default=None, pattern=r"^[\w.\-:]+$")
     targets: str | None = None      # 多目标子集（逗号分隔，前端探活后只传可达的）
+    # 多目标并发数：None + 多目标 → 默认全并发（每个目标是独立端点，无共享限速）
+    target_concurrency: int | None = Field(default=None, ge=1, le=32)
 
 
 def _refresh_task_status(t: dict) -> None:
@@ -114,12 +116,16 @@ def _spawn(task_id: str, t: dict) -> None:
     TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_file = open(t["log_path"], "w", encoding="utf-8")
     try:
+        # 注入 LLMSEC_TASK_ID：子进程（runner/attack_phase、experiments/study）据此
+        # 把逐轮/逐 trial 进度落到 output/tasks/<task_id>.progress.jsonl，供看板消费。
+        env = os.environ.copy()
+        env["LLMSEC_TASK_ID"] = task_id
         proc = subprocess.Popen(
             [sys.executable, *t["argv"]],
             cwd=WORKSPACE_ROOT,
             stdout=log_file,
             stderr=subprocess.STDOUT,
-            env=os.environ.copy(),
+            env=env,
         )
     except OSError as e:
         log_file.close()
@@ -215,6 +221,12 @@ async def api_run_evaluate(req: EvaluateRequest):
     elif req.targets:
         # 前端探活后只传可达目标的子集（逗号分隔）
         argv += ["--targets", req.targets]
+        # 多目标并发：未显式指定时默认全并发（每目标独立端点）。runner 内 min(tc, n) 兜底
+        n_targets = len([t for t in req.targets.split(",") if t.strip()])
+        tc = req.target_concurrency or max(1, n_targets)
+        argv += ["--target-concurrency", str(tc)]
+    elif req.target_concurrency:
+        argv += ["--target-concurrency", str(req.target_concurrency)]
     view = _start_task("evaluate", argv)
     view["has_tax_probe"] = has_tax_probe
     return view
@@ -258,6 +270,96 @@ async def api_task_log(task_id: str, download: bool = False):
     return {"id": task_id, "log": text}
 
 
+# ============================================================
+# 任务进度（看板实时简略信息）
+# ============================================================
+def _progress_path(task_id: str) -> Path:
+    """<task_id>.progress.jsonl 路径（与 .log 同目录）。可能不存在（任务刚启动/无 env）。"""
+    return TASK_LOG_DIR / f"{task_id}.progress.jsonl"
+
+
+def _read_progress(task_id: str) -> list[dict]:
+    """读取 progress.jsonl 全部记录（坏行跳过）。文件不存在返回 []。"""
+    p = _progress_path(task_id)
+    if not p.exists():
+        return []
+    out: list[dict] = []
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def _parse_eval_argv(argv: list[str]) -> tuple[list[str], int | None]:
+    """从 runner argv 解析目标列表（--targets/--target）与 max_rounds。
+
+    看板需要"全部声明目标"以渲染排队中占位行，而 progress.jsonl 只有已启动目标。
+    """
+    targets: list[str] = []
+    max_rounds: int | None = None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--targets" and i + 1 < len(argv):
+            targets = [x.strip() for x in argv[i + 1].split(",") if x.strip()]
+            i += 2
+            continue
+        if a == "--target" and i + 1 < len(argv):
+            targets = [argv[i + 1].strip()]
+            i += 2
+            continue
+        if a == "--max-rounds" and i + 1 < len(argv):
+            try:
+                max_rounds = int(argv[i + 1])
+            except ValueError:
+                pass
+            i += 2
+            continue
+        i += 1
+    return targets, max_rounds
+
+
+@router.get("/api/tasks/{task_id}/progress")
+async def api_task_progress(task_id: str):
+    """任务进度快照：evaluate 返回每目标最后一条 + 全部声明目标（占位）；
+    hpo 返回最后一条汇总。供看板初次渲染与 SSE 不可用时的轮询兜底。"""
+    t = TASKS.get(task_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    _refresh_task_status(t)
+    kind = t["kind"]
+    status = t["status"]
+    records = _read_progress(task_id)
+
+    if kind == "hpo":
+        return {
+            "kind": "hpo", "status": status,
+            "progress": records[-1] if records else {},
+        }
+
+    # evaluate：每目标取最后一条；用 argv 补齐未启动目标的占位
+    targets, max_rounds = _parse_eval_argv(t.get("argv", []))
+    by_target: dict[str, dict] = {}
+    for r in records:
+        tg = r.get("target")
+        if tg:
+            by_target[tg] = r
+    progress: dict[str, dict] = {tg: by_target.get(tg, {}) for tg in targets}
+    # 兜底：progress 里出现但 argv 未声明的目标（如单 --target 之外的回退场景）
+    for tg, rec in by_target.items():
+        progress.setdefault(tg, rec)
+    return {
+        "kind": "evaluate", "status": status,
+        "targets": targets, "max_rounds": max_rounds,
+        "progress": progress,
+    }
+
+
 @router.post("/api/tasks/{task_id}/cancel")
 async def api_task_cancel(task_id: str):
     """取消排队中或运行中的任务，置 cancelled。
@@ -295,69 +397,54 @@ async def api_task_cancel(task_id: str):
 
 @router.get("/api/tasks/{task_id}/stream")
 async def api_task_stream(task_id: str):
-    """SSE 实时日志流：连接时先吐尾部 2KB 上下文，之后跟随新增字节（直播）。
+    """SSE 实时进度流：跟随 progress.jsonl 新增行，每行发一个 event:progress（JSON）。
 
-    子进程结束时发一个 event:done（携带 status/returncode）再关闭，前端据此
-    停止跟随并刷新数据。取代运行控制页 2~3s 轮询 log_tail 的"看监控录像"体验。
+    连接时先回放射已有进度行（初次渲染上下文），之后跟随新增行直播。
+    子进程结束时发一个 event:done（携带 status/returncode）再关闭，前端据此刷新数据。
+    原始 .log 不再直播（仅 /api/tasks/{id}/log 下载）——运行框改为结构化简略信息。
     """
     t = TASKS.get(task_id)
     if t is None:
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
-    log_path: Path = t["log_path"]
+    progress_path = _progress_path(task_id)
 
     async def event_gen():
-        buf = ""
-
-        def take_lines(text: str) -> list[str]:
-            """把文本切成完整行返回，末尾不完整段留作 buf 等下次拼齐。"""
-            nonlocal buf
-            buf += text
-            parts = buf.split("\n")
-            buf = parts.pop()  # 最后一段可能不完整，保留
-            return parts
-
         offset = 0
-        # 连接初始上下文：尾部 2KB（起始半行丢弃，避免半行噪音）
-        if log_path.exists():
+        # 连接初始上下文：回放射全部已有进度行（每轮/每 trial 一行，量小）
+        if progress_path.exists():
             try:
-                size = log_path.stat().st_size
-                head = max(0, size - 2048)
-                with open(log_path, encoding="utf-8", errors="replace") as f:
-                    f.seek(head)
-                    if head > 0:
-                        f.readline()  # 丢弃起始半行
-                    init = f.read()
-                offset = size
+                init = progress_path.read_text(encoding="utf-8", errors="replace")
+                offset = len(init.encode("utf-8"))
             except OSError:
                 init = ""
-            for line in take_lines(init):
-                yield f"data: {line}\n\n"
+            for line in init.splitlines():
+                line = line.strip()
+                if line:
+                    yield f"event: progress\ndata: {line}\n\n"
 
         while True:
-            if log_path.exists():
+            if progress_path.exists():
                 try:
-                    size = log_path.stat().st_size
+                    size = progress_path.stat().st_size
                 except OSError:
                     size = offset
                 if size > offset:
                     try:
-                        with open(log_path, encoding="utf-8", errors="replace") as f:
+                        with open(progress_path, encoding="utf-8", errors="replace") as f:
                             f.seek(offset)
                             chunk = f.read(size - offset)
                         offset = size
                     except OSError:
                         chunk = ""
-                    for line in take_lines(chunk):
-                        yield f"data: {line}\n\n"
+                    for line in chunk.splitlines():
+                        line = line.strip()
+                        if line:
+                            yield f"event: progress\ndata: {line}\n\n"
                 elif size < offset:
                     # 文件被截断/轮转，重置偏移跟随新内容
                     offset = size
             _refresh_task_status(t)
             if t["status"] != "running":
-                # 刷出残留 buffer 后发结束事件
-                if buf:
-                    yield f"data: {buf}\n\n"
-                    buf = ""
                 yield (
                     "event: done\ndata: "
                     + json.dumps(

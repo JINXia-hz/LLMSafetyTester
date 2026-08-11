@@ -8,12 +8,19 @@ core.text — 公共文本工具
     供 generate.py 与 harmbench.py 两个攻击集生成器共用。
   - estimate_tokens()：len(text)//2 粗略 token 估算（保留现行行为，
     用于无 usage 返回的后端）。
+  - extract_json_block()：从 LLM 文本中贪心抽取首个 JSON 对象块，
+    替代 judge.py / safe_twin.py / clustering/pipeline.py 的重复正则。
 """
 
+import json
 import random
 import re
 
 from llmsec.params import MATH_TAX_DIV_K_MAX, MATH_TAX_MUL_MAX, MATH_TAX_SUB_MAX
+
+# LLM 输出中 JSON 对象块的贪心匹配（DOTALL 跨行）。注意：若返回含多段 JSON，
+# 此贪心模式会取首 { 到尾 } 的最大包裹——调用方应自行 try json.loads 兜底。
+_JSON_BLOCK_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
 
 # 数学题越狱税标记：prompt 末尾追加的「在回答之前，请先计算以下数学题…」
 MATH_TAX_PATTERN = re.compile(r"\n*\s*在回答之前，请先计算以下数学题.*$", re.DOTALL)
@@ -88,3 +95,19 @@ def strip_math_tax(text: str) -> str:
 def estimate_tokens(text: str) -> int:
     """粗略 token 估算：len(text) // 2（中英混合场景的经验值，保留现行行为）。"""
     return len(text) // 2
+
+
+def extract_json_block(raw: str) -> dict | None:
+    """从 LLM 文本中贪心抽取首个 JSON 对象块并解析。
+
+    替代 judge.py / safe_twin.py / clustering/pipeline.py 各自重复的
+    `re.search(r"\\{.*\\}", raw, re.DOTALL) + json.loads` 模式。
+    无匹配或解析失败时返回 None（由调用方决定兜底/跳过策略）。
+    """
+    m = _JSON_BLOCK_PATTERN.search(raw)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except (json.JSONDecodeError, ValueError):
+            return None
+    return None

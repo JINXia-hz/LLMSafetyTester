@@ -43,13 +43,15 @@ def load_json(path: Path | None) -> dict:
 
 
 def _validate_run(run: str) -> str:
-    if not RUN_NAME_RE.match(run):
+    """run 可以是 'YYYY-MM-DD_HHMMSS'（旧格式）或 'YYYY-MM-DD_HHMMSS/target'（新格式）。"""
+    parts = run.split("/", 1)
+    if not RUN_NAME_RE.match(parts[0]):
         raise HTTPException(status_code=400, detail=f"非法 run 参数: {run!r}")
     return run
 
 
 def _run_dir(run: str | None) -> Path | None:
-    """解析 run 参数为目录；缺省取最新一个有报告的批次；无可用目录返回 None。"""
+    """解析 run 参数为目录；支持 'ts/target' 和 'ts' 两种格式；缺省取最新。"""
     runs_dir = _runs_dir()
     if run:
         _validate_run(run)
@@ -62,24 +64,65 @@ def _run_dir(run: str | None) -> Path | None:
     return runs_dir / runs[0]["name"] if runs else None
 
 
+
+def _run_name(run_dir: Path | None, run: str | None = None) -> str:
+    """返回完整的 run 名（如 'ts/target'）。run 参数有值时直接用，否则从路径推导。"""
+    if run:
+        return run
+    if run_dir is None:
+        return ""
+    from llmsec.server.dashboard_api import RUNS_DIR
+    try:
+        return str(run_dir.relative_to(RUNS_DIR)).replace("\\", "/")
+    except ValueError:
+        return run_dir.name
+
+
 def _discover_runs() -> list[dict]:
+    """扫描 run 目录。支持两种布局：
+    1. 新布局（并发模型）：runs/<ts>/<target>/runner_report.json — 每个目标子目录是一个独立 run
+    2. 旧布局（兼容）：runs/<ts>/runner_report.json — 单目标 run 直接在时间戳目录下
+    """
     runs_dir = _runs_dir()
     if not runs_dir.exists():
         return []
     runs = []
-    for d in runs_dir.iterdir():
-        if not d.is_dir() or not RUN_NAME_RE.match(d.name):
+    for batch_dir in runs_dir.iterdir():
+        if not batch_dir.is_dir() or not RUN_NAME_RE.match(batch_dir.name):
             continue
-        runs.append({
-            "name": d.name,
-            # M-35：多目标 run 写 multi_target_report.json（+ canonical runner_report.json），
-            # 两者任一存在即视为有报告，避免多目标 run 对看板不可见
-            "has_report": (d / "runner_report.json").exists() or (d / "multi_target_report.json").exists(),
-            "has_md": (d / "security_report.md").exists(),
-            "has_tree": (d / "security_tree.json").exists(),
-            "has_cluster_analysis": (d / "cluster_security_analysis.json").exists(),
-            "mtime": datetime.fromtimestamp(d.stat().st_mtime).isoformat(),
-        })
+        # 新布局：扫 target 子目录
+        has_target_subdirs = False
+        for target_dir in batch_dir.iterdir():
+            if not target_dir.is_dir():
+                continue
+            if (target_dir / "runner_report.json").exists():
+                has_target_subdirs = True
+                report = load_json(target_dir / "runner_report.json") or {}
+                runs.append({
+                    "name": f"{batch_dir.name}/{target_dir.name}",
+                    "batch": batch_dir.name,
+                    "target": target_dir.name,
+                    "target_model": report.get("target_model", target_dir.name),
+                    "has_report": True,
+                    "has_md": (target_dir / "security_report.md").exists(),
+                    "has_tree": (target_dir / "security_tree.json").exists(),
+                    "has_cluster_analysis": (target_dir / "cluster_security_analysis.json").exists(),
+                    "mtime": datetime.fromtimestamp(target_dir.stat().st_mtime).isoformat(),
+                })
+        # 旧布局兼容：batch_dir 自身有 runner_report.json（单目标旧格式）
+        if not has_target_subdirs and (batch_dir / "runner_report.json").exists():
+            report = load_json(batch_dir / "runner_report.json") or {}
+            runs.append({
+                "name": batch_dir.name,
+                "batch": batch_dir.name,
+                "target": report.get("target_model", ""),
+                "target_model": report.get("target_model", ""),
+                "has_report": True,
+                "has_md": (batch_dir / "security_report.md").exists(),
+                "has_tree": (batch_dir / "security_tree.json").exists(),
+                "has_cluster_analysis": (batch_dir / "cluster_security_analysis.json").exists(),
+                "mtime": datetime.fromtimestamp(batch_dir.stat().st_mtime).isoformat(),
+            })
     runs.sort(key=lambda x: x["name"], reverse=True)
     return runs
 
@@ -107,9 +150,15 @@ def _run_summary(run_dir: Path) -> dict | None:
     allergy = report.get("allergy", {}) or {}
     elo = report.get("elo", {}) or {}
     tax = attack.get("jailbreak_tax") or {}
+    # run 名 = 相对 runs_dir 的路径（如 "2026-08-07_120000/minimax"），不用 run_dir.name（只返回末段）
+    from llmsec.server.dashboard_api import RUNS_DIR
+    try:
+        run_name = str(run_dir.relative_to(RUNS_DIR)).replace("\\", "/")
+    except ValueError:
+        run_name = run_dir.name
     return {
-        "run": run_dir.name,
-        "time": _run_time(run_dir.name) or report.get("generated_at"),
+        "run": run_name,
+        "time": _run_time(run_name.split("/")[-1]) or report.get("generated_at"),
         "target": report.get("target_model"),
         "asr": attack.get("asr"),
         "fpr": allergy.get("fpr"),
@@ -125,7 +174,11 @@ _RUN_META_CACHE: dict[str, tuple[float, dict]] = {}
 
 def _run_meta(run_dir: Path) -> dict:
     """批次富化信息（target_model/security_level/asr），按目录 mtime 缓存。"""
-    name = run_dir.name
+    from llmsec.server.dashboard_api import RUNS_DIR
+    try:
+        name = str(run_dir.relative_to(RUNS_DIR)).replace("\\", "/")
+    except ValueError:
+        name = run_dir.name
     try:
         mtime = run_dir.stat().st_mtime
     except OSError:
@@ -309,8 +362,8 @@ async def api_overview(run: str | None = None):
         return {
             "available": False,
             "reason": "run_no_report",
-            "message": f"批次 {run_dir.name} 未生成报告（评估未完成或失败）",
-            "run": run_dir.name,
+            "message": f"批次 {_run_name(run_dir, run)} 未生成报告（评估未完成或失败）",
+            "run": _run_name(run_dir, run),
         }
     tree = load_json(run_dir / "security_tree.json")
     overall = tree.get("overall", {})
@@ -358,7 +411,7 @@ async def api_overview(run: str | None = None):
     message = None
     newer = next(
         (r["name"] for r in _discover_runs()
-         if r["has_report"] and r["name"] > run_dir.name),
+         if r["has_report"] and r["name"] > _run_name(run_dir, run)),
         None,
     )
     if newer:
@@ -367,7 +420,7 @@ async def api_overview(run: str | None = None):
 
     return {
         "available": True,
-        "run": run_dir.name,
+        "run": _run_name(run_dir, run),
         "generated_at": report.get("generated_at"),
         "target_model": report.get("target_model"),
         "overall_verdict": report.get("overall_verdict"),
@@ -434,7 +487,7 @@ async def api_threats(run: str | None = None):
 
     return {
         "available": True,
-        "run": run_dir.name,
+        "run": _run_name(run_dir, run),
         "top_threats": [_enrich(t) for t in tree.get("top_threats", [])],
         "strong_defenses": [_enrich(t) for t in tree.get("strong_defenses", [])],
         "upsets": tree.get("upsets", {}),
@@ -481,10 +534,10 @@ async def api_report_md(run: str | None = None):
         return {"available": False}
     md_path = run_dir / "security_report.md"
     if not md_path.exists():
-        return {"available": False, "run": run_dir.name}
+        return {"available": False, "run": _run_name(run_dir, run)}
     return {
         "available": True,
-        "run": run_dir.name,
+        "run": _run_name(run_dir, run),
         "markdown": md_path.read_text(encoding="utf-8"),
     }
 
@@ -500,11 +553,11 @@ async def api_report_download(run: str | None = None, format: str = "md"):
         raise HTTPException(status_code=404, detail="无可用批次")
     md_path = run_dir / "security_report.md"
     if not md_path.exists():
-        raise HTTPException(status_code=404, detail=f"批次 {run_dir.name} 无 security_report.md")
+        raise HTTPException(status_code=404, detail=f"批次 {_run_name(run_dir, run)} 无 security_report.md")
     if format.lower() != "md":
         raise HTTPException(status_code=400, detail="当前仅支持 format=md（PDF 请用浏览器打印）")
     content = md_path.read_text(encoding="utf-8")
-    fname = f"security_report_{run_dir.name}.md"
+    fname = 'security_report_' + _run_name(run_dir, run).replace('/', '_') + '.md'
     return PlainTextResponse(
         content,
         media_type="text/markdown; charset=utf-8",
@@ -544,7 +597,7 @@ async def api_clusters(run: str | None = None):
 
     return {
         "available": True,
-        "run": run_dir.name if run_dir else None,
+        "run": _run_name(run_dir, run) if run_dir else None,
         "defender_name": analysis.get("defender_name"),
         "defender_elo": analysis.get("defender_elo"),
         "n_methods": analysis.get("n_methods", report.get("method_count", 0)),
@@ -566,19 +619,15 @@ async def api_model(run: str | None = None):
     analysis = load_json(run_dir / "cluster_security_analysis.json") if run_dir else {}
     svd = analysis.get("svd_ridge")
     blend = analysis.get("blend_predictor")
-    # 多目标 run：blend_predictor 在 multi_target_report.json
-    if not blend and run_dir and (run_dir / "multi_target_report.json").exists():
-        mt = load_json(run_dir / "multi_target_report.json")
-        blend = (mt or {}).get("blend_predictor")
     if not svd and not blend:
         msg = "该批次无预测模型诊断数据（需用新版 pipeline 运行后生成）"
         if analysis.get("svd_ridge_skipped"):
             msg += f"（{analysis['svd_ridge_skipped']}）"
         elif analysis.get("svd_ridge_error"):
             msg += f"（生成时出错: {analysis['svd_ridge_error']}）"
-        return {"available": False, "run": run_dir.name if run_dir else None,
+        return {"available": False, "run": _run_name(run_dir, run) if run_dir else None,
                 "reason": "no_model", "message": msg}
-    return {"available": True, "run": run_dir.name if run_dir else None,
+    return {"available": True, "run": _run_name(run_dir, run) if run_dir else None,
             "svd_ridge": svd, "blend_predictor": blend}
 
 

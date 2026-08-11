@@ -1,5 +1,5 @@
-﻿"""
-evaluation.blend_predictor — 统一预测 + 模型预测，自适应加权（贝叶斯收缩）
+"""
+evaluation.predictors.blend — 统一预测 + 模型预测，自适应加权（贝叶斯收缩）
 
 设计（对应"预测矩阵"管理）：
   预测器有两层，最终输出按该模型的样本量自适应加权：
@@ -28,8 +28,7 @@ from llmsec.core.config import INITIAL_ELO, PREDICTORS_DIR
 from llmsec.core.io import load_artifact, save_artifact
 from llmsec.core.logging import get_logger
 from llmsec.core.results import ResultsMatrix
-from llmsec.evaluation.elo import derive_elo
-from llmsec.evaluation.elo_cluster import EloPredictorModel
+from llmsec.evaluation.predictors.svd_ridge import EloPredictorModel
 from llmsec.params import BLEND_PRIOR_K, RIDGE_PRED_STD_CAP_MIN, RIDGE_PRED_STD_CAP_MULT
 
 logger = get_logger(__name__)
@@ -74,6 +73,8 @@ class BlendPredictor:
 
         # 1) 每模型派生 Elo（R → Elo），收集团测值与样本量
         per_model_elo: dict[str, dict[str, float]] = {}
+        # lazy 导入 derive_elo 避免 predictors/__init__ → blend → elo → predictors 循环
+        from llmsec.evaluation.elo import derive_elo
         for model in models:
             tracker = derive_elo(results, model, method_catalog=self._catalog)
             elo_map = {m: float(tracker.get_attacker_elo(m)) for m in tracker.ground_truth_methods}
@@ -118,7 +119,7 @@ class BlendPredictor:
         self.unified = {}
         if self.unified_fallback is not None:
             try:
-                from llmsec.evaluation.model_fingerprint import donor_similarities, load_probes
+                from llmsec.evaluation.predictors.fingerprint import donor_similarities, load_probes
 
                 probes = load_probes()
             except Exception as e:
@@ -158,7 +159,7 @@ class BlendPredictor:
             except Exception as e:
                 logger.warning("模型 %s 预测器 fit 失败（跳过）: %s", model, e)
 
-        # 3) 层间协方差（#3）：统一层与模型层共用方法特征 → 预测残差正相关，
+        # 4) 层间协方差（#3）：统一层与模型层共用方法特征 → 预测残差正相关，
         # blend 方差须含交叉项 2·w_u·w_m·cov，否则 CI 系统性偏窄、过度自信。
         # 用各自 λ* 的 OOS 残差估计；统一层取 target 的 sim-加权 unified（无则 fallback）。
         self._cov = {}
@@ -212,12 +213,14 @@ class BlendPredictor:
             elo = self._measured_elo[model][method]
             return {"elo": elo, "std": 0.0, "w_model": 1.0, "w_unified": 0.0, "source": "ground_truth"}
 
+        # 权重提前算：两个 fallback 分支统一返回真实计算的权重（原特征缺失分支
+        # 硬编码 0.0/0.0，与下方"两层都无"分支返回真实 w_m/w_u 口径不一）
+        w_m, w_u = self.blend_weights(model)
         feat = self._features.get(method)
         if feat is None:
             return {"elo": float(INITIAL_ELO), "std": self._std_cap(model),
-                    "w_model": 0.0, "w_unified": 0.0, "source": "fallback"}
+                    "w_model": w_m, "w_unified": w_u, "source": "fallback"}
 
-        w_m, w_u = self.blend_weights(model)
         # 发现层：优先用 target 的 sim-加权 unified（从相似 donor 借），无则均匀 fallback
         u_mean, u_var = self._predict_one(
             self.unified.get(model) or self.unified_fallback, method, feat
@@ -276,7 +279,7 @@ class BlendPredictor:
         """
         base = self.summary()
         try:
-            from llmsec.evaluation.model_fingerprint import donor_similarities, load_probes
+            from llmsec.evaluation.predictors.fingerprint import donor_similarities, load_probes
 
             probes = load_probes()
         except Exception:
@@ -322,18 +325,17 @@ class BlendPredictor:
 
         发现层：sim-加权 unified 依赖各模型指纹（probes.json），指纹变 → 缓存失效。
         """
-        # R 内容指纹：每模型列的 (method, score, ts)
+        # R 内容指纹：每模型列的 (method, score, ts)——M-37 复用 ResultsMatrix.column_payload
         parts = []
         for model in sorted(results.all_models()):
-            col = results.model_column(model)
-            payload = ",".join(f"{m}:{r.eval_score}:{r.ts}" for m, r in sorted(col.items()))
+            payload = results.column_payload(model) or ""
             parts.append(f"{model}={payload}")
         r_fp = hashlib.md5(("|".join(parts)).encode("utf-8")).hexdigest()
         cat_fp = hashlib.md5(",".join(method_catalog).encode("utf-8")).hexdigest()
         feat_fp = BlendPredictor._features_signature(features)
         # 探针指纹签名（probes.json 的 {model: fingerprint} 内容）
         try:
-            from llmsec.evaluation.model_fingerprint import load_probes
+            from llmsec.evaluation.predictors.fingerprint import load_probes
 
             probes = load_probes()
             probe_payload = "|".join(

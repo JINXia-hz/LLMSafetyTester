@@ -10,12 +10,10 @@
   - _quick_precluster
   - run_attack_phase
 
-为避免与 runner 形成循环导入，本模块对 runner.py 的模块级运行时依赖
-（DEFENDER_NAME / logger / write_jsonl / read_jsonl / evaluate_single 等）
-统一在函数体内延迟导入（``from llmsec.pipeline.runner import X``）；对 params.py
-常量与 evaluation / cluster_analysis / samplers / tax 等模块在顶层正常导入。
-runner.py 底部的兼容性 re-export 区会把这几个名字重新导出，保证
-``from llmsec.pipeline.runner import run_attack_phase`` 等历史用法仍然可用。
+本模块的运行时依赖（logger / write_jsonl / read_jsonl / evaluate_single 等）
+一律从源模块顶层导入（core.logging / core.io / evaluation.evaluator 等），
+不经 runner 命名空间中转——这些名字本就只在源模块定义，runner 底部
+re-export 区已删除，runner 命名空间下不再存在这些名字。
 """
 from __future__ import annotations
 
@@ -25,14 +23,22 @@ if TYPE_CHECKING:
     from llmsec.evaluation.elo import ELOTracker
     from llmsec.evaluation.judge import Judge
 
-import hashlib
 import time
 from pathlib import Path
 
 from llmsec.core.config import INITIAL_ELO
+from llmsec.core.io import read_jsonl, write_jsonl
+from llmsec.core.logging import get_logger
+from llmsec.core.progress import emit_progress
 from llmsec.core.seed import get_global_seed
 from llmsec.evaluation.cluster_analysis import analyze_clusters, save_cluster_analysis
+from llmsec.evaluation.evaluator import evaluate_single
+from llmsec.evaluation.predictors.cold_start import (
+    _compute_method_set_hash,  # 与 cold_start.py 原为逐字节重复实现，统一从定义处导入
+    current_feature_config_hash,
+)
 from llmsec.evaluation.samplers import build_sampler
+from llmsec.evaluation.scoring import measure_math_baseline
 from llmsec.params import (
     ADAPTIVE_BATCH_MAX,
     ADAPTIVE_BATCH_MIN,
@@ -46,19 +52,25 @@ from llmsec.params import (
     SEED_MIN_COUNT,
 )
 from llmsec.pipeline.tax import format_tax_line, summarize_jailbreak_tax
+from llmsec.targets import set_active_target
+
+logger = get_logger(__name__)
 
 
 # ============================================================
 # Phase 1 辅助函数
 # ============================================================
 def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict],
-                           defender_name: str):
+                           defender_name: str, r_snapshot=None):
     """
     为所有尚未真实评估的方法注入预测初始 Elo。
 
     优先 **BlendPredictor**（跨模型：sim-加权 universal + 每模型层，发现层 D+A——
     冷启动从相似 donor 借先验，多模型场景的核心）；特征不可用/失败 → 回退
-    ClusterEloPredictor（单模型 SVD-Ridge + 变体兜底）。已真实评估的方法 Elo 不变。
+    ColdStartPredictor（单模型 SVD-Ridge + 变体兜底）。已真实评估的方法 Elo 不变。
+
+    r_snapshot：运行前获取的 R 快照（不可变）。评估期间不读活 R——传入快照保证
+    并发安全 + 隔离（目标 B 不会读到目标 A 刚 publish 的半截数据）。
     """
     untested = {
         m: r for m, r in method_records.items()
@@ -68,29 +80,27 @@ def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict],
         return
 
     # 优先 BlendPredictor：跨模型 sim-加权（发现层）——仅 R 有 ≥2 模型时启用（单模型无 donor、
-    # 无跨模型意义，走 ClusterEloPredictor 单训练路径避免冗余）
+    # 无跨模型意义，走 ColdStartPredictor 单训练路径避免冗余）
     predictions: dict | None = None
     artifacts = getattr(tracker.predictor, "artifacts", None) or {}
     feats = artifacts.get("features")
     if feats:
         try:
             from llmsec.core.results import ResultsMatrix
-            from llmsec.evaluation.blend_predictor import load_or_fit_blend_predictor
+            from llmsec.evaluation.predictors.blend import load_or_fit_blend_predictor
 
-            R = ResultsMatrix.load()
+            # r_snapshot=None 的回退仅兜底单测/独立调用——生产路径由 run_attack_phase
+            # 传入运行前快照，评估期间不读活 R（并发安全 + 跨目标隔离）
+            R = r_snapshot if r_snapshot is not None else ResultsMatrix.load()
             if len(R.all_models()) >= 2:
                 catalog = list(method_records.keys())
                 bp = load_or_fit_blend_predictor(R, feats, method_catalog=catalog)
                 predictions = {m: bp.predict(m, defender_name) for m in untested}
         except Exception as e:
-            try:
-                from llmsec.pipeline.runner import logger
-                logger.warning(f"BlendPredictor 预测失败，回退 ClusterEloPredictor: {e}")
-            except Exception:
-                pass
+            logger.warning(f"BlendPredictor 预测失败，回退 ColdStartPredictor: {e}")
             predictions = None
 
-    # 回退：ClusterEloPredictor（单模型 SVD-Ridge + 同后缀/同基底变体平均）
+    # 回退：ColdStartPredictor（单模型 SVD-Ridge + 同后缀/同基底变体平均）
     if predictions is None:
         predictions = tracker.predictor.predict_batch(untested)
 
@@ -103,13 +113,6 @@ def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict],
 
 
 
-def _compute_method_set_hash(methods: list[str]) -> str:
-    """计算方法集合的指纹 hash，用于判断攻击集是否发生变化。"""
-    content = ",".join(sorted(set(methods)))
-    return hashlib.md5(content.encode("utf-8")).hexdigest()
-
-
-
 def _dedup_attack_results(rows: list[dict]) -> list[dict]:
     """按 (id, method) 去重攻击明细：同键保留后出现的记录（新结果覆盖旧记录）。
 
@@ -119,7 +122,8 @@ def _dedup_attack_results(rows: list[dict]) -> list[dict]:
     merged: dict[tuple, dict] = {}
     order: list[tuple] = []
     for row in rows:
-        # 缺 id/method 的记录用 id(row) 兜底防 (None, method) 错误合并丢数据
+        # id(row) 兜底仅对缺 id/method 的畸形行生效：防 (None, method) 错误合并丢数据。
+        # 正常记录两字段齐全不会落入 fallback；畸形行各自 id(row) 唯一，不会互相合并。
         key = (row.get("id", id(row)), row.get("method", id(row)))
         if key not in merged:
             order.append(key)
@@ -149,16 +153,10 @@ def _should_refresh_features(
     if predictor.artifacts.get("method_set_hash") != current_hash:
         return True
     # M-6：EMBEDDING_PCA_DIM/EMBEDDING_MODEL 等特征配置变更后旧缓存必须失效，
-    # 不能只看方法名。current_feature_config_hash 由 elo_cluster 暴露（动态反映当前配置）。
-    try:
-        from llmsec.evaluation import elo_cluster as _ec
-        current_cfg_hash = getattr(_ec, "current_feature_config_hash", lambda: None)()
-    except Exception:
-        current_cfg_hash = None
-    if current_cfg_hash is not None:
-        cached_cfg_hash = (predictor.artifacts.get("meta") or {}).get("feature_config_hash")
-        if cached_cfg_hash != current_cfg_hash:
-            return True
+    # 不能只看方法名。current_feature_config_hash 由 predictors.cold_start 暴露（动态反映当前配置）。
+    cached_cfg_hash = (predictor.artifacts.get("meta") or {}).get("feature_config_hash")
+    if cached_cfg_hash != current_feature_config_hash():
+        return True
     return False
 
 
@@ -215,6 +213,10 @@ def _build_attack_row(rec: dict, result: dict, round_idx: int, phase: str) -> di
         "is_harmful": result.get("is_harmful", False),
         "is_refusal": result.get("is_refusal", False),
         "response_preview": result.get("content", "")[:500],
+        # 预筛可观测性：透传 prescreen_result（refusal/empty/None）与 Judge 调用数。
+        # 否则 attack_results.jsonl 看不出预筛省了多少 API，prescreen_hit_rate 恒为 0。
+        "prescreen_result": result.get("prescreen_result"),
+        "judge_calls": result.get("judge_calls", 0),
     }
 
 
@@ -225,6 +227,35 @@ def _resolve_workers(batch_n: int, concurrency: int | None) -> int:
     if concurrency <= 0:
         return 1
     return max(1, min(concurrency, batch_n))
+
+
+
+def _emit_round_progress(defender_name: str, round_idx: int, max_rounds: int,
+                         conv: dict, prev_elo: float | None, tested: int, total: int) -> float | None:
+    """落盘单轮攻击进度（无 LLMSEC_TASK_ID 时 no-op）。
+
+    复用每轮已算好的 conv（current_elo/ci_half/coverage/converged），与收敛判据同源。
+    progress_pct 与 dashboard _convergence_score 同口径：ci_half→0 满分、≥目标归零。
+    返回本轮 elo，供下一轮计算 delta（箭头/幅度）。
+    """
+    elo = conv.get("current_elo")
+    if elo is None:
+        return prev_elo
+    ci_half = conv.get("ci_half")
+    progress_pct = (
+        round(max(0.0, min(0.99, 1 - ci_half / CONV_CI_TARGET)) * 100)
+        if ci_half is not None else None
+    )
+    delta = round(elo - prev_elo, 1) if prev_elo is not None else None
+    emit_progress({
+        "phase": "attack", "target": defender_name, "round": round_idx,
+        "max_rounds": max_rounds, "elo": round(elo, 1),
+        "prev_elo": (round(prev_elo, 1) if prev_elo is not None else None),
+        "delta": delta, "ci_half": ci_half, "coverage": conv.get("coverage"),
+        "tested": tested, "total": total,
+        "converged": bool(conv.get("converged")), "progress_pct": progress_pct,
+    })
+    return round(elo, 1)
 
 
 
@@ -244,24 +275,20 @@ def run_attack_phase(records: list[dict],
                      sampler_log_file: Path | None = None,
                      cluster_analysis_file: Path | None = None,
                      skip_final_clustering: bool = False,
-                    state_file: Path | str | None = None,
-                    no_early_stop: bool = False,
-                    concurrency: int | None = None,
-                    ) -> dict:
+                     state_file: Path | str | None = None,
+                     no_early_stop: bool = False,
+                     force_refresh: bool = False,
+                     concurrency: int | None = None,
+                     defender_name: str = "",
+                     r_snapshot=None,
+                     ) -> dict:
     """
     自适应攻击测试：从ELO中档开始，逐轮二分搜索。
     新增：聚类冷启动预测 + 动态重训练 + 种子采样 + 可插拔采样器 + 聚类安全分析。
     coordinate_rounds 为 None 时缺省读 params.SAMPLER_HYBRID_EXPLORE_ROUNDS。
+    force_refresh=True 时无视特征缓存指纹，强制重新提取特征（透传 _should_refresh_features）。
     返回: {tested_methods, results, boundary, rounds}
     """
-    from llmsec.pipeline.runner import (
-        DEFENDER_NAME,
-        evaluate_single,
-        logger,
-        publish_tracker,
-        read_jsonl,
-        write_jsonl,
-    )
     if coordinate_rounds is None:
         coordinate_rounds = SAMPLER_HYBRID_EXPLORE_ROUNDS
     logger.info("=" * 60)
@@ -281,10 +308,11 @@ def run_attack_phase(records: list[dict],
     sf = str(state_file) if state_file else None
     if sf and Path(sf).exists():
         tracker.load(sf)
-    # 跨 run resume：从 R 注入当前攻击集内已测方法（R 跨 run 累积真实观测）
+    # 跨 run resume：从 R 注入当前攻击集内已测方法（R 跨 run 累积真实观测）。
+    # 优先用调用方传入的运行前快照（评估期间不读活 R）；None 仅兜底单测/独立调用。
     from llmsec.core.results import ResultsMatrix as _RM
-    _R = _RM.load()
-    _tested_in_R = _R.tested_methods(DEFENDER_NAME) & set(all_methods)
+    _R = r_snapshot if r_snapshot is not None else _RM.load()
+    _tested_in_R = _R.tested_methods(defender_name) & set(all_methods)
     if _tested_in_R:
         tracker.ground_truth_methods.update(_tested_in_R)
         logger.info(f"  📥 从 R 恢复 {len(_tested_in_R)} 个已测方法（跨 run resume）")
@@ -295,11 +323,12 @@ def run_attack_phase(records: list[dict],
         for m in _stale_gt:
             tracker.ground_truth_methods.discard(m)
             tracker.predictor.ground_truth.pop(m, None)
-            # 同步清理 attacker_ratings / pred_std / history，
+            # 同步清理 attacker_ratings / pred_std / pred_source / history，
             # 否则 compute_security_boundary 的 total_methods 膨胀（覆盖率偏低、永不收敛）、
             # predicted_above 虚高、stale history 经 publish_tracker 污染 R 矩阵
             tracker.attacker_ratings.pop(m, None)
             tracker.attacker_pred_std.pop(m, None)
+            tracker.attacker_pred_source.pop(m, None)
         tracker.history = [h for h in tracker.history
                            if h.get("attacker") in _current_methods
                            or h.get("attacker") is None]
@@ -317,26 +346,30 @@ def run_attack_phase(records: list[dict],
 
     # ---- 启动时特征缓存：复用 / 重新提取（聚类在测试结束后才进行） ----
     gt_count = len(tracker.ground_truth_methods)
-    if _should_refresh_features(tracker.predictor, method_records, force=False):
+    if _should_refresh_features(tracker.predictor, method_records, force=force_refresh):
         tracker.predictor.fit_features(records)
         logger.info(f"  🧩 特征缓存: {len(method_records)} 种方法")
     else:
         logger.info(f"  ♻️ 复用已有特征缓存 (ground truth {gt_count} 种)")
 
     # ---- 冷启动：为所有未测方法注入预测 Elo ----
-    _inject_predicted_elos(tracker, method_records, DEFENDER_NAME)
+    _inject_predicted_elos(tracker, method_records, defender_name, r_snapshot=r_snapshot)
     logger.info(f"  🧊 冷启动: 已为 {len(all_methods)} 种方法注入初始 Elo "
           f"(ground truth {len(tracker.ground_truth_methods)} 种)")
 
     # ---- 构造采样器 ----
-    # H-1 修复：Phase 1 期间聚类尚未运行（post-test），用特征缓存做快速预聚类
-    # 注入 sampler，否则 InfoGain/Coordinate 的簇覆盖特性完全不工作（build_sampler
+    # H-1 修复：Phase 1 期间聚类尚未运行（post-test），用特征缓存做预聚类
+    #（与 post-test 同口径的 HDBSCAN/Ward，见 _quick_precluster）注入 sampler，
+    # 否则 InfoGain/Coordinate 的簇覆盖特性完全不工作（build_sampler
     # 默认 cluster_report=None → 所有方法被当做一个簇 → beta*visit_count 退化为全局惩罚）
     pre_labels = _quick_precluster(tracker, all_methods)
     pre_report = {"method_labels": pre_labels} if pre_labels else None
     if pre_labels:
         n_clusters_pre = len(set(pre_labels.values()))
         logger.info(f"  🔍 预聚类: {n_clusters_pre} 簇注入采样器（簇覆盖生效）")
+    # coord_min_per_cluster 映射到 samplers.py 两个真实参数名：CoordinateSampler 是
+    # min_tests_per_cluster、HybridSampler 是 coordinate_min_tests_per_cluster——两个都传，
+    # 不适用的那个沿子类 **kwargs 链落到 AttackSampler 基类 sink（有意吞掉，见 samplers.py）。
     sampler_obj = build_sampler(
         sampler,
         cluster_report=pre_report,
@@ -344,13 +377,19 @@ def run_attack_phase(records: list[dict],
         beta=sampler_beta,
         gamma=sampler_gamma,
         explore_rounds=coordinate_rounds,
+        min_tests_per_cluster=coord_min_per_cluster,
+        coordinate_min_tests_per_cluster=coord_min_per_cluster,
     )
     logger.info(f"  🎲 采样策略: {sampler} "
           f"(alpha={sampler_alpha}, beta={sampler_beta}, gamma={sampler_gamma}, "
           f"coordinate_rounds={coordinate_rounds})")
 
-    # 采样日志
-    sampler_log: list[dict] = []
+    # 采样日志（同 M-11 attack_file 口径：resume 预载已有日志再 append，
+    # 否则结尾整体覆写会销毁上次运行的采样历史）
+    sampler_log: list[dict] = read_jsonl(sampler_log_file) if sampler_log_file else []
+
+    # 上一轮防御方 ELO，用于本轮 delta（看板进度箭头/幅度）；首轮/seed 前 None
+    prev_elo: float | None = None
 
     # ---- D-optimality 种子：选信息量最大的方法做真实评估 ----
     if len(tracker.ground_truth_methods) == 0 and len(all_methods) > 0:
@@ -393,29 +432,37 @@ def run_attack_phase(records: list[dict],
 
         # Model B 同步轮次 ELO：种子批用轮始快照一次性更新（与主循环语义统一）
         if seed_rows:
-            tracker.update_round(DEFENDER_NAME, seed_rows, round_idx=0, statuses=seed_statuses)
+            tracker.update_round(defender_name, seed_rows, round_idx=0, statuses=seed_statuses)
 
         # 明细先于 state 落盘（同主循环顺序，防崩溃窗口丢数据）
         write_jsonl(attack_file, all_results)
-        tracker.record_round_end(DEFENDER_NAME)
+        tracker.record_round_end(defender_name)
+
+        # 进度落盘：seed 轮（round=0）。delta=None（首轮无前值）
+        _seed_conv = tracker.check_convergence(
+            defender_name, total_methods=len(all_methods),
+            tested_count=len(tracker.ground_truth_methods))
+        prev_elo = _emit_round_progress(
+            defender_name, 0, max_rounds, _seed_conv, prev_elo,
+            len(tracker.ground_truth_methods), len(all_methods))
 
         # 发现层 D+A：种子评估后算 per-seed Elo 指纹（独立于累积 R，
         # 供 BlendPredictor 相似度加权池化——冷启动从相似 donor 借先验）
         if seed_rows:
             try:
-                from llmsec.evaluation.model_fingerprint import compute_fingerprint, save_probe
+                from llmsec.evaluation.predictors.fingerprint import compute_fingerprint, save_probe
 
                 seed_evaluated = [m for m, _ in seed_rows]
                 fp = compute_fingerprint(tracker, seed_evaluated)
                 if len(fp) >= 3:
-                    save_probe(DEFENDER_NAME, fp, seed_evaluated)
+                    save_probe(defender_name, fp, seed_evaluated)
                     logger.info(f"  🧬 防御指纹已记录: {len(fp)} 个哨兵 Elo（发现层 donor 相似度用）")
             except Exception as e:
                 logger.warning(f"  ⚠ 指纹计算/存储失败（不影响评估）: {e}")
 
         # 用 SVD-Ridge 重新预测剩余方法
         remaining_records = {m: r for m, r in method_records.items() if m not in tested}
-        _inject_predicted_elos(tracker, remaining_records, DEFENDER_NAME)
+        _inject_predicted_elos(tracker, remaining_records, defender_name, r_snapshot=r_snapshot)
         if sf:
             tracker.save(sf)
         logger.info(f"  ✅ 种子阶段完成: 已建立 ground truth {len(tracker.ground_truth_methods)} 种，"
@@ -424,8 +471,9 @@ def run_attack_phase(records: list[dict],
     base_batch = batch_size  # 用户 --batch-size（nominal，自适应缩放的基准）
     current_batch_size = batch_size
     prev_ci_half: float | None = None  # 上一轮收敛 CI（首轮 None→用 base）
-    # 兜底：max_rounds<=0 时循环不执行，下方 summary 仍引用 round_idx
+    # 兜底：max_rounds<=0 时循环不执行，下方 summary/进度落盘仍引用 round_idx 与 conv
     round_idx = 0
+    conv: dict = {}
     for round_idx in range(1, max_rounds + 1):
         untested = [m for m in all_methods if m not in tested]
         if not untested:
@@ -441,7 +489,7 @@ def run_attack_phase(records: list[dict],
 
         # 使用采样器选择下一批方法
         next_methods = sampler_obj.select(
-            untested, tracker, DEFENDER_NAME, n=current_batch_size,
+            untested, tracker, defender_name, n=current_batch_size,
             round_idx=round_idx,
         )
 
@@ -454,10 +502,9 @@ def run_attack_phase(records: list[dict],
         def _eval_one(m):
             # 并发 worker：补 threading.local 的 ambient 目标继承缺口（多目标路由正确）
             try:
-                from llmsec.targets import set_active_target
-                set_active_target(DEFENDER_NAME)
-            except Exception:
-                pass
+                set_active_target(defender_name)
+            except Exception as e:
+                logger.warning(f"     ⚠ worker 设置活动目标失败（多目标路由可能串扰）: {e}")
             rec_m = method_records[m]
             return evaluate_single(rec_m["prompt"], rec_m["expected_answer"], judge, use_judge=True)
 
@@ -490,7 +537,7 @@ def run_attack_phase(records: list[dict],
 
         # Model B 同步轮次 ELO：批内全部观测用轮始快照一次性更新（顺序无关、消除 batch↔K 耦合）
         if round_rows:
-            tracker.update_round(DEFENDER_NAME, round_rows, round_idx=round_idx, statuses=round_statuses)
+            tracker.update_round(defender_name, round_rows, round_idx=round_idx, statuses=round_statuses)
 
         # 落盘顺序：明细先于 state——若 state.json 已含本轮 GT 但 attack_results.jsonl
         # 还没写时崩溃，resume 会把本轮方法标为"已测"但明细永久丢失（ASR/税/threats 全失真）。
@@ -498,22 +545,18 @@ def run_attack_phase(records: list[dict],
         write_jsonl(attack_file, all_results)
 
         # 记录本轮结束时的防御方 Elo（在 tracker.save 之前，确保轨迹点被持久化）
-        tracker.record_round_end(DEFENDER_NAME)
-
-        # 保存ELO进度
-        if sf:
-            tracker.save(sf)
+        tracker.record_round_end(defender_name)
 
         # SVD-Ridge 更新：基于新增 ground truth 刷新未测方法预测 Elo（聚类不重训）
         remaining_records = {m: r for m, r in method_records.items() if m not in tested}
-        _inject_predicted_elos(tracker, remaining_records, DEFENDER_NAME)
+        _inject_predicted_elos(tracker, remaining_records, defender_name, r_snapshot=r_snapshot)
+        # 保存ELO进度（每轮一次：轨迹点与刷新后的预测一并持久化）
         if sf:
             tracker.save(sf)
         logger.info(f"     🔄 预测已更新: {len(remaining_records)} 个未测方法的 SVD-Ridge 预测 Elo")
 
-        # M-12：每轮同步发布进 R（唯一真相）。
-        # publish_tracker 写 R 失败 = 真相源损坏，不可静默——重抛让调用方感知。
-        publish_tracker(tracker, DEFENDER_NAME)
+        # 不在此处 publish_tracker——R 快照模型下，评估期间不写 R，
+        # 合并由调用方（runner main）在评估结束后统一执行
 
         # 记录采样器决策日志
         sampler_log.append({
@@ -521,19 +564,24 @@ def run_attack_phase(records: list[dict],
             "selected": next_methods,
             "sampler": sampler,
             "sub_sampler": getattr(sampler_obj, "last_sub_sampler", None),
-            "defender_elo": tracker.get_defender_elo(DEFENDER_NAME),
+            "defender_elo": tracker.get_defender_elo(defender_name),
             "tested_count": len(tested),
         })
 
         # 检查收敛：综合轮次 Elo 标准差、相对标准差、覆盖率
-        conv = tracker.check_convergence(DEFENDER_NAME, total_methods=len(all_methods), tested_count=len(tested))
+        conv = tracker.check_convergence(defender_name, total_methods=len(all_methods), tested_count=len(tested))
         prev_ci_half = conv.get("ci_half")  # 供下一轮 batch 自适应（收敛距离驱动）
-        boundary_info = tracker.compute_security_boundary(DEFENDER_NAME)
+        boundary_info = tracker.compute_security_boundary(defender_name)
         confidence = boundary_info.get("confidence", 0)
+
+        # 进度落盘：本轮（含 delta=本轮−上轮）。无 LLMSEC_TASK_ID 时 no-op
+        prev_elo = _emit_round_progress(
+            defender_name, round_idx, max_rounds, conv, prev_elo,
+            len(tested), len(all_methods))
         # --no-early-stop：实验模式需每个 trial 跑满 max_rounds（固定预算），
         # 使 ci_half 在同一预算下可比——故不提前 break。
         if boundary_info.get("converged") and not no_early_stop:
-            logger.info(f"\n  🎯 防御方 {DEFENDER_NAME} ELO 已收敛 "
+            logger.info(f"\n  🎯 防御方 {defender_name} ELO 已收敛 "
                   f"(置信度={confidence*100:.0f}%, "
                   f"真值Elo 95%CI±{conv['ci_half']:.0f} (目标±{CONV_CI_TARGET:.0f}), "
                   f"漂移={conv['drift']:+.1f}/轮, "
@@ -545,11 +593,27 @@ def run_attack_phase(records: list[dict],
             notes = "; ".join(conv.get("notes", [])) if conv.get("notes") else "未收敛"
             ci_disp = f"{conv['ci_half']:.0f}" if conv.get("ci_half") is not None else "N/A"
             drift_disp = f"{conv['drift']:+.1f}" if conv.get("drift") is not None else "N/A"
-            logger.info(f"     📊 防御={DEFENDER_NAME} ELO≈{conv['current_elo']:.0f} "
+            logger.info(f"     📊 防御={defender_name} ELO≈{conv['current_elo']:.0f} "
                   f"95%CI±{ci_disp} 漂移={drift_disp}/轮 "
                   f"覆盖率={conv['coverage']*100:.0f}% "
                   f"置信度={confidence*100:.0f}% "
                   f"({notes})")
+
+    # 进度落盘：该目标攻击阶段结束（收敛/跑满/方法测尽）。看板据此把行标灰
+    # conv 主循环前已显式初始化为 {}，循环未进入时各进度字段自然为 None
+    emit_progress({
+        "phase": "attack_done", "target": defender_name,
+        "round": round_idx, "max_rounds": max_rounds,
+        "elo": conv.get("current_elo"),
+        "ci_half": conv.get("ci_half"),
+        "coverage": conv.get("coverage"),
+        "tested": len(tested), "total": len(all_methods),
+        "converged": bool(conv.get("converged")),
+        "progress_pct": (
+            round(max(0.0, min(0.99, 1 - conv["ci_half"] / CONV_CI_TARGET)) * 100)
+            if conv.get("ci_half") is not None else None
+        ),
+    })
 
     # ---- 攻击完成后最终聚类（post-test）+ 簇级安全分析 ----
     # 多目标模式下跳过（聚类是方法级、跨模型共享；由上层统一做一次，避免 N× embedding）
@@ -583,7 +647,7 @@ def run_attack_phase(records: list[dict],
         logger.warning(f"     ⚠ 聚类安全分析失败: {e}")
 
     if sf:
-            tracker.save(sf)
+        tracker.save(sf)
 
     # 保存攻击结果到专用文件（避免 Phase 3 读到旧数据）；去重防续跑重测产生同键重复
     all_results = _dedup_attack_results(all_results)
@@ -593,15 +657,31 @@ def run_attack_phase(records: list[dict],
     if sampler_log_file:
         write_jsonl(sampler_log_file, sampler_log)
 
-    boundary = tracker.compute_security_boundary(DEFENDER_NAME)
+    boundary = tracker.compute_security_boundary(defender_name)
     ranking = tracker.get_attacker_ranking()
     n_attacks = len(tested)
     # M-19：ASR 统一以 is_harmful 为准（与 evaluator 口径一致），eval_score>0 作兜底，
     # 避免"成功但税钳 0 分"的有害记录被判为未成功。
-    successful = sum(1 for r in all_results if r.get("is_harmful", False) or r.get("eval_score", 0) > 0)
+    successful = sum(1 for r in all_results if r.get("is_harmful", False) or (r.get("eval_score") or 0) > 0)
     asr = successful / len(all_results) if all_results else 0
 
-    tax_summary = summarize_jailbreak_tax(all_results)
+    # S5：攻击集含数学探针时补测裸数学基线——baseline_accuracy/accuracy_drop 的数据源
+    # （reporting/report.py 与前端 sections.js 消费）。先 set_active_target 保证多目标
+    # 路由正确；测量抛异常或 accuracy 为 None 时记 warning 并降级为无基线输出。
+    baseline = None
+    if any(r.get("math_score") is not None for r in all_results):
+        try:
+            if defender_name:
+                set_active_target(defender_name)
+            baseline = measure_math_baseline()
+            if baseline.get("accuracy") is None:
+                logger.warning("  ⚠ 越狱税基线测量无有效探针，降级为无基线输出")
+                baseline = None
+        except Exception as e:
+            logger.warning(f"  ⚠ 越狱税基线测量失败，降级为无基线输出: {e}")
+            baseline = None
+
+    tax_summary = summarize_jailbreak_tax(all_results, baseline=baseline or None)
 
     summary = {
         "total_attacks": n_attacks,
@@ -633,14 +713,17 @@ def run_attack_phase(records: list[dict],
 
 
 def _quick_precluster(tracker: ELOTracker, all_methods: list[str]) -> dict[str, int] | None:
-    """用 tracker 的特征缓存做快速 KMeans 预聚类，返回 {method: label} 或 None。
+    """用 tracker 的特征缓存做预聚类，返回 {method: label} 或 None。
 
     H-1 修复：Phase 1 期间聚类尚未运行（post-test），sampler 的 InfoGain/Coordinate
-    簇覆盖特性需要预聚类标签才能工作。用 build_whitened_space + KMeans 做轻量预聚类。
+    簇覆盖特性需要预聚类标签才能工作。与 post-test 聚类同口径复用
+    clustering.hdb.compute_cluster_labels（阻尼白化 → HDBSCAN 密度视图 → Ward auto-k
+    主标签）；此时无 GT 反应，弱监督特征权重不存在，故用未加权白化空间，
+    簇划分允许与最终聚类存在差异。
 
-    失败时返回 None（sampler 退化为全局模式，与原行为一致，不崩溃）。
+    hdbscan 是可选依赖，不可用/核心失败时回退 KMeans；再失败返回 None
+    （sampler 退化为全局模式，与原行为一致，不崩溃）。
     """
-    from llmsec.pipeline.runner import logger
     artifacts = getattr(tracker.predictor, "artifacts", None) or {}
     features = artifacts.get("features")
     if not features:
@@ -648,6 +731,17 @@ def _quick_precluster(tracker: ELOTracker, all_methods: list[str]) -> dict[str, 
     methods = [m for m in all_methods if m in features]
     if len(methods) < 4:
         return None  # 太少不值得聚类
+    try:
+        from llmsec.clustering.hdb import compute_cluster_labels
+
+        core = compute_cluster_labels({m: features[m] for m in methods})
+        if not core.get("error"):
+            return core["labels"]
+        logger.warning(f"⚠️ 预聚类核心返回错误（{core['error']}），回退 KMeans")
+    except ImportError:
+        logger.warning("⚠️ hdbscan 未安装，预聚类回退 KMeans")
+    except Exception as e:
+        logger.warning(f"⚠️ 预聚类(HDBSCAN/Ward)失败（{e}），回退 KMeans")
     try:
         from sklearn.cluster import KMeans
 

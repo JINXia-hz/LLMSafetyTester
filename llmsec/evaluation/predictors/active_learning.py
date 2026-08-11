@@ -11,7 +11,7 @@ D-Optimality 主动学习。
 精确且每次更新 O(d²)，无需重求逆。
 
 用法:
-    from llmsec.evaluation.active_learning import greedy_d_optimal
+    from llmsec.evaluation.predictors.active_learning import greedy_d_optimal
     idx = greedy_d_optimal(X_candidates, n=8, lam=1.0, X_gt=X_tested)
 """
 

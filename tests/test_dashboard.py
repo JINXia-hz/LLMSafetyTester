@@ -210,4 +210,207 @@ def test_batch_limit_matches_params():
         over_rejected = False
     except ValidationError:
         over_rejected = True
-    assert over_rejected, 'M18: batch_size 超上限被 422 拦截'
+    assert over_rejected, 'M18: batch_size 超上限被 422 拦截'
+
+
+
+def test_emit_progress_env_gated():
+    """emit_progress：无 LLMSEC_TASK_ID 时 no-op；有则写一行 JSON。"""
+    import os
+
+    from llmsec.core import progress as P
+
+    task_id = 'ut-progress-' + str(int(time.time() * 1000))
+    path = P.TASK_LOG_DIR / f"{task_id}.progress.jsonl"
+    if path.exists():
+        path.unlink()
+
+    # 无 env → 不写文件
+    os.environ.pop('LLMSEC_TASK_ID', None)
+    P.emit_progress({'phase': 'attack', 'target': 'x', 'round': 1})
+    assert not path.exists(), '无 LLMSEC_TASK_ID 时不应写 progress 文件'
+
+    # 有 env → 写一行可 parse 的 JSON
+    os.environ['LLMSEC_TASK_ID'] = task_id
+    try:
+        P.emit_progress({'phase': 'attack', 'target': 'deepseek', 'round': 2, 'elo': 1500.0})
+        assert path.exists(), '有 LLMSEC_TASK_ID 时应写 progress 文件'
+        import json
+        rec = json.loads(path.read_text(encoding='utf-8').strip().splitlines()[-1])
+        assert rec['target'] == 'deepseek' and rec['round'] == 2 and 'ts' in rec, '进度记录字段完整'
+    finally:
+        os.environ.pop('LLMSEC_TASK_ID', None)
+        if path.exists():
+            path.unlink()
+
+    print('✅ emit_progress env 门控通过')
+
+
+
+def test_task_progress_endpoint():
+    """/api/tasks/{id}/progress：argv 解析目标 + 每 target 取末条；hpo 取末条。"""
+    import json
+
+    from llmsec.core.config import TASK_LOG_DIR
+    from llmsec.server.routers.tasks import TASKS, _progress_path
+
+    # evaluate：双目标，各有进度
+    tid = 'evaluate-ut-' + str(int(time.time() * 1000))
+    TASKS[tid] = {
+        'kind': 'evaluate',
+        'argv': ['-m', 'llmsec.pipeline.runner', '--targets', 'a,b', '--max-rounds', '10'],
+        'status': 'success', 'returncode': 0, 'log_path': TASK_LOG_DIR / f"{tid}.log",
+        'log_file': None, 'started_at': '2026-01-01T00:00:00', 'cmd': '', 'proc': None,
+    }
+    pp = _progress_path(tid)
+    TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    pp.write_text(
+        json.dumps({'ts': 't1', 'phase': 'attack', 'target': 'a', 'round': 1, 'elo': 1490.0}) + '\n'
+        + json.dumps({'ts': 't2', 'phase': 'attack', 'target': 'a', 'round': 2, 'elo': 1500.0}) + '\n'
+        + json.dumps({'ts': 't3', 'phase': 'attack', 'target': 'b', 'round': 1, 'elo': 1510.0}) + '\n',
+        encoding='utf-8')
+    try:
+        r = client.get(f'/api/tasks/{tid}/progress')
+        assert r.status_code == 200
+        d = r.json()
+        assert d['kind'] == 'evaluate' and d['targets'] == ['a', 'b'] and d['max_rounds'] == 10
+        # a 取末条（round 2），b 取末条（round 1）
+        assert d['progress']['a']['round'] == 2 and d['progress']['b']['round'] == 1
+    finally:
+        TASKS.pop(tid, None)
+        if pp.exists():
+            pp.unlink()
+
+    # hpo：取末条汇总
+    hid = 'hpo-ut-' + str(int(time.time() * 1000))
+    TASKS[hid] = {
+        'kind': 'hpo', 'argv': ['-m', 'llmsec.experiments', 'run', 'x.yaml'],
+        'status': 'success', 'returncode': 0, 'log_path': TASK_LOG_DIR / f"{hid}.log",
+        'log_file': None, 'started_at': '2026-01-01T00:00:00', 'cmd': '', 'proc': None,
+    }
+    hp = _progress_path(hid)
+    hp.write_text(
+        json.dumps({'phase': 'hpo', 'trial_done': 1, 'best_metric': None}) + '\n'
+        + json.dumps({'phase': 'hpo', 'trial_done': 3, 'best_metric': 0.5}) + '\n',
+        encoding='utf-8')
+    try:
+        r = client.get(f'/api/tasks/{hid}/progress')
+        assert r.status_code == 200
+        d = r.json()
+        assert d['kind'] == 'hpo' and d['progress']['trial_done'] == 3 and d['progress']['best_metric'] == 0.5
+    finally:
+        TASKS.pop(hid, None)
+        if hp.exists():
+            hp.unlink()
+
+    print('✅ /api/tasks/{id}/progress 通过')
+
+
+
+def test_evaluate_concurrency_argv(monkeypatch):
+    """多目标评估：argv 必须含 --targets 与 --target-concurrency（默认=目标数，全并发）。"""
+    import llmsec.server.routers.tasks as tasks_mod
+
+    captured = {}
+
+    def fake_start(kind, argv):
+        captured['argv'] = list(argv)
+        return {"id": "fake-eval", "kind": kind, "cmd": " ".join(argv), "argv": list(argv),
+                "status": "queued", "returncode": None, "log_path": tasks_mod.TASK_LOG_DIR / "fake.log",
+                "log_file": None, "started_at": "2026-01-01T00:00:00", "error": None, "proc": None}
+
+    monkeypatch.setattr(tasks_mod, "_start_task", fake_start)
+
+    # 默认：多目标 → 全并发（target_concurrency = 目标数）
+    r = client.post('/api/run/evaluate', json={
+        "input": "l1.jsonl", "targets": "a,b,c", "max_rounds": 3, "batch_size": 3})
+    assert r.status_code == 200, r.text
+    argv = captured['argv']
+    assert "--targets" in argv and argv[argv.index("--targets") + 1] == "a,b,c"
+    assert "--target-concurrency" in argv, "多目标必须拼 --target-concurrency"
+    assert argv[argv.index("--target-concurrency") + 1] == "3", "默认全并发 = 目标数"
+
+    # 显式覆盖
+    captured.clear()
+    r = client.post('/api/run/evaluate', json={
+        "input": "l1.jsonl", "targets": "a,b", "target_concurrency": 1, "max_rounds": 3, "batch_size": 3})
+    argv = captured['argv']
+    assert argv[argv.index("--target-concurrency") + 1] == "1", "显式 target_concurrency 生效"
+
+    print('✅ 多目标并发 argv 拼接通过')
+
+
+
+def test_spawn_injects_task_id_env(monkeypatch, tmp_path):
+    """_spawn 必须把 LLMSEC_TASK_ID 注入子进程 env（进度落盘的钥匙）。"""
+    import llmsec.server.routers.tasks as tasks_mod
+
+    captured = {}
+
+    class FakeProc:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def terminate(self):
+            pass
+
+        def kill(self):
+            pass
+
+    def fake_popen(*args, **kwargs):
+        captured['env'] = kwargs.get('env')
+        return FakeProc()
+
+    monkeypatch.setattr(tasks_mod.subprocess, "Popen", fake_popen)
+
+    t = {"kind": "smoke", "argv": ["-c", "pass"], "cmd": "pass",
+         "log_path": tmp_path / "t.log", "log_file": None,
+         "status": "queued", "started_at": "2026-01-01T00:00:00", "proc": None}
+    try:
+        tasks_mod._spawn("tid-inject", t)
+    finally:
+        if t.get("log_file"):
+            t["log_file"].close()
+
+    assert captured.get('env', {}).get("LLMSEC_TASK_ID") == "tid-inject", \
+        "子进程 env 必须注入 LLMSEC_TASK_ID"
+    print('✅ _spawn 注入 LLMSEC_TASK_ID 通过')
+
+
+
+def test_task_stream_progress_events(monkeypatch):
+    """SSE /stream：回放射已有 progress 行（event:progress）+ 结束发 event:done。"""
+    import json
+
+    import llmsec.server.routers.tasks as tasks_mod
+
+    tid = "stream-ut"
+    pp = tasks_mod._progress_path(tid)
+    tasks_mod.TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    pp.write_text(
+        json.dumps({"ts": "t1", "phase": "attack", "target": "a", "round": 1, "elo": 1500.0}) + "\n"
+        + json.dumps({"ts": "t2", "phase": "attack", "target": "a", "round": 2, "elo": 1505.0}) + "\n",
+        encoding="utf-8")
+    # 终态：生成器首次 while 即发 done 返回（不挂起）
+    tasks_mod.TASKS[tid] = {
+        "kind": "evaluate", "argv": ["--targets", "a"], "cmd": "", "status": "success",
+        "returncode": 0, "log_path": tasks_mod.TASK_LOG_DIR / f"{tid}.log", "log_file": None,
+        "started_at": "2026-01-01T00:00:00", "proc": None}
+    try:
+        r = client.get(f"/api/tasks/{tid}/stream")
+        assert r.status_code == 200
+        body = r.text
+        assert "event: progress" in body, "应回放射 progress 事件"
+        assert "event: done" in body, "任务终态应发 done 事件"
+        assert '"round": 2' in body, "应包含最新进度行（round 2）"
+    finally:
+        tasks_mod.TASKS.pop(tid, None)
+        if pp.exists():
+            pp.unlink()
+
+    print('✅ SSE progress 流通过')

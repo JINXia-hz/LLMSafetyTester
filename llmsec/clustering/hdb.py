@@ -2,6 +2,9 @@
 """
 HDBSCAN 聚类主管线（post-test，整个测试流程结束后运行）。
 
+标签计算核心 compute_cluster_labels（白化 → 密度视图 → Ward auto-k，无命名/落盘）
+同时供 Phase 1 开头的采样器预聚类复用（attack_phase._quick_precluster）。
+
 流程：
 1. 先验特征 → （可选弱监督特征权重）→ 阻尼白化空间（谱拐点截断）
 2. HDBSCAN 密度聚类 → flat labels（含噪声 -1，仅作密度视图旁挂）
@@ -48,24 +51,21 @@ def _method_set_hash(methods: list[str]) -> str:
     return hashlib.md5(",".join(sorted(set(methods))).encode("utf-8")).hexdigest()
 
 
-def run_hdbscan_clustering(
+def compute_cluster_labels(
     features: dict,
-    meta: dict,
     feature_weights: np.ndarray | None = None,
-    reactions: dict | None = None,
-    write: bool = True,
 ) -> dict:
     """
-    HDBSCAN 聚类主入口。
+    聚类标签计算核心：阻尼白化 → HDBSCAN 密度视图 → Ward 树 auto-k 主标签。
 
-    参数:
-        features: extract_all_features 输出 {method: 特征块}
-        meta: extract_all_features 元信息
-        feature_weights: posterior.learn_supervised_weights 的输出（可选）
-        reactions: posterior.compute_method_reactions 的输出（可选，提供时做簇效验证）
-        write: 是否写 cluster_report.json / cluster_result.pkl
+    无命名/画像/验证/落盘，供两处复用：
+      - post-test 主管线 run_hdbscan_clustering（接续命名/画像/落盘）
+      - Phase 1 开头的采样器预聚类（attack_phase._quick_precluster，只要标签）
 
-    返回: 聚类报告 dict。
+    返回:
+        正常: {methods, space, coords, Z, flat_labels, n_flat, n_noise,
+               min_cluster_size, labels, k_best, top_ks, sweep}
+        n<2: {"error": "方法数不足", "labels": {m: 0}}
     """
     import hdbscan
 
@@ -85,7 +85,6 @@ def run_hdbscan_clustering(
         " + 弱监督加权" if feature_weights is not None else "",
     )
 
-    # 2. HDBSCAN
     # 2. HDBSCAN 密度视图（flat labels + 稀疏区）
     # min_samples=1 放宽互达距离，集中空间里显著降低噪声率；
     # #11：min_cluster_size 改 sqrt 缩放（原 n//DIV 线性：n=132→3 偏激进，密度视图过分割）。
@@ -120,6 +119,59 @@ def run_hdbscan_clustering(
     k_best, top_ks = select_knee(sweep)
     labels = cut_tree(Z, methods, k_best)
     logger.info("  关键层: 候选 %s → k*=%d (top3 %s)", ks, k_best, top_ks)
+
+    return {
+        "methods": methods,
+        "space": space,
+        "coords": coords,
+        "Z": Z,
+        "flat_labels": flat_labels,
+        "n_flat": n_flat,
+        "n_noise": n_noise,
+        "min_cluster_size": min_cluster_size,
+        "labels": labels,
+        "k_best": k_best,
+        "top_ks": top_ks,
+        "sweep": sweep,
+    }
+
+
+def run_hdbscan_clustering(
+    features: dict,
+    meta: dict,
+    feature_weights: np.ndarray | None = None,
+    reactions: dict | None = None,
+    write: bool = True,
+) -> dict:
+    """
+    HDBSCAN 聚类主入口。
+
+    参数:
+        features: extract_all_features 输出 {method: 特征块}
+        meta: extract_all_features 元信息
+        feature_weights: posterior.learn_supervised_weights 的输出（可选）
+        reactions: posterior.compute_method_reactions 的输出（可选，提供时做簇效验证）
+        write: 是否写 cluster_report.json / cluster_result.pkl
+
+    返回: 聚类报告 dict。
+    """
+    core = compute_cluster_labels(features, feature_weights=feature_weights)
+    if core.get("error"):
+        return {"error": core["error"], "labels": core["labels"]}
+
+    methods = core["methods"]
+    n = len(methods)
+    space = core["space"]
+    coords = core["coords"]
+    Z = core["Z"]
+    flat_labels = core["flat_labels"]
+    n_flat = core["n_flat"]
+    n_noise = core["n_noise"]
+    min_cluster_size = core["min_cluster_size"]
+    labels = core["labels"]
+    k_best = core["k_best"]
+    top_ks = core["top_ks"]
+    sweep = core["sweep"]
 
     # 4. 命名（关键层各簇 + 密度视图各簇；噪声组固定命名为稀疏区）
     cluster_names = auto_name_clusters(labels, features, meta, meta.get("method_prompts", {}))

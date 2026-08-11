@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-from llmsec.core.logging import get_logger
-
 """
 目标 API 探测脚本（原根目录 probe_victim.py）
 
@@ -19,8 +17,7 @@ import time
 import requests
 import urllib3
 
-from llmsec.core.config import load_env
-from llmsec.core.logging import setup_console
+from llmsec.core.logging import get_logger, setup_console
 from llmsec.targets import call_target
 from llmsec.targets.pcap import PCAP_JUDGE_URL, build_pcap_payload
 
@@ -35,7 +32,7 @@ TIMEOUT = 60.0
 
 def probe(test_text: str):
     """按 TARGET_TYPE 路由探测目标后端。"""
-    load_env()  # 先加载 .env，再读 TARGET_TYPE
+    # .env 已在 import llmsec 时由 llmsec/__init__.py 加载，无需重复 load_env
     target_type = os.getenv("TARGET_TYPE", "openai")
     if target_type == "pcap_judge":
         probe_pcap(test_text)
@@ -102,7 +99,7 @@ def probe_pcap(test_text: str):
             logger.info("🔍 字段扫描:")
             scan_for_text_fields(data)
 
-        except json.JSONDecodeError:
+        except ValueError:  # 兼容 simplejson 环境（其 JSONDecodeError 不一定是 json.JSONDecodeError，但都是 ValueError 子类）
             logger.warning("⚠ 响应不是有效 JSON，原始文本:")
             logger.info(resp.text[:2000])
 
@@ -131,6 +128,8 @@ def scan_for_text_fields(data, prefix=""):
             elif isinstance(value, (dict, list)):
                 scan_for_text_fields(value, path)
     elif isinstance(data, list) and len(data) > 0:
+        # 启发式取舍：列表只下钻第一个元素——响应里的同类列表（choices/candidates）
+        # 结构通常一致，扫 [0] 足以定位文本字段，避免大列表刷屏
         scan_for_text_fields(data[0], f"{prefix}[0]")
 
 

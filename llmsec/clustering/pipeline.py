@@ -21,6 +21,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 
 from llmsec.core import CLUSTER_MATRIX_FILE
 from llmsec.core.logging import get_logger
+from llmsec.core.text import extract_json_block
 
 logger = get_logger(__name__)
 # ============================================================
@@ -209,11 +210,10 @@ def ai_rename_clusters(
     try:
         client = create_openai_client(cfg.api_key, cfg.base_url, cfg.timeout)
         raw = retry_call(_gen, retries=cfg.max_retries, delay=1.0, retry_on=is_retryable_error)
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if not m:
+        mapping = extract_json_block(raw)
+        if mapping is None:
             logger.warning("AI 簇命名：未解析到 JSON，保留技术名")
             return cluster_names
-        mapping = json.loads(m.group(0))
         renamed = dict(cluster_names)
         for cid in cluster_names:
             new = mapping.get(str(cid)) or mapping.get(cid)

@@ -18,7 +18,7 @@ import numpy as np
 
 from llmsec.clustering.tree import _evaluate_cut, sweep_candidates
 from llmsec.evaluation.elo import ELOTracker
-from llmsec.evaluation.elo_cluster import ClusterEloPredictor
+from llmsec.evaluation.predictors.cold_start import ColdStartPredictor
 from llmsec.params import PORTRAIT_MIN_TESTED
 
 
@@ -120,7 +120,7 @@ def test_h4_build_tree_inconclusive_when_confidence_low():
 
 def test_h9_kfold_balanced_small_gt():
     """小 GT（n=7, k=5）K-Fold 不崩，fold 余数均衡分配（非全堆最后一折）。"""
-    from llmsec.evaluation.elo_cluster import EloPredictorModel
+    from llmsec.evaluation.predictors.svd_ridge import EloPredictorModel
     rng = np.random.default_rng(42)
     methods = [f'm{i}' for i in range(7)]
     features = {m: {'textual': rng.normal(size=5).tolist(), 'prior': [0.0, 0.0, 0.0]} for m in methods}
@@ -151,7 +151,7 @@ def test_h9_kfold_fold_sizes_balanced():
 
 def test_h10_predict_fallback_has_std_ci95():
     """predict() 所有回退分支返回的 dict 都含 std/ci95 字段。"""
-    predictor = ClusterEloPredictor()
+    predictor = ColdStartPredictor()
     r = predictor.predict('unknown_method')
     assert 'std' in r and 'ci95' in r, f'H10: 空 GT 回退含 std/ci95（keys={list(r.keys())}）'
     assert r['std'] is not None and math.isfinite(r['std']), 'H10: 空 GT 回退 std 有限'
@@ -167,7 +167,7 @@ def test_h10_predict_fallback_has_std_ci95():
 
 def test_h10_predict_batch_fallback_schema_consistent():
     """predict_batch 在 GT 不足走回退时，结果 schema 与 SVD-Ridge 分支一致。"""
-    predictor = ClusterEloPredictor()
+    predictor = ColdStartPredictor()
     predictor.update_ground_truth('gt1', 1500.0)
     method_records = {'gt1': {'id': 'gt1'}, 'unknown1': {'id': 'unknown1'}}
     results = predictor.predict_batch(method_records)
@@ -243,7 +243,7 @@ def test_h8_severity_inconclusive_when_no_results():
 def test_h11_cache_key_includes_features():
     """cache_key 纳入 features 结构签名（切换 embedding 时 key 不同）。"""
     from llmsec.core.results import ResultsMatrix
-    from llmsec.evaluation.blend_predictor import BlendPredictor
+    from llmsec.evaluation.predictors.blend import BlendPredictor
     mat = ResultsMatrix()
     mat.upsert('A', 'm', 1.0, ts=1)
     catalog = ['A']

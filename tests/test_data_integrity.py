@@ -21,24 +21,26 @@ from llmsec.core.config import _resolve_target_prefixes, load_targets, target_ba
 from llmsec.core.io import CorruptedFileError, read_json, write_json
 from llmsec.core.results import ResultsMatrix
 from llmsec.evaluation.elo import ELOTracker
+from llmsec.params import ELO_SCALE
 
 
 def test_f1_nan_does_not_pollute():
     """NaN eval_score 不应污染 attacker_ratings（原来会级联损坏所有对手）。"""
     tr = ELOTracker()
-    tr.update('good', 'def', 3.0)
-    tr.update('bad', 'def', float('nan'))
+    tr.update_round('def', [('good', 3.0)])
+    tr.update_round('def', [('bad', float('nan'))])
     assert math.isfinite(tr.get_attacker_elo('bad')), 'F1: NaN eval_score 后 bad 方法 Elo 仍有限'
     assert tr.get_attacker_elo('bad') != float('nan'), 'F1: bad 方法 Elo 非 NaN'
-    tr.update('good', 'def', 2.0)
-    expected_now = tr._expected(tr.get_attacker_elo('good'), tr.get_defender_elo('def'))
+    tr.update_round('def', [('good', 2.0)])
+    # _expected 已删除：内联标准 ELO 期望胜率公式（与 _compute_match 同式）
+    expected_now = 1.0 / (1.0 + 10.0 ** ((tr.get_defender_elo('def') - tr.get_attacker_elo('good')) / ELO_SCALE))
     assert math.isfinite(expected_now), 'F1: 经 NaN 污染后 expected 胜率仍有限（无级联）'
     assert math.isfinite(tr.get_attacker_elo('good')), 'F1: good 方法 Elo 仍有限'
 
 def test_f1_inf_does_not_pollute():
     """+inf eval_score：inf>0 通过 → inf/(inf+2)=NaN，原代码会污染。"""
     tr = ELOTracker()
-    tr.update('m', 'def', float('inf'))
+    tr.update_round('def', [('m', float('inf'))])
     assert math.isfinite(tr.get_attacker_elo('m')), 'F1: +inf eval_score 后 Elo 仍有限'
     assert math.isfinite(tr.get_defender_elo('def')), 'F1: +inf eval_score 后防御方 Elo 仍有限'
 
@@ -46,7 +48,7 @@ def test_f1_string_invalid():
     """字符串/None 等非法 eval_score 也不应崩溃（TypeError 兜底）。"""
     tr = ELOTracker()
     try:
-        tr.update('m', 'def', 'not_a_number')
+        tr.update_round('def', [('m', 'not_a_number')])
         assert math.isfinite(tr.get_attacker_elo('m')), 'F1: 字符串 eval_score 兜底为 0，Elo 有限'
     except (TypeError, ValueError):
         assert False, 'F1: 字符串 eval_score 不应抛异常（应兜底为 0）'
@@ -54,15 +56,15 @@ def test_f1_string_invalid():
 def test_f1_normal_still_works():
     """F1 修复不应破坏正常评分路径。"""
     tr = ELOTracker()
-    tr.update('winner', 'def', 3.0)
-    tr.update('loser', 'def', -2.0)
+    tr.update_round('def', [('winner', 3.0)])
+    tr.update_round('def', [('loser', -2.0)])
     assert tr.get_attacker_elo('winner') > tr.get_attacker_elo('loser'), 'F1: 正常 update 仍让胜者 Elo 高于败者'
     assert tr.get_attacker_elo('winner') > 1500.0, 'F1: 胜者 Elo 高于初始值'
 
 def test_f1_save_load_no_nan_persistence():
     """NaN 不应经 save/load 持久化进 state.json（JSON 允许 NaN 字面量）。"""
     tr = ELOTracker()
-    tr.update('m', 'def', float('nan'))
+    tr.update_round('def', [('m', float('nan'))])
     with tempfile.TemporaryDirectory() as d:
         sf = Path(d) / 'state.json'
         tr.save(sf)

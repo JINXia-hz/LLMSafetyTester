@@ -82,6 +82,7 @@ class StudyConfig:
     trial_timeout_minutes: int = 30   # 单个 trial 超时（subprocess.run timeout）；超时即杀，标 timeout
     targets: list = field(default_factory=list)  # 多目标跨模型评估（空=用 fixed.target 单目标）
     max_concurrent: int = 1           # 跨目标/seed 并发 trial 数（不同目标端点天然可并行）
+    config_concurrency: int = 1       # 并行 config 数（bayesian: batched ask/tell 吃满 GPU；grid/random: 天然独立）
 
     @classmethod
     def from_dict(cls, d: dict) -> StudyConfig:
@@ -121,6 +122,7 @@ class StudyConfig:
             trial_timeout_minutes=trial_timeout,
             targets=list(d.get("targets", []) or []),
             max_concurrent=int(d.get("max_concurrent", 1)),
+            config_concurrency=max(1, int(d.get("config_concurrency", 1))),
         )
 
     @classmethod

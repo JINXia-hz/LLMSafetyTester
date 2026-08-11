@@ -67,6 +67,10 @@ def run_trial(
     timeout_s = trial_timeout_minutes * 60 if trial_timeout_minutes and trial_timeout_minutes > 0 else None
     try:
         full_env = {**__import__("os").environ, **env_override}
+        # trial runner 不得继承 LLMSEC_TASK_ID：否则每个 trial 子进程都会把 evaluate 式
+        # 进度写进 HPO 任务的 progress.jsonl，污染看板的 HPO 进度视图。进度只由 study
+        # 本进程（汇总层）汇报。
+        full_env.pop("LLMSEC_TASK_ID", None)
         with open(log_path, "w", encoding="utf-8") as log:
             proc = subprocess.run(argv, stdout=log, stderr=subprocess.STDOUT,
                                   env=full_env, cwd=str(Path(__file__).resolve().parents[2]),
@@ -100,13 +104,17 @@ def run_trial(
 
 
 def _resolve_attack_set_path(config: dict) -> str | None:
-    """从 config 的 input 因子解析攻击集绝对路径（manifest 记 hash 用）。"""
+    """从 config 的 input 因子解析攻击集绝对路径（manifest 记 hash 用）。
+
+    input 已归一化为 'attacks/<name>' 形式，相对路径锚定仓库根 PROJECT_ROOT
+    （与 runner.py 一致），而非 OUTPUT_DIR——攻击集落在 repo/attacks，不在 output/。
+    """
     rel = config.get("input")
     if not rel:
         return None
-    from llmsec.core.config import OUTPUT_DIR
+    from llmsec.core.config import PROJECT_ROOT
     p = Path(rel)
-    return str(p if p.is_absolute() else OUTPUT_DIR / p)
+    return str(p if p.is_absolute() else PROJECT_ROOT / p)
 
 
 def _max_rounds_of(config: dict) -> int | None:
