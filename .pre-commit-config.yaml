@@ -1,7 +1,11 @@
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.1
+  - repo: local
     hooks:
       - id: ruff
-        args: [--fix]
-      - id: ruff-format
+        name: ruff check
+        # language: system 复用项目 venv 里已装的 ruff，不再走 pre-commit 隔离环境下载
+        # （隔离环境在某些机器抓不到 ruff==x.y.z）。与 CI 的 `ruff check llmsec/ tests/` 同口径；
+        # 不挂 ruff-format 以避免一次性重排 54 个历史文件，待专门一次格式化后再启用。
+        entry: ruff check
+        language: system
+        types: [python]

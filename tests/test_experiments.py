@@ -212,9 +212,9 @@ def test_capture_manifest(tmp_path):
     from llmsec.core.config import PROJECT_ROOT
     from llmsec.experiments.manifest import capture_manifest
 
-    attack = PROJECT_ROOT / "attacks" / "l1.jsonl"
+    attack = PROJECT_ROOT / "attacks" / "example.jsonl"
     capture_manifest(tmp_path, ["python", "-m", "llmsec.pipeline.runner"],
-                     {"LLMSEC_PARAM_K": "1"}, 7, str(attack), {"input": "attacks/l1.jsonl"})
+                     {"LLMSEC_PARAM_K": "1"}, 7, str(attack), {"input": "attacks/example.jsonl"})
     p = tmp_path / "manifest.json"
     assert p.exists(), "manifest.json 应落盘"
     d = json.loads(p.read_text(encoding="utf-8"))
@@ -223,7 +223,7 @@ def test_capture_manifest(tmp_path):
               "env_redacted", "library_versions"]:
         assert k in d, f"manifest 缺字段 {k}"
     assert d["seed"] == 7
-    assert d["attack_set_sha1"], "l1.jsonl 存在 → sha1 应非空（M-路径修复验证）"
+    assert d["attack_set_sha1"], "example.jsonl 存在 → sha1 应非空（M-路径修复验证）"
     print('✅ capture_manifest 通过')
 
 

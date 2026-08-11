@@ -15,9 +15,8 @@
 
 全部用 monkeypatch/mock，禁止真实 API/网络。
 """
-from types import SimpleNamespace as NS
-
 import inspect
+from types import SimpleNamespace as NS
 
 import pytest
 
@@ -53,8 +52,12 @@ def _eval_math(prompt, ea, judge, use_judge=True):
 
 def _run_math_attack(tmp_path, monkeypatch, defender_name="test-def"):
     """跑一轮含数学探针的 run_attack_phase（evaluate_single/R 全部 mock）。"""
+    import llmsec.core.config as cfg
     records = _records()
     monkeypatch.setattr(ap, "evaluate_single", _eval_math)
+    # 隔离特征缓存到 tmp：fit_features 会原子写 FEATURE_CACHE_FILE，
+    # 多 worker(-n auto) 并发抢写全局 output/feature_cache.pkl 在 Windows 上 os.replace 失败。
+    monkeypatch.setattr(cfg, "FEATURE_CACHE_FILE", tmp_path / "feature_cache.pkl")
     tracker = ELOTracker()
     tracker.predictor.fit_features(records)
     return ap.run_attack_phase(
@@ -95,6 +98,9 @@ def _patch_main_runtime(monkeypatch, tmp_path, captured):
     monkeypatch.setattr(rn, "run_attack_phase", _stub_attack_phase)
     monkeypatch.setattr(rn, "create_judge_client", lambda: None)
     monkeypatch.setattr(rn, "Judge", lambda client: None)
+    # runner.py 的 twin_client = OpenAI(...) 在 --phase 2 时先于 state 校验执行；
+    # CI 无 GENERATOR_API_KEY 会在构造期抛 OpenAIError。早退路径用不到 twin_client → 置 None。
+    monkeypatch.setattr(rn, "OpenAI", lambda **kw: None)
     # 禁写全局 R / 禁重训预筛模型 / 禁生成真实报告
     monkeypatch.setattr(rn, "publish_tracker", lambda tracker, name: None)
     monkeypatch.setattr(ResultsMatrix, "load", classmethod(lambda cls: ResultsMatrix()))

@@ -10,8 +10,13 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
-from llmsec.pipeline.attack_phase import _quick_precluster
+# hdbscan 是可选依赖（requirements-cluster.txt），CI 只装 requirements.txt。
+# 这些测试锁定 HDBSCAN 专属行为，无 hdbscan 时整模块跳过（代码侧已有 KMeans 兜底）。
+pytest.importorskip("hdbscan")
+
+from llmsec.pipeline.attack_phase import _quick_precluster  # noqa: E402
 
 
 def _make_blob_features(n_per_cluster: int = 4, dim: int = 6, seed: int = 42):

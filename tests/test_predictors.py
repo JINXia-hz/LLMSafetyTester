@@ -459,6 +459,13 @@ def test_prediction_paths():
 
         R.upsert("m%d" % ts, "qwen", 3.0 if ts <= 5 else -2.0, ts=ts)
 
+    # ≥2 模型才会池化训练统一层（blend.py:109）；单模型 fixture 下 unified=None，
+    # 无法覆盖 blend / unified_only 路径。补第二个模型让统一层生效。
+
+    for ts in range(1, 11):
+
+        R.upsert("m%d" % ts, "llama", 2.0 if ts <= 5 else -1.0, ts=ts)
+
     catalog = ["m%d" % ts for ts in range(1, 11)] + ["untested_x"]
 
     bp = BlendPredictor().fit(R, _feat(catalog), method_catalog=catalog)
@@ -469,19 +476,19 @@ def test_prediction_paths():
 
     if r1["source"] != "ground_truth" or r1["std"] != 0.0:
 
-        print("❌ 已测方法应 ground_truth/std=0:", r1); return 1
+        raise AssertionError(f"❌ 已测方法应 ground_truth/std=0: {r1}")
 
     r2 = bp.predict("untested_x", "qwen")
 
     if r2["source"] != "blend" or not (0 < r2["w_model"] < 1):
 
-        print("❌ 未测方法应 blend:", r2); return 1
+        raise AssertionError(f"❌ 未测方法应 blend: {r2}")
 
     r3 = bp.predict("m1", "brand_new")
 
     if r3["w_model"] != 0.0 or r3["source"] != "unified_only":
 
-        print("❌ 全新模型应 unified_only:", r3); return 1
+        raise AssertionError(f"❌ 全新模型应 unified_only: {r3}")
 
 
 
@@ -511,7 +518,7 @@ def test_adaptive_weights():
 
     if w_small >= w_big:
 
-        print(f"❌ 少样本应更偏统一: w_small={w_small} >= w_big={w_big}"); return 1
+        raise AssertionError(f"❌ 少样本应更偏统一: w_small={w_small} >= w_big={w_big}")
 
     # 公式校验：w_m = n/(n+K)
 
@@ -519,7 +526,7 @@ def test_adaptive_weights():
 
     if not math.isclose(w_big, 30 / (30 + BLEND_PRIOR_K), abs_tol=1e-9):
 
-        print(f"❌ w_big 公式不符: {w_big}"); return 1
+        raise AssertionError(f"❌ w_big 公式不符: {w_big}")
 
 
 
@@ -535,7 +542,7 @@ def test_no_data_fallback():
 
     if r["source"] != "fallback" or r["elo"] != 1500.0:
 
-        print("❌ 空预测器应 fallback/1500:", r); return 1
+        raise AssertionError(f"❌ 空预测器应 fallback/1500: {r}")
 
 
 

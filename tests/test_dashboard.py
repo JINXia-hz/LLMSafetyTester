@@ -323,7 +323,7 @@ def test_evaluate_concurrency_argv(monkeypatch):
 
     # 默认：多目标 → 全并发（target_concurrency = 目标数）
     r = client.post('/api/run/evaluate', json={
-        "input": "l1.jsonl", "targets": "a,b,c", "max_rounds": 3, "batch_size": 3})
+        "input": "example.jsonl", "targets": "a,b,c", "max_rounds": 3, "batch_size": 3})
     assert r.status_code == 200, r.text
     argv = captured['argv']
     assert "--targets" in argv and argv[argv.index("--targets") + 1] == "a,b,c"
@@ -333,7 +333,7 @@ def test_evaluate_concurrency_argv(monkeypatch):
     # 显式覆盖
     captured.clear()
     r = client.post('/api/run/evaluate', json={
-        "input": "l1.jsonl", "targets": "a,b", "target_concurrency": 1, "max_rounds": 3, "batch_size": 3})
+        "input": "example.jsonl", "targets": "a,b", "target_concurrency": 1, "max_rounds": 3, "batch_size": 3})
     argv = captured['argv']
     assert argv[argv.index("--target-concurrency") + 1] == "1", "显式 target_concurrency 生效"
 
