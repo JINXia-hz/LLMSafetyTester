@@ -227,3 +227,30 @@ def test_capture_manifest(tmp_path):
     print('✅ capture_manifest 通过')
 
 
+def test_run_study_no_targets_fails_fast(tmp_path):
+    """targets 与 fixed.target 均空 → run_study 立即 ValueError，不再空转误报"空间穷尽"。"""
+    import pytest
+
+    import llmsec.experiments.study as study_mod
+
+    cfg = StudyConfig.from_dict({
+        "name": "no_target_ut",
+        "objective": {"metric": "conv_rounds", "direction": "minimize"},
+        "budget": {"max_trials": 3},
+        "strategy": "random",
+        "repeats": 1,
+        "space": {"K_FACTOR": {"type": "int", "low": 16, "high": 32}},
+        "fixed": {"input": "x.jsonl"},   # 无 target；config.targets 默认空
+    })
+    orig_dir = study_mod.STUDIES_DIR
+    study_mod.STUDIES_DIR = tmp_path
+    try:
+        with pytest.raises(ValueError, match="无有效目标"):
+            study_mod.run_study(cfg)
+    finally:
+        study_mod.STUDIES_DIR = orig_dir
+    # 不得产生任何 trial 记录
+    assert not (tmp_path / "no_target_ut" / "trials.jsonl").exists(), "fail-fast 前不应产生 trials.jsonl"
+    print('✅ run_study 空目标 fail-fast 通过')
+
+

@@ -117,6 +117,8 @@ async def api_run_hpo(req: HpoRequest):
     """写临时 study.yaml 并作为 hpo 任务启动（进任务列表）。"""
     if not req.name.strip():
         raise HTTPException(400, "study 名不能为空")
+    if not req.targets and not req.fixed.get("target"):
+        raise HTTPException(400, "未选择目标模型（targets 为空且 fixed 无 target）——study 无目标可跑")
     # 构造 StudyConfig 兼容的 dict（schema.StudyConfig.from_dict 解析）
     cfg_dict = {
         "name": req.name.strip(),

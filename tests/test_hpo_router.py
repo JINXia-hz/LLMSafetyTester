@@ -66,9 +66,35 @@ def test_run_hpo_starts_task(monkeypatch, tmp_path):
 
     monkeypatch.setattr(hpo_mod, "_start_task", fake_start)
 
-    r = client.post("/api/run/hpo", json={"name": "utstudy", "strategy": "bayesian", "max_trials": 5})
+    r = client.post("/api/run/hpo", json={"name": "utstudy", "strategy": "bayesian", "max_trials": 5,
+                                          "targets": ["modelA"]})
     assert r.status_code == 200, r.text
     assert captured["kind"] == "hpo"
     yamls = list((tmp_path / "experiments").glob("_dashboard_utstudy.yaml"))
     assert len(yamls) == 1, "应落盘 study.yaml 供 experiments run 读取"
     print("✅ /api/run/hpo 通过")
+
+
+def test_run_hpo_no_targets_rejected():
+    """无 targets 且 fixed 无 target → 400（防空转 study：前端漏传目标时的防线）。"""
+    r = client.post("/api/run/hpo", json={"name": "notarget", "strategy": "bayesian", "max_trials": 5})
+    assert r.status_code == 400, r.text
+    assert "目标" in r.json()["detail"]
+    print("✅ /api/run/hpo 空目标 400 通过")
+
+
+def test_run_hpo_fixed_target_ok(monkeypatch, tmp_path):
+    """fixed.target 兜底：无 targets 列表但 fixed 带 target 时允许启动。"""
+    import llmsec.server.routers.hpo as hpo_mod
+
+    monkeypatch.setattr(hpo_mod, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(hpo_mod, "_start_task",
+                        lambda kind, argv: {"id": "fake", "kind": kind, "cmd": "", "argv": argv,
+                                            "status": "queued", "returncode": None,
+                                            "log_path": tmp_path / "h.log", "log_file": None,
+                                            "started_at": "2026-01-01T00:00:00", "error": None, "proc": None})
+
+    r = client.post("/api/run/hpo", json={"name": "fixedtgt", "strategy": "random", "max_trials": 2,
+                                          "fixed": {"target": "modelB", "input": "l1.jsonl"}})
+    assert r.status_code == 200, r.text
+    print("✅ /api/run/hpo fixed.target 兜底通过")

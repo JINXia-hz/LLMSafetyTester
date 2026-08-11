@@ -1,6 +1,21 @@
 /* sections.js — 只读看板板块：运行批次/总览/趋势/批次对比/威胁（依赖 core.js） */
 
 // ---------- 运行批次 ----------
+function _runLabel(r) {
+  // 进行中批次：⏳ 占位，无印章/ASR（报告还可能只覆盖部分目标）
+  if (r.active) return `⏳ ${r.name} · 进行中…`;
+  // 标签去重：run 名（ts/target）里已含目标，不再重复拼 target；
+  // 时间截短成 MM-DD HH:MM，完整 run 名放 title。
+  const m = /^(\d{4})-(\d{2})-(\d{2})_(\d{2})(\d{2})/.exec(r.batch || '');
+  const shortTs = m ? `${m[2]}-${m[3]} ${m[4]}:${m[5]}` : (r.batch || r.name);
+  if (r.has_report) {
+    const seal = SEAL_CHARS[r.security_level] || '▫';
+    const tg = r.target_model || r.target || '?';
+    return `${seal} ${shortTs} · ${tg} · ASR ${fmtPct(r.asr)}`;
+  }
+  return `${r.name} (无报告)`;
+}
+
 async function loadRuns() {
   const data = await api('/api/runs');
   const sel = $('runSelect');
@@ -11,10 +26,8 @@ async function loadRuns() {
   data.runs.forEach(r => {
     const opt = document.createElement('option');
     opt.value = r.name;
-    // 富化条目：印字等级 + 目标模型 + ASR，一眼分辨批次质量（option 纯文本，无法上色）
-    opt.textContent = r.has_report
-      ? `${SEAL_CHARS[r.security_level] || '▫'} ${r.name} · ${r.target_model || '?'} · ASR ${fmtPct(r.asr)}`
-      : `${r.name} (无报告)`;
+    opt.title = r.name;   // 完整批次名（含目录时间戳）悬浮可见
+    opt.textContent = _runLabel(r);
     sel.appendChild(opt);
     cmp.appendChild(opt.cloneNode(true));   // 批次对比下拉共用同一清单
   });

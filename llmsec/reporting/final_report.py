@@ -148,7 +148,18 @@ def generate_reports(
         tree = build_tree(method_stats, allergy_summary, elo_ratings, output_dir=OUTPUT_DIR)
         write_json(run_dir / "security_tree.json", tree)
 
-        markdown = generate_narrative(tree, OUTPUT_DIR)
+        # P5：本轮 0 新测试（如全量 resume）时跳过 LLM 叙事，避免白调 LLM
+        # （chat_with_retry 重试后直接回落 fallback，浪费一次往返）。优先用
+        # attack_summary["this_run_tested"]（本轮新测数），缺该键时退到 total_tested==0。
+        this_run_tested = attack_summary.get("this_run_tested")
+        no_new_tests = (this_run_tested == 0) if this_run_tested is not None \
+            else attack_summary.get("total_tested", tested_methods) == 0
+        if no_new_tests:
+            from llmsec.reporting.report import generate_fallback_report
+            logger.info("  ℹ️ 本轮无新测试，跳过 LLM 叙事，直接使用 fallback 报告")
+            markdown = generate_fallback_report(tree)
+        else:
+            markdown = generate_narrative(tree, OUTPUT_DIR)
         (run_dir / "security_report.md").write_text(markdown, encoding="utf-8")
     except Exception as e:
         logger.warning(f"  报告生成（tree/md）失败（runner_report.json 已写入）: {e}")

@@ -61,7 +61,8 @@ logger = get_logger(__name__)
 # Phase 1 辅助函数
 # ============================================================
 def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict],
-                           defender_name: str, r_snapshot=None):
+                           defender_name: str, r_snapshot=None,
+                           full_method_records: dict[str, dict] | None = None):
     """
     为所有尚未真实评估的方法注入预测初始 Elo。
 
@@ -71,6 +72,12 @@ def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict],
 
     r_snapshot：运行前获取的 R 快照（不可变）。评估期间不读活 R——传入快照保证
     并发安全 + 隔离（目标 B 不会读到目标 A 刚 publish 的半截数据）。
+
+    full_method_records：完整攻击集方法清单（含已测）。BlendPredictor 缓存键含
+    catalog 指纹（blend.cache_key 的 cat_fp）——method_records 逐轮传入的是
+    remaining 子集，若直接拿它当 catalog，缓存键每轮变、永远 miss（每轮每目标
+    全量重 fit + 孤儿 pkl 泄漏）。故 catalog 恒用完整清单，predict 仍只对
+    untested。None 时回退 method_records（兼容独立调用/单测）。
     """
     untested = {
         m: r for m, r in method_records.items()
@@ -93,7 +100,9 @@ def _inject_predicted_elos(tracker: ELOTracker, method_records: dict[str, dict],
             # 传入运行前快照，评估期间不读活 R（并发安全 + 跨目标隔离）
             R = r_snapshot if r_snapshot is not None else ResultsMatrix.load()
             if len(R.all_models()) >= 2:
-                catalog = list(method_records.keys())
+                # catalog 恒用完整清单：缓存键 cat_fp 才跨轮稳定（见 docstring）
+                catalog_src = full_method_records if full_method_records is not None else method_records
+                catalog = list(catalog_src.keys())
                 bp = load_or_fit_blend_predictor(R, feats, method_catalog=catalog)
                 predictions = {m: bp.predict(m, defender_name) for m in untested}
         except Exception as e:
@@ -281,12 +290,15 @@ def run_attack_phase(records: list[dict],
                      concurrency: int | None = None,
                      defender_name: str = "",
                      r_snapshot=None,
+                     pre_labels: dict | None = None,
                      ) -> dict:
     """
     自适应攻击测试：从ELO中档开始，逐轮二分搜索。
     新增：聚类冷启动预测 + 动态重训练 + 种子采样 + 可插拔采样器 + 聚类安全分析。
     coordinate_rounds 为 None 时缺省读 params.SAMPLER_HYBRID_EXPLORE_ROUNDS。
     force_refresh=True 时无视特征缓存指纹，强制重新提取特征（透传 _should_refresh_features）。
+    pre_labels：调用方预算好的预聚类标签 {method: label}（多目标场景由 runner 层算一次
+    共享，避免每目标重复 embedding）；None 时维持现状由 _quick_precluster 自算。
     返回: {tested_methods, results, boundary, rounds}
     """
     if coordinate_rounds is None:
@@ -314,8 +326,26 @@ def run_attack_phase(records: list[dict],
     _R = r_snapshot if r_snapshot is not None else _RM.load()
     _tested_in_R = _R.tested_methods(defender_name) & set(all_methods)
     if _tested_in_R:
+        # 只恢复 GT 集合不够——全量 resume 时防御 Elo 停在默认 INITIAL_ELO、CI=None，
+        # 且 predictor.ground_truth 缺已测方法（cluster_analysis 按需训练分支会把它们
+        # 当未测预测）。用 derive_elo 从 R 回放重建派生态，字段级并入本 run tracker：
+        # 评分/场次/收敛轨迹/历史/predictor GT 一并恢复，本 run 后续 update 不受影响
+        #（K 衰减场次从 0 重累计是项目认可口径，同 elo_access.publish_tracker）。
+        from llmsec.evaluation.elo import derive_elo
+        _derived = derive_elo(_R, defender_name, method_catalog=all_methods)
+        for m in _derived.ground_truth_methods:
+            tracker.attacker_ratings[m] = _derived.attacker_ratings[m]
+        tracker.defender_ratings.update(_derived.defender_ratings)
+        tracker._defender_match_count.update(_derived._defender_match_count)
+        tracker._round_defender_elos.update(_derived._round_defender_elos)
+        # 历史：R 回放是该 defender 的累计真相——先剔除本 tracker 同 defender 旧条目
+        #（state 与 R 同源时防重复计数），再并入回放历史；其他 defender 条目保留
+        tracker.history = [h for h in tracker.history if h.get("defender") != defender_name]
+        tracker.history.extend(_derived.history)
         tracker.ground_truth_methods.update(_tested_in_R)
-        logger.info(f"  📥 从 R 恢复 {len(_tested_in_R)} 个已测方法（跨 run resume）")
+        tracker.predictor.ground_truth.update(_derived.predictor.ground_truth)
+        logger.info(f"  📥 从 R 恢复 {len(_tested_in_R)} 个已测方法"
+              f"（跨 run resume，评分/历史/predictor GT 已回放）")
     # 防跨攻击集 stale GT 污染
     _current_methods = set(all_methods)
     _stale_gt = tracker.ground_truth_methods - _current_methods
@@ -336,6 +366,8 @@ def run_attack_phase(records: list[dict],
               f"（GT/attacker_ratings/history 已同步清理，保留 {len(tracker.ground_truth_methods)} 个）")
     # resume 时已实测方法直接计入 tested，避免被重新选中二次计 Elo
     tested = set(tracker.ground_truth_methods)
+    # resume 带进来的已测数（含 R 恢复）——summary 的 this_run_tested 以此为基线
+    _resumed_tested = len(tested)
     # M-11：resume 回读已有 attack_file 预载历史明细——此前续跑首轮 write_jsonl 整体覆写
     # 会销毁上次明细。预载后轮内增量落盘与结尾全量写都基于合并结果，保证
     # attack_results.jsonl 含完整历史，ASR 口径与 Elo（ground truth 全历史）一致。
@@ -362,7 +394,8 @@ def run_attack_phase(records: list[dict],
     #（与 post-test 同口径的 HDBSCAN/Ward，见 _quick_precluster）注入 sampler，
     # 否则 InfoGain/Coordinate 的簇覆盖特性完全不工作（build_sampler
     # 默认 cluster_report=None → 所有方法被当做一个簇 → beta*visit_count 退化为全局惩罚）
-    pre_labels = _quick_precluster(tracker, all_methods)
+    if pre_labels is None:
+        pre_labels = _quick_precluster(tracker, all_methods)
     pre_report = {"method_labels": pre_labels} if pre_labels else None
     if pre_labels:
         n_clusters_pre = len(set(pre_labels.values()))
@@ -462,7 +495,8 @@ def run_attack_phase(records: list[dict],
 
         # 用 SVD-Ridge 重新预测剩余方法
         remaining_records = {m: r for m, r in method_records.items() if m not in tested}
-        _inject_predicted_elos(tracker, remaining_records, defender_name, r_snapshot=r_snapshot)
+        _inject_predicted_elos(tracker, remaining_records, defender_name, r_snapshot=r_snapshot,
+                               full_method_records=method_records)
         if sf:
             tracker.save(sf)
         logger.info(f"  ✅ 种子阶段完成: 已建立 ground truth {len(tracker.ground_truth_methods)} 种，"
@@ -549,7 +583,8 @@ def run_attack_phase(records: list[dict],
 
         # SVD-Ridge 更新：基于新增 ground truth 刷新未测方法预测 Elo（聚类不重训）
         remaining_records = {m: r for m, r in method_records.items() if m not in tested}
-        _inject_predicted_elos(tracker, remaining_records, defender_name, r_snapshot=r_snapshot)
+        _inject_predicted_elos(tracker, remaining_records, defender_name, r_snapshot=r_snapshot,
+                               full_method_records=method_records)
         # 保存ELO进度（每轮一次：轨迹点与刷新后的预测一并持久化）
         if sf:
             tracker.save(sf)
@@ -634,6 +669,9 @@ def run_attack_phase(records: list[dict],
         if rv.get("available"):
             logger.info(f"     簇效验证: {rv.get('verdict')} "
                   f"(p={rv.get('p_anova')}, eta²={rv.get('eta2')})")
+    elif skip_final_clustering:
+        # 多目标并发主动跳过（聚类跨模型共享，由上层统一落盘一次）——非异常，不打 warning
+        logger.info("\n  ⏭ 多目标共享聚类文件，本目标跳过最终聚类落盘")
     else:
         # 记录 <2、或记录≥2 但同属 1 种方法（方法数不足）时 final_fit 返回 None，跳过聚类输出
         logger.warning("\n  ⚠ 攻击记录数或方法种类不足（需 ≥2 条且 ≥2 种方法），跳过最终聚类输出")
@@ -663,7 +701,14 @@ def run_attack_phase(records: list[dict],
     # M-19：ASR 统一以 is_harmful 为准（与 evaluator 口径一致），eval_score>0 作兜底，
     # 避免"成功但税钳 0 分"的有害记录被判为未成功。
     successful = sum(1 for r in all_results if r.get("is_harmful", False) or (r.get("eval_score") or 0) > 0)
-    asr = successful / len(all_results) if all_results else 0
+    asr_n = len(all_results)
+    if not all_results and _tested_in_R:
+        # 全量 resume（本轮 0 新测、明细为空）：从 R 列合成累计 ASR，否则汇总恒报
+        # ASR=0/0。R 无 is_harmful 字段，用 eval_score>0（M-19 的兜底口径）计成功。
+        _col = {m: r for m, r in _R.model_column(defender_name).items() if m in _current_methods}
+        successful = sum(1 for r in _col.values() if r.eval_score > 0)
+        asr_n = len(_col)
+    asr = successful / asr_n if asr_n else 0
 
     # S5：攻击集含数学探针时补测裸数学基线——baseline_accuracy/accuracy_drop 的数据源
     # （reporting/report.py 与前端 sections.js 消费）。先 set_active_target 保证多目标
@@ -686,6 +731,8 @@ def run_attack_phase(records: list[dict],
     summary = {
         "total_attacks": n_attacks,
         "total_tested": len(all_results),
+        # 本轮新测的方法数（不含 resume 带进来的已测）——区分全量 resume（=0）与真实新测
+        "this_run_tested": len(tested) - _resumed_tested,
         "successful": successful,
         "asr": round(asr, 4),
         "rounds": round_idx,
@@ -703,7 +750,7 @@ def run_attack_phase(records: list[dict],
     }
 
     logger.info("\n  📊 攻击阶段完成:")
-    logger.info(f"     ASR={asr*100:.1f}% ({successful}/{len(all_results)})")
+    logger.info(f"     ASR={asr*100:.1f}% ({successful}/{asr_n})")
     logger.info(f"     边界ELO={boundary['boundary_elo']:.0f} (置信度{boundary['confidence']*100:.0f}%)")
     logger.info(f"     TOP5威胁: {', '.join(summary['top_threats'])}")
     logger.info(format_tax_line(tax_summary))

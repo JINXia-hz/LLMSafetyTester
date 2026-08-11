@@ -88,6 +88,10 @@ def run_study(config: StudyConfig) -> dict:
     seeds = [config.seed_base + i for i in range(config.repeats)]
     trials_lock = threading.Lock()   # 并发 trial 写 trials.jsonl 的互斥
 
+    # fail-fast：无目标可跑时直接报错，不再逐 config 跳过 + 误报"搜索空间已穷尽"空转
+    if not _effective_targets(config, config.fixed):
+        raise ValueError(f"study '{config.name}' 无有效目标：targets 与 fixed.target 均为空")
+
     # 已完成的独立 config 数（一个 config 需 targets×seeds 个成功单元）
     done_search_fps = {t.get("search_fp") for t in completed if t.get("status") == "success"}
     counted_fps: set[str] = set()
@@ -204,7 +208,7 @@ def run_study(config: StudyConfig) -> dict:
                             consecutive_failures = 0
                     logger.info(f"   [{tgt}/seed{sd}] {rec.get('status')} "
                           f"{config.objective.metric}={(rec.get('metrics') or {}).get(config.objective.metric)}")
-                    # 进度落盘：每个 trial 完成即汇报（看板实时 trial 计数 + 已知最佳）
+                    # 进度落盘：每个 trial 完成即汇报（看板实时 trial 计数 + 已知最佳 + 逐 trial 明细）
                     emit_progress({
                         "phase": "hpo",
                         "trial_done": len(completed),
@@ -214,6 +218,9 @@ def run_study(config: StudyConfig) -> dict:
                         "best_metric": best_obj,
                         "metric_name": config.objective.metric,
                         "direction": config.objective.direction,
+                        "last": {"target": tgt, "seed": sd, "status": rec.get("status"),
+                                 "value": (rec.get("metrics") or {}).get(config.objective.metric),
+                                 "params": search_params},
                     })
                     if consecutive_failures >= _FAIL_ABORT:
                         logger.warning(f"⚠ 连续 {consecutive_failures} 个 trial 失败/超时，中止 study（疑似系统性故障）")

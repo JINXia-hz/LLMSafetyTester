@@ -281,7 +281,7 @@ def test_task_progress_endpoint():
         if pp.exists():
             pp.unlink()
 
-    # hpo：取末条汇总
+    # hpo：取末条汇总 + 逐 trial 明细（无 last 的旧记录跳过）
     hid = 'hpo-ut-' + str(int(time.time() * 1000))
     TASKS[hid] = {
         'kind': 'hpo', 'argv': ['-m', 'llmsec.experiments', 'run', 'x.yaml'],
@@ -291,13 +291,21 @@ def test_task_progress_endpoint():
     hp = _progress_path(hid)
     hp.write_text(
         json.dumps({'phase': 'hpo', 'trial_done': 1, 'best_metric': None}) + '\n'
-        + json.dumps({'phase': 'hpo', 'trial_done': 3, 'best_metric': 0.5}) + '\n',
+        + json.dumps({'phase': 'hpo', 'trial_done': 2, 'best_metric': 0.6,
+                      'last': {'target': 'a', 'seed': 0, 'status': 'success',
+                               'value': 0.6, 'params': {'K_FACTOR': 16}}}) + '\n'
+        + json.dumps({'phase': 'hpo', 'trial_done': 3, 'best_metric': 0.5,
+                      'last': {'target': 'a', 'seed': 0, 'status': 'timeout',
+                               'value': None, 'params': {'K_FACTOR': 48}}}) + '\n',
         encoding='utf-8')
     try:
         r = client.get(f'/api/tasks/{hid}/progress')
         assert r.status_code == 200
         d = r.json()
         assert d['kind'] == 'hpo' and d['progress']['trial_done'] == 3 and d['progress']['best_metric'] == 0.5
+        assert len(d['trials']) == 2, 'trials 应收 2 条带 last 的明细（首条无 last 跳过）'
+        assert d['trials'][0]['value'] == 0.6 and d['trials'][1]['status'] == 'timeout'
+        assert d['trials'][1]['params'] == {'K_FACTOR': 48}
     finally:
         TASKS.pop(hid, None)
         if hp.exists():
@@ -414,3 +422,105 @@ def test_task_stream_progress_events(monkeypatch):
             pp.unlink()
 
     print('✅ SSE progress 流通过')
+
+
+def test_runs_active_marking(monkeypatch, tmp_path):
+    """/api/runs：有 running evaluate 任务时，批次 ts ≥ 任务 started_at 的 run 标 active。"""
+    import json
+
+    import llmsec.server.dashboard_api as api
+    from llmsec.server.routers import data_query as dq
+    from llmsec.server.routers.tasks import TASKS
+
+    # 构造两个批次：旧批次（任务开始前）与新批次（任务进行中）
+    for ts, tgt in [("2026-08-10_100000", "modelA"), ("2026-08-11_150000", "modelB")]:
+        d = tmp_path / ts / tgt
+        d.mkdir(parents=True)
+        (d / "runner_report.json").write_text(json.dumps({
+            "target_model": tgt, "security_level": "safe",
+            "attack_phase": {"asr": 0.1}, "allergy": {}, "elo": {}}), encoding="utf-8")
+    monkeypatch.setattr(api, "RUNS_DIR", tmp_path)
+    dq._RUN_META_CACHE.clear()
+
+    tid = "evaluate-active-ut"
+    TASKS[tid] = {"kind": "evaluate", "status": "running",
+                  "started_at": "2026-08-11T14:59:00", "argv": [], "cmd": "",
+                  "returncode": None, "log_path": None, "log_file": None, "proc": None}
+    try:
+        r = client.get("/api/runs")
+        assert r.status_code == 200
+        by_name = {x["name"]: x for x in r.json()["runs"]}
+        assert by_name["2026-08-11_150000/modelB"].get("active") is True, "进行中新批次应标 active"
+        assert "active" not in by_name["2026-08-10_100000/modelA"], "旧批次不应标 active"
+    finally:
+        TASKS.pop(tid, None)
+
+    # 无运行任务 → 全部无 active
+    r = client.get("/api/runs")
+    assert all("active" not in x for x in r.json()["runs"]), "无运行任务时不应有 active 标注"
+    print("✅ /api/runs active 标注通过")
+
+
+def test_run_meta_cache_invalidation(monkeypatch, tmp_path):
+    """_run_meta：同目录覆写 runner_report.json（size 变）必须重读，不能吃目录 mtime 旧缓存。"""
+    import json
+
+    import llmsec.server.dashboard_api as api
+    from llmsec.server.routers import data_query as dq
+
+    run_dir = tmp_path / "2026-08-11_160000" / "modelC"
+    run_dir.mkdir(parents=True)
+    monkeypatch.setattr(api, "RUNS_DIR", tmp_path)
+    dq._RUN_META_CACHE.clear()
+
+    (run_dir / "runner_report.json").write_text(json.dumps({
+        "target_model": "modelC", "security_level": "safe", "attack_phase": {"asr": 0.10},
+        "allergy": {}, "elo": {}}), encoding="utf-8")
+    m1 = dq._run_meta(run_dir)
+    assert m1["asr"] == 0.10
+
+    # 覆写（内容更长 → size 变）：resume 续跑场景
+    (run_dir / "runner_report.json").write_text(json.dumps({
+        "target_model": "modelC", "security_level": "risky", "attack_phase": {"asr": 0.55},
+        "allergy": {}, "elo": {}}), encoding="utf-8")
+    m2 = dq._run_meta(run_dir)
+    assert m2["asr"] == 0.55 and m2["security_level"] == "risky", "覆写后缓存必须失效重读"
+    print("✅ _run_meta 缓存失效通过")
+
+
+def test_probe_includes_services(monkeypatch):
+    """/api/targets/probe：全量探活含 generator+judge；同端点复用 list；模型名不在列表 → warning。"""
+    from types import SimpleNamespace
+
+    import llmsec.core.config as cfg_mod
+    import llmsec.core.llm as llm_mod
+
+    monkeypatch.setattr(cfg_mod, "load_targets", lambda: {})
+    gen_cfg = SimpleNamespace(api_key="k", base_url="http://g/v1", model="gen-x")
+    judge_cfg = SimpleNamespace(api_key="k", base_url="http://g/v1", model="judge-y")
+    monkeypatch.setattr(cfg_mod.GeneratorConfig, "from_env", classmethod(lambda cls: gen_cfg))
+    monkeypatch.setattr(cfg_mod.JudgeConfig, "from_env", classmethod(lambda cls: judge_cfg))
+
+    calls = {"n": 0}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            calls["n"] += 1
+
+        class models:
+            @staticmethod
+            def list():
+                return [SimpleNamespace(id="gen-x")]  # judge-y 不在列表
+
+    monkeypatch.setattr(llm_mod, "create_openai_client", lambda *a, **k: FakeClient())
+
+    r = client.get("/api/targets/probe")
+    assert r.status_code == 200
+    d = r.json()
+    svcs = {s["name"]: s for s in d["services"]}
+    assert set(svcs) == {"generator", "judge"}, "services 应含 generator 与 judge"
+    assert svcs["generator"]["reachable"] is True
+    assert svcs["generator"]["warning"] is None, "gen-x 在列表 → 无 warning"
+    assert svcs["judge"]["warning"], "judge-y 不在列表 → 应有 warning"
+    assert calls["n"] == 1, "同端点应复用 models.list（只调一次）"
+    print("✅ /api/targets/probe services 通过")

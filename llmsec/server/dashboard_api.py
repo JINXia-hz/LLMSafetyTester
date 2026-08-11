@@ -40,8 +40,20 @@ STATIC_DIR = SERVER_DIR / "static"
 
 app = FastAPI(title="LLMSEC Dashboard")
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
+
+
+class _NoCacheStaticFiles(StaticFiles):
+    """静态资源一律 Cache-Control: no-cache（每次协商重校验，ETag/Last-Modified
+    仍让 304 足够便宜）——浏览器启发式缓存曾导致 JS 更新后必须 ctrl+F5 才生效。"""
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
 if STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.mount("/static", _NoCacheStaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 # ============================================================

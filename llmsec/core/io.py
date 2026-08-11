@@ -22,6 +22,8 @@ import json
 import logging
 import os
 import shutil
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -237,10 +239,21 @@ def save_artifact(path, obj, *, atomic: bool = True, backup: bool = False) -> No
         except OSError as e:
             logger.warning("备份 %s -> %s 失败: %s", path, bak, e)
     if atomic:
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        # P9：tmp 名加进程/线程唯一后缀——并发写同一 cache key 时两线程共用
+        # <path>.tmp 会互相截断/损坏；os.replace 成功后 tmp 已不存在，无需额外清理
+        tmp = Path(f"{path}.tmp.{os.getpid()}.{threading.get_ident()}")
         try:
             joblib.dump(obj, tmp)
-            os.replace(tmp, path)
+            # P9：Windows 上并发 replace 同一目标文件会抛 PermissionError（WinError 5，
+            # 目标被另一线程的 replace 瞬时占用），短重试即可；非并发原因重试后仍抛
+            for attempt in range(5):
+                try:
+                    os.replace(tmp, path)
+                    break
+                except PermissionError:
+                    if attempt == 4:
+                        raise
+                    time.sleep(0.05)
         except OSError:
             try:
                 tmp.unlink()

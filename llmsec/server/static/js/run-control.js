@@ -26,6 +26,7 @@ function selectTask(task) {
 // ---- HPO 配置台 ----
 let _hpoParamsLoaded = false;
 let hpoParamsCache = [];
+let targetsCache = [];  // .env TARGETS 目标清单（HPO "全部目标" 展开用）
 
 async function loadHpoParams() {
   try {
@@ -126,6 +127,7 @@ function collectHpoSpace() {
 }
 
 function collectHpoConfig() {
+  const selT = ($('hpoTarget') && $('hpoTarget').value) || '';
   return {
     name: ($('hpoName').value || '').trim() || `dash-${Date.now()}`,
     objective: { metric: $('hpoMetric').value, direction: $('hpoDir').value, aggregate: 'mean' },
@@ -133,6 +135,7 @@ function collectHpoConfig() {
     max_trials: intVal('hpoTrials', 12),
     max_wall_minutes: intVal('hpoWall', 0),
     repeats: intVal('hpoRepeats', 1),
+    targets: selT ? [selT] : targetsCache.map(t => t.name),
     fixed: { input: $('hpoInput').value },
     space: collectHpoSpace(),
     est_methods_per_trial: 50,
@@ -157,6 +160,7 @@ async function hpoPreview() {
 
 async function startHpo() {
   try {
+    if (!checkServicesBeforeStart()) return;
     const cfg = collectHpoConfig();
     const res = await fetch('/api/run/hpo', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg),
@@ -177,13 +181,15 @@ function openAddTarget() {
 function closeAddTarget() { $('addTargetModal').classList.add('hidden'); }
 
 // ---- 目标探活缓存 ----
-let probeCache = {};  // {name: {reachable, latency_ms, error}}
+let probeCache = {};  // {name: {reachable, latency_ms, error}}（目标模型）
+let serviceProbeCache = {};  // {generator: {...}, judge: {...}}（全模型探活）
 
 async function refreshProbeCache(targetName) {
   try {
     const url = targetName ? `/api/targets/probe?name=${encodeURIComponent(targetName)}` : '/api/targets/probe';
     const d = await api(url);
     (d.targets || []).forEach(t => { probeCache[t.name] = t; });
+    (d.services || []).forEach(s => { serviceProbeCache[s.name] = s; });
     updateProbeUI();
   } catch { /* 静默：探活失败不阻塞 */ }
 }
@@ -191,23 +197,42 @@ async function refreshProbeCache(targetName) {
 function updateProbeUI() {
   const tsel = $('evalTarget');
   const hint = $('probeHint');
-  if (!tsel) return;
-  // 更新下拉项灰显
-  [...tsel.options].forEach(opt => {
-    if (!opt.value) return; // 跳过"全部目标"
-    const info = probeCache[opt.value];
-    if (info && !info.reachable) {
-      opt.textContent = `⚠ ${opt.value}（不可通）`;
-      opt.disabled = true;
-      opt.title = info.error || '连接失败';
+  // 更新下拉项灰显（评估与 HPO 两个目标下拉共用探活结果）
+  [tsel, $('hpoTarget')].filter(Boolean).forEach(sel => {
+    [...sel.options].forEach(opt => {
+      if (!opt.value) return; // 跳过"全部目标"
+      const info = probeCache[opt.value];
+      if (info && !info.reachable) {
+        opt.textContent = `⚠ ${opt.value}（不可通）`;
+        opt.disabled = true;
+        opt.title = info.error || '连接失败';
+      } else {
+        opt.textContent = opt.value;
+        opt.disabled = false;
+        opt.title = '';
+      }
+    });
+    // 当前选中被禁用时回退
+    if (sel.selectedOptions[0] && sel.selectedOptions[0].disabled) sel.value = '';
+  });
+  // generator / judge 探活状态行（连接配置表单 + 启动保护共用 serviceProbeCache）
+  const svcRows = { generator: $('envGProbe'), judge: $('envJProbe') };
+  Object.entries(svcRows).forEach(([svc, el]) => {
+    if (!el) return;
+    const info = serviceProbeCache[svc];
+    if (!info) { el.textContent = ''; return; }
+    if (!info.reachable) {
+      el.textContent = `✗ 不可达：${info.error || '连接失败'}`;
+      el.style.color = 'var(--c-warn)';
+    } else if (info.warning) {
+      el.textContent = `⚠ ${info.warning}`;
+      el.style.color = 'var(--c-warn)';
     } else {
-      opt.textContent = opt.value;
-      opt.disabled = false;
-      opt.title = '';
+      el.textContent = `✓ 可达 ${info.latency_ms}ms（${info.model}）`;
+      el.style.color = 'var(--c-safe)';
     }
   });
-  // 当前选中被禁用时回退
-  if (tsel.selectedOptions[0] && tsel.selectedOptions[0].disabled) tsel.value = '';
+  if (!tsel) return;
   // 统计可达数 + 提示
   if (hint) {
     const all = Object.keys(probeCache);
@@ -282,8 +307,8 @@ async function saveEnv() {
     if (!res.ok) throw new Error(d.detail || res.statusText);
     setStatus(`环境配置已保存（${(d.updated || []).join(', ')}）`);
     loadEnv();  // 刷新掩码
-    // 若改了 TARGET_* → 重新探活（legacy 单目标可能变了）
-    if ((d.updated || []).some(k => k.startsWith('TARGET_'))) {
+    // 改了 TARGET_*/GENERATOR_*/JUDGE_* 任一组 → 重新全量探活（目标下拉 + 服务状态行一起刷新）
+    if ((d.updated || []).some(k => /^(TARGET_|GENERATOR_|JUDGE_)/.test(k))) {
       refreshProbeCache();
     }
   } catch (e) { setStatus('环境配置保存失败: ' + e.message); }
@@ -318,10 +343,11 @@ async function loadRunSection() {
     // 环境参数配置（右卡）每次刷新（值可能被保存更新）
     loadEnv();
     // 目标模型下拉（单选，来自 .env TARGETS）
+    targetsCache = tgts.targets || [];
     const tsel = $('evalTarget');
     if (tsel) {
       tsel.innerHTML = '<option value="">全部目标（多模型扫描）</option>';
-      (tgts.targets || []).forEach(t => {
+      targetsCache.forEach(t => {
         const opt = document.createElement('option');
         opt.value = t.name; opt.textContent = t.name;
         tsel.appendChild(opt);
@@ -329,6 +355,16 @@ async function loadRunSection() {
       tsel.addEventListener('change', updateProbeUI);
       // 后台探查可通性（不阻塞 UI）
       refreshProbeCache();
+    }
+    // HPO 配置台的目标下拉同步填充
+    const hpoTsel = $('hpoTarget');
+    if (hpoTsel) {
+      hpoTsel.innerHTML = '<option value="">全部目标（多目标均值）</option>';
+      targetsCache.forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = t.name; opt.textContent = t.name;
+        hpoTsel.appendChild(opt);
+      });
     }
     await loadTasks();
   } catch (e) { setStatus('运行控制加载失败: ' + e.message); }
@@ -404,16 +440,35 @@ function stopWatchTask(taskId) {
 // Fix 1: 自适应轮询——仅在存在运行中任务时才 2s 刷 taskList，无任务时停止
 // （原无条件 setInterval 在任务结束后仍持续重建 DOM，是"停止后仍刷新"的主因）
 let taskPollTimer = null;
+let _taskPollTick = 0;
 function startTaskPolling() {
   if (taskPollTimer) return;
-  taskPollTimer = setInterval(() => { if (activeSection === 'run') loadTasks(); }, 2000);
+  taskPollTimer = setInterval(() => {
+    if (activeSection !== 'run') return;
+    loadTasks();
+    // 每 5 拍（10s）同步一次批次下拉：运行中新落盘的目标报告自动出现（⏳ 进行中）
+    if (++_taskPollTick % 5 === 0) loadRuns();
+  }, 2000);
 }
 function stopTaskPolling() {
   if (taskPollTimer) { clearInterval(taskPollTimer); taskPollTimer = null; }
 }
 
+// 启动前服务探活保护：generator/judge 不可达时 confirm 拦截（防白跑）；未探到不拦截
+function checkServicesBeforeStart() {
+  const labels = { generator: '生成模型', judge: 'Judge 模型' };
+  for (const [svc, label] of Object.entries(labels)) {
+    const info = serviceProbeCache[svc];
+    if (info && !info.reachable) {
+      if (!confirm(`⚠ ${label}探活不可达（${info.error || '连接失败'}），继续将大概率全部失败白跑。\n仍要启动吗？`)) return false;
+    }
+  }
+  return true;
+}
+
 async function startEvaluate() {
   try {
+    if (!checkServicesBeforeStart()) return;
     const target = ($('evalTarget') && $('evalTarget').value) || null;
     const body = {
       phase: $('evalPhase').value,
@@ -582,7 +637,7 @@ const progressState = {};
 function _newProgressState(kind) {
   return { kind, running: false, seeded: false, maxRounds: null,
            order: [], targets: {}, done: new Set(), activeTarget: null, hpo: null,
-           hist: {}, dispPct: {} };
+           hpoTrials: [], hist: {}, dispPct: {} };
 }
 
 function _mergeSnapshot(st, d) {
@@ -590,6 +645,7 @@ function _mergeSnapshot(st, d) {
   st.maxRounds = d.max_rounds || st.maxRounds;
   if (d.kind === 'hpo') {
     st.hpo = d.progress || null;
+    st.hpoTrials = d.trials || [];
   } else {
     (d.targets || []).forEach(tg => { if (!st.order.includes(tg)) st.order.push(tg); });
     Object.entries(d.progress || {}).forEach(([tg, rec]) => {
@@ -634,7 +690,19 @@ async function fetchAndApplyProgress(taskId) {
 function applyProgress(taskId, rec) {
   const st = progressState[taskId] || (progressState[taskId] = _newProgressState('evaluate'));
   st.seeded = true;
-  if (rec.phase === 'hpo') { st.kind = 'hpo'; st.hpo = rec; renderProgressBox(taskId); return; }
+  if (rec.phase === 'hpo') {
+    st.kind = 'hpo';
+    st.hpo = rec;
+    // 逐 trial 明细累积（按 target+seed+params+计数去重，防 SSE 与轮询双通道重复），封顶 30 条
+    if (rec.last && rec.last.target) {
+      const dup = st.hpoTrials.some(t => t.target === rec.last.target && t.seed === rec.last.seed
+        && JSON.stringify(t.params) === JSON.stringify(rec.last.params) && t._n === rec.trial_done);
+      if (!dup) st.hpoTrials.push(Object.assign({ _n: rec.trial_done }, rec.last));
+      if (st.hpoTrials.length > 30) st.hpoTrials = st.hpoTrials.slice(-30);
+    }
+    renderProgressBox(taskId);
+    return;
+  }
   const tg = rec.target;
   if (tg) {
     if (!st.order.includes(tg)) st.order.push(tg);
@@ -672,7 +740,10 @@ function recomputeEvalState(st) {
 
 function _progSig(st) {
   // 进度表内容指纹：未变则跳过重建（防 2s 轮询反复重建导致进度条从 0 重绘闪烁）
-  if (st.kind === 'hpo') return 'hpo:' + JSON.stringify(st.hpo || {});
+  if (st.kind === 'hpo') {
+    const lt = st.hpoTrials.length ? st.hpoTrials[st.hpoTrials.length - 1] : null;
+    return 'hpo:' + JSON.stringify(st.hpo || {}) + '|' + st.hpoTrials.length + '|' + JSON.stringify(lt || {});
+  }
   return 'ev:' + (st.maxRounds ?? '') + '|' + st.order.map(tg => {
     const r = st.targets[tg] || {};
     return tg + ':' + [r.round ?? '', r.elo ?? '', r.delta ?? '', r.ci_half ?? '',
@@ -707,7 +778,7 @@ function renderProgressBox(taskId) {
   // 真·终端窗口：标题栏（主题色圆点 + 任务标题）+ 主体（每目标一行）
   const title = esc(taskLabel(st.kind)) + ' · ' + esc(taskId.split('-').pop());
   const bodyHtml = st.kind === 'hpo'
-    ? renderHpoLine(st.hpo)
+    ? renderHpoBox(st)
     : st.order.map(tg => renderTargetRow(tg, st.targets[tg], st)).join('');
   box.innerHTML =
     '<div class="term-header"><span class="term-dots"><i></i><i></i><i></i></span>' +
@@ -793,9 +864,12 @@ function renderTargetRow(tg, rec, st) {
   const has = !!rec && rec.round != null;
   const isDone = st.done.has(tg);
   const isActive = st.activeTarget === tg && !isDone;
-  const cls = isActive ? 'prog-line pg-active' : 'prog-line pg-idle';
-  const mark = isActive ? '<span class="pg-mark">▶</span> ' : '  ';
-  const name = esc(tg).padEnd(14);
+  // 终端拟真：active ❯ 描金提示符 + 行尾闪烁块光标；done ✓ 石绿整行压暗；idle ❯ 暗色
+  const cls = isDone ? 'prog-line pg-done' : (isActive ? 'prog-line pg-active' : 'prog-line pg-idle');
+  const mark = isDone ? '<span class="pg-done-mark">✓</span> '
+    : (isActive ? '<span class="pg-mark">❯</span> ' : '<span class="pg-mark-idle">❯</span> ');
+  const cursor = isActive ? ' <span class="pg-cursor">▋</span>' : '';
+  const name = esc(tg).padEnd(14) + ' ';   // 尾部兜底空格：名字超 14 字符时不与后文粘连
   if (!has) {
     return `<div class="${cls}">${mark}${name}等待中</div>`;
   }
@@ -810,25 +884,66 @@ function renderTargetRow(tg, rec, st) {
   const pct = (st.dispPct && st.dispPct[tg] != null) ? st.dispPct[tg] : 0;
   let tail;
   if (isDone) {
-    tail = `<span class="pg-status">${rec.converged ? '已收敛' : '完成'}</span>`;
+    tail = `<span class="pg-status-done">${rec.converged ? '已收敛' : '完成'}</span>`;
   } else {
     tail = `<span class="pg-bar-txt">${_textBar(pct)}</span> ${pct}%`;
   }
   const statusTxt = isActive ? ' <span class="pg-status">运行中</span>' : '';
-  return `<div class="${cls}">${mark}${name}${roundTxt}  ELO ${fmtNum(rec.elo, 0)}${deltaTxt}  CI${ciTxt}  ${tail}${statusTxt}</div>`;
+  return `<div class="${cls}">${mark}${name}${roundTxt}  ELO ${fmtNum(rec.elo, 0)}${deltaTxt}  CI${ciTxt}  ${tail}${statusTxt}${cursor}</div>`;
 }
 
-function renderHpoLine(rec) {
-  if (!rec) return '<div class="prog-line pg-idle">HPO 搜索准备中</div>';
+// HPO 直播：汇总行 + 盲文进度条 + 目标值 sparkline + 最近 trial 流水
+function renderHpoBox(st) {
+  const rec = st.hpo;
+  if (!rec) return '<div class="prog-line pg-idle"><span class="pg-mark-idle">❯</span> HPO 搜索准备中</div>';
   const tDone = rec.trial_done ?? 0;
   const tTot = rec.trial_total_est ?? '?';
   const cDone = rec.configs_done ?? 0;
   const cTot = rec.configs_total ?? '?';
   const pct = (typeof cTot === 'number' && cTot > 0) ? Math.round(cDone / cTot * 100) : 0;
+  const dirArrow = rec.direction === 'maximize' ? '↑' : '↓';
   let best = '';
-  if (rec.best_metric != null) best = `  best ${esc(rec.metric_name || '')}=${fmtNum(rec.best_metric, 3)}`;
-  return `<div class="prog-line pg-active"><span class="pg-mark">▶</span> HPO  trial ${tDone}/${tTot}  config ${cDone}/${cTot}${best}</div>
-<div class="prog-line pg-active">    <span class="pg-bar-txt">${_textBar(pct)}</span> ${pct}%</div>`;
+  if (rec.best_metric != null) {
+    best = ` · 最佳 ${esc(rec.metric_name || '')}=${fmtNum(rec.best_metric, 3)} <span class="pg-dim">(${dirArrow}更佳)</span>`;
+  }
+  const lines = [
+    `<div class="prog-line pg-active"><span class="pg-mark">❯</span> config ${cDone}/${cTot} · trial ${tDone}/${tTot}${best}</div>`,
+    `<div class="prog-line pg-active">    <span class="pg-bar-txt">${_textBar(pct)}</span> ${pct}% <span class="pg-cursor">▋</span></div>`,
+  ];
+  const trials = st.hpoTrials || [];
+  // 目标值 sparkline：成功 trial 的 value 归一化到 ▁▂▃▄▅▆▇█，最优值字符描金
+  const okTrials = trials.filter(t => t.status === 'success' && typeof t.value === 'number' && isFinite(t.value));
+  if (okTrials.length >= 2) {
+    const vals = okTrials.map(t => t.value);
+    const lo = Math.min(...vals), hi = Math.max(...vals);
+    const bestVal = rec.direction === 'maximize' ? hi : lo;
+    const chars = '▁▂▃▄▅▆▇█';
+    const spark = okTrials.map(t => {
+      const lvl = hi === lo ? 3 : Math.round((t.value - lo) / (hi - lo) * 7);
+      const ch = chars[Math.max(0, Math.min(7, lvl))];
+      return t.value === bestVal ? `<span class="pg-bf">${ch}</span>` : ch;
+    }).join('');
+    lines.push(`<div class="prog-line pg-active">    <span class="pg-dim">趋势</span> <span class="pg-spark">${spark}</span></div>`);
+  }
+  // 最近 trial 流水（末 4 条，新在下）：✓ 成功带目标值，✗ 失败带状态；参数紧凑展示
+  const fmtParams = p => {
+    if (!p || typeof p !== 'object') return '';
+    const ents = Object.entries(p);
+    const shown = ents.slice(0, 3).map(([k, v]) =>
+      `${k}=${typeof v === 'number' ? fmtNum(v, 2) : v}`).join(' ');
+    return `⟨${shown}${ents.length > 3 ? ` +${ents.length - 3}` : ''}⟩`;
+  };
+  trials.slice(-4).forEach(t => {
+    const who = esc(String(t.target)).padEnd(14) + ' ';
+    const tag = `s${t.seed ?? 0}`;
+    if (t.status === 'success') {
+      const valTxt = typeof t.value === 'number' ? `${esc(rec.metric_name || '')}=${fmtNum(t.value, 2)}` : '—';
+      lines.push(`<div class="prog-line pg-done"><span class="pg-done-mark">✓</span> ${who}${tag}  ${valTxt}  <span class="pg-dim">${esc(fmtParams(t.params))}</span></div>`);
+    } else {
+      lines.push(`<div class="prog-line pg-idle"><span class="pg-trialfail">✗</span> ${who}${tag}  <span class="pg-trialfail">${esc(t.status || 'failed')}</span>  <span class="pg-dim">${esc(fmtParams(t.params))}</span></div>`);
+    }
+  });
+  return lines.join('');
 }
 
 async function loadTasks() {
@@ -840,7 +955,10 @@ async function loadTasks() {
 
     if (!data.tasks.length) {
       if (!wrap.querySelector('[data-empty]')) {
-        wrap.innerHTML = '<span data-empty style="color: var(--c-muted);">暂无任务</span>';
+        wrap.innerHTML = '<div data-empty class="empty-state">' +
+          '<svg class="empty-medal" viewBox="0 0 100 100" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.2"><rect x="12" y="12" width="76" height="76"/><rect x="24" y="24" width="52" height="52" transform="rotate(45 50 50)"/><rect x="33" y="33" width="34" height="34"/><circle cx="50" cy="50" r="10"/></g></svg>' +
+          '<div class="empty-title">暂无任务</div>' +
+          '<div class="empty-sub">在上方选择任务类型，完成配置后启动</div></div>';
       }
       [...taskStreams.keys()].forEach(id => closeTaskStream(id));
       [...watchTimers.keys()].forEach(id => stopWatchTask(id));

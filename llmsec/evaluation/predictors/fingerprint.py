@@ -17,6 +17,7 @@ per-seed Elo 向量即该模型的"防御指纹"。两模型指纹的相关系�
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -69,25 +70,31 @@ def load_probes(path: Path | str | None = None) -> dict:
     return {}
 
 
+# P9：save_probe 的 read-modify-write 无锁时，并发目标（线程）会互相覆盖指纹。
+# 模块级锁保证同进程线程安全（本次运行是线程并发）；跨进程并发写仍有竞争风险。
+_save_lock = threading.Lock()
+
+
 def save_probe(
     model: str,
     fingerprint: dict,
     seed_methods: list[str],
     path: Path | str | None = None,
 ) -> None:
-    """原子合并：追加/更新一个模型的指纹到 probes.json。"""
+    """原子合并：追加/更新一个模型的指纹到 probes.json（同进程线程安全）。"""
     from llmsec.core.io import write_json
 
     p = Path(path) if path else PROBES_FILE
-    models = load_probes(p)
-    models[model] = {
-        "fingerprint": {m: round(float(e), 2) for m, e in fingerprint.items()},
-        "seed_methods": list(seed_methods),
-        "n": len(fingerprint),
-        "computed_at": datetime.now().isoformat(),
-    }
-    p.parent.mkdir(parents=True, exist_ok=True)
-    write_json(p, {"version": 1, "models": models})
+    with _save_lock:
+        models = load_probes(p)
+        models[model] = {
+            "fingerprint": {m: round(float(e), 2) for m, e in fingerprint.items()},
+            "seed_methods": list(seed_methods),
+            "n": len(fingerprint),
+            "computed_at": datetime.now().isoformat(),
+        }
+        p.parent.mkdir(parents=True, exist_ok=True)
+        write_json(p, {"version": 1, "models": models})
 
 
 def donor_similarities(

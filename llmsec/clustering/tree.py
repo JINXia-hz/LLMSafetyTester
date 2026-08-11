@@ -5,7 +5,7 @@
 对任意 scipy 兼容 linkage 树（Ward / HDBSCAN single_linkage_tree_ 均可）：
 1. 候选 k 以 log 增长的 k0 = ceil(log2(n)) 为中心取 log 间隔点
 2. 每个 k 从同一棵树 fcluster 切出，计算 轮廓系数 / Calinski-Harabasz(方差比) / DB 指数
-3. 归一化合成 S(k)，全局 argmax 选关键层；边界仍上升时标注 k 可能低估
+3. 归一化合成 S(k)，全局 argmax 选关键层；边界仍上升时自动外扩候选重 sweep（P8），扩满仍上升才标注 k 可能低估
 4. 保留 top-3 k 作为前端树图缩放的预设停点
 
 聚类主流程见 llmsec.clustering.hdb（HDBSCAN）。
@@ -99,25 +99,13 @@ def _evaluate_cut(coords: np.ndarray, labels: dict[str, int], methods: list[str]
     }
 
 
-def sweep_candidates(
-    coords: np.ndarray,
-    Z: np.ndarray,
-    methods: list[str],
-    ks: list[int] | None = None,
-) -> list[dict]:
-    """
-    对每个候选 k 切树并评估三指标，归一化后合成 score。
-    返回按 k 升序的 [{"k", "silhouette", "calinski_harabasz", "davies_bouldin", "score"}]。
-    """
-    if ks is None:
-        ks = candidate_ks(len(methods))
-    entries = []
-    for k in ks:
-        labels = cut_tree(Z, methods, k)
-        metrics = _evaluate_cut(coords, labels, methods)
-        entries.append({"k": k, **metrics})
+# P8：argmax 顶到最大候选且末尾仍上升时，自动向外扩展候选的次数上限（防无限扩展）
+_MAX_K_EXPANSIONS = 2
 
-    # 归一化：轮廓/CH 越高越好，DB 越低越好（取反）
+
+def _assign_scores(entries: list[dict]) -> None:
+    """归一化三指标并合成 score 写回 entries：轮廓/CH 越高越好，DB 越低越好（取反）。"""
+
     def _norm(key, invert=False):
         vals = np.array([e[key] for e in entries], dtype=float)
         # F-2 修复：钳位非有限值（inf/nan），防止 (inf-lo)/(hi-lo) 产生 NaN 污染 score
@@ -135,6 +123,73 @@ def sweep_candidates(
     nd = _norm("davies_bouldin", invert=True)
     for i, e in enumerate(entries):
         e["score"] = round((ns[i] + nc[i] + nd[i]) / 3.0, 4)
+
+
+def _argmax_boundary_rising(entries: list[dict]) -> bool:
+    """argmax 落在最大候选且末尾仍在快速上升（与 select_knee 的边界判定同口径）。"""
+    if len(entries) < 2:
+        return False
+    scores = np.array([e["score"] for e in entries], dtype=float)
+    if int(np.argmax(scores)) != len(entries) - 1:
+        return False
+    deltas = np.diff(scores)
+    return bool(
+        deltas.size
+        and float(deltas.max()) > 0
+        and float(deltas[-1]) > KNEE_FLATTEN_RATIO * float(deltas.max())
+    )
+
+
+def sweep_candidates(
+    coords: np.ndarray,
+    Z: np.ndarray,
+    methods: list[str],
+    ks: list[int] | None = None,
+    max_expansions: int = _MAX_K_EXPANSIONS,
+) -> list[dict]:
+    """
+    对每个候选 k 切树并评估三指标，归一化后合成 score。
+    返回按 k 升序的 [{"k", "silhouette", "calinski_harabasz", "davies_bouldin", "score"}]。
+
+    P8：argmax 落在最大候选且末尾仍在上升时，自动向外扩展候选重 sweep——
+    每次把 hi ×1.5（上限 max(n//5, 2*k0)，且 ≤ n-1），最多 max_expansions 次，
+    避免候选范围偏窄把 k* 截断在边界；扩满仍上升由 select_knee 标注 k 可能低估。
+    """
+    if ks is None:
+        ks = candidate_ks(len(methods))
+    n = len(methods)
+    entries: list[dict] = []
+    evaluated: set[int] = set()
+    pending = sorted(set(ks))
+    expansions = 0
+    while pending:
+        for k in pending:
+            labels = cut_tree(Z, methods, k)
+            metrics = _evaluate_cut(coords, labels, methods)
+            entries.append({"k": k, **metrics})
+            evaluated.add(k)
+        entries.sort(key=lambda e: e["k"])
+        _assign_scores(entries)
+        if expansions >= max_expansions or not _argmax_boundary_rising(entries):
+            break
+        hi = entries[-1]["k"]
+        cap = min(n - 1, max(n // 5, 2 * log_growth_k0(n)))
+        new_hi = min(int(hi * 1.5), cap)
+        if new_hi <= hi:
+            break
+        num = min(4, new_hi - hi)
+        pending = sorted(
+            k
+            for k in {int(round(v)) for v in np.geomspace(hi + 1, new_hi, num=num)}
+            if k not in evaluated and hi < k <= n - 1
+        )
+        if not pending:
+            break
+        expansions += 1
+        logger.info(
+            "auto-k: 最大候选 k=%d 处得分仍在上升，候选向外扩展至 k=%d（第 %d 次扩展）",
+            hi, new_hi, expansions,
+        )
     return entries
 
 

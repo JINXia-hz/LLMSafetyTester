@@ -324,6 +324,8 @@ class BlendPredictor:
         """预测器依赖 (R 内容 + 方法清单 + features 结构 + 探针指纹) 的指纹——四者不变才可复用。
 
         发现层：sim-加权 unified 依赖各模型指纹（probes.json），指纹变 → 缓存失效。
+        键内嵌模型 schema 版本段（blend_v2_）：EloPredictorModel 结构变更时升版本，
+        旧 pkl 反序列化会缺属性，直接让其 miss 重训而非兼容。
         """
         # R 内容指纹：每模型列的 (method, score, ts)——M-37 复用 ResultsMatrix.column_payload
         parts = []
@@ -345,7 +347,9 @@ class BlendPredictor:
             probe_fp = hashlib.md5(probe_payload.encode("utf-8")).hexdigest()[:8]
         except Exception:
             probe_fp = "noprobes"
-        return f"blend_{r_fp[:12]}_{cat_fp[:8]}_{feat_fp[:8]}_{probe_fp}"
+        # v2：EloPredictorModel 新增 no_signal 属性，旧缓存反序列化后 predict 会
+        # AttributeError——键加版本盐让旧 pkl 静默 miss 重训，不加 getattr 兜底
+        return f"blend_v2_{r_fp[:12]}_{cat_fp[:8]}_{feat_fp[:8]}_{probe_fp}"
 
     def save(self, path) -> None:
         save_artifact(path, {

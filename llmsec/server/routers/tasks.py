@@ -340,6 +340,8 @@ async def api_task_progress(task_id: str):
         return {
             "kind": "hpo", "status": status,
             "progress": records[-1] if records else {},
+            # 逐 trial 明细（供轮询兜底/中途打开页面重建历史；无 last 的旧记录跳过）
+            "trials": [r["last"] for r in records if r.get("last")][-30:],
         }
 
     # evaluate：每目标取最后一条；用 argv 补齐未启动目标的占位

@@ -39,6 +39,8 @@ class EloPredictorModel:
     - 贝叶斯解释：Ridge 等价于高斯先验的 MAP；
       预测均值 E = y_mean + X_test @ w，预测方差 σ²_噪声 · (1 + diag(X_test (X^T X + λI)^(-1) X_test^T))。
       σ²_噪声 用自由度修正的 in-sample 残差 RSS/(n−df_eff) 估计（M1：避免 CV-MSE 双重计数）。
+      P6：λ* 顶到候选网格上限（no_signal）时特征无信号、预测≈y_mean，predict 的方差
+      下限提到 GT 边际方差 y_std²，下游 confidence 随之降级。
     """
 
     BLOCK_ORDER = ("textual", "embedding", "technique", "intent", "prior")
@@ -72,6 +74,9 @@ class EloPredictorModel:
         self.fit_count: int = 0
         # OOS 预测（λ* 下逐折留出，键=ground_truth 方法名）——供 BlendPredictor 估计层间残差协方差（#3）
         self.oos_by_key_: dict[str, float] = {}
+        # P6：λ* 顶到候选网格上限 = 方法特征对 Elo 基本无信号、模型退化为均值预测，
+        # predict 时方差下限提到 GT 边际方差以降级置信度（残差 σ² 在强正则下趋小，会给出假高置信度）
+        self.no_signal: bool = False
 
     @classmethod
     def features_to_matrix(
@@ -313,6 +318,17 @@ class EloPredictorModel:
         XTX = X_scaled.T @ X_scaled
         self.xtx_inv = np.linalg.inv(XTX + self.lambda_opt * np.eye(XTX.shape[0]))
 
+        # P6：λ* 顶到候选网格上限 = 方法特征对 Elo 基本无信号，模型退化为均值预测。
+        # 打标供 predict 降级置信度；快速通道复用顶格 λ 时同样成立（无信号未改善）。
+        # 不扩 λ 网格：无信号时更大的 λ 只是更贵地得到均值
+        self.no_signal = bool(self.lambda_opt >= float(np.max(self.lambda_candidates)))
+        if self.no_signal:
+            logger.warning(
+                "λ*=%.4g 顶到候选网格上限：方法特征对 Elo 基本无信号，"
+                "模型退化为均值预测 (df=%.1f/%d)，预测置信度按边际方差降级",
+                self.lambda_opt, self.effective_df, X_scaled.shape[1],
+            )
+
         self.fit_count += 1
         logger.info(
             "EloPredictorModel 训练完成: n=%d, λ*=%.4f, σ²=%.2f, df=%.1f/%d",
@@ -359,7 +375,11 @@ class EloPredictorModel:
 
         means = self.y_mean + X_scaled @ self.w
         # 预测方差 = 不可约噪声 σ² + 参数不确定 σ²·x'(XᵀX+λI)⁻¹x
-        variances = self.sigma2 * (
+        # P6：λ* 顶格（no_signal）时 w≈0、预测≈y_mean，强正则下残差 σ² 趋小，
+        # 不能反映"只会猜均值"的真实不确定性——方差下限提到 GT 边际方差 y_std²，
+        # 下游 confidence=1/(1+std/200)（cold_start）与 blend 的 std 权重随之降级
+        noise2 = max(self.sigma2, self.y_std ** 2) if self.no_signal else self.sigma2
+        variances = noise2 * (
             1.0 + np.sum((X_scaled @ self.xtx_inv) * X_scaled, axis=1)
         )
         return means, variances

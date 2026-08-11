@@ -168,26 +168,29 @@ def _run_summary(run_dir: Path) -> dict | None:
     }
 
 
-# /api/runs 富化缓存：按 (run 名, 目录 mtime) 失效，避免每次下拉都重解析报告
-_RUN_META_CACHE: dict[str, tuple[float, dict]] = {}
+# /api/runs 富化缓存：按 (run 名, 报告文件 mtime+size) 失效，避免每次下拉都重解析报告。
+# 注意不能用目录 mtime：resume 续跑覆写已有 runner_report.json 时目录 mtime 不变，会吃旧缓存。
+_RUN_META_CACHE: dict[str, tuple[tuple[float, int] | None, dict]] = {}
 
 
 def _run_meta(run_dir: Path) -> dict:
-    """批次富化信息（target_model/security_level/asr），按目录 mtime 缓存。"""
+    """批次富化信息（target_model/security_level/asr），按报告文件 (mtime,size) 缓存。"""
     from llmsec.server.dashboard_api import RUNS_DIR
     try:
         name = str(run_dir.relative_to(RUNS_DIR)).replace("\\", "/")
     except ValueError:
         name = run_dir.name
+    report_path = run_dir / "runner_report.json"
     try:
-        mtime = run_dir.stat().st_mtime
+        st = report_path.stat()
+        sig: tuple[float, int] | None = (st.st_mtime, st.st_size)
     except OSError:
-        return {}
+        sig = None
     cached = _RUN_META_CACHE.get(name)
-    if cached and cached[0] == mtime:
+    if cached and cached[0] == sig:
         return cached[1]
     meta: dict = {}
-    if (run_dir / "runner_report.json").exists():
+    if sig is not None:
         summ = _run_summary(run_dir)
         if summ:
             meta = {
@@ -195,7 +198,7 @@ def _run_meta(run_dir: Path) -> dict:
                 "security_level": summ["level"],
                 "asr": summ["asr"],
             }
-    _RUN_META_CACHE[name] = (mtime, meta)
+    _RUN_META_CACHE[name] = (sig, meta)
     return meta
 
 
@@ -294,7 +297,18 @@ def _load_tree_artifacts() -> dict | None:
 async def api_runs():
     runs_dir = _runs_dir()
     runs = _discover_runs()
+    # 进行中标注：有 evaluate 任务在跑时，批次 ts ≥ 任务 started_at 的 run 标 active，
+    # 前端据此渲染 ⏳（多目标运行时先完成的目标报告已落盘，需与"已完成"区分）
+    from llmsec.server.routers.tasks import TASKS
+    active_since: str | None = None
+    for t in TASKS.values():
+        if t.get("kind") == "evaluate" and t.get("status") in ("running", "queued"):
+            ts = (t.get("started_at") or "")[:19].replace("T", "_").replace(":", "")
+            if ts and (active_since is None or ts < active_since):
+                active_since = ts
     for r in runs:
+        if active_since and r.get("batch", "") >= active_since:
+            r["active"] = True
         # 富化：带报告的批次附 target_model/security_level/asr，
         # 供批次下拉渲染成"带等级印章的列表"（安/警/伤小方印排在批次名前）
         if r.get("has_report"):
@@ -877,31 +891,45 @@ async def api_env_put(req: EnvUpdate):
 
 @router.get("/api/targets/probe")
 async def api_targets_probe(name: str | None = None):
-    """探查目标模型的 API 可通性。
+    """探查全部模型的 API 可通性：目标模型 + generator + judge。
 
-    ?name=xxx 时只探单个目标（用于添加/编辑后即时反馈）。
+    ?name=xxx 时只探单个目标（用于添加/编辑后即时反馈），不探 services。
     对每个目标发送最轻量请求（OpenAI models.list 或 HTTP GET），5s 超时。
-    返回 [{name, model, reachable, latency_ms, error}]。
+    models.list 非空时顺带校验配置模型名是否在列表（不在 → warning，不判不可达：
+    部分端点 list 不全）。
+    返回 {targets: [...], services: [...]}，条目 {name, model, reachable, latency_ms, error, warning}。
     api_key / base_url 绝不出后端。
     """
     import time
 
-    from llmsec.core.config import load_targets, target_backend
+    from llmsec.core.config import (
+        GeneratorConfig,
+        JudgeConfig,
+        load_targets,
+        target_backend,
+    )
     from llmsec.core.llm import create_openai_client
 
     try:
         targets_cfg = load_targets()
     except Exception:
-        return {"targets": []}
+        return {"targets": [], "services": []}
 
     if name:
         targets_cfg = {k: v for k, v in targets_cfg.items() if k == name}
+
+    def _model_warning(model_ids: list[str] | None, model: str) -> str | None:
+        """models.list 非空且配置模型不在其中 → warning（不判不可达）。"""
+        if model_ids and model and model not in model_ids:
+            return f"模型 {model} 不在端点列表"
+        return None
 
     async def _probe_one(name, cfg):
         backend = target_backend(name)
 
         def _do():
             t0 = time.time()
+            ids = None
             if backend == "pcap_judge":
                 # pcap judge 不是 OpenAI 兼容 API，用 HTTP GET 探通
                 import requests
@@ -912,16 +940,48 @@ async def api_targets_probe(name: str | None = None):
             else:
                 # OpenAI 兼容：models.list() 是最轻量 GET，不消耗 token
                 client = create_openai_client(cfg.api_key, cfg.base_url, timeout=5.0)
-                client.models.list()
-            return round((time.time() - t0) * 1000)
+                ids = [m.id for m in client.models.list()]
+            return round((time.time() - t0) * 1000), ids
 
         try:
-            latency = await asyncio.to_thread(_do)
+            latency, ids = await asyncio.to_thread(_do)
             return {"name": name, "model": cfg.model, "reachable": True,
-                    "latency_ms": latency, "error": None}
+                    "latency_ms": latency, "error": None,
+                    "warning": _model_warning(ids, cfg.model)}
         except Exception as e:
             return {"name": name, "model": cfg.model, "reachable": False,
-                    "latency_ms": None, "error": str(e)[:120]}
+                    "latency_ms": None, "error": str(e)[:120], "warning": None}
+
+    async def _probe_service(svc_name: str, cfg, shared: dict):
+        """generator / judge 探活；与已探端点同 base_url 时复用其 models.list 结果（省一次调用）。"""
+        key = (cfg.base_url or "", cfg.api_key or "")
+        if key in shared:
+            latency, ids, err = shared[key]
+        else:
+            def _do():
+                t0 = time.time()
+                client = create_openai_client(cfg.api_key, cfg.base_url, timeout=5.0)
+                ids = [m.id for m in client.models.list()]
+                return round((time.time() - t0) * 1000), ids
+            try:
+                latency, ids = await asyncio.to_thread(_do)
+                err = None
+            except Exception as e:
+                latency, ids, err = None, None, str(e)[:120]
+            shared[key] = (latency, ids, err)
+        if err is not None:
+            return {"name": svc_name, "model": cfg.model, "reachable": False,
+                    "latency_ms": None, "error": err, "warning": None}
+        return {"name": svc_name, "model": cfg.model, "reachable": True,
+                "latency_ms": latency, "error": None,
+                "warning": _model_warning(ids, cfg.model)}
 
     results = await asyncio.gather(*[_probe_one(n, c) for n, c in targets_cfg.items()])
-    return {"targets": list(results)}
+    services: list[dict] = []
+    if not name:
+        # 全量探活：追加 generator / judge。顺序执行（不并进 gather）：
+        # 并发下两个协程会在对方写入 shared 前同时检查缓存，复用失效
+        shared: dict = {}
+        services.append(await _probe_service("generator", GeneratorConfig.from_env(), shared))
+        services.append(await _probe_service("judge", JudgeConfig.from_env(), shared))
+    return {"targets": list(results), "services": services}

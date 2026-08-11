@@ -60,7 +60,7 @@ from llmsec.params import (
     SAMPLER_INFOGAIN_GAMMA,
 )
 from llmsec.pipeline.allergy_phase import run_allergy_phase
-from llmsec.pipeline.attack_phase import run_attack_phase
+from llmsec.pipeline.attack_phase import _quick_precluster, run_attack_phase
 from llmsec.targets import PCAP_JUDGE_URL, PCAP_MODEL_VERSION
 
 logger = get_logger(__name__)
@@ -278,6 +278,13 @@ def main():
     _feat_tracker.predictor.fit_features(records)
     features = _feat_tracker.predictor.artifacts.get("features", {})
 
+    # P7：预聚类在 runner 层只算一次（输入同一份 features，结果确定），多目标共享，
+    # 避免每个目标的 run_attack_phase 内 _quick_precluster 各算一遍。
+    # 必须在目标线程启动前完成（主线程串行预计算）。
+    pre_labels = _quick_precluster(_feat_tracker, sorted(catalog)) if do_phase1 else None
+    if pre_labels:
+        logger.info(f"  🔍 预聚类: {len(set(pre_labels.values()))} 簇（一次计算，多目标共享）")
+
     concurrency = args.concurrency
     target_concurrency = min(args.target_concurrency, len(names))
 
@@ -327,6 +334,7 @@ def main():
                     concurrency=concurrency,
                     defender_name=name,
                     r_snapshot=R_snapshot,
+                    pre_labels=pre_labels,
                 )
             except Exception as e:
                 logger.warning(f"  ⚠ {name} 攻击失败: {e}", exc_info=True)

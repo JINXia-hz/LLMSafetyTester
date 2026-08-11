@@ -50,8 +50,9 @@
       --c-input-bg: #FBF6E6;
       --c-th-bg: #EFE7CE;
       --c-btn-plain-bg: #E7DDC2;
-      --c-log-bg: #262B30;
-      --c-log-text: #CDBE9C;
+      --c-log-bg: #20242B;
+      --c-log-text: #E7DFC8;
+      --c-log-dim: #A79D82;
       --c-plaque1: #46586B;
       --c-plaque2: #3A495A;
       --c-border: var(--c-line);   /* 别名：dropZone/因子行等引用 */
@@ -79,8 +80,9 @@
       --c-input-bg: #262019;
       --c-th-bg: #3D342A;
       --c-btn-plain-bg: #453B2F;
-      --c-log-bg: #171310;
-      --c-log-text: #D9C89E;
+      --c-log-bg: #15120E;
+      --c-log-text: #E7DFC8;
+      --c-log-dim: #9A8F76;
       --c-plaque1: #33271E;       /* 玄漆匾额 */
       --c-plaque2: #241C15;
     }
@@ -242,13 +244,13 @@
     /* 报告目录卡标题 */
     .report-nav-title { font-family: var(--serif); font-weight: 700; font-size: 0.9rem; color: var(--c-text); border-left: 4px solid var(--c-gold); padding-left: 8px; margin-bottom: 6px; }
 
-    .log-box { background: var(--c-log-bg); color: var(--c-log-text); font-family: ui-monospace, Consolas, monospace; font-size: 0.75rem; border-radius: 4px; border-top: 2px solid var(--c-gold); padding: 12px; height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+    .log-box { background: var(--c-log-bg); color: var(--c-log-text); font-family: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace; font-size: 0.75rem; border-radius: 4px; border: 1px solid rgba(0,0,0,.28); padding: 12px; height: 260px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
     .card[data-task-id] .task-chevron { display: inline-block; color: var(--c-muted); transition: transform .15s; font-size: .7rem; }
     .card[data-task-id][data-collapsed="0"] .task-chevron { transform: rotate(90deg); }
     .card[data-task-id][data-collapsed="1"] .progress-box { display: none; }
     /* ---- 任务进度：真·终端窗口（标题栏 + 主体，固定高度不自适应）---- */
     .progress-box { margin-top: 8px; width: 100%; background: var(--c-log-bg); color: var(--c-log-text);
-      font-family: ui-monospace, Consolas, monospace; font-size: 0.78rem; border-radius: 6px;
+      font-family: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace; font-size: 0.78rem; border-radius: 6px;
       display: flex; flex-direction: column; height: 280px; min-height: 280px; max-height: 280px;
       overflow: hidden; box-sizing: border-box;
       border: 1px solid rgba(0,0,0,.28); box-shadow: inset 0 1px 0 rgba(255,255,255,.04); }
@@ -263,13 +265,25 @@
     .term-dots i:nth-child(1) { background: var(--c-accent); }
     .term-dots i:nth-child(2) { background: var(--c-gold); }
     .term-dots i:nth-child(3) { background: var(--c-safe); }
-    .term-title { color: var(--c-log-text); opacity: .68; font-size: .72rem; letter-spacing: .02em; }
+    .term-title { color: var(--c-log-text); opacity: .85; font-size: .72rem; letter-spacing: .02em; }
     .term-body { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
-      padding: 8px 12px; white-space: pre; line-height: 1.75; }
+      padding: 8px 12px; white-space: pre; line-height: 1.7;
+      scrollbar-width: thin; scrollbar-color: rgba(191,160,60,.45) transparent; }
+    .term-body::-webkit-scrollbar { width: 8px; }
+    .term-body::-webkit-scrollbar-track { background: transparent; }
+    .term-body::-webkit-scrollbar-thumb { background: rgba(191,160,60,.45); border-radius: 4px; }
+    .term-body::-webkit-scrollbar-thumb:hover { background: rgba(191,160,60,.7); }
     .prog-line { white-space: pre; }
-    .prog-line.pg-idle { color: var(--c-muted); opacity: .8; }
+    .prog-line.pg-idle { color: var(--c-log-dim); }
     .prog-line.pg-active { color: var(--c-log-text); }
+    .prog-line.pg-done { color: var(--c-log-dim); opacity: .75; }
     .prog-line .pg-mark { color: var(--c-gold); }
+    .prog-line .pg-mark-idle { color: var(--c-log-dim); opacity: .55; }
+    .prog-line .pg-done-mark { color: var(--c-safe); }
+    .prog-line .pg-status-done { color: var(--c-safe); }
+    /* 闪烁块光标：active 行末尾，终端感的核心 */
+    .pg-cursor { color: var(--c-log-text); animation: pgBlink 1.06s step-end infinite; }
+    @keyframes pgBlink { 50% { opacity: 0; } }
     .prog-line .pg-delta.up { color: #9CB58E; }
     .prog-line .pg-delta.down { color: #D89A82; }
     /* 盲文进度条：⣿/⣦(填充,金色) + ⣀(空槽,暗色)，等高不串行 */
@@ -277,6 +291,10 @@
     .prog-line .pg-bf { color: var(--c-gold); }
     .prog-line .pg-em { color: var(--c-muted); opacity: .4; }
     .prog-line .pg-status { color: var(--c-muted); }
+    /* HPO 直播：次要信息压暗 / 目标值 sparkline / 失败 trial 标记 */
+    .prog-line .pg-dim { color: var(--c-muted); opacity: .8; }
+    .prog-line .pg-spark { color: var(--c-log-text); letter-spacing: 1px; }
+    .prog-line .pg-trialfail { color: var(--c-warn); }
     /* ---- 头部极简进度条（始终可见：运行中按 pct 填充 / 无 pct 流光 / 终态固定色）---- */
     .mini-bar { display: inline-block; width: 150px; height: 4px; border-radius: 2px;
       background: var(--c-line); overflow: hidden; position: relative; flex: none; }
@@ -401,7 +419,7 @@
     }
     .task-card:hover { transform: translateY(-2px); box-shadow: 0 4px 14px rgba(0,0,0,.10); }
     button.task-card:not(.active) { opacity: .72; }
-    .task-card.active { border-color: var(--c-gold); box-shadow: 0 0 0 1.5px var(--c-gold), 0 4px 14px rgba(191,160,60,.18); }
+    .task-card.active { border-color: var(--c-primary); box-shadow: 0 0 0 1.5px var(--c-primary), 0 4px 14px rgba(70,88,107,.18); }
     .task-seal {
       width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
       font-family: var(--serif); font-size: 15px; color: var(--c-on-seal);
@@ -411,7 +429,22 @@
     .task-card.active .task-seal { background: var(--c-accent); }
     .task-name { font-family: var(--serif); font-weight: 700; font-size: 0.95rem; color: var(--c-text); }
     .task-desc { font-size: 0.75rem; color: var(--c-muted); line-height: 1.5; }
-    .task-form { animation: secIn .22s ease both; }
+    /* 表单卡：左右石青书函侧带（与侧栏同色 + 同款菱格锦地），内容区收窄显瘦 */
+    .task-form { position: relative; padding-left: 48px; padding-right: 48px; animation: secIn .22s ease both; }
+    .task-form::before, .task-form::after {
+      content: ""; position: absolute; top: 0; bottom: 0; width: 30px; pointer-events: none;
+      background:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'%3E%3Cg fill='none' stroke='%23BFA03C' stroke-width='0.7' stroke-opacity='0.55'%3E%3Cpath d='M10 0L20 10L10 20L0 10Z'/%3E%3C/g%3E%3C/svg%3E"),
+        linear-gradient(180deg, var(--c-plaque1) 0%, var(--c-plaque2) 100%);
+    }
+    .task-form::before { left: 0; border-radius: 6px 0 0 6px; box-shadow: inset -1px 0 0 rgba(191,160,60,.45); }
+    .task-form::after { right: 0; border-radius: 0 6px 6px 0; box-shadow: inset 1px 0 0 rgba(191,160,60,.45); }
+    @media (max-width: 640px) {
+      .task-form { padding-left: 16px; padding-right: 16px; }
+      .task-form::before, .task-form::after { display: none; }
+    }
+    /* 运行控制页：表单卡与任务列表卡标题去金色题签方块（其余页面保留全局题签语言） */
+    #sec-run .task-form h3, #sec-run .card:has(> #taskList) h3 { border-left: none; padding-left: 0; }
 
     /* 字段行：标签 + 控件 + 一行注释（取代 placeholder 墙） */
     .field { display: flex; flex-direction: column; gap: 3px; }
@@ -499,15 +532,14 @@
     @media (max-width: 1000px) { .run-wrap { padding: 0; } .run-wrap::before, .run-wrap::after { display: none; } }
 
     /* 雾霭：feTurbulence 分形噪声真雾，贴在未选卡上（白天=白纱+暖灰双层，夜=牙白雾） */
-    /* 选中卡与表单同属"灯下之物"：同一描金光晕（夜色收敛衰变） */
-    .task-form { box-shadow: 0 0 0 1.5px var(--c-gold), 0 6px 22px rgba(191,160,60,.20); }
-    [data-theme="dark"] .task-card.active { box-shadow: 0 0 0 1px var(--c-gold), 0 2px 9px rgba(217,180,92,.22); }
-    [data-theme="dark"] .task-form { box-shadow: 0 0 0 1px var(--c-gold), 0 2px 9px rgba(217,180,92,.16); }
+    /* 选中卡与表单卡：去描金光晕（用户反馈金光泛滥）——选中态用石青描边，
+       表单卡存在感由两侧石青书函带承担（见下） */
+    [data-theme="dark"] .task-card.active { box-shadow: 0 0 0 1px var(--c-primary), 0 2px 9px rgba(94,122,148,.22); }
 
     @media (prefers-reduced-motion: reduce) {
       .medal svg, .clouds, .seal-anim, .section.visible .card,
       .section-enter, .section-exit, .metric-value.loading::after, .chart-loading::before,
-      .splash-medal, .splash-seal, .splash-title, .splash-sub, .splash-line
+      .splash-medal, .splash-seal, .splash-title, .splash-sub, .splash-line, .pg-cursor
       { animation: none !important; }
       .nav-label, .nav-seal, .task-card, .factor-drawer, .factor-toggle .caret { transition: none !important; }
     }
@@ -895,7 +927,6 @@
               </div>
               <div class="field">
                 <div class="field-head"><span class="field-label">攻击集</span><select id="evalInput"></select></div>
-                <div class="field-hint">越狱税需文件名含 baseline 的带探针攻击集</div>
               </div>
               <div class="field">
                 <div class="field-head"><span class="field-label">阶段</span>
@@ -932,6 +963,12 @@
               </div>
               <div class="field">
                 <div class="field-head"><span class="field-label">攻击集</span><select id="hpoInput"></select></div>
+              </div>
+              <div class="field">
+                <div class="field-head"><span class="field-label">目标模型</span>
+                  <select id="hpoTarget"><option value="">全部目标（多目标均值）</option></select>
+                </div>
+                <div class="field-hint">每组参数按 目标×seed 逐单元跑，多目标取均值</div>
               </div>
               <div class="field">
                 <div class="field-head"><span class="field-label">优化目标</span>
@@ -1014,8 +1051,10 @@
                   <div class="field"><div class="field-head"><span class="field-label">API Key</span><input id="envGKey" type="password" placeholder="留空保持不变"></div>
                     <div class="field-hint" id="envGKeyHint"></div></div>
                 </div>
+                <div class="field-hint" id="envGProbe"></div>
                 <div class="env-group">Judge<span class="env-sub">缺省回退生成模型</span></div>
                 <div class="field mt-2"><div class="field-head"><span class="field-label">模型名</span><input id="envJudge"></div></div>
+                <div class="field-hint" id="envJProbe"></div>
               </div>
             </div>
             <button class="btn btn-primary w-full text-xs mt-4" onclick="saveEnv()">保存到 .env</button>
