@@ -1,11 +1,11 @@
-/* control.js — 控制台「中书台」：对话 + 坊·工作区 + 衡·对比合并（依赖 core.js 全局）
+/* control.js — 宣政殿「中书省」：对话 + 坊·工作区 + 衡·对比合并（依赖 core.js 全局）
  *
  * 对话经 /api/control/chat（LLM tool-calling，未配置 LLM 时规则兜底）。
  * 工作区经 /api/control/workspaces、/api/control/fork、/api/control/fork-and-run。
  * 对比/合并经 /api/control/compare、/api/control/merge。
  */
 
-// ---------- 控制台 ----------
+// ---------- 宣政殿 ----------
 let _chatBusy = false;
 let _ctrlBound = false;
 // session_id + pendingConfirm 持久化到 sessionStorage（刷新不丢，关标签页才丢）
@@ -30,7 +30,7 @@ async function loadControlSection() {
   } catch { /* 忽略 */ }
   if (!_greeted) {
     _greeted = true;
-    appendChat('assistant', mdSafe('中书省候旨。陛下有何吩咐？臣可：**查批次**、**对比 run**、**fork 工作区**、**审查报告**、**合并 R 矩阵**、**清缓存**。'));
+    appendChat('assistant', mdSafe('宣政殿候旨。陛下有何吩咐？臣可：**查批次**、**对比 run**、**fork 工作区**、**审查报告**、**合并 R 矩阵**、**清缓存**。'));
   }
   loadWorkspaces();
   loadPickLists();
@@ -139,14 +139,14 @@ async function sendChat() {
             : data.mode
           }</span>`;
       appendChat('assistant', mdSafe(data.reply) + modeTag);
-      setStatus('控制台对话完成');
+      setStatus('宣政殿对话完成');
     }
     // LLM 可能动了工作区（fork/delete/merge），静默刷新列表
     loadWorkspaces();
   } catch (e) {
     removeThinking();
     appendChat('error', '✕ ' + esc(e.message));
-    setStatus('控制台对话失败: ' + e.message);
+    setStatus('宣政殿对话失败: ' + e.message);
   } finally {
     _chatBusy = false;
     $('ctrl-chat-send').disabled = false;
