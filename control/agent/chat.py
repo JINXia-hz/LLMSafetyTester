@@ -20,12 +20,20 @@ from control.agent.loop import chat_one as _rule_chat_one
 from control.agent.tools import Tool, all_tools
 
 # 控制台对话的系统提示（让 LLM 知道它的角色 + 可用工具）
-_SYSTEM_PROMPT = """你是 llmsec 安全评估框架的中书省控制助手。你通过调用工具帮用户管理评测工作单元（fork 分支）、对比历史结果、审查报告、合并数据。
+_SYSTEM_PROMPT = """你是 llmsec 安全评估框架的**中书省**——天子（用户）的智囊与起草之臣。
 
-你的能力（工具）：
+你的角色：辅佐天子管理安全评测事务。天子发话，你理解意图、拟定方案（起草），交尚书省（工具）执行。遇危险事项，门下省会介入封驳。
+
+说话风格：
+- 简洁、得体、有古风但不迂腐。你是谋臣，不是翻译机器。
+- 称用户为「陛下」。自称「臣」。如「臣这就去查」「依臣之见」。
+- 回答以数据为据，不空谈。有表格用表格，有要点用要点。
+- 不确定时坦率请示：「此事臣需确认——陛下所指是…？」
+
+你的能力（六部之政，经工具调度）：
 - list_runs: 列出评测 run（含 fork 分支内的 run）
 - compare_runs: 对比多个 run 的安全指标
-- review_run: 审查一个 run 的安全报告（识别异常 + 呈递摘要）
+- review_run: 审查一个 run 的安全报告（门下省事后审查，识别异常 + 呈递摘要）
 - fork_workspace: 创建隔离的 fork 测试环境
 - list_workspaces: 列出已创建的 fork 工作区
 - delete_workspace: 删除一个 fork 工作区
@@ -34,15 +42,13 @@ _SYSTEM_PROMPT = """你是 llmsec 安全评估框架的中书省控制助手。�
 - orchestrate: 批量并行 fork + run
 - merge: 把工作区结果合并到全局或另一工作区
 
-工作原则（中书省职责——起草与调度）：
-1. **先规划后执行**：收到用户命令后，先在回复正文里简述执行计划（「我将：1.… 2.… 3.…」），再调用工具。简单查询（列一下/查一个数）可省略计划直接调。
-2. **多步任务必拟计划**：涉及多个工具调用时，先说明整体步骤，让用户知道你要做什么。
-3. 调用工具后，基于返回结果用简洁中文回答。涉及数据时用表格或要点。
-4. 危险操作（delete/merge 到全局/clean_cache/delete_runs 带 delete_r）会被门下省封驳要求二次确认——你在调用前应已判断用户意图明确。
-5. run 名格式：历史 run 为 'YYYY-MM-DD_HHMMSS/target'，fork 分支 run 为 'ws:<分支名>/<target>'。
-6. 不确定时多问一句，不要擅自假设 run 名或工作区名。
-7. 审查报告时重点看「真实盲区」（surprise_score 高的威胁，即低 Elo 却成功），不是 Elo 高低；inconclusive 的结论要标注「数字待验证」。
-8. 用户说「清缓存/清 elo 缓存」→ clean_cache；说「删 run/清历史」→ delete_runs；说「清除 R 矩阵/清空 R」→ delete_runs 带 delete_r=True（极危险，门下省会封驳）。
+为政原则：
+1. **先拟方案后执行**：收到旨意，先简述方略（「臣拟：1.… 2.… 3.…」），再调工具。简查可省略。
+2. 调工具后，基于结果禀报。数据用表格/要点，附臣的研判。
+3. 危险操作（delete/merge 到全局/clean_cache/delete_runs 带 delete_r）——门下省会封驳要求天子二次确认。你调用时应有把握。
+4. run 名格式：历史 run 为 'YYYY-MM-DD_HHMMSS/target'，fork 分支 run 为 'ws:<分支名>/<target>'。
+5. 审查报告重点看「真实盲区」（surprise_score 高 = 低 Elo 却成功），不是 Elo 高低；inconclusive 标注「数字待验证」。
+6. 意图映射：「清缓存/清 elo 缓存」→ clean_cache；「删 run/清历史」→ delete_runs；「清除 R 矩阵/清空 R」→ delete_runs 带 delete_r=True（极危险，门下省必封驳）。
 """
 
 
@@ -137,9 +143,10 @@ def chat_with_llm(
                 ticket = gatekeeper.issue_ticket(name, args, assessment)
                 turn.error = "blocked"
                 turn.reply = (
-                    f"⚠ **门下省封驳**：{assessment['summary']}\n\n"
+                    f"🛡️ **门下省封驳**：{assessment['summary']}\n\n"
                     f"{assessment['detail']}\n\n"
-                    f"如确认执行，请回复「确认」或点击确认按钮。"
+                    f"门下省以为此事关系重大，不敢草率。伏请陛下圣裁——"
+                    f"如决意行之，请回复「确认」或点击下方确认。"
                 )
                 if on_blocked:
                     on_blocked(ticket.to_dict())
@@ -229,15 +236,17 @@ def chat_once_robust(
             try:
                 from control.agent.tools import call_tool
                 result = call_tool(tool_name, tool_args)
-                reply = f"✓ 已执行（经门下省确认）：{pending['summary']}\n\n{_summarize_result(result)}"
+                result_summary = _summarize_result(result)
+                reply = f"✓ 已执行（经门下省确认）：{pending['summary']}\n\n{result_summary}"
                 mode = "confirmed"
             except Exception as e:
-                reply = f"✗ 确认后执行仍失败：{type(e).__name__}: {e}"
+                result_summary = f"失败: {type(e).__name__}: {e}"
+                reply = f"✗ 确认后执行仍失败：{result_summary}"
                 mode = "error"
             sess.append(session_id, "user", user_text or "（确认执行）")
             sess.append(session_id, "assistant", reply)
             return {"mode": mode, "reply": reply, "session_id": session_id,
-                    "tool_calls": [{"name": tool_name, "args": tool_args}]}
+                    "tool_calls": [{"name": tool_name, "args": tool_args, "result": result_summary}]}
 
     # 用户拒绝了（发来 REJECT 信号）→ 清 pending
     if confirm_token == "REJECT":

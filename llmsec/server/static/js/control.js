@@ -30,7 +30,7 @@ async function loadControlSection() {
   } catch { /* 忽略 */ }
   if (!_greeted) {
     _greeted = true;
-    appendChat('assistant', mdSafe('中书台待命。可吩咐我：**查批次**、**对比 run**、**fork 工作区**、**合并 R 矩阵**。'));
+    appendChat('assistant', mdSafe('中书省候旨。陛下有何吩咐？臣可：**查批次**、**对比 run**、**fork 工作区**、**审查报告**、**合并 R 矩阵**、**清缓存**。'));
   }
   loadWorkspaces();
   loadPickLists();
@@ -130,7 +130,14 @@ async function sendChat() {
       for (const tc of (data.tool_calls || [])) appendToolCall(tc);
       // 回复 + 模式小印
       const modeTag = data.mode === 'llm' ? ''
-        : `<span class="ws-tag pending" style="margin-left:6px;">${data.mode === 'fallback' ? 'LLM失败·规则兜底' : data.mode === 'confirmed' ? '已确认执行' : data.mode === 'cancelled' ? '已取消' : '规则模式'}</span>`;
+        : `<span class="ws-tag pending" style="margin-left:6px;">${
+            data.mode === 'fallback' ? 'LLM失败·规则兜底'
+            : data.mode === 'confirmed' ? '已确认执行'
+            : data.mode === 'cancelled' ? '已取消'
+            : data.mode === 'error' ? '执行失败'
+            : data.mode === 'rule' ? '规则模式'
+            : data.mode
+          }</span>`;
       appendChat('assistant', mdSafe(data.reply) + modeTag);
       setStatus('控制台对话完成');
     }

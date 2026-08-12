@@ -72,6 +72,10 @@ class ReviewRequest(BaseModel):
     use_llm: bool = True
 
 
+class ResetRequest(BaseModel):
+    session_id: str | None = None
+
+
 # ============================================================
 # 工作区管理
 # 注意：端点用 def（非 async），让 FastAPI 自动丢到线程池跑，
@@ -180,7 +184,7 @@ def api_chat(req: ChatRequest):
 
 
 @router.post("/api/control/chat/reset")
-def api_chat_reset(req: ChatRequest):
+def api_chat_reset(req: ResetRequest):
     """清空 session 历史（重新开始对话）。"""
     from control.agent import session as sess
     if req.session_id:
