@@ -227,13 +227,16 @@ def _do_merge(args: dict) -> dict:
     res = _run(_manage_argv(sub))
     res.require_ok()
     result = res.json or {}
-    # 状态闭合：执行合并后标记各 workspace 源为已合并
+    # 状态闭合：执行合并后标记各 workspace 源为已合并（容错——merge 已成功不可逆）
     if args.get("confirm") and result.get("dry_run") is False:
         from control.core.workspace import mark_merged
         target = args["target"]
         for src in args["sources"]:
             if src.startswith("ws:"):
-                mark_merged(src[3:], target)
+                ok = mark_merged(src[3:], target)
+                if not ok:
+                    result.setdefault("warnings", []).append(
+                        f"工作区 {src[3:]} 状态更新失败（merge 已生效）")
     return result
 
 

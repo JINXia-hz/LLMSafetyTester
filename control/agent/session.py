@@ -92,6 +92,22 @@ def get_pending_confirm(session_id: str) -> dict | None:
         return s["pending_confirm"] if s else None
 
 
+def pop_pending_confirm_if_match(session_id: str, token: str) -> dict | None:
+    """原子操作：若 pending_confirm 的 token 匹配，取出并清除；否则返回 None。
+
+    解决 check-then-clear 的 TOCTOU：防止双确认请求各执行一次。
+    """
+    with _LOCK:
+        s = _SESSIONS.get(session_id)
+        if not s or not s["pending_confirm"]:
+            return None
+        pending = s["pending_confirm"]
+        if pending.get("token") == token:
+            s["pending_confirm"] = None
+            return pending
+        return None
+
+
 def set_pending_confirm(session_id: str, confirm: dict | None) -> None:
     """设置/清除待确认操作。confirm = {token, action, summary, detail}。"""
     with _LOCK:

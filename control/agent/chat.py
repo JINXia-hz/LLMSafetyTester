@@ -211,44 +211,42 @@ def chat_once_robust(
 
     返回 {mode, reply, tool_calls, session_id, blocked?, confirm?}
     """
-    from control.agent import gatekeeper
     from control.agent import session as sess
 
     # 确保 session 存在，拿到 history
     session_id, messages = sess.get_or_create(session_id)
 
     # ★ 门下省确认流程：用户回传了 confirm_token
-    pending = sess.get_pending_confirm(session_id)
-    if pending is not None and confirm_token and gatekeeper.is_confirmed(
-            gatekeeper.ConfirmTicket(**pending) if isinstance(pending, dict) else pending,
-            confirm_token):
-        # 确认通过 → 执行被封驳的操作，带 confirmed_token
-        sess.set_pending_confirm(session_id, None)
-        tool_name = pending["tool_name"]
-        tool_args = pending["tool_args"]
-        try:
-            from control.agent.tools import call_tool, reset_registry
-            reset_registry()
-            result = call_tool(tool_name, tool_args)
-            reply = f"✓ 已执行（经门下省确认）：{pending['summary']}\n\n{_summarize_result(result)}"
-            mode = "confirmed"
-        except Exception as e:
-            reply = f"✗ 确认后执行仍失败：{type(e).__name__}: {e}"
-            mode = "error"
-        sess.append(session_id, "user", user_text or "（确认执行）")
-        sess.append(session_id, "assistant", reply)
-        return {"mode": mode, "reply": reply, "session_id": session_id,
-                "tool_calls": [{"name": tool_name, "args": tool_args}]}
+    if confirm_token and confirm_token != "REJECT":
+        pending = sess.pop_pending_confirm_if_match(session_id, confirm_token)
+        if pending is not None:
+            # 确认通过（原子取出+清除）→ 执行被封驳的操作
+            tool_name = pending["tool_name"]
+            tool_args = pending["tool_args"]
+            try:
+                from control.agent.tools import call_tool
+                result = call_tool(tool_name, tool_args)
+                reply = f"✓ 已执行（经门下省确认）：{pending['summary']}\n\n{_summarize_result(result)}"
+                mode = "confirmed"
+            except Exception as e:
+                reply = f"✗ 确认后执行仍失败：{type(e).__name__}: {e}"
+                mode = "error"
+            sess.append(session_id, "user", user_text or "（确认执行）")
+            sess.append(session_id, "assistant", reply)
+            return {"mode": mode, "reply": reply, "session_id": session_id,
+                    "tool_calls": [{"name": tool_name, "args": tool_args}]}
 
-    # 用户拒绝了（发来拒绝信号或换了个新话题）→ 清 pending
-    if pending is not None and confirm_token == "REJECT":
+    # 用户拒绝了（发来 REJECT 信号）→ 清 pending
+    if confirm_token == "REJECT":
         sess.set_pending_confirm(session_id, None)
         reply = "已取消该操作。"
         sess.append(session_id, "user", user_text or "（取消）")
         sess.append(session_id, "assistant", reply)
         return {"mode": "cancelled", "reply": reply, "session_id": session_id}
 
-    # 正常对话
+    # 正常对话分支：清除 stale pending_confirm（用户没确认也没拒绝就发了新问题）
+    sess.set_pending_confirm(session_id, None)
+
     if not is_llm_configured():
         reply = _rule_chat_one(user_text)
         sess.append(session_id, "user", user_text)

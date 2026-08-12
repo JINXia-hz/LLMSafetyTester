@@ -74,9 +74,11 @@ class ReviewRequest(BaseModel):
 
 # ============================================================
 # 工作区管理
+# 注意：端点用 def（非 async），让 FastAPI 自动丢到线程池跑，
+# 避免同步阻塞代码（subprocess/LLM/文件IO）卡住事件循环。
 # ============================================================
 @router.get("/api/control/workspaces")
-async def api_list_workspaces():
+def api_list_workspaces():
     try:
         return {"workspaces": ws_mod.list_workspaces()}
     except Exception as e:
@@ -84,7 +86,7 @@ async def api_list_workspaces():
 
 
 @router.post("/api/control/fork")
-async def api_fork(req: ForkRequest):
+def api_fork(req: ForkRequest):
     try:
         return ws_mod.fork(req.name, source=req.source, note=req.note)
     except (FileExistsError, FileNotFoundError, ValueError) as e:
@@ -94,13 +96,12 @@ async def api_fork(req: ForkRequest):
 
 
 @router.post("/api/control/fork-and-run")
-async def api_fork_and_run(req: ForkRunRequest):
+def api_fork_and_run(req: ForkRunRequest):
     """fork 后异步起 runner（复用 tasks 子系统的任务跟踪 + SSE）。"""
     try:
         info = ws_mod.fork(req.name, source=req.source, note=req.note)
     except (FileExistsError, FileNotFoundError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
-    # 异步起 runner（复用 tasks._start_task，看板自动获任务卡片 + 进度 + SSE）
     from llmsec.server.routers.tasks import _start_task
     ws_dir = WORKSPACES_DIR / req.name
     argv = ["-m", "llmsec.pipeline.runner", "--work-dir", str(ws_dir),
@@ -115,7 +116,7 @@ async def api_fork_and_run(req: ForkRunRequest):
 
 
 @router.delete("/api/control/workspaces/{name}")
-async def api_delete_workspace(name: str):
+def api_delete_workspace(name: str):
     try:
         return ws_mod.delete_workspace(name)
     except KeyError:
@@ -128,7 +129,7 @@ async def api_delete_workspace(name: str):
 # 对比 / 合并
 # ============================================================
 @router.post("/api/control/compare")
-async def api_compare(req: CompareRequest):
+def api_compare(req: CompareRequest):
     if len(req.runs) < 2:
         raise HTTPException(status_code=400, detail="至少需要 2 个 run")
     try:
@@ -138,10 +139,9 @@ async def api_compare(req: CompareRequest):
 
 
 @router.post("/api/control/merge")
-async def api_merge(req: MergeRequest):
+def api_merge(req: MergeRequest):
     """合并 R 矩阵。经 control merge tool（confirm=True 时执行 + 回写 merged 状态）。"""
-    from control.agent.tools import call_tool, reset_registry
-    reset_registry()
+    from control.agent.tools import call_tool
     try:
         result = call_tool("merge", {
             "sources": req.sources, "target": req.target,
@@ -156,23 +156,18 @@ async def api_merge(req: MergeRequest):
 # LLM 对话
 # ============================================================
 @router.get("/api/control/llm-status")
-async def api_llm_status():
+def api_llm_status():
     return {"configured": is_llm_configured()}
 
 
 @router.get("/api/control/tools")
-async def api_tools():
+def api_tools():
     return {"tools": [t.to_schema() for t in all_tools()]}
 
 
 @router.post("/api/control/chat")
-async def api_chat(req: ChatRequest):
-    """LLM 对话（带 session 上下文记忆 + 门下省封驳）。
-
-    前端首次请求不传 session_id（后端分配并返回）；
-    后续请求带上同一 session_id 以保持上下文。
-    封驳确认：blocked 响应含 confirm ticket，用户确认后带 confirm_token 重发。
-    """
+def api_chat(req: ChatRequest):
+    """LLM 对话（带 session 上下文记忆 + 门下省封驳）。"""
     try:
         result = chat_once_robust(
             req.text,
@@ -185,7 +180,7 @@ async def api_chat(req: ChatRequest):
 
 
 @router.post("/api/control/chat/reset")
-async def api_chat_reset(req: ChatRequest):
+def api_chat_reset(req: ChatRequest):
     """清空 session 历史（重新开始对话）。"""
     from control.agent import session as sess
     if req.session_id:
@@ -194,7 +189,7 @@ async def api_chat_reset(req: ChatRequest):
 
 
 @router.post("/api/control/review")
-async def api_review(req: ReviewRequest):
+def api_review(req: ReviewRequest):
     """门下省事后审查：读 run 报告，识别异常，呈递摘要。"""
     from control.agent.review import review_run
     try:

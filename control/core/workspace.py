@@ -15,12 +15,17 @@ workspaces 由控制层独立管理（output/workspaces/），维护 _index.json
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import threading
 from datetime import datetime
 from pathlib import Path
 
 from control.config import LLMSEC_REPO, WORKSPACES_DIR, ensure_workspaces_dir
 from control.core.invoker import export_snapshot, run_runner
+
+# 保护 _index.json 的 RMW（orchestrator 多线程 fork 会并发写索引）
+_INDEX_LOCK = threading.Lock()
 
 
 # ============================================================
@@ -38,8 +43,12 @@ def _load_index() -> dict:
 
 
 def _save_index(idx: dict) -> None:
+    """原子写：先写 .tmp 再 os.replace（防写中途崩溃导致 JSON 损坏）。"""
     ensure_workspaces_dir()
-    _index_path().write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
+    p = _index_path()
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(str(tmp), str(p))
 
 
 def _now() -> str:
@@ -103,10 +112,11 @@ def fork(
         "merged_to": None,
     }
 
-    # 4. 记入索引
-    idx = _load_index()
-    idx["workspaces"][name] = info
-    _save_index(idx)
+    # 4. 记入索引（加锁防并发 fork 丢更新）
+    with _INDEX_LOCK:
+        idx = _load_index()
+        idx["workspaces"][name] = info
+        _save_index(idx)
     return info
 
 
@@ -164,26 +174,36 @@ def get_workspace(name: str) -> dict | None:
     return idx.get("workspaces", {}).get(name)
 
 
-def mark_merged(name: str, target: str) -> None:
-    """标记工作区已 merge 到某目标（merge tool 执行后调）。"""
-    idx = _load_index()
-    if name in idx.get("workspaces", {}):
-        idx["workspaces"][name]["merged"] = True
-        idx["workspaces"][name]["merged_at"] = _now()
-        idx["workspaces"][name]["merged_to"] = target
-        _save_index(idx)
+def mark_merged(name: str, target: str) -> bool:
+    """标记工作区已 merge 到某目标（merge tool 执行后调）。
+
+    容错：_index.json 写失败不抛异常（merge 本身已成功不可逆，不应因索引更新失败而报错）。
+    返回 True=成功更新索引，False=更新失败（调用方可提示用户但 merge 已生效）。
+    """
+    try:
+        with _INDEX_LOCK:
+            idx = _load_index()
+            if name in idx.get("workspaces", {}):
+                idx["workspaces"][name]["merged"] = True
+                idx["workspaces"][name]["merged_at"] = _now()
+                idx["workspaces"][name]["merged_to"] = target
+                _save_index(idx)
+        return True
+    except Exception:
+        return False
 
 
 def delete_workspace(name: str) -> dict:
     """删除工作区（目录 + 索引项）。不碰全局 R（工作区本就是隔离副本）。"""
-    idx = _load_index()
-    if name not in idx.get("workspaces", {}):
-        raise KeyError(f"工作区不存在: {name}")
-    ws_dir = WORKSPACES_DIR / name
-    if ws_dir.exists():
-        shutil.rmtree(ws_dir)
-    info = idx["workspaces"].pop(name)
-    _save_index(idx)
+    with _INDEX_LOCK:
+        idx = _load_index()
+        if name not in idx.get("workspaces", {}):
+            raise KeyError(f"工作区不存在: {name}")
+        ws_dir = WORKSPACES_DIR / name
+        if ws_dir.exists():
+            shutil.rmtree(ws_dir)
+        info = idx["workspaces"].pop(name)
+        _save_index(idx)
     return {"deleted": name, "info": info}
 
 
