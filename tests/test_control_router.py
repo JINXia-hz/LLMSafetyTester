@@ -112,8 +112,10 @@ class TestChatFallback:
     def test_chat_fallback_on_llm_error(self, monkeypatch):
         from control.agent import chat as chat_mod
         monkeypatch.setattr(chat_mod, "is_llm_configured", lambda: True)
-        monkeypatch.setattr(chat_mod, "chat_with_llm",
-                            lambda txt, **k: (_ for _ in ()).throw(RuntimeError("LLM 连不上")))
+
+        def boom(user_text, messages, **k):
+            raise RuntimeError("LLM 连不上")
+        monkeypatch.setattr(chat_mod, "chat_with_llm", boom)
         r = _client().post("/api/control/chat", json={"text": "列工作区"})
         assert r.status_code == 200
         d = r.json()
@@ -124,11 +126,14 @@ class TestChatFallback:
         from control.agent import chat as chat_mod
         from control.agent.chat import ChatTurn
         monkeypatch.setattr(chat_mod, "is_llm_configured", lambda: True)
-        monkeypatch.setattr(chat_mod, "chat_with_llm", lambda txt, **k: ChatTurn(
-            user_text=txt,
-            tool_calls=[{"name": "list_workspaces", "args": {}, "result": "共 0 项"}],
-            reply="当前没有工作区。",
-        ))
+
+        def fake_chat(user_text, messages, **k):
+            return ChatTurn(
+                user_text=user_text,
+                tool_calls=[{"name": "list_workspaces", "args": {}, "result": "共 0 项"}],
+                reply="当前没有工作区。",
+            )
+        monkeypatch.setattr(chat_mod, "chat_with_llm", fake_chat)
         r = _client().post("/api/control/chat", json={"text": "有哪些工作区"})
         assert r.status_code == 200
         d = r.json()

@@ -499,3 +499,110 @@ class TestLoop:
         from control.agent.loop import chat_one
         out = chat_one("xyzzy nonsense")
         assert "未识别" in out
+
+
+# ============================================================
+# session：上下文记忆
+# ============================================================
+class TestSession:
+    def test_get_or_create_assigns_id(self):
+        from control.agent import session as sess
+        sess._SESSIONS.clear()
+        sid, msgs = sess.get_or_create(None)
+        assert sid is not None and len(sid) > 0
+        assert len(msgs) >= 1 and msgs[0]["role"] == "system"
+
+    def test_reuse_existing_session(self):
+        from control.agent import session as sess
+        sess._SESSIONS.clear()
+        sid1, _ = sess.get_or_create(None)
+        sid2, msgs2 = sess.get_or_create(sid1)
+        assert sid1 == sid2  # 同一 session
+
+    def test_messages_accumulate(self):
+        """跨调用累积消息（上下文记忆的核心）。"""
+        from control.agent import session as sess
+        sess._SESSIONS.clear()
+        sid, msgs = sess.get_or_create(None)
+        sess.append(sid, "user", "帮我 fork")
+        sess.append(sid, "assistant", "已 fork")
+        _, msgs2 = sess.get_or_create(sid)
+        assert len(msgs2) == 3  # system + user + assistant
+        assert msgs2[1]["content"] == "帮我 fork"
+        assert msgs2[2]["content"] == "已 fork"
+
+    def test_append_raw_with_tool_calls(self):
+        from control.agent import session as sess
+        sess._SESSIONS.clear()
+        sid, _ = sess.get_or_create(None)
+        sess.append_raw(sid, {"role": "assistant", "content": None, "tool_calls": [{"id": "x"}]})
+        _, msgs = sess.get_or_create(sid)
+        assert len(msgs) == 2 and msgs[1].get("tool_calls")
+
+    def test_pending_confirm_set_get_clear(self):
+        from control.agent import session as sess
+        sess._SESSIONS.clear()
+        sid, _ = sess.get_or_create(None)
+        assert sess.get_pending_confirm(sid) is None
+        sess.set_pending_confirm(sid, {"token": "abc", "action": "merge"})
+        assert sess.get_pending_confirm(sid)["token"] == "abc"
+        sess.set_pending_confirm(sid, None)
+        assert sess.get_pending_confirm(sid) is None
+
+    def test_reset_clears_history(self):
+        from control.agent import session as sess
+        sess._SESSIONS.clear()
+        sid, _ = sess.get_or_create(None)
+        sess.append(sid, "user", "hello")
+        sess.reset(sid)
+        _, msgs = sess.get_or_create(sid)
+        assert len(msgs) == 1 and msgs[0]["role"] == "system"
+
+
+# ============================================================
+# gatekeeper：门下省封驳
+# ============================================================
+class TestGatekeeper:
+    def test_merge_to_global_is_blocked(self):
+        from control.agent import gatekeeper
+        a = gatekeeper.assess("merge", {"sources": ["ws:ab"], "target": "global"})
+        assert a is not None
+        assert a["action"] == "merge_to_global"
+        assert "不可逆" in a["detail"]
+
+    def test_merge_to_workspace_not_blocked(self):
+        from control.agent import gatekeeper
+        a = gatekeeper.assess("merge", {"sources": ["ws:ab"], "target": "ws:other"})
+        assert a is None  # 融合到另一个 ws，不触发封驳
+
+    def test_delete_runs_with_delete_r_blocked(self):
+        from control.agent import gatekeeper
+        a = gatekeeper.assess("delete_runs", {"names": ["m1"], "delete_r": True})
+        assert a is not None and a["action"] == "delete_r_column"
+
+    def test_delete_runs_without_delete_r_not_blocked(self):
+        from control.agent import gatekeeper
+        a = gatekeeper.assess("delete_runs", {"names": ["m1"], "delete_r": False})
+        assert a is None
+
+    def test_safe_operations_not_blocked(self):
+        from control.agent import gatekeeper
+        for name, args in [("list_runs", {}), ("compare_runs", {"runs": ["a", "b"]}),
+                           ("fork_workspace", {"name": "x"}), ("list_workspaces", {})]:
+            assert gatekeeper.assess(name, args) is None
+
+    def test_issue_ticket_has_token(self):
+        from control.agent import gatekeeper
+        a = gatekeeper.assess("merge", {"sources": ["ws:x"], "target": "global"})
+        t = gatekeeper.issue_ticket("merge", {"sources": ["ws:x"], "target": "global"}, a)
+        assert t.token and len(t.token) > 0
+        assert t.action == "merge_to_global"
+        assert "merge" in t.tool_name
+
+    def test_is_confirmed_matches_token(self):
+        from control.agent import gatekeeper
+        a = gatekeeper.assess("merge", {"sources": ["ws:x"], "target": "global"})
+        t = gatekeeper.issue_ticket("merge", {"sources": ["ws:x"], "target": "global"}, a)
+        assert gatekeeper.is_confirmed(t, t.token) is True
+        assert gatekeeper.is_confirmed(t, "wrong") is False
+        assert gatekeeper.is_confirmed(None, "x") is False

@@ -518,18 +518,97 @@
 
     /* ---------- 运行控制：窄列 + 卷草纹侧饰带 + 全局雾霭/灯晕 ---------- */
     /* 侧饰带放在 wrap 内边距里（padding 44px），不悬在元素外部——避免被裁切/宽度玄学 */
-    .run-wrap { position: relative; max-width: calc(56rem + 88px); margin: 0 auto; padding: 0 44px; }
+    .run-wrap, .ctrl-wrap { position: relative; max-width: calc(56rem + 88px); margin: 0 auto; padding: 0 44px; }
     /* 卷草（唐草忍冬 S 波）竖带 + 联珠纹内缘，描金低透明度，仅作暗纹 */
-    .run-wrap::before, .run-wrap::after {
+    .run-wrap::before, .run-wrap::after, .ctrl-wrap::before, .ctrl-wrap::after {
       content: ""; position: absolute; top: 4px; bottom: 4px; width: 24px; pointer-events: none;
       opacity: .34;   /* 绢本上需更浓才可见；夜色另设 */
       z-index: 6;     /* 压在雾层之上，防止被雾洗没 */
       background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='120' viewBox='0 0 40 120'%3E%3Cg fill='none' stroke='%23BFA03C' stroke-width='1.0'%3E%3Cpath d='M18 0 C36 20 0 40 18 60 C36 80 0 100 18 120'/%3E%3Cpath d='M26 20 q8 -7 13 -7 q-2 8 -13 7'/%3E%3Cpath d='M10 52 q-8 7 -13 7 q2 -8 13 -7'/%3E%3Cpath d='M26 80 q8 -7 13 -7 q-2 8 -13 7'/%3E%3Cpath d='M18 54 a6 6 0 1 1 6 6 a3 3 0 1 0 -6 0'/%3E%3Cpath d='M18 114 a6 6 0 1 1 6 6 a3 3 0 1 0 -6 0'/%3E%3C/g%3E%3Cg fill='%23BFA03C'%3E%3Ccircle cx='33' cy='8' r='1.1'/%3E%3Ccircle cx='33' cy='20' r='1.1'/%3E%3Ccircle cx='33' cy='32' r='1.1'/%3E%3Ccircle cx='33' cy='44' r='1.1'/%3E%3Ccircle cx='33' cy='56' r='1.1'/%3E%3Ccircle cx='33' cy='68' r='1.1'/%3E%3Ccircle cx='33' cy='80' r='1.1'/%3E%3Ccircle cx='33' cy='92' r='1.1'/%3E%3Ccircle cx='33' cy='104' r='1.1'/%3E%3Ccircle cx='33' cy='116' r='1.1'/%3E%3C/g%3E%3C/svg%3E") repeat-y center top / 24px 72px;
     }
-    [data-theme="dark"] .run-wrap::before, [data-theme="dark"] .run-wrap::after { opacity: .15; }
-    .run-wrap::before { left: 6px; }
-    .run-wrap::after { right: 6px; }
-    @media (max-width: 1000px) { .run-wrap { padding: 0; } .run-wrap::before, .run-wrap::after { display: none; } }
+    [data-theme="dark"] .run-wrap::before, [data-theme="dark"] .run-wrap::after,
+    [data-theme="dark"] .ctrl-wrap::before, [data-theme="dark"] .ctrl-wrap::after { opacity: .15; }
+    .run-wrap::before, .ctrl-wrap::before { left: 6px; }
+    .run-wrap::after, .ctrl-wrap::after { right: 6px; }
+    @media (max-width: 1000px) { .run-wrap, .ctrl-wrap { padding: 0; } .run-wrap::before, .run-wrap::after, .ctrl-wrap::before, .ctrl-wrap::after { display: none; } }
+
+    /* ---------- 控制台「中书台」：对话笺条 / 坊 · 工作区 / 衡 · 对比合并 ---------- */
+    /* 小方印角色标（对话/工作区/工具行共用印章语言） */
+    .seal-mini { width: 22px; height: 22px; flex: none; display: inline-flex; align-items: center; justify-content: center;
+      font-family: var(--serif); font-size: 12px; border-radius: 3px; color: var(--c-on-seal);
+      background: var(--c-primary); box-shadow: inset 0 0 0 1.5px rgba(248,239,216,.35); }
+    .seal-mini.seal-accent { background: var(--c-accent); }
+    .seal-mini.seal-gold { background: var(--c-gold); color: #2F343B; box-shadow: inset 0 0 0 1.5px rgba(47,52,59,.25); }
+    /* 对话流：用户右靠石青条，助手左靠描金签条 */
+    .chat-log { height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 2px;
+      scrollbar-width: thin; scrollbar-color: rgba(191,160,60,.45) transparent; }
+    .chat-log::-webkit-scrollbar { width: 8px; }
+    .chat-log::-webkit-scrollbar-thumb { background: rgba(191,160,60,.45); border-radius: 4px; }
+    .chat-msg { max-width: 88%; padding: 8px 12px; border-radius: 6px; font-size: 0.85rem; line-height: 1.65;
+      animation: cardIn .25s ease both; overflow-wrap: break-word; }
+    .chat-msg .chat-role { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; font-size: 0.7rem; color: var(--c-muted); }
+    .chat-msg p { margin: 0.25em 0; }
+    .chat-msg ul, .chat-msg ol { padding-left: 1.3em; margin: 0.3em 0; }
+    .chat-msg ul { list-style: disc; } .chat-msg ol { list-style: decimal; }
+    .chat-msg code { background: var(--c-th-bg); border-radius: 3px; padding: 0 4px; font-size: 0.78rem; }
+    .chat-msg table { border-collapse: collapse; margin: 0.4em 0; font-size: 0.78rem; }
+    .chat-msg th, .chat-msg td { border: 1px solid var(--c-line); padding: 3px 8px; }
+    .chat-msg th { background: var(--c-th-bg); }
+    .chat-user { align-self: flex-end; background: var(--c-th-bg); border-right: 3px solid var(--c-primary); }
+    .chat-assistant { align-self: flex-start; background: var(--c-bg); border-left: 3px solid var(--c-gold); }
+    .chat-thinking { align-self: flex-start; color: var(--c-muted); font-style: italic; }
+    .chat-cursor { display: inline-block; color: var(--c-gold); animation: pgBlink 1.06s step-end infinite; }
+    .chat-error { align-self: flex-start; border-left: 3px solid var(--c-accent); color: var(--c-accent); background: rgba(168,91,67,.08); }
+    /* 工具调用折叠行：器字小印 + mono，展开看入参出参 */
+    .chat-tool { align-self: flex-start; max-width: 100%; font-size: 0.72rem;
+      font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+      border: 1px dashed var(--c-line); border-radius: 4px; padding: 4px 8px; color: var(--c-muted);
+      animation: cardIn .25s ease both; }
+    .chat-tool summary { cursor: pointer; display: flex; align-items: center; gap: 6px; list-style: none; }
+    .chat-tool summary::-webkit-details-marker { display: none; }
+    .chat-tool .tool-caret { transition: transform .15s; font-size: 0.6rem; }
+    .chat-tool[open] .tool-caret { transform: rotate(90deg); }
+    .chat-tool[open] summary { margin-bottom: 4px; }
+    .chat-tool .tool-detail { white-space: pre-wrap; word-break: break-all; color: var(--c-text); opacity: .85; }
+    /* LLM 状态小印章（卡头右侧） */
+    .ctrl-badge { font-size: 0.68rem; padding: 1px 8px; border-radius: 2px; font-weight: 600; }
+    .ctrl-badge.on { background: rgba(117,135,107,.20); color: var(--c-safe); box-shadow: inset 0 0 0 1px rgba(117,135,107,.5); }
+    .ctrl-badge.off { background: rgba(185,138,68,.16); color: var(--c-ochre); box-shadow: inset 0 0 0 1px rgba(185,138,68,.5); }
+    /* 快捷指令 chips：楷体小丸，悬停描金 */
+    .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { font-size: 0.72rem; padding: 3px 10px; border-radius: 10px; border: 1px solid var(--c-line);
+      background: var(--c-card); color: var(--c-muted); cursor: pointer; font-family: var(--serif);
+      transition: border-color .15s, color .15s; }
+    .chip:hover { border-color: var(--c-gold); color: var(--c-text); }
+    /* 工作区行：坊字小印 + 悬停描金 */
+    .ws-row { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid var(--c-line);
+      border-radius: 4px; background: var(--c-bg); transition: box-shadow .2s; }
+    .ws-row:hover { box-shadow: 0 0 0 1.5px rgba(191,160,60,.45); }
+    .ws-name { font-family: var(--serif); font-weight: 700; font-size: 0.85rem; color: var(--c-text); }
+    .ws-meta { font-size: 0.68rem; color: var(--c-muted); }
+    .ws-del { flex: none; font-size: 0.7rem; color: var(--c-accent); background: none; border: none;
+      cursor: pointer; padding: 2px 6px; border-radius: 3px; }
+    .ws-del:hover { background: rgba(168,91,67,.12); }
+    /* 工作区状态小印 */
+    .ws-tag { font-size: 0.66rem; padding: 0 6px; border-radius: 2px; font-weight: 600; }
+    .ws-tag.merged { background: rgba(117,135,107,.20); color: var(--c-safe); }
+    .ws-tag.pending { background: rgba(185,138,68,.16); color: var(--c-ochre); }
+    /* fork+run 内联参数抽屉 */
+    .fork-opts { max-height: 0; overflow: hidden; transition: max-height .3s ease; }
+    .fork-opts.open { max-height: 240px; }
+    /* run 多选列表（对比/合并共用） */
+    .pick-list { max-height: 170px; overflow-y: auto; border: 1px solid var(--c-line); border-radius: 4px;
+      padding: 4px; background: var(--c-input-bg);
+      scrollbar-width: thin; scrollbar-color: rgba(191,160,60,.45) transparent; }
+    .pick-row { display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 0.75rem;
+      border-radius: 3px; cursor: pointer; color: var(--c-text); }
+    .pick-row:hover { background: var(--c-th-bg); }
+    .pick-row .ws-tag { flex: none; }
+    /* 对比结果表：描金表头线（与威胁表同语言） */
+    .cmp-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+    .cmp-table th, .cmp-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--c-line); }
+    .cmp-table th { color: var(--c-muted); font-weight: 600; font-size: 0.7rem; font-family: var(--serif); }
+    .cmp-table thead tr { border-bottom: 2px solid var(--c-gold); }
 
     /* 雾霭：feTurbulence 分形噪声真雾，贴在未选卡上（白天=白纱+暖灰双层，夜=牙白雾） */
     /* 选中卡与表单卡：去描金光晕（用户反馈金光泛滥）——选中态用石青描边，
@@ -1089,44 +1168,84 @@
           </div>
         </section>
 
-        <!-- ============ 控制台 ============ -->
+        <!-- ============ 控制台「中书台」 ============ -->
         <section id="sec-control" class="section">
-          <div class="max-w-6xl mx-auto space-y-6">
-            <div class="flex items-center justify-between">
-              <h2 class="text-xl font-bold">控制台</h2>
-              <span id="ctrl-llm-badge" class="text-xs px-2 py-1 rounded bg-white/5 border border-white/10">LLM 检测中…</span>
-            </div>
-
-            <!-- 对话区 -->
-            <div class="rounded-lg border border-white/10 bg-white/[0.02] p-4">
-              <div class="flex items-center justify-between mb-3">
-                <h3 class="font-semibold">对话中间者</h3>
-                <span class="text-xs text-white/40">自然语言 → 自动调 fork/compare/merge 等工具</span>
+         <div class="ctrl-wrap">
+          <div class="grid grid-cols-1 lg:grid-cols-5 gap-4 mb-4">
+            <!-- 中书对话 -->
+            <div class="card lg:col-span-3">
+              <div class="flex items-center justify-between mb-1">
+                <h3 class="font-semibold text-sm">中书对话</h3>
+                <span id="ctrl-llm-badge" class="ctrl-badge off">检测中…</span>
               </div>
-              <div id="ctrl-chat-log" class="space-y-3 mb-3 max-h-[40vh] overflow-y-auto"></div>
+              <div class="text-xs mb-2" style="color: var(--c-muted);">自然语言调度控制层：查批次、对比、fork 工作区、合并 R 矩阵。</div>
+              <div id="ctrl-chat-log" class="chat-log mb-2"></div>
+              <div class="chip-row mb-2" id="ctrl-chips">
+                <button class="chip" data-q="列出所有工作区">列工作区</button>
+                <button class="chip" data-q="列出最近的运行批次">近期批次</button>
+                <button class="chip" data-q="对比最近两个 run 的安全指标">对比近两批</button>
+                <button class="chip" data-q="预览把所有工作区合并回全局（dry-run，不执行）">合并预览</button>
+              </div>
               <div class="flex gap-2">
-                <input id="ctrl-chat-input" type="text" class="flex-1 rounded border border-white/10 bg-white/5 px-3 py-2 text-sm focus:outline-none focus:border-[var(--accent)]" placeholder="问：帮我 fork 一个叫 ab1 的环境…  （回车发送）">
-                <button id="ctrl-chat-send" class="px-4 py-2 rounded bg-[var(--accent)] text-white text-sm font-medium hover:opacity-90">发送</button>
+                <input id="ctrl-chat-input" type="text" class="flex-1" placeholder="吩咐中书台…（Enter 发送，Shift+Enter 换行）">
+                <button id="ctrl-chat-send" class="btn btn-primary text-xs">发送</button>
               </div>
             </div>
 
-            <!-- 工作区管理 -->
-            <div class="rounded-lg border border-white/10 bg-white/[0.02] p-4">
-              <div class="flex items-center justify-between mb-3">
-                <h3 class="font-semibold">Fork 工作区</h3>
-                <button id="ctrl-ws-refresh" class="text-xs px-2 py-1 rounded border border-white/10 hover:bg-white/5">刷新</button>
+            <!-- 坊 · 工作区 -->
+            <div class="card lg:col-span-2">
+              <div class="flex items-center justify-between mb-1">
+                <h3 class="font-semibold text-sm">坊 · 工作区</h3>
+                <button id="ctrl-ws-refresh" class="btn btn-plain text-xs">刷新</button>
               </div>
-              <div class="flex gap-2 mb-3 flex-wrap">
-                <input id="ctrl-fork-name" type="text" class="rounded border border-white/10 bg-white/5 px-2 py-1 text-sm w-40" placeholder="工作区名">
-                <select id="ctrl-fork-source" class="rounded border border-white/10 bg-white/5 px-2 py-1 text-sm">
-                  <option value="global">来源: global</option>
-                </select>
-                <button id="ctrl-fork-btn" class="px-3 py-1 rounded bg-[var(--accent)] text-white text-sm hover:opacity-90">Fork</button>
-                <button id="ctrl-fork-run-btn" class="px-3 py-1 rounded border border-[var(--accent)] text-[var(--accent)] text-sm hover:bg-[var(--accent)]/10">Fork + 跑</button>
+              <div class="text-xs mb-2" style="color: var(--c-muted);">fork 隔离副本做 A/B 实验，不污染全局 R。</div>
+              <div id="ctrl-ws-list" class="space-y-2 mb-3" style="max-height: 220px; overflow-y: auto;"></div>
+              <div class="space-y-2" style="border-top: 1px dashed var(--c-line); padding-top: 10px;">
+                <div class="field"><div class="field-head"><span class="field-label">名称</span>
+                  <input id="ctrl-fork-name" type="text" placeholder="如 ab_batch2"></div></div>
+                <div class="field"><div class="field-head"><span class="field-label">来源</span>
+                  <select id="ctrl-fork-source"></select></div></div>
+                <div class="fork-opts" id="ctrl-fork-opts">
+                  <div class="space-y-2 pt-2">
+                    <div class="field"><div class="field-head"><span class="field-label">目标</span>
+                      <select id="ctrl-fork-target"><option value="">全部目标</option></select></div></div>
+                    <div class="field"><div class="field-head"><span class="field-label">攻击集</span>
+                      <select id="ctrl-fork-input"></select></div></div>
+                    <div class="field"><div class="field-head"><span class="field-label">轮次</span>
+                      <div class="unit-wrap"><input id="ctrl-fork-rounds" type="number" value="5" min="1" max="50"><span class="unit">轮</span></div></div></div>
+                  </div>
+                </div>
+                <div class="flex gap-2">
+                  <button id="ctrl-fork-btn" class="btn btn-plain flex-1 text-xs">建立副本</button>
+                  <button id="ctrl-fork-run-btn" class="btn btn-accent flex-1 text-xs">建立并运行</button>
+                </div>
               </div>
-              <div id="ctrl-ws-list" class="space-y-1 text-sm"></div>
             </div>
           </div>
+
+          <!-- 衡 · 对比与合并 -->
+          <div class="card">
+            <h3 class="font-semibold text-sm mb-3">衡 · 对比与合并</h3>
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-3">
+              <div>
+                <div class="text-xs mb-1 font-semibold" style="color: var(--c-muted);">批次对比（勾选 ≥2 个 run）</div>
+                <div id="ctrl-cmp-list" class="pick-list"></div>
+                <button id="ctrl-cmp-btn" class="btn btn-primary w-full text-xs mt-2">对比所选</button>
+              </div>
+              <div>
+                <div class="text-xs mb-1 font-semibold" style="color: var(--c-muted);">合并 R 矩阵（勾选源 → 汇入目标）</div>
+                <div id="ctrl-mrg-list" class="pick-list"></div>
+                <div class="field mt-2"><div class="field-head"><span class="field-label">目标</span>
+                  <select id="ctrl-mrg-target"><option value="global">global（全局 R）</option></select></div></div>
+                <label class="flex items-center gap-2 mt-2 text-xs" style="color: var(--c-muted);">
+                  <input type="checkbox" id="ctrl-mrg-confirm"> 确认执行（不勾 = dry-run 预览，不落盘）
+                </label>
+                <button id="ctrl-mrg-btn" class="btn btn-plain w-full text-xs mt-2">合并</button>
+              </div>
+            </div>
+            <div id="ctrl-heng-result" class="mt-3"></div>
+          </div>
+         </div><!-- /ctrl-wrap -->
         </section>
 
       </div>

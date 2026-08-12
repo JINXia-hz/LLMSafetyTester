@@ -175,7 +175,8 @@ document.querySelectorAll('#nav .nav-item').forEach(el => {
 });
 
 function loadSection(name) {
-  if (loaded[name] === currentRun) return;
+  // 控制台不走缓存：工作区/对话状态易变，每次切入都刷新
+  if (name !== 'control' && loaded[name] === currentRun) return;
   loaded[name] = currentRun;
   toggleSkeletons(name, true);
   Promise.resolve(({ overview: loadOverview, threats: loadThreats, report: loadReport,

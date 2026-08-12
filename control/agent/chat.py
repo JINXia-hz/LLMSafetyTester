@@ -59,27 +59,32 @@ class ChatTurn:
 
 def chat_with_llm(
     user_text: str,
+    messages: list[dict],
     *,
     max_tool_rounds: int = 5,
+    confirmed_token: str | None = None,
+    on_blocked=None,
 ) -> ChatTurn:
-    """LLM 驱动的单轮对话（多轮 tool-calling ReAct）。
+    """LLM 驱动的单轮对话（多轮 tool-calling ReAct），带上下文记忆 + 门下省封驳。
 
     Args:
         user_text: 用户自然语言输入
+        messages: 会话历史（会被本函数追加 user/assistant/tool 消息，调用方负责持久化）
         max_tool_rounds: 最多工具调用轮次（防死循环）
+        confirmed_token: 用户对门下省劝谏的确认令牌（None=无待确认/首次请求）
+        on_blocked: 回调（ticket_dict）→ 调用方据此存 pending_confirm
 
     Returns:
-        ChatTurn（含 tool_calls 轨迹 + 最终自然语言回复）
+        ChatTurn（含 tool_calls 轨迹 + 最终自然语言回复 + 可能的 blocked 标记）
     """
+    from control.agent import gatekeeper
+
     turn = ChatTurn(user_text=user_text)
     tools_schema = [t.to_schema() for t in all_tools()]
-    # 工具名 → Tool 对象（执行用）
     tool_map: dict[str, Tool] = {t.name: t for t in all_tools()}
 
-    messages = [
-        {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": user_text},
-    ]
+    # 追加用户消息到会话历史
+    messages.append({"role": "user", "content": user_text})
 
     for _round in range(max_tool_rounds):
         resp = chat_with_tools(messages, tools=tools_schema)
@@ -88,6 +93,7 @@ def chat_with_llm(
         # LLM 没调工具 → 最终回复
         if not msg.tool_calls:
             turn.reply = msg.content or "(模型未给出回复)"
+            messages.append({"role": "assistant", "content": turn.reply})
             return turn
 
         # 把 assistant 的 tool_calls 消息加入历史
@@ -111,6 +117,27 @@ def chat_with_llm(
                 args = json.loads(tc.function.arguments) if tc.function.arguments else {}
             except json.JSONDecodeError:
                 args = {}
+
+            # ★ 门下省审查：危险操作封驳（除非用户已确认）
+            assessment = gatekeeper.assess(name, args)
+            if assessment is not None and not confirmed_token:
+                # 发劝谏令牌，封驳执行
+                ticket = gatekeeper.issue_ticket(name, args, assessment)
+                turn.error = "blocked"
+                turn.reply = (
+                    f"⚠ **门下省封驳**：{assessment['summary']}\n\n"
+                    f"{assessment['detail']}\n\n"
+                    f"如确认执行，请回复「确认」或点击确认按钮。"
+                )
+                if on_blocked:
+                    on_blocked(ticket.to_dict())
+                # 回灌一个 tool 结果告诉 LLM 被封驳（让 LLM 后续知道）
+                messages.append({
+                    "role": "tool", "tool_call_id": tc.id,
+                    "content": f"门下省封驳：{assessment['summary']}。等待用户确认。",
+                })
+                return turn
+
             tool = tool_map.get(name)
             if tool is None:
                 result_str = f"错误：未知工具 {name}"
@@ -121,7 +148,6 @@ def chat_with_llm(
                 except Exception as e:
                     result_str = f"工具执行失败: {type(e).__name__}: {e}"
             turn.tool_calls.append({"name": name, "args": args, "result": result_str[:500]})
-            # 工具结果回灌给 LLM
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
@@ -132,6 +158,7 @@ def chat_with_llm(
     messages.append({"role": "user", "content": "已达到工具调用上限，请基于已有信息给出总结。"})
     resp = chat_with_tools(messages, tools=None)
     turn.reply = resp.choices[0].message.content or "(模型未给出回复)"
+    messages.append({"role": "assistant", "content": turn.reply})
     return turn
 
 
@@ -160,22 +187,88 @@ def _summarize_result(result) -> str:
     return str(result)[:1500]
 
 
-def chat_once_robust(user_text: str) -> dict:
-    """对外统一入口：优先 LLM，失败兜底规则版。
+def chat_once_robust(
+    user_text: str,
+    *,
+    session_id: str | None = None,
+    confirm_token: str | None = None,
+) -> dict:
+    """对外统一入口（带 session 上下文记忆 + 门下省封驳）。
 
-    返回 {mode: "llm"|"rule"|"error", turn: {...}, reply: str}
+    流程：
+      1. 有 pending_confirm 且 confirm_token 匹配 → 执行被封驳的操作
+      2. 否则走 LLM 对话（带 session history）
+      3. LLM 未配置/失败 → 规则兜底
+
+    返回 {mode, reply, tool_calls, session_id, blocked?, confirm?}
     """
+    from control.agent import gatekeeper
+    from control.agent import session as sess
+
+    # 确保 session 存在，拿到 history
+    session_id, messages = sess.get_or_create(session_id)
+
+    # ★ 门下省确认流程：用户回传了 confirm_token
+    pending = sess.get_pending_confirm(session_id)
+    if pending is not None and confirm_token and gatekeeper.is_confirmed(
+            gatekeeper.ConfirmTicket(**pending) if isinstance(pending, dict) else pending,
+            confirm_token):
+        # 确认通过 → 执行被封驳的操作，带 confirmed_token
+        sess.set_pending_confirm(session_id, None)
+        tool_name = pending["tool_name"]
+        tool_args = pending["tool_args"]
+        try:
+            from control.agent.tools import call_tool, reset_registry
+            reset_registry()
+            result = call_tool(tool_name, tool_args)
+            reply = f"✓ 已执行（经门下省确认）：{pending['summary']}\n\n{_summarize_result(result)}"
+            mode = "confirmed"
+        except Exception as e:
+            reply = f"✗ 确认后执行仍失败：{type(e).__name__}: {e}"
+            mode = "error"
+        sess.append(session_id, "user", user_text or "（确认执行）")
+        sess.append(session_id, "assistant", reply)
+        return {"mode": mode, "reply": reply, "session_id": session_id,
+                "tool_calls": [{"name": tool_name, "args": tool_args}]}
+
+    # 用户拒绝了（发来拒绝信号或换了个新话题）→ 清 pending
+    if pending is not None and confirm_token == "REJECT":
+        sess.set_pending_confirm(session_id, None)
+        reply = "已取消该操作。"
+        sess.append(session_id, "user", user_text or "（取消）")
+        sess.append(session_id, "assistant", reply)
+        return {"mode": "cancelled", "reply": reply, "session_id": session_id}
+
+    # 正常对话
     if not is_llm_configured():
-        # LLM 未配置 → 规则版
         reply = _rule_chat_one(user_text)
-        return {"mode": "rule", "reply": reply, "turn": None}
+        sess.append(session_id, "user", user_text)
+        sess.append(session_id, "assistant", reply)
+        return {"mode": "rule", "reply": reply, "session_id": session_id}
+
+    blocked_ticket = None
+
+    def _on_blocked(ticket_dict):
+        nonlocal blocked_ticket
+        blocked_ticket = ticket_dict
+        sess.set_pending_confirm(session_id, ticket_dict)
 
     try:
-        turn = chat_with_llm(user_text)
-        return {"mode": "llm", "reply": turn.reply, "turn": turn.to_dict(),
-                "tool_calls": turn.tool_calls}
+        turn = chat_with_llm(
+            user_text, messages,
+            confirmed_token=confirm_token,
+            on_blocked=_on_blocked,
+        )
+        result = {
+            "mode": "llm", "reply": turn.reply, "session_id": session_id,
+            "tool_calls": turn.tool_calls,
+        }
+        if turn.error == "blocked" and blocked_ticket:
+            result["blocked"] = blocked_ticket
+        return result
     except Exception as e:
-        # LLM 调用失败 → 兜底规则版
+        # LLM 失败 → 规则兜底（但仍记录进 session）
         reply = _rule_chat_one(user_text)
-        return {"mode": "fallback", "reply": reply, "turn": None,
+        sess.append(session_id, "assistant", reply)
+        return {"mode": "fallback", "reply": reply, "session_id": session_id,
                 "llm_error": f"{type(e).__name__}: {e}"}

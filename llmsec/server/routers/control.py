@@ -63,6 +63,8 @@ class MergeRequest(BaseModel):
 class ChatRequest(BaseModel):
     text: str
     max_tool_rounds: int = 5
+    session_id: str | None = None
+    confirm_token: str | None = None
 
 
 # ============================================================
@@ -160,9 +162,27 @@ async def api_tools():
 
 @router.post("/api/control/chat")
 async def api_chat(req: ChatRequest):
-    """LLM 对话（tool-calling ReAct 循环）。LLM 未配置时兜底规则版。"""
+    """LLM 对话（带 session 上下文记忆 + 门下省封驳）。
+
+    前端首次请求不传 session_id（后端分配并返回）；
+    后续请求带上同一 session_id 以保持上下文。
+    封驳确认：blocked 响应含 confirm ticket，用户确认后带 confirm_token 重发。
+    """
     try:
-        result = chat_once_robust(req.text)
+        result = chat_once_robust(
+            req.text,
+            session_id=req.session_id,
+            confirm_token=req.confirm_token,
+        )
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/control/chat/reset")
+async def api_chat_reset(req: ChatRequest):
+    """清空 session 历史（重新开始对话）。"""
+    from control.agent import session as sess
+    if req.session_id:
+        sess.reset(req.session_id)
+    return {"session_id": req.session_id, "reset": True}
