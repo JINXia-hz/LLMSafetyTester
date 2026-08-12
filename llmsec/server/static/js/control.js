@@ -8,7 +8,8 @@
 // ---------- 控制台 ----------
 let _chatBusy = false;
 let _ctrlBound = false;
-let _sessionId = null;        // 后端 session id（上下文记忆）
+// session_id + pendingConfirm 持久化到 sessionStorage（刷新不丢，关标签页才丢）
+let _sessionId = sessionStorage.getItem('ctrl_session_id') || null;
 let _pendingConfirm = null;   // 门下省待确认的 ticket（blocked 时填）
 let _forkOptsLoaded = false;   // fork+run 抽屉的目标/攻击集下拉是否已填充
 let _greeted = false;          // 开场白只发一次
@@ -58,6 +59,27 @@ function bindControl() {
   });
   $('ctrl-cmp-btn').onclick = doCompare;
   $('ctrl-mrg-btn').onclick = doMerge;
+  // 重置对话（清上下文 + session）
+  const resetBtn = $('ctrl-chat-reset');
+  if (resetBtn) resetBtn.onclick = resetChat;
+}
+
+async function resetChat() {
+  if (_chatBusy) return;
+  // 通知后端清 session
+  if (_sessionId) {
+    try {
+      await fetch('/api/control/chat/reset', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: '', session_id: _sessionId }),
+      });
+    } catch { /* 忽略 */ }
+  }
+  _sessionId = null;
+  _pendingConfirm = null;
+  sessionStorage.removeItem('ctrl_session_id');
+  $('ctrl-chat-log').innerHTML = '';
+  setStatus('对话已重置');
 }
 
 // ============================================================
@@ -89,8 +111,11 @@ async function sendChat() {
     }
     const data = await res.json();
     removeThinking();
-    // 记住 session_id（上下文记忆）
-    if (data.session_id) _sessionId = data.session_id;
+    // 记住 session_id（上下文记忆 + sessionStorage 持久化）
+    if (data.session_id) {
+      _sessionId = data.session_id;
+      sessionStorage.setItem('ctrl_session_id', _sessionId);
+    }
     // 门下省封驳：展示劝谏卡片
     if (data.blocked) {
       _pendingConfirm = data.blocked;

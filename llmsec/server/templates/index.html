@@ -1176,7 +1176,10 @@
             <div class="card lg:col-span-3">
               <div class="flex items-center justify-between mb-1">
                 <h3 class="font-semibold text-sm">中书对话</h3>
-                <span id="ctrl-llm-badge" class="ctrl-badge off">检测中…</span>
+                <div class="flex items-center gap-2">
+                  <button id="ctrl-chat-reset" class="text-xs px-2 py-0.5 rounded border border-white/10 hover:bg-white/5" title="清空对话上下文">↻ 重置</button>
+                  <span id="ctrl-llm-badge" class="ctrl-badge off">检测中…</span>
+                </div>
               </div>
               <div class="text-xs mb-2" style="color: var(--c-muted);">自然语言调度控制层：查批次、对比、fork 工作区、合并 R 矩阵。</div>
               <div id="ctrl-chat-log" class="chat-log mb-2"></div>
