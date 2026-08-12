@@ -187,12 +187,14 @@ def append_twin_entry(entry: dict) -> None:
 
 
 def make_twin_entry(rec: dict, original_id, clean_prompt: str, twin: dict) -> dict:
-    """构造 safe_twins.jsonl 落盘 entry（generate_all_twins 与 allergy_phase 共享）。"""
+    """构造 safe_twins.jsonl 落盘 entry（generate_all_twins 与 allergy_phase 共用）。"""
+    from llmsec.core.taxonomy import normalize_harm_type
+
     return {
         "original_id": original_id,
         "category": rec.get("category", "unknown"),  # M-36：category/harm_type 可选（README），用 .get 防缺键崩溃
         "method": rec.get("method", "unknown"),
-        "harm_type": rec.get("harm_type", "unknown"),
+        "harm_type": normalize_harm_type(rec.get("harm_type", "other")),
         "original_prompt": clean_prompt[:300],
         "safe_prompt": twin["safe_prompt"],
         "replacement": twin["replacement"],

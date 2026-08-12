@@ -25,7 +25,7 @@ from fastapi.templating import Jinja2Templates
 
 from llmsec.core.config import RUNS_DIR
 from llmsec.core.logging import get_logger
-from llmsec.server.routers import cluster_viz, data_query, hpo, tasks
+from llmsec.server.routers import cluster_viz, control, data_query, hpo, tasks
 
 logger = get_logger(__name__)
 
@@ -71,6 +71,7 @@ app.include_router(data_query.router)
 app.include_router(cluster_viz.router)
 app.include_router(tasks.router)
 app.include_router(hpo.router)
+app.include_router(control.router)
 
 
 # ============================================================

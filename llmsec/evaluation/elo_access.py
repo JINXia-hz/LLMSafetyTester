@@ -26,7 +26,7 @@ from llmsec.core.io import read_json, write_json
 from llmsec.core.results import ResultsMatrix, _coarse_status, _file_lock
 from llmsec.evaluation.elo import ELOTracker, derive_elo
 
-_CACHE_VERSION = 2  # v2：ground_truth 统一 {m: {elo: ...}} 形态 + 补 attacker_pred_std
+_CACHE_VERSION = 3  # v3：簇粒度——ratings/GT 键为 unit_id（簇），R 行键为记录 id
 
 
 # ============================================================
@@ -129,8 +129,8 @@ def _ts_key(ts):
 def publish_tracker(tracker: ELOTracker, model: str) -> None:
     """评估结束后发布：把 live tracker 的结果写入 R，并把派生状态发布到缓存。
 
-    语义：R 对同 (method, model) 的多次观测**以最后一次为准**（upsert 覆盖），
-    而 live tracker 会累积全部更新——故缓存项的 ratings/ground_truth 取
+    语义：R 的行键是实测记录 id（原始观测），同一评级单位（簇）的多条观测各自成行；
+    derive_elo 按 extra.unit 聚合回放——故缓存项的 ratings/ground_truth 取
     derive_elo(R, model) 的派生态（M-2），使缓存恒等于 R 重算结果，
     不与 elo_state_for 冷派生产生分歧。
 
@@ -148,17 +148,21 @@ def publish_tracker(tracker: ELOTracker, model: str) -> None:
     # 各自 upsert 自己的子集、各自 save → 后写者覆盖先写者。
     with _file_lock(config.RESULTS_FILE):
         R = ResultsMatrix.load()
-        # 镜像 history → R（按 defender 归属，防跨模型错记）
+        # 镜像 history → R（按 defender 归属，防跨模型错记）。
+        # 行键 = 实测记录 id（h["record"]，原始观测粒度）；评级单位（簇）写进 extra.unit，
+        # derive_elo 回放时按它聚合——同一 unit 的多条 prompt 观测各自成行、不再互相覆盖。
         for h in tracker.history:
             if h.get("defender") == model:
                 # #10：round 经 extra 持久化进 R，使 derive_elo 能按轮分组重建收敛轨迹
-                extra = {"round": h["round"]} if h.get("round") is not None else None
+                extra = {"unit": h["attacker"]}
+                if h.get("round") is not None:
+                    extra["round"] = h["round"]
                 # F2 修复：透传 live tracker 的原始 status（fully_compliant/safe_redirect/…），
                 # 不用 _coarse_status 二次改写（原实现把 safe_redirect→irrelevant、
                 # partially_compliant→fully_compliant，语义丢失）。status 缺失时才兜底。
                 raw_status = h.get("status") or _coarse_status(h["eval_score"])
                 R.upsert(
-                    h["attacker"], model, h["eval_score"],
+                    h.get("record") or h["attacker"], model, h["eval_score"],
                     status=raw_status,
                     extra=extra,
                 )

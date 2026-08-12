@@ -169,7 +169,7 @@ def test_f3_from_store_missing_eval_score():
     """R-3: 半残 JSON 缺 eval_score 字段时跳过该记录（不 KeyError 崩溃）。"""
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / 'r.json'
-        p.write_text('{"version":1,"methods":[],"models":[],"results":{"good":{"qwen":{"eval_score":3.0}},"bad":{"qwen":{"status":"refused"}}}}', encoding='utf-8')
+        p.write_text('{"version":2,"units":[],"models":[],"results":{"good":{"qwen":{"eval_score":3.0}},"bad":{"qwen":{"status":"refused"}}}}', encoding='utf-8')
         mat = ResultsMatrix.load(p)
         assert mat.get('good', 'qwen') is not None, 'F3: 正常记录被加载'
         assert mat.get('bad', 'qwen') is None, 'F3: 缺 eval_score 的记录被跳过（不崩溃）'

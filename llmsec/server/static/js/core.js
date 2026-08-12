@@ -145,7 +145,7 @@ function clearCharts(ids) {
 }
 
 // ---------- 导航 ----------
-const SECTIONS = ['overview', 'threats', 'report', 'clusters', 'model', 'run'];
+const SECTIONS = ['overview', 'threats', 'report', 'clusters', 'model', 'run', 'control'];
 let _secToken = 0;   // 翻页过渡令牌：快速连点时作废旧过渡
 document.querySelectorAll('#nav .nav-item').forEach(el => {
   el.addEventListener('click', () => {
@@ -179,7 +179,8 @@ function loadSection(name) {
   loaded[name] = currentRun;
   toggleSkeletons(name, true);
   Promise.resolve(({ overview: loadOverview, threats: loadThreats, report: loadReport,
-     clusters: loadClusters, model: loadModel, run: loadRunSection })[name]())
+     clusters: loadClusters, model: loadModel, run: loadRunSection,
+     control: loadControlSection })[name]())
     .finally(() => toggleSkeletons(name, false));   // 渲染（含空数据分支）完成后撤骨架
 }
 function invalidate() { for (const k in loaded) delete loaded[k]; loadSection(activeSection); }

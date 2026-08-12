@@ -2,19 +2,24 @@
 core.results — 结果矩阵 R（唯一真相存储）
 
 设计哲学（更高视角）：
-  结果矩阵 R[method][model] → 结果记录 是整个评估体系的**唯一真相**。
-  Elo、预测器、收敛判定都是从 R + 方法特征 X **派生**出来的缓存，可随时
+  结果矩阵 R[record][model] → 结果记录 是整个评估体系的**唯一真相**。
+  Elo、预测器、收敛判定都是从 R + 单位特征 X **派生**出来的缓存，可随时
   从 R 全量重算。这保证：
     1. Elo 不跨模型混淆（每个模型的 Elo 仅由该模型列的 R 回放得到）
     2. "已攻击的只要算一下就得出了"——R 是不可重算的原始观测，其余皆派生
     3. 多模型自然支持（R 的第二维就是模型）
 
+schema v2（簇粒度）：
+  行键 = 实测 prompt 记录 id（原始观测，同一簇可有多条）；评级单位（簇）
+  由 extra.unit 标注，Elo 回放时按它聚合（evaluation.elo.derive_elo）。
+  v1（method 键）文件在 load 时归档为 results.method-era.bak 并重建。
+
 存储布局：output/state/results.json
   {
-    "version": 1,
-    "methods": ["DAN_b64", ...],          # 规范方法清单（来自攻击集，可空）
+    "version": 2,
+    "units":   ["c_1a2b3c4d5e", ...],      # 评级单位（簇）清单（来自攻击集聚类，可空）
     "models":  ["qwen9b", ...],            # 已观测到的模型（自发现）
-    "results": { method: { model: {eval_score, status, ts, ...} } }
+    "results": { record: { model: {eval_score, status, ts, extra:{unit, round, ...}} } }
   }
 
 本模块只负责存储与访问；Elo 派生见 evaluation.elo.derive_elo；
@@ -33,7 +38,7 @@ from llmsec.core.config import RESULTS_FILE
 from llmsec.core.io import CorruptedFileError, read_json, write_json
 
 _logger = logging.getLogger(__name__)
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 @contextmanager
@@ -91,14 +96,14 @@ def _file_lock(filepath: Path, timeout: float = 10.0):
 
 @dataclass
 class MatchResult:
-    """单场 (方法 × 模型) 攻击结果原子记录。"""
+    """单场 (记录 × 模型) 攻击结果原子记录。record = 实测 prompt 记录 id。"""
 
-    method: str
+    record: str
     model: str
     eval_score: float
     status: str = ""              # fully_compliant / refused / irrelevant / ...
     ts: object = None             # 时序键（数字/字符串）；排序用，可为 None
-    extra: dict = field(default_factory=dict)  # judge 细节、响应长度等可选附注
+    extra: dict = field(default_factory=dict)  # unit/round/judge 细节等可选附注
 
     def to_dict(self) -> dict:
         d = {"eval_score": self.eval_score}
@@ -111,17 +116,17 @@ class MatchResult:
         return d
 
     @classmethod
-    def from_store(cls, method: str, model: str, d: dict) -> MatchResult:
+    def from_store(cls, record: str, model: str, d: dict) -> MatchResult:
         # R-3 修复：eval_score 用 .get 防御半残 JSON 缺该键（其他字段都已用 .get，唯此处不一致）
         score = d.get("eval_score")
         if score is None:
-            raise ValueError(f"记录缺 eval_score 字段: method={method} model={model}")
+            raise ValueError(f"记录缺 eval_score 字段: record={record} model={model}")
         try:
             score = float(score)
         except (TypeError, ValueError) as e:
-            raise ValueError(f"eval_score 非 float: method={method} model={model}: {e}")
+            raise ValueError(f"eval_score 非 float: record={record} model={model}: {e}")
         return cls(
-            method=method,
+            record=record,
             model=model,
             eval_score=score,
             status=str(d.get("status", "")),
@@ -132,25 +137,25 @@ class MatchResult:
 
 class ResultsMatrix:
     """
-    结果矩阵 R：method → model → MatchResult。
+    结果矩阵 R：record（实测记录 id）→ model → MatchResult。
 
-    - upsert 写入；get / model_column / method_row 读取。
-    - tested_methods(model) / n_for_model(model) 支撑覆盖率与自适应权重。
+    - upsert 写入；get / model_column / record_row 读取。
+    - tested_records(model) / tested_units(model) / n_for_model(model) 支撑覆盖率与续跑。
     - ordered_results(model) 按 ts 返回该模型的时序结果，供 Elo 回放。
-    - save / load 幂等持久化（version 1）。
+    - save / load 幂等持久化（version 2；v1 method 键文件 load 时归档重建）。
     """
 
-    def __init__(self, methods: list[str] | None = None, models: list[str] | None = None):
-        # method -> model -> MatchResult
+    def __init__(self, units: list[str] | None = None, models: list[str] | None = None):
+        # record -> model -> MatchResult
         self._r: dict[str, dict[str, MatchResult]] = {}
-        self._methods: list[str] = list(methods) if methods else []
+        self._units: list[str] = list(units) if units else []
         self._models: list[str] = list(models) if models else []
         self._ins_order: int = 0  # 插入序，ts 缺失时用作稳定排序兜底
 
     # ---------- 写 ----------
     def upsert(
         self,
-        method: str,
+        record: str,
         model: str,
         eval_score: float,
         status: str = "",
@@ -161,25 +166,23 @@ class ResultsMatrix:
         if ts is None:
             self._ins_order += 1
             ts = self._ins_order
-        res = MatchResult(method, model, float(eval_score), status, ts, dict(extra or {}))
-        self._r.setdefault(method, {})[model] = res
+        res = MatchResult(record, model, float(eval_score), status, ts, dict(extra or {}))
+        self._r.setdefault(record, {})[model] = res
         if model not in self._models:
             self._models.append(model)
-        if method not in self._methods:
-            self._methods.append(method)
         return res
 
     # ---------- 读 ----------
-    def get(self, method: str, model: str) -> MatchResult | None:
-        col = self._r.get(method)
+    def get(self, record: str, model: str) -> MatchResult | None:
+        col = self._r.get(record)
         return col.get(model) if col else None
 
     def model_column(self, model: str) -> dict[str, MatchResult]:
-        """返回 {method: MatchResult}——该模型列的全部结果。"""
+        """返回 {record: MatchResult}——该模型列的全部结果。"""
         return {m: col[model] for m, col in self._r.items() if model in col}
 
     def column_payload(self, model: str, extra_fields: tuple[str, ...] = ()) -> str | None:
-        """该模型列的确定性内容串（method:score:ts[:extra] 按方法排序拼接）。无结果返回 None。
+        """该模型列的确定性内容串（record:score:ts[:extra] 按记录排序拼接）。无结果返回 None。
 
         供 elo_access / predictors.blend 构造缓存失效指纹（M-37），替代二者各自重复的
         `",".join(f"{m}:{r.eval_score}:{r.ts}...")` 拼接。调用方自行 md5 包装。
@@ -195,24 +198,29 @@ class ResultsMatrix:
             parts.append(seg)
         return ",".join(parts)
 
-    def method_row(self, method: str) -> dict[str, MatchResult]:
-        """返回 {model: MatchResult}——该方法行跨全部模型的结果。"""
-        return dict(self._r.get(method, {}))
+    def record_row(self, record: str) -> dict[str, MatchResult]:
+        """返回 {model: MatchResult}——该记录行跨全部模型的结果。"""
+        return dict(self._r.get(record, {}))
 
-    def tested_methods(self, model: str) -> set[str]:
-        """该模型已真实评估的方法集合（ground truth）。"""
+    def tested_records(self, model: str) -> set[str]:
+        """该模型已真实评估的记录集合（原始观测口径）。"""
         return {m for m, col in self._r.items() if model in col}
 
-    def n_for_model(self, model: str) -> int:
-        return len(self.tested_methods(model))
+    def tested_units(self, model: str) -> set[str]:
+        """该模型已真实评估的评级单位（簇）集合（extra.unit 聚合口径）。"""
+        out = set()
+        for col in self._r.values():
+            res = col.get(model)
+            if res is not None:
+                out.add((res.extra or {}).get("unit") or res.record)
+        return out
 
-    def all_methods(self) -> list[str]:
-        """规范方法清单（含攻击集声明 + 已观测）。"""
-        seen: list[str] = []
-        for m in self._methods + [k for k in self._r if k not in self._methods]:
-            if m not in seen:
-                seen.append(m)
-        return seen
+    def n_for_model(self, model: str) -> int:
+        return len(self.tested_records(model))
+
+    def all_units(self) -> list[str]:
+        """评级单位（簇）清单（攻击集聚类注入）。"""
+        return list(self._units)
 
     def all_models(self) -> list[str]:
         seen: list[str] = []
@@ -221,11 +229,11 @@ class ResultsMatrix:
                 seen.append(m)
         return seen
 
-    def set_method_catalog(self, methods: list[str]) -> None:
-        """攻击集加载后，注入规范方法清单（覆盖率分母）。"""
-        for m in methods:
-            if m not in self._methods:
-                self._methods.append(m)
+    def set_unit_catalog(self, units: list[str]) -> None:
+        """攻击集聚类后，注入评级单位清单（覆盖率分母）。"""
+        for m in units:
+            if m not in self._units:
+                self._units.append(m)
 
     def ordered_results(self, model: str) -> list[MatchResult]:
         """该模型列按 ts 升序的结果——Elo 回放的时序输入。"""
@@ -240,6 +248,28 @@ class ResultsMatrix:
             return (1, str(t))
         return sorted(self.model_column(model).values(), key=_key)
 
+    # ---------- 删除 ----------
+    def remove_model(self, model: str) -> int:
+        """删除某模型列（全部观测）。返回删除的记录条数。
+
+        列删除后 ``column_payload(model) → None``，下游 elo_cache 指纹失效、
+        ``elo_state_for`` 返回空，符合现有指纹失效机制（无需手动清缓存）。
+        """
+        n = 0
+        for col in self._r.values():
+            if model in col:
+                del col[model]
+                n += 1
+        # 清空空 record 行 + 从 _models 移除
+        self._r = {m: col for m, col in self._r.items() if col}
+        self._models = [m for m in self._models if m != model]
+        return n
+
+    def remove_record(self, record: str) -> int:
+        """删除某记录行（跨全部模型）。返回删除的模型列条数。"""
+        col = self._r.pop(record, None)
+        return len(col) if col else 0
+
     # ---------- 持久化 ----------
     def save(self, filepath: str | Path | None = None, *, _locked: bool = False) -> Path:
         # F-3 修复：权威存储用原子写 + .bak 轮转，避免崩溃/并发静默丢失全部历史观测
@@ -248,7 +278,7 @@ class ResultsMatrix:
         filepath = Path(filepath) if filepath else RESULTS_FILE
         data = {
             "version": _SCHEMA_VERSION,
-            "methods": self._methods,
+            "units": self._units,
             "models": self.all_models(),
             "results": {
                 m: {model: res.to_dict() for model, res in col.items()}
@@ -295,15 +325,29 @@ class ResultsMatrix:
                 raise
         if not data:
             return cls()
-        mat = cls(methods=data.get("methods", []), models=data.get("models", []))
-        for method, col in data.get("results", {}).items():
+        # schema v1（method 键）已废弃：归档后重建（不做兼容迁移——v1 行键是方法名，
+        # 无法还原记录级原始观测，硬迁移只会污染新单位空间）
+        if data.get("version") != _SCHEMA_VERSION:
+            try:
+                import shutil
+                bak = filepath.with_name("results.method-era.bak")
+                shutil.copy2(filepath, bak)
+                _logger.warning(
+                    "results.json 为旧 schema（method 键 v%s），已归档为 %s 并按 v2 重建",
+                    data.get("version"), bak,
+                )
+            except OSError:
+                pass
+            return cls()
+        mat = cls(units=data.get("units", []), models=data.get("models", []))
+        for record, col in data.get("results", {}).items():
             for model, d in col.items():
                 try:
-                    res = MatchResult.from_store(method, model, d)
+                    res = MatchResult.from_store(record, model, d)
                 except ValueError as e:
                     _logger.warning("跳过损坏记录: %s", e)
                     continue
-                mat._r.setdefault(method, {})[model] = res
+                mat._r.setdefault(record, {})[model] = res
                 # 还原插入序兜底（取已见 ts 的上界）
                 try:
                     self_ts = float(res.ts) if res.ts is not None else 0
@@ -317,7 +361,7 @@ class ResultsMatrix:
     def summary(self) -> dict:
         models = self.all_models()
         return {
-            "methods_total": len(self.all_methods()),
+            "units_total": len(self.all_units()),
             "models": models,
             "coverage": {m: self.n_for_model(m) for m in models},
             "results_total": sum(len(col) for col in self._r.values()),

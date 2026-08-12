@@ -89,13 +89,29 @@ def build_svd_ridge_summary(tracker: ELOTracker) -> dict | None:
         feats = predictor.artifacts.get("features", {}) if predictor.artifacts else {}
         if not feats or predictor.ground_truth_count() < predictor.min_cluster_size:
             return None
-        # 构造最小 method_records（build_prior_features 接受空 record）
-        method_records = {m: {} for m in feats}
-        try:
-            predictor.predict_batch(method_records)
-        except Exception as e:
-            logger.warning("SVD-Ridge 模型按需训练失败，跳过诊断: %s", e)
-            return None
+        # 簇粒度：artifacts 特征是 method 级而 GT 键是 unit_id——按需训练前换成
+        # unit 级质心特征（units 由 final_fit 随聚类产物持久化）
+        units = predictor.artifacts.get("units") if predictor.artifacts else None
+        if units:
+            from llmsec.core.units import build_unit_features
+            feats = build_unit_features(feats, units)
+            orig = predictor.artifacts
+            predictor.artifacts = {**orig, "features": feats}
+            try:
+                predictor.predict_batch({m: {} for m in feats})
+            except Exception as e:
+                logger.warning("SVD-Ridge 模型按需训练失败，跳过诊断: %s", e)
+                return None
+            finally:
+                predictor.artifacts = orig
+        else:
+            # 构造最小 method_records（build_prior_features 接受空 record）
+            method_records = {m: {} for m in feats}
+            try:
+                predictor.predict_batch(method_records)
+            except Exception as e:
+                logger.warning("SVD-Ridge 模型按需训练失败，跳过诊断: %s", e)
+                return None
         if model.w is None:
             return None
 
@@ -130,6 +146,12 @@ def build_blend_predictor_summary(tracker: ELOTracker) -> dict | None:
     feats = pred.artifacts.get("features", {}) if pred and pred.artifacts else {}
     if not feats:
         return None
+    # 簇粒度：R 行键 = 记录 id、derive_elo 按 extra.unit 聚合出 unit 键——
+    # 特征同步换成 unit 级质心，键空间才一致
+    units = pred.artifacts.get("units") if pred.artifacts else None
+    if units:
+        from llmsec.core.units import build_unit_features
+        feats = build_unit_features(feats, units)
     try:
         from llmsec.core.results import ResultsMatrix
         from llmsec.evaluation.predictors.blend import load_or_fit_blend_predictor
@@ -195,6 +217,10 @@ def analyze_clusters(
     if cluster_report and "cluster_names" in cluster_report:
         cluster_names = cluster_report["cluster_names"]
 
+    # 簇粒度（unit）路径：artifacts 带 units 时，tracker 的评级键就是 unit_id——
+    # 每个 unit 即一个簇，members 传入 [uid] 直接命中 tracker 的键空间
+    units = (cluster_artifacts or {}).get("units") or {}
+
     if defender_name is None:
         defender_name = (
             list(tracker.defender_ratings.keys())[0]
@@ -204,12 +230,18 @@ def analyze_clusters(
 
     defender_elo = tracker.get_defender_elo(defender_name)
 
-    # 按簇分组
+    # 按簇分组（unit 路径：label → [unit_id]；否则 method 粒度旧路径：label → [method]）
     clusters = defaultdict(list)
-    for method, cid in labels.items():
-        clusters[parse_cluster_id(cid)].append(method)
+    if units:
+        for uid, u in units.items():
+            clusters[parse_cluster_id(u.get("label", 0))].append(uid)
+        if not cluster_names:
+            cluster_names = {str(u.get("label", 0)): u.get("name") for u in units.values()}
+    else:
+        for method, cid in labels.items():
+            clusters[parse_cluster_id(cid)].append(method)
 
-    # 从 history 计算每个方法的 eval_score 历史（用于 ASR）
+    # 从 history 计算每个键（unit/method）的 eval_score 历史（用于 ASR）
     method_scores: dict[str, list[float]] = defaultdict(list)
     for h in tracker.history:
         method_scores[h["attacker"]].append(h["eval_score"])
@@ -224,6 +256,16 @@ def analyze_clusters(
             cluster_names,
             method_scores,
         )
+        if units:
+            # unit 即簇：size/成员/覆盖率按 unit 真实语义修正（单键入参时默认 size=1）
+            u = units.get(members[0], {})
+            n_match = tracker.attacker_stats.get(members[0], {}).get("n_matches", 0)
+            detail["unit_id"] = members[0]
+            detail["size"] = u.get("size", 1)
+            detail["members"] = sorted(u.get("members", []))[:50]
+            detail["tested_members"] = []
+            detail["tested_records"] = n_match
+            detail["test_coverage"] = round(min(1.0, n_match / max(1, u.get("size", 1))), 4)
         cluster_details[str(cid)] = detail
 
     # 分类簇
@@ -272,10 +314,16 @@ def analyze_clusters(
             if model is None or model.w is None:
                 feats = pred.artifacts.get("features", {}) if pred and pred.artifacts else {}
                 gt_all = sorted(pred.ground_truth.keys()) if pred else []
+                # 簇粒度：GT 键是 unit_id 而 artifacts 特征是 method 级——
+                # 用 unit 质心特征做匹配判断，避免误报"stale 污染"
+                _units = (pred.artifacts or {}).get("units") if pred else None
+                if _units and feats:
+                    from llmsec.core.units import build_unit_features
+                    feats = build_unit_features(feats, _units)
                 gt_in_feats = [m for m in gt_all if m in feats]
                 stale = len(gt_all) - len(gt_in_feats)
                 if stale > 0:
-                    reason = f"GT {gt_n} 中 {stale} 个方法不在当前特征集（跨攻击集 stale 污染），可用 {len(gt_in_feats)}"
+                    reason = f"GT {gt_n} 中 {stale} 个单位不在当前特征集（跨攻击集 stale 污染），可用 {len(gt_in_feats)}"
                 elif not feats:
                     reason = "特征缓存为空（extract_all_features 可能失败）"
                 elif gt_n < (pred.min_cluster_size if pred else 3):

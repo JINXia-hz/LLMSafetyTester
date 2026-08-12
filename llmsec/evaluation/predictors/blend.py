@@ -76,7 +76,7 @@ class BlendPredictor:
         # lazy 导入 derive_elo 避免 predictors/__init__ → blend → elo → predictors 循环
         from llmsec.evaluation.elo import derive_elo
         for model in models:
-            tracker = derive_elo(results, model, method_catalog=self._catalog)
+            tracker = derive_elo(results, model, unit_catalog=self._catalog)
             elo_map = {m: float(tracker.get_attacker_elo(m)) for m in tracker.ground_truth_methods}
             per_model_elo[model] = elo_map
             self._tested[model] = set(elo_map.keys())

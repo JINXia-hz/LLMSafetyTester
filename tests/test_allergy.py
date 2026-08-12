@@ -9,8 +9,8 @@ from llmsec.pipeline.allergy_phase import select_twin_candidates
 
 
 def _ranking(elos: list[float]):
-    """构造与 ELOTracker.get_attacker_ranking 相同的降序结构。"""
-    ranking = [{'method': f'm{i:03d}', 'elo': e} for i, e in enumerate(elos)]
+    """构造与 ELOTracker.get_attacker_ranking 相同的降序结构（unit 键）。"""
+    ranking = [{'unit': f'm{i:03d}', 'elo': e} for i, e in enumerate(elos)]
     ranking.sort(key=lambda x: x['elo'], reverse=True)
     return ranking
 

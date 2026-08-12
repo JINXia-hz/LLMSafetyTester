@@ -118,6 +118,12 @@ async def api_cluster_projection(method: str = "pca"):
     state = _load_state()
     ratings = state.get("attacker_ratings", {})
 
+    # 评级键 = unit_id：method → unit 反查（units 表随聚类产物持久化）
+    method_to_unit = {}
+    for uid, u in (artifacts.get("units") or {}).items():
+        for mem in u.get("members", []):
+            method_to_unit[mem] = uid
+
     points = []
     for i, m in enumerate(methods):
         cid = labels.get(m, -1)
@@ -125,14 +131,16 @@ async def api_cluster_projection(method: str = "pca"):
             cid = int(cid)
         except (TypeError, ValueError):
             cid = -1
+        uid = method_to_unit.get(m)
         points.append({
             "method": m,
+            "unit": uid,
             "x": round(float(coords[i, 0]), 4),
             "y": round(float(coords[i, 1]), 4),
             "cluster": cid,
             "cluster_name": cluster_names.get(str(cid), f"簇{cid}"),
-            "tested": m in gt_methods,
-            "elo": round(ratings[m], 1) if m in ratings else None,
+            "tested": uid in gt_methods if uid else False,
+            "elo": round(ratings[uid], 1) if uid and uid in ratings else None,
         })
 
     result["points"] = points
@@ -230,6 +238,11 @@ async def api_cluster_cut(k: int):
 
     state = _load_state()
     ratings = state.get("attacker_ratings", {})
+    # 评级键 = unit_id：method → unit 反查（任意 k 层切割的成员仍是 method）
+    method_to_unit = {}
+    for uid, u in (artifacts.get("units") or {}).items():
+        for mem in u.get("members", []):
+            method_to_unit[mem] = uid
 
     result = {
         "available": True,
@@ -241,7 +254,7 @@ async def api_cluster_cut(k: int):
                 "size": len(members),
                 "members": sorted(members),
                 "mean_elo": (
-                    round(sum(ratings.get(m, 1500.0) for m in members) / len(members), 1)
+                    round(sum(ratings.get(method_to_unit.get(m), 1500.0) for m in members) / len(members), 1)
                     if members else None
                 ),
             }

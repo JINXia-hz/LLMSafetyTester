@@ -155,8 +155,13 @@ def main():
     parser.add_argument("--seed", type=int, default=get_global_seed(),
                         help=f"全局随机种子，贯穿 K-Fold/D-optimal/PCA（实验复现用，默认 {get_global_seed()}）")
     parser.add_argument("--work-dir", type=str, default=None,
-                        help="实验隔离模式：state/results 写入该目录，不碰全局 R/"
-                             "elo_cache，且跳过聚类落盘。HPO trial 用")
+                        help="实验隔离模式：所有产物（results/elo_cache/probes/prescreen/blend/"
+                             "cluster_report/safe_twins 等全部）写入该目录，全局 output/ 零写入。"
+                             "fork/HPO trial 用。")
+    parser.add_argument("--publish-global", action="store_true",
+                        help="全局模式（无 --work-dir）下，结束时把本次观测 publish 进全局 R 矩阵。"
+                             "默认关（单元化原则）：评估产物只在 run_dir，更新全局 R 用 "
+                             "`llmsec-manage merge`。work-dir 模式忽略此开关（本就隔离）。")
     parser.add_argument("--no-early-stop", action="store_true",
                         help="跑满 max_rounds 不提前收敛停（实验 ci_half@固定预算可比性所需）")
     parser.add_argument("--concurrency", type=int, default=None,
@@ -178,20 +183,12 @@ def main():
     from llmsec.core.seed import set_global_seed
     set_global_seed(args.seed)
 
-    # 实验隔离模式：重绑 results/elo_cache/state 路径到 work-dir，全局零污染（M-17）。
-    # elo_access 经 config 模块动态读取这些路径，故重绑模块属性即生效。
+    # 实验隔离模式：经 core.isolation 集中重绑全部产物路径到 work-dir，全局 output/ 零写入。
+    # 覆盖 results/elo_cache/feature/cluster/predictors/probes/prescreen/safe_twins 全部 9 个
+    # 写入点（原 M-17 只重绑 4 个，probes/prescreen/blend/cluster_report/safe_twins 会泄漏全局）。
     if args.work_dir:
-        wd = Path(args.work_dir)
-        wd.mkdir(parents=True, exist_ok=True)
-        import llmsec.core.config as _cfg
-        import llmsec.core.results as _res
-        _res.RESULTS_FILE = wd / "results.json"
-        _cfg.ELO_CACHE_FILE = wd / "elo_cache.json"
-        # M-17：特征缓存/聚类产物同样隔离——predictors/cold_start 动态读 core.config 的这两个
-        # 路径（仿 elo_access），重绑后 fit_features/_should_refresh_features 读写均落 work-dir
-        _cfg.FEATURE_CACHE_FILE = wd / "feature_cache.pkl"
-        _cfg.CLUSTER_RESULT_FILE = wd / "cluster_result.pkl"
-        logger.info(f"🧪 实验隔离模式: work-dir={wd}（全局 state/results/elo_cache 不被触碰）")
+        from llmsec.core.isolation import rebind_to_workdir
+        rebind_to_workdir(Path(args.work_dir))
 
     # 本次运行目录（原模块级 datetime.now() import 副作用移入 main）；
     # 秒级时间戳撞名时追加 _2/_3 后缀，避免同秒两个 run 互相覆盖产物。
@@ -273,17 +270,28 @@ def main():
 
     catalog = list(method_records.keys())
     R_snapshot = ResultsMatrix.load()
-    R_snapshot.set_method_catalog(catalog)
     _feat_tracker = ELOTracker()
     _feat_tracker.predictor.fit_features(records)
     features = _feat_tracker.predictor.artifacts.get("features", {})
 
-    # P7：预聚类在 runner 层只算一次（输入同一份 features，结果确定），多目标共享，
-    # 避免每个目标的 run_attack_phase 内 _quick_precluster 各算一遍。
+    # 评级单位（簇）在 runner 层只装配一次（输入同一份 features，结果确定），
+    # 多目标共享——避免每个目标的 run_attack_phase 内各自 embedding/聚类。
     # 必须在目标线程启动前完成（主线程串行预计算）。
-    pre_labels = _quick_precluster(_feat_tracker, sorted(catalog)) if do_phase1 else None
-    if pre_labels:
-        logger.info(f"  🔍 预聚类: {len(set(pre_labels.values()))} 簇（一次计算，多目标共享）")
+    units = None
+    if do_phase1:
+        from llmsec.core.units import assemble_units
+
+        pre_labels = _quick_precluster(_feat_tracker, sorted(catalog))
+        if not pre_labels:
+            # 聚类不可用：每方法自成一个 unit（粒度退化但流程一致）
+            pre_labels = {m: i for i, m in enumerate(sorted(catalog))}
+        method_pool: dict[str, list[dict]] = {}
+        for r in records:
+            method_pool.setdefault(r["method"], []).append(r)
+        units = assemble_units(pre_labels, method_records, method_pool,
+                               _feat_tracker.predictor.artifacts)
+        logger.info(f"  🧭 评级单位: {len(units)} 簇（一次装配，多目标共享）")
+    R_snapshot.set_unit_catalog(sorted(units.keys()) if units else catalog)
 
     concurrency = args.concurrency
     target_concurrency = min(args.target_concurrency, len(names))
@@ -334,7 +342,7 @@ def main():
                     concurrency=concurrency,
                     defender_name=name,
                     r_snapshot=R_snapshot,
-                    pre_labels=pre_labels,
+                    units=units,
                 )
             except Exception as e:
                 logger.warning(f"  ⚠ {name} 攻击失败: {e}", exc_info=True)
@@ -353,7 +361,8 @@ def main():
             tracker.load(str(state_path))
 
         conv = tracker.check_convergence(
-            name, total_methods=len(catalog), tested_count=len(tracker.ground_truth_methods))
+            name, total_methods=len(units) if units else len(catalog),
+            tested_count=len(tracker.ground_truth_methods))
         boundary = tracker.compute_security_boundary(name)
         info.update({
             "defender_elo": round(tracker.get_defender_elo(name), 1),
@@ -366,13 +375,17 @@ def main():
         allergy_smmry: dict = {}
         if do_phase2 and tracker.attacker_ratings:
             set_active_target(name)
+            from llmsec.core.units import build_unit_proxy_records
             from llmsec.pipeline.allergy_phase import adaptive_twin_window
+            # 过敏检测同样以簇为单位：候选取自 unit 排行榜，孪生 prompt 用 unit 代理
+            # 记录（medoid prompt）
+            _allergy_recs = build_unit_proxy_records(units) if units else method_records
             n_window = adaptive_twin_window(
-                boundary, len(method_records), user_window=args.twin_window)
+                boundary, len(_allergy_recs), user_window=args.twin_window)
             allergy_file = run_dir / "allergy.json"
             try:
                 allergy_smmry = run_allergy_phase(
-                    method_records, twin_client, judge, tracker,
+                    _allergy_recs, twin_client, judge, tracker,
                     n_window=n_window, allergy_file=allergy_file,
                     concurrency=concurrency, defender_name=name)
             except Exception as e:
@@ -396,7 +409,8 @@ def main():
                 defender_name=name,
                 attack_summary=attack_summary,
                 allergy_summary=allergy_smmry,
-                total_methods=len(catalog),
+                total_methods=len(units) if units else len(catalog),
+                units=units,
             )
         except Exception as e:
             logger.warning(f"  报告生成失败（回退精简版）: {e}")
@@ -457,17 +471,35 @@ def main():
 
     # ============================================================
     # Phase C：写入 R（主线程串行，所有评估+报告完成后）
+    # 单元化原则：work-dir 模式 publish 到 work-dir（隔离）；全局模式默认不 publish
+    # （评估产物只在 run_dir），需更新全局 R 用 `llmsec-manage merge`。
+    # --publish-global 显式恢复旧行为（全局模式下直接 publish 进全局 R）。
     # ============================================================
-    logger.info(f"\n{'='*60}\n  💾 写入 R 矩阵\n{'='*60}")
-    for name in names:
-        tracker = trackers.get(name)
-        if tracker is None:
-            continue
-        try:
-            publish_tracker(tracker, name)
-            logger.info(f"  {name}: {len(tracker.ground_truth_methods)} 条 → R")
-        except Exception as e:
-            logger.error(f"  ❌ {name} 写入 R 失败: {e}")
+    if args.work_dir:
+        logger.info(f"\n{'='*60}\n  💾 写入 work-dir R（隔离）\n{'='*60}")
+        for name in names:
+            tracker = trackers.get(name)
+            if tracker is None:
+                continue
+            try:
+                publish_tracker(tracker, name)
+                logger.info(f"  {name}: {len(tracker.ground_truth_methods)} 条 → work-dir R")
+            except Exception as e:
+                logger.error(f"  ❌ {name} 写入 R 失败: {e}")
+    elif args.publish_global:
+        logger.info(f"\n{'='*60}\n  💾 写入全局 R（--publish-global）\n{'='*60}")
+        for name in names:
+            tracker = trackers.get(name)
+            if tracker is None:
+                continue
+            try:
+                publish_tracker(tracker, name)
+                logger.info(f"  {name}: {len(tracker.ground_truth_methods)} 条 → 全局 R")
+            except Exception as e:
+                logger.error(f"  ❌ {name} 写入 R 失败: {e}")
+    else:
+        logger.info(f"\n{'='*60}\n  ℹ️ 未写全局 R（单元化默认）\n{'='*60}"
+                    f"\n  评估产物在 {runs_dir}/；更新全局 R 用: llmsec-manage merge")
 
     # ============================================================
     # Phase D：清理（trackers 离开作用域 → GC）
@@ -493,15 +525,20 @@ def main():
         if (runs_dir / name / "runner_report.json").exists():
             logger.info(f"    {name}/runner_report.json")
 
-    # 自动重训 ML 预筛模型（<1s，不阻塞；数据不足时静默跳过）
-    try:
-        from llmsec.evaluation.prescreen_ml import train as _retrain
-        result = _retrain()
-        if result.get("trained"):
-            logger.info(f"  🧠 ML 预筛模型已自动更新: {result['n_samples']} 条数据, "
-                  f"CV accuracy={result['cv_accuracy']:.3f}")
-    except Exception as e:
-        logger.debug(f"ML 预筛自动重训跳过: {e}")
+    # 自动重训 ML 预筛模型（<1s，不阻塞；数据不足时静默跳过）。
+    # 单元化原则：work-dir 模式下重训（MODEL_PATH 已隔离到 work-dir）；全局模式默认跳过
+    # （避免单次 run 覆盖全局预筛模型）。
+    if args.work_dir:
+        try:
+            from llmsec.evaluation.prescreen_ml import train as _retrain
+            result = _retrain()
+            if result.get("trained"):
+                logger.info(f"  🧠 ML 预筛模型已更新（work-dir）: {result['n_samples']} 条, "
+                      f"CV accuracy={result['cv_accuracy']:.3f}")
+        except Exception as e:
+            logger.debug(f"ML 预筛自动重训跳过: {e}")
+    else:
+        logger.debug("全局模式：跳过 ML 预筛自动重训（单元化；用 llmsec-manage 触发）")
 
     return {"targets": names, "per_target": results}
 

@@ -52,6 +52,7 @@ def generate_reports(
     attack_summary: dict,
     allergy_summary: dict,
     total_methods: int,
+    units: dict | None = None,
 ) -> dict:
     """为单个目标生成全部报告产物到 run_dir。
 
@@ -61,7 +62,8 @@ def generate_reports(
         defender_name: 目标名
         attack_summary: run_attack_phase 返回的 summary dict
         allergy_summary: run_allergy_phase 返回的 summary dict
-        total_methods: 攻击集方法总数（覆盖率分母）
+        total_methods: 评级单位（簇）总数（覆盖率分母）
+        units: unit 表（core.units.build_units 输出）——top_threats 附簇名用
 
     生成：
         run_dir/runner_report.json  — 完整版报告（前端 overview/threats 数据源）
@@ -77,6 +79,7 @@ def generate_reports(
     boundary = tracker.compute_security_boundary(defender_name)
     ranking = tracker.get_attacker_ranking()
     tested_methods = attack_summary.get("total_attacks", 0)
+    unit_names = {uid: u.get("name", uid) for uid, u in (units or {}).items()}
 
     conv_rounds = _compute_conv_rounds(tracker, defender_name, total_methods)
 
@@ -121,8 +124,9 @@ def generate_reports(
             "tested_above_boundary": boundary.get("tested_above_boundary", 0),
             "predicted_above_boundary": boundary.get("predicted_above_boundary", 0),
             "total_methods": total_methods,
-            "top_threats": [{"method": r["method"], "elo": r["elo"]} for r in ranking[:5]],
-            "top_threats_predicted": [r["method"] for r in ranking[:5] if r.get("predicted")],
+            "top_threats": [{"unit": r["unit"], "name": unit_names.get(r["unit"], r["unit"]),
+                             "elo": r["elo"]} for r in ranking[:5]],
+            "top_threats_predicted": [r["unit"] for r in ranking[:5] if r.get("predicted")],
         },
         "allergy": {
             "fpr": round(fpr, 4) if fpr else None,
@@ -143,8 +147,8 @@ def generate_reports(
             generate_narrative,
         )
 
-        elo_ratings = {name: elo for entry in ranking for name, elo in [(entry["method"], entry["elo"])]}
-        method_stats = build_method_stats(attack_rows, elo_ratings, {})
+        elo_ratings = {entry["unit"]: entry["elo"] for entry in ranking}
+        method_stats = build_method_stats(attack_rows, elo_ratings, {}, units=units)
         tree = build_tree(method_stats, allergy_summary, elo_ratings, output_dir=OUTPUT_DIR)
         write_json(run_dir / "security_tree.json", tree)
 

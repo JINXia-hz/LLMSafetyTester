@@ -41,12 +41,16 @@ from llmsec.clustering.tree import (
     select_knee,
     sweep_candidates,
 )
-from llmsec.core.config import CLUSTER_REPORT_FILE, CLUSTER_RESULT_FILE, OUTPUT_DIR
+from llmsec.core import config as _config
 from llmsec.core.io import save_artifact, write_json
 from llmsec.core.logging import get_logger
+from llmsec.core.seed import get_global_seed
 from llmsec.params import HDBSCAN_MIN_CLUSTER_DIV
 
 logger = get_logger(__name__)
+
+# Ward/auto-k 抽样子集规模上限（O(n²) 距离阵内存防护；超过即分层抽样 + 最近质心归并）
+_WARD_SAMPLE_CAP = 3000
 def _method_set_hash(methods: list[str]) -> str:
     return hashlib.md5(",".join(sorted(set(methods))).encode("utf-8")).hexdigest()
 
@@ -54,6 +58,9 @@ def _method_set_hash(methods: list[str]) -> str:
 def compute_cluster_labels(
     features: dict,
     feature_weights: np.ndarray | None = None,
+    preset_labels: dict[str, int] | None = None,
+    *,
+    skip_hdbscan: bool = False,
 ) -> dict:
     """
     聚类标签计算核心：阻尼白化 → HDBSCAN 密度视图 → Ward 树 auto-k 主标签。
@@ -62,19 +69,29 @@ def compute_cluster_labels(
       - post-test 主管线 run_hdbscan_clustering（接续命名/画像/落盘）
       - Phase 1 开头的采样器预聚类（attack_phase._quick_precluster，只要标签）
 
+    preset_labels：冻结的预聚类标签（run 开头确定的簇分区）。提供时跳过
+    Ward/auto-k 重分区，直接以其为主 labels——unit（簇）身份在 run 开始即冻结，
+    post-test 只允许在同一分区上补命名/画像/验证，防止单位 id 中途漂移。
+
+    skip_hdbscan：跳过 HDBSCAN 密度视图（步骤 2），直接进入 Ward 主标签。
+    用于 _quick_precluster 快速路径——预聚类只需 Ward 主标签，密度视图的
+    flat_labels/n_noise 仅供 post-test 分析参考，预聚类不消费。跳过可省去
+    HDBSCAN 拟合开销（大 n 下显著）。
+
+    规模防护：n > _WARD_SAMPLE_CAP 时 Ward linkage/auto-k 在分层抽样子集上进行
+    （O(n²) 距离阵内存控制），其余点按最近质心归并。
+
     返回:
         正常: {methods, space, coords, Z, flat_labels, n_flat, n_noise,
                min_cluster_size, labels, k_best, top_ks, sweep}
         n<2: {"error": "方法数不足", "labels": {m: 0}}
     """
-    import hdbscan
-
     methods = sorted(features.keys())
     n = len(methods)
     if n < 2:
         return {"error": "方法数不足", "labels": {m: 0 for m in methods}}
 
-    logger.info("🧬 HDBSCAN 聚类: %d 种方法", n)
+    logger.info("🧬 HDBSCAN 聚类: %d 种方法%s", n, "（快速模式：跳过密度视图）" if skip_hdbscan else "")
 
     # 1. 阻尼白化空间（弱监督加权 + 谱拐点截断）
     space = build_whitened_space(features, methods, feature_weights=feature_weights)
@@ -90,21 +107,30 @@ def compute_cluster_labels(
     # #11：min_cluster_size 改 sqrt 缩放（原 n//DIV 线性：n=132→3 偏激进，密度视图过分割）。
     # 默认 DIV=40 复现 sqrt(n)：n=50→7, 132→12, 400→20, 1000→32；DIV 调小→更严（更大簇 fewer），
     # 调大→更松。下限 5 杜绝极小簇。手动 sweep：固定攻击集跑 hdb，比 silhouette/簇效选 DIV。
-    min_cluster_size = max(5, int(round((n ** 0.5) * 40 / HDBSCAN_MIN_CLUSTER_DIV)))
-    clf = hdbscan.HDBSCAN(
-        min_cluster_size=min_cluster_size,
-        min_samples=1,
-        metric="euclidean",
-        cluster_selection_method="eom",  # A6：显式指定，防库升级改默认值静默漂移
-    )
-    flat_arr = clf.fit_predict(coords)
-    flat_labels = {m: int(v) for m, v in zip(methods, flat_arr)}
-    n_flat = len(set(flat_labels.values()) - {-1})
-    n_noise = sum(1 for v in flat_labels.values() if v == -1)
-    logger.info(
-        "  HDBSCAN 密度视图: %d 簇, 噪声 %d (%.0f%%), min_cluster_size=%d",
-        n_flat, n_noise, n_noise / n * 100, min_cluster_size,
-    )
+    if skip_hdbscan:
+        # 快速路径：跳过密度视图，flat_labels 留空（主标签来自 Ward，预聚类不消费密度视图）
+        flat_labels = {m: 0 for m in methods}
+        n_flat = 0
+        n_noise = 0
+        min_cluster_size = 0
+    else:
+        import hdbscan
+
+        min_cluster_size = max(5, int(round((n ** 0.5) * 40 / HDBSCAN_MIN_CLUSTER_DIV)))
+        clf = hdbscan.HDBSCAN(
+            min_cluster_size=min_cluster_size,
+            min_samples=1,
+            metric="euclidean",
+            cluster_selection_method="eom",  # A6：显式指定，防库升级改默认值静默漂移
+        )
+        flat_arr = clf.fit_predict(coords)
+        flat_labels = {m: int(v) for m, v in zip(methods, flat_arr)}
+        n_flat = len(set(flat_labels.values()) - {-1})
+        n_noise = sum(1 for v in flat_labels.values() if v == -1)
+        logger.info(
+            "  HDBSCAN 密度视图: %d 簇, 噪声 %d (%.0f%%), min_cluster_size=%d",
+            n_flat, n_noise, n_noise / n * 100, min_cluster_size,
+        )
 
     # 3. Ward 缩放树 + 关键层（主 labels）
     # 注意：HDBSCAN 的 single_linkage_tree_ 在最近邻链式合并下会产出
@@ -113,18 +139,70 @@ def compute_cluster_labels(
     # 因此缩放/关键层/簇效分析改用均衡的 Ward 树（同一白化坐标）。
     from scipy.cluster.hierarchy import linkage
 
-    Z = linkage(coords, method="ward")
-    ks = candidate_ks(n)
-    sweep = sweep_candidates(coords, Z, methods, ks)
-    k_best, top_ks = select_knee(sweep)
-    labels = cut_tree(Z, methods, k_best)
-    logger.info("  关键层: 候选 %s → k*=%d (top3 %s)", ks, k_best, top_ks)
+    if preset_labels is not None:
+        # 冻结分区（run 开头的预聚类）：不重切 auto-k，直接沿用。
+        # Z 仍按规模防护计算（抽样或全量），仅供树图产物/可视化，不影响分区。
+        labels = {m: int(preset_labels.get(m, 0)) for m in methods}
+        k_best = len(set(labels.values()))
+        top_ks = []
+        sweep = []
+        logger.info("  冻结分区: 沿用 run 开头预聚类标签（k=%d，不重切）", k_best)
+        if n > _WARD_SAMPLE_CAP:
+            rng = np.random.default_rng(get_global_seed())
+            sub_idx = sorted(rng.choice(n, size=_WARD_SAMPLE_CAP, replace=False).tolist())
+            Z = linkage(coords[sub_idx], method="ward")
+        else:
+            Z = linkage(coords, method="ward")
+    elif n > _WARD_SAMPLE_CAP:
+        # 规模防护：Ward linkage 的 O(n²) 距离阵在 1 万点约 400MB+——
+        # 先按 HDBSCAN 密度视图分层抽样 ~_WARD_SAMPLE_CAP 点跑 linkage/auto-k，
+        # 其余点按最近质心（抽样集各 k 层簇的质心）归并。固定种子保证确定性。
+        rng = np.random.default_rng(get_global_seed())
+        flat_arr_np = np.array([flat_labels[m] for m in methods])
+        by_flat: dict[int, list[int]] = {}
+        for i, fl in enumerate(flat_arr_np):
+            by_flat.setdefault(int(fl), []).append(i)
+        per = max(1, _WARD_SAMPLE_CAP // max(1, len(by_flat)))
+        sub_idx = []
+        for _fl, idxs in sorted(by_flat.items()):
+            take = min(len(idxs), per)
+            sub_idx.extend(rng.choice(idxs, size=take, replace=False).tolist())
+        sub_idx = sorted(set(sub_idx))[:_WARD_SAMPLE_CAP]
+        logger.info("  规模防护: n=%d > %d，Ward/auto-k 在 %d 点抽样子集上进行",
+                    n, _WARD_SAMPLE_CAP, len(sub_idx))
+        sub_methods = [methods[i] for i in sub_idx]
+        sub_coords = coords[sub_idx]
+        Z = linkage(sub_coords, method="ward")
+        ks = candidate_ks(len(sub_methods))
+        sweep = sweep_candidates(sub_coords, Z, sub_methods, ks)
+        k_best, top_ks = select_knee(sweep)
+        sub_labels = cut_tree(Z, sub_methods, k_best)
+        # 全量归并：每点归入最近质心的 k 层簇
+        centroids = {}
+        for k in set(sub_labels.values()):
+            members = [sub_methods.index(m) for m, v in sub_labels.items() if v == k]
+            centroids[k] = sub_coords[members].mean(axis=0)
+        ck = sorted(centroids)
+        Cmat = np.stack([centroids[k] for k in ck])
+        d = ((coords[:, None, :] - Cmat[None, :, :]) ** 2).sum(axis=-1)
+        nearest = d.argmin(axis=1)
+        labels = {m: int(ck[nearest[i]]) for i, m in enumerate(methods)}
+    else:
+        Z = linkage(coords, method="ward")
+        ks = candidate_ks(n)
+        sweep = sweep_candidates(coords, Z, methods, ks)
+        k_best, top_ks = select_knee(sweep)
+        labels = cut_tree(Z, methods, k_best)
+        logger.info("  关键层: 候选 %s → k*=%d (top3 %s)", ks, k_best, top_ks)
 
     return {
         "methods": methods,
         "space": space,
         "coords": coords,
         "Z": Z,
+        # Z 为抽样子集树（n 超上限时）：叶索引不对应全量 methods，
+        # 树图/切层视图须据此降级，勿按 sorted(methods) 对叶
+        "tree_subsampled": n > _WARD_SAMPLE_CAP,
         "flat_labels": flat_labels,
         "n_flat": n_flat,
         "n_noise": n_noise,
@@ -142,6 +220,7 @@ def run_hdbscan_clustering(
     feature_weights: np.ndarray | None = None,
     reactions: dict | None = None,
     write: bool = True,
+    preset_labels: dict[str, int] | None = None,
 ) -> dict:
     """
     HDBSCAN 聚类主入口。
@@ -152,10 +231,12 @@ def run_hdbscan_clustering(
         feature_weights: posterior.learn_supervised_weights 的输出（可选）
         reactions: posterior.compute_method_reactions 的输出（可选，提供时做簇效验证）
         write: 是否写 cluster_report.json / cluster_result.pkl
+        preset_labels: 冻结的预聚类标签（可选）——沿用该分区，不重切 Ward auto-k
 
     返回: 聚类报告 dict。
     """
-    core = compute_cluster_labels(features, feature_weights=feature_weights)
+    core = compute_cluster_labels(features, feature_weights=feature_weights,
+                                  preset_labels=preset_labels)
     if core.get("error"):
         return {"error": core["error"], "labels": core["labels"]}
 
@@ -230,11 +311,13 @@ def run_hdbscan_clustering(
         report["reaction_validation"] = rv
 
     if write:
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        # 动态读 config：work-dir 实验隔离模式重绑的是 config 模块属性，
+        # 静态 import 路径常量会穿透隔离写全局产物（runner 重绑失效）
+        _config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         # allow_nan=False 语义保留：先整体序列化验证，NaN/Infinity 直接抛错；
         # write_json 默认原子写（.tmp → os.replace），崩溃不留半截报告
         json.dumps(report, ensure_ascii=False, allow_nan=False)
-        write_json(CLUSTER_REPORT_FILE, report)
+        write_json(_config.CLUSTER_REPORT_FILE, report)
         _export_matrix(labels, features, meta)
 
         artifacts = {
@@ -258,6 +341,7 @@ def run_hdbscan_clustering(
             "feature_weights": (
                 feature_weights.tolist() if feature_weights is not None else None
             ),
+            "tree_subsampled": core.get("tree_subsampled", False),
             "chosen_k": k_best,
             "top_ks": top_ks,
             "candidate_sweep": sweep,
@@ -266,7 +350,7 @@ def run_hdbscan_clustering(
             "hdbscan_report": report,
             "generated_at": report["generated_at"],
         }
-        save_artifact(CLUSTER_RESULT_FILE, artifacts)
+        save_artifact(_config.CLUSTER_RESULT_FILE, artifacts)
         logger.info(
             "✅ 聚类完成: 关键层 k*=%d, 密度视图 %d 簇+%d 噪声, silhouette=%.4f",
             k_best, n_flat, n_noise, validation.get("silhouette", 0.0),

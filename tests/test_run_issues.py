@@ -53,16 +53,6 @@ def _eval_ok(prompt, ea, judge, use_judge=True):
     }
 
 
-def _r_with_results(defender, scores: dict):
-    """构造含 R 记录的 ResultsMatrix：{method: eval_score}，同一 round。"""
-    R = ResultsMatrix()
-    for i, (m, s) in enumerate(scores.items()):
-        R.upsert(m, defender, s,
-                 status="fully_compliant" if s > 0 else "refused",
-                 ts=i + 1, extra={"round": 1})
-    return R
-
-
 def _isolate_feature_cache(tmp_path, monkeypatch):
     """特征缓存隔离到 tmp——fit_features 会原子写 FEATURE_CACHE_FILE，
     不隔离会抢写全局 output/feature_cache.pkl。"""
@@ -89,7 +79,27 @@ def _preseed_features(tracker, methods):
 
 # ============================================================
 # P1：全量 resume —— R 回放重建 + ASR 合成 + this_run_tested==0
+# （簇粒度：R 行键 = 记录 id，extra.unit = 簇指纹；预聚类打叉为 None → 每方法一簇，确定性）
 # ============================================================
+def _one_method_units(monkeypatch, methods):
+    """强制每方法自成一个 unit（_quick_precluster 返回 None 走退化路径），
+    返回 {method: unit_id}——测试侧据此构造与 run 内完全一致的 unit 指纹。"""
+    from llmsec.core.units import unit_fingerprint
+
+    monkeypatch.setattr(ap, "_quick_precluster", lambda *a, **k: None)
+    return {m: unit_fingerprint([m]) for m in methods}
+
+
+def _r_with_unit_results(defender, scores: dict, uid_of):
+    """构造簇粒度 R：行键 = 记录 id（=方法名），extra.unit = 对应 unit 指纹。"""
+    R = ResultsMatrix()
+    for i, (m, s) in enumerate(scores.items()):
+        R.upsert(m, defender, s,
+                 status="fully_compliant" if s > 0 else "refused",
+                 ts=i + 1, extra={"round": 1, "unit": uid_of[m]})
+    return R
+
+
 def test_p1_full_resume_replays_elo_from_r(tmp_path, monkeypatch):
     _isolate_feature_cache(tmp_path, monkeypatch)
     monkeypatch.setattr(ap, "analyze_clusters", lambda tracker: {})
@@ -98,8 +108,9 @@ def test_p1_full_resume_replays_elo_from_r(tmp_path, monkeypatch):
                         lambda *a, **k: eval_calls.append(1) or _eval_ok(*a, **k))
 
     methods = ["m0", "m1", "m2", "m3"]
+    uid_of = _one_method_units(monkeypatch, methods)
     # R：m0/m1/m3 成功（score>0），m2 被拒 —— 合成 ASR 应为 3/4
-    R = _r_with_results("def-x", {"m0": 3.0, "m1": 3.0, "m2": -2.0, "m3": 3.0})
+    R = _r_with_unit_results("def-x", {"m0": 3.0, "m1": 3.0, "m2": -2.0, "m3": 3.0}, uid_of)
 
     tracker = ELOTracker()
     _preseed_features(tracker, methods)
@@ -114,9 +125,9 @@ def test_p1_full_resume_replays_elo_from_r(tmp_path, monkeypatch):
     assert eval_calls == [], "P1: 全量 resume 不应发起任何新评估"
     # R 回放重建：防御 Elo 不再停在默认 INITIAL_ELO=1500
     assert tracker.get_defender_elo("def-x") != pytest.approx(1500.0)
-    # predictor.ground_truth 含 R 已测方法
-    assert set(tracker.predictor.ground_truth) == set(methods)
-    assert tracker.ground_truth_methods == set(methods)
+    # predictor.ground_truth 含 R 已测单位（4 个单方法簇）
+    assert set(tracker.predictor.ground_truth) == set(uid_of.values())
+    assert tracker.ground_truth_methods == set(uid_of.values())
     # 本轮无新测；ASR 为 R 合成的累计口径（非 0/0）
     assert summary["this_run_tested"] == 0
     assert summary["successful"] == 3
@@ -124,7 +135,7 @@ def test_p1_full_resume_replays_elo_from_r(tmp_path, monkeypatch):
 
 
 # ============================================================
-# P2：部分 resume —— GT 数 = R 恢复 + 本轮新测；已测方法不重测不重复预测
+# P2：部分 resume —— GT 数 = R 恢复 + 本轮新测；已测单位不重测不重复预测
 # ============================================================
 def test_p2_partial_resume_gt_count_and_no_retest(tmp_path, monkeypatch):
     _isolate_feature_cache(tmp_path, monkeypatch)
@@ -139,7 +150,8 @@ def test_p2_partial_resume_gt_count_and_no_retest(tmp_path, monkeypatch):
 
     resumed = ["m0", "m1", "m2", "m3"]
     fresh = ["m4", "m5", "m6", "m7"]
-    R = _r_with_results("def-y", {m: 3.0 for m in resumed})
+    uid_of = _one_method_units(monkeypatch, resumed + fresh)
+    R = _r_with_unit_results("def-y", {m: 3.0 for m in resumed}, uid_of)
 
     tracker = ELOTracker()
     _preseed_features(tracker, resumed + fresh)
@@ -151,14 +163,14 @@ def test_p2_partial_resume_gt_count_and_no_retest(tmp_path, monkeypatch):
         defender_name="def-y", r_snapshot=R,
     )
 
-    # R 已测的 4 个方法不被重测，本轮只新测剩余 4 个
+    # R 已测的 4 个单位不被重测，本轮只新测剩余 4 个（各簇唯一记录即该方法 prompt）
     assert {p.replace("attack prompt ", "") for p in evaluated} == set(fresh)
     assert summary["this_run_tested"] == 4
     # predict_batch 视角：GT 数 = R 恢复数(4) + 本轮新测(4)
     assert tracker.predictor.ground_truth_count() == 8
-    # 已测方法（R 恢复 + 新测）不被当未测预测
+    # 已测单位（R 恢复 + 新测）不被当未测预测
     remaining = tracker.predictor.predict_batch(
-        {m: {"method": m} for m in resumed + fresh})
+        {uid: {"method": uid} for uid in uid_of.values()})
     assert remaining == {}, "P2: 全部已测后 predict_batch 不应再产出预测"
 
 

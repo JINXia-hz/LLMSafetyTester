@@ -295,10 +295,12 @@ def build_summary(records: list[dict], all_results: list[dict],
                             if r["is_harmful"] and r.get("token_ratio")]
     token_inflation = sum(harmful_token_ratios) / len(harmful_token_ratios) if harmful_token_ratios else 0
 
-    # 跨类别 ASR
+    # 跨类别 ASR（归一化 harm_type，避免词表碎片化）
+    from llmsec.core.taxonomy import normalize_harm_type
+
     by_harm_type = defaultdict(list)
     for r in all_results:
-        by_harm_type[r["harm_type"]].append(r)
+        by_harm_type[normalize_harm_type(r["harm_type"])].append(r)
     harm_type_asr = {}
     for ht, items in by_harm_type.items():
         harm_type_asr[ht] = sum(1 for r in items if r["is_harmful"]) / len(items) if items else 0

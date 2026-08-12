@@ -17,7 +17,7 @@ class _FakeTracker:
     defender_ratings = {"fake_def": 1500.0}
 
     def get_attacker_ranking(self):
-        return [{"method": "m1", "elo": 1490.0}]
+        return [{"unit": "m1", "elo": 1490.0}]
 
     def compute_security_boundary(self, _name):
         return {"boundary_elo": 1500.0}
@@ -82,7 +82,10 @@ def _setup_twin_files(monkeypatch, tmp_path, records):
 
 
 def test_generate_all_twins_missing_optional_keys(monkeypatch, tmp_path):
-    """缺 category/harm_type/method 的记录填 unknown 并正常落盘。"""
+    """缺 category/harm_type/method 的记录填默认值并正常落盘。
+
+    harm_type 缺失时经 normalize_harm_type 归一化为 "other"（标准默认）。
+    """
     twin_file = _setup_twin_files(monkeypatch, tmp_path, [
         {"id": "a1", "prompt": "p1", "method": "m1"},
     ])
@@ -90,7 +93,7 @@ def test_generate_all_twins_missing_optional_keys(monkeypatch, tmp_path):
     rows = [json.loads(x) for x in twin_file.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 1
     assert rows[0]["category"] == "unknown"
-    assert rows[0]["harm_type"] == "unknown"
+    assert rows[0]["harm_type"] == "other"
     assert rows[0]["method"] == "m1"
 
 

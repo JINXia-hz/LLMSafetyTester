@@ -43,6 +43,7 @@ dev = [
 
 [project.scripts]
 llmsec = "llmsec.pipeline.runner:main"
+llmsec-manage = "llmsec.management.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["llmsec*"]
@@ -101,7 +102,11 @@ known-first-party = ["llmsec"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "--tb=short"
+addopts = "--tb=short -n 4"
+# -n 4 而非 -n auto：本套件是"海量毫秒级小测试 + 少数聚类重测试"分布，
+# worker 冷启动 + import llmsec/numpy/sklearn 的固定开销约 5-6s/worker，
+# -n auto(=12 逻辑核)下该开销远超并行收益（实测 130s vs 串行 37s）。
+# -n 4 实测 ~28s，兼顾并行加速与启动开销。临时禁用并行：pytest -p no:xdist
 # 自动过滤无害的第三方库 warning（避免干扰"是否全过"的判断）：
 #   - starlette/httpx TestClient 弃用告警（测试工具链，与业务无关）
 #   - scipy/sklearn 在退化输入（零方差组、单样本 PCA）上的数值 RuntimeWarning；

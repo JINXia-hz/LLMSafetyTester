@@ -1003,7 +1003,7 @@ async function loadTasks() {
 // ---------- 键盘导航 ----------
 document.addEventListener('keydown', e => {
   if (e.target.matches('input, select, textarea') || e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.key >= '1' && e.key <= '6') {
+  if (e.key >= '1' && e.key <= '7') {
     document.querySelectorAll('#nav .nav-item')[+e.key - 1]?.click();
   } else if (e.key === 'r') {
     $('refreshBtn').click();

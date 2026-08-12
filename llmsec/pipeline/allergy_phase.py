@@ -143,15 +143,15 @@ def select_twin_candidates(ranking: list[dict], boundary_elo: float,
     half = n_window // 2
     candidates = below[:half] + above[:n_window - half]
 
-    # 一侧不足：按距离边界最近优先，从剩余方法补齐
+    # 一侧不足：按距离边界最近优先，从剩余单位补齐
     if len(candidates) < n_window:
-        chosen = {r["method"] for r in candidates}
+        chosen = {r["unit"] for r in candidates}
         for r in sorted_by_dist:
             if len(candidates) >= n_window:
                 break
-            if r["method"] not in chosen:
+            if r["unit"] not in chosen:
                 candidates.append(r)
-                chosen.add(r["method"])
+                chosen.add(r["unit"])
 
     return candidates
 
@@ -192,9 +192,9 @@ def run_allergy_phase(method_records: dict[str, dict],
     # 取ELO边界附近的 n_window 个方法（一侧不足按距离补齐，上方取最近侧）
     candidates = select_twin_candidates(ranking, boundary_elo, n_window)
 
-    twin_methods = [r["method"] for r in candidates]
-    logger.info(f"  ELO边界={boundary_elo:.0f}，选取 {len(twin_methods)} 个方法做过敏检测 (窗口={n_window})")
-    logger.info(f"  方法: {', '.join(m[:25] for m in twin_methods)}")
+    twin_methods = [r["unit"] for r in candidates]
+    logger.info(f"  ELO边界={boundary_elo:.0f}，选取 {len(twin_methods)} 个单位做过敏检测 (窗口={n_window})")
+    logger.info(f"  单位: {', '.join(m[:25] for m in twin_methods)}")
 
     # M9：并行前主线程一次性预载已有孪生（worker 内并发扫文件+append 有竞态）
     twin_cache = {}

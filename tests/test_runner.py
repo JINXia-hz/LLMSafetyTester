@@ -145,7 +145,7 @@ def test_per_target_reports(tmp_path, monkeypatch):
     # 模拟 main 的核心：直接验证 runner_report 产出逻辑
     from llmsec.core.results import ResultsMatrix
     R = ResultsMatrix()
-    R.set_method_catalog(list(method_records.keys()))
+    R.set_unit_catalog(list(method_records.keys()))
     feat_tracker = ELOTracker()
     feat_tracker.predictor.fit_features(records)
 

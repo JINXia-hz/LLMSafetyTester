@@ -51,7 +51,7 @@ from llmsec.clustering.features import (
 )
 from llmsec.core import config
 from llmsec.core.config import INITIAL_ELO
-from llmsec.core.io import save_artifact
+from llmsec.core.io import save_artifact, write_json
 from llmsec.core.logging import get_logger
 from llmsec.core.seed import get_global_seed as _global_seed
 from llmsec.evaluation.predictors.active_learning import greedy_d_optimal
@@ -601,12 +601,19 @@ class ColdStartPredictor:
         self,
         attack_records: list[dict],
         eval_results: list[dict],
+        preset_labels: dict[str, int] | None = None,
+        units: dict | None = None,
     ) -> dict | None:
         """
         攻击完成后最终聚类（post-test）：
         弱监督特征加权（真实 GT 反应）→ 阻尼白化 → HDBSCAN + Ward 树
         → 关键层 auto-k → 全簇命名 → ANOVA/Kruskal 簇效验证。
         后验特征仅用于画像与验证，不进入度量。
+
+        preset_labels：run 开头冻结的预聚类分区（unit 身份 anchor）——提供时
+        沿用该分区，不重切 Ward auto-k（防 unit_id 中途漂移使 R/resume 键失效）。
+        units：run 开头的 unit 表（core.units.build_units 输出）——随聚类产物
+        持久化，供簇级安全分析/报告/看板以簇为键消费。
 
         返回: 最终聚类报告 dict。
         """
@@ -636,6 +643,7 @@ class ColdStartPredictor:
             feature_weights=weights,
             reactions=reactions,
             write=True,
+            preset_labels=preset_labels,
         )
 
         # M-30：方法数 <2（如 2 条记录同属 1 方法）时 hdb 提前返回 error 且不写文件。
@@ -654,6 +662,18 @@ class ColdStartPredictor:
         self.artifacts["method_set_hash"] = _compute_method_set_hash(
             sorted(self.artifacts.get("labels", {}).keys())
         )
+        # unit 表随聚类产物持久化（簇级安全分析/报告/看板以簇为键的数据源）。
+        # pool 含完整记录体，只存轻量字段 + 记录 id 清单
+        if units:
+            slim = {
+                uid: {"unit_id": uid, "label": u["label"], "name": u["name"],
+                      "members": u["members"], "size": u["size"], "medoid": u["medoid"],
+                      "record_ids": [str(r.get("id")) for _m, r in u["pool"]]}
+                for uid, u in units.items()
+            }
+            self.artifacts["units"] = slim
+            report["units"] = slim
+            write_json(config.CLUSTER_REPORT_FILE, report)
         self.last_fit_gt_count = self.ground_truth_count()
         self.last_fit_at = datetime.now().isoformat()
         # 写回聚类结果文件（不走 _save_artifacts——那会把聚类结果错投进 feature_cache）
@@ -688,8 +708,10 @@ class ColdStartPredictor:
                     vec[i] = 1.0
                     break
 
-        # harm_type / category
-        harm_type = record.get("harm_type", "")
+        # harm_type / category（归一化，保证 fit/predict 词表对称）
+        from llmsec.core.taxonomy import normalize_harm_type
+
+        harm_type = normalize_harm_type(record.get("harm_type", ""))
         category = record.get("category", "")
         harm_key = f"harm:{harm_type}" if harm_type else None
         cat_key = f"cat:{category}" if category else None

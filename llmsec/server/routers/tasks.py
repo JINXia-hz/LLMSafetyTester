@@ -227,6 +227,9 @@ async def api_run_evaluate(req: EvaluateRequest):
         argv += ["--target-concurrency", str(tc)]
     elif req.target_concurrency:
         argv += ["--target-concurrency", str(req.target_concurrency)]
+    # 看板评估默认走全局模式且 publish 到全局 R（保留旧行为；runner 已改为默认不 publish）。
+    # 用户若要隔离评估，用 control 层的 fork。
+    argv += ["--publish-global"]
     view = _start_task("evaluate", argv)
     view["has_tax_probe"] = has_tax_probe
     return view

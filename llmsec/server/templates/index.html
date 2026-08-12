@@ -558,6 +558,7 @@
     body.printing-all .section, body.preview-print .section { display: block !important; }
     body.printing-all .section .card, body.preview-print .section .card { animation: none !important; }
     body.printing-all #sec-run, body.preview-print #sec-run,
+    body.printing-all #sec-control, body.preview-print #sec-control,
     body.printing-all aside, body.preview-print aside,
     body.printing-all #topbar, body.preview-print #topbar,
     body.printing-all #readProgress, body.preview-print #readProgress,
@@ -699,6 +700,7 @@
         <div class="nav-item side-row" data-section="clusters"><span class="nav-seal">聚</span><span class="nav-label">聚类分析</span></div>
         <div class="nav-item side-row" data-section="model"><span class="nav-seal">预</span><span class="nav-label">预测模型</span></div>
         <div class="nav-item side-row" data-section="run"><span class="nav-seal">运</span><span class="nav-label">运行控制</span></div>
+        <div class="nav-item side-row" data-section="control"><span class="nav-seal">控</span><span class="nav-label">控制台</span></div>
       </nav>
     </aside>
 
@@ -778,7 +780,7 @@
             <h3 class="font-semibold mb-3 text-sm">高威胁方法清单</h3>
             <div class="overflow-auto"><table class="min-w-full text-sm">
               <thead><tr class="text-left" style="color: var(--c-muted);">
-                <th class="py-2 pr-4">方法</th><th class="py-2 pr-4" data-sort="elo">ELO</th><th class="py-2 pr-4" data-sort="asr">ASR</th>
+                <th class="py-2 pr-4">威胁簇</th><th class="py-2 pr-4">规模</th><th class="py-2 pr-4" data-sort="elo">ELO</th><th class="py-2 pr-4" data-sort="asr">ASR</th>
                 <th class="py-2 pr-4" data-sort="tax">税</th><th class="py-2 pr-4" data-sort="tested">来源</th><th class="py-2">95% CI</th>
               </tr></thead>
               <tbody id="threatTable"></tbody>
@@ -1087,6 +1089,46 @@
           </div>
         </section>
 
+        <!-- ============ 控制台 ============ -->
+        <section id="sec-control" class="section">
+          <div class="max-w-6xl mx-auto space-y-6">
+            <div class="flex items-center justify-between">
+              <h2 class="text-xl font-bold">控制台</h2>
+              <span id="ctrl-llm-badge" class="text-xs px-2 py-1 rounded bg-white/5 border border-white/10">LLM 检测中…</span>
+            </div>
+
+            <!-- 对话区 -->
+            <div class="rounded-lg border border-white/10 bg-white/[0.02] p-4">
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="font-semibold">对话中间者</h3>
+                <span class="text-xs text-white/40">自然语言 → 自动调 fork/compare/merge 等工具</span>
+              </div>
+              <div id="ctrl-chat-log" class="space-y-3 mb-3 max-h-[40vh] overflow-y-auto"></div>
+              <div class="flex gap-2">
+                <input id="ctrl-chat-input" type="text" class="flex-1 rounded border border-white/10 bg-white/5 px-3 py-2 text-sm focus:outline-none focus:border-[var(--accent)]" placeholder="问：帮我 fork 一个叫 ab1 的环境…  （回车发送）">
+                <button id="ctrl-chat-send" class="px-4 py-2 rounded bg-[var(--accent)] text-white text-sm font-medium hover:opacity-90">发送</button>
+              </div>
+            </div>
+
+            <!-- 工作区管理 -->
+            <div class="rounded-lg border border-white/10 bg-white/[0.02] p-4">
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="font-semibold">Fork 工作区</h3>
+                <button id="ctrl-ws-refresh" class="text-xs px-2 py-1 rounded border border-white/10 hover:bg-white/5">刷新</button>
+              </div>
+              <div class="flex gap-2 mb-3 flex-wrap">
+                <input id="ctrl-fork-name" type="text" class="rounded border border-white/10 bg-white/5 px-2 py-1 text-sm w-40" placeholder="工作区名">
+                <select id="ctrl-fork-source" class="rounded border border-white/10 bg-white/5 px-2 py-1 text-sm">
+                  <option value="global">来源: global</option>
+                </select>
+                <button id="ctrl-fork-btn" class="px-3 py-1 rounded bg-[var(--accent)] text-white text-sm hover:opacity-90">Fork</button>
+                <button id="ctrl-fork-run-btn" class="px-3 py-1 rounded border border-[var(--accent)] text-[var(--accent)] text-sm hover:bg-[var(--accent)]/10">Fork + 跑</button>
+              </div>
+              <div id="ctrl-ws-list" class="space-y-1 text-sm"></div>
+            </div>
+          </div>
+        </section>
+
       </div>
     </main>
   </div>
@@ -1095,6 +1137,7 @@
   <script src="/static/js/sections.js" defer></script>
   <script src="/static/js/analysis.js" defer></script>
   <script src="/static/js/run-control.js" defer></script>
+  <script src="/static/js/control.js" defer></script>
   <script src="/static/app.js" defer></script>
 </body>
 </html>

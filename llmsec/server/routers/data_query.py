@@ -275,7 +275,8 @@ def _convergence_score(state: dict) -> float | None:
 
 
 def _load_tree_artifacts() -> dict | None:
-    """加载含 linkage 的聚类 artifacts；不存在或缺 linkage 时返回 None。"""
+    """加载含 linkage 的聚类 artifacts；不存在、缺 linkage 或 linkage 为抽样子集树
+    （叶索引不对应全量方法）时返回 None——树图/切层视图对这些情形降级。"""
     import joblib
 
     if not CLUSTER_RESULT_FILE.exists():
@@ -286,6 +287,8 @@ def _load_tree_artifacts() -> dict | None:
         logger.warning("降级: %s", _e)
         return None
     if artifacts.get("linkage") is None:
+        return None
+    if artifacts.get("tree_subsampled"):
         return None
     return artifacts
 
@@ -479,11 +482,12 @@ async def api_threats(run: str | None = None):
     ground_truth = _gt_set(state)
 
     def _enrich(item: dict) -> dict:
-        method = item.get("method", "")
-        elo = round(ratings.get(method, item.get("elo", 1500.0)), 1)
-        std = pred_std.get(method)
-        tested = method in ground_truth
-        # 未测方法的徽标来源：缓存/派生态里带真实来源（如 tree 条目自带 source）则用真实值，
+        # tree 条目的评级键 = unit（簇指纹）；method 字段已是簇展示名
+        key = item.get("unit") or item.get("method", "")
+        elo = round(ratings.get(key, item.get("elo", 1500.0)), 1)
+        std = pred_std.get(key)
+        tested = key in ground_truth
+        # 未测单位的徽标来源：缓存/派生态里带真实来源（如 tree 条目自带 source）则用真实值，
         # 否则标中性的 'predicted'——不再硬编码 svd_ridge 误导徽标
         source = "ground_truth" if tested else (item.get("source") or "predicted")
         return {
@@ -499,12 +503,29 @@ async def api_threats(run: str | None = None):
             ),
         }
 
+    # 意外事件的 attacker = unit_id：附簇名供前端直接展示
+    # （独立于 _load_tree_artifacts——树图降级不影响 units 查询）
+    units: dict = {}
+    try:
+        import joblib
+        if CLUSTER_RESULT_FILE.exists():
+            units = (joblib.load(CLUSTER_RESULT_FILE).get("units") or {})
+    except Exception as _e:
+        logger.warning("降级: %s", _e)
+    upsets = tree.get("upsets", {})
+    if isinstance(upsets, dict):
+        for side in ("weakness", "strength"):
+            for ev in upsets.get(side, []):
+                uid = ev.get("attacker")
+                if uid in units:
+                    ev["name"] = units[uid].get("name")
+
     return {
         "available": True,
         "run": _run_name(run_dir, run),
         "top_threats": [_enrich(t) for t in tree.get("top_threats", [])],
         "strong_defenses": [_enrich(t) for t in tree.get("strong_defenses", [])],
-        "upsets": tree.get("upsets", {}),
+        "upsets": upsets,
     }
 
 
@@ -515,9 +536,21 @@ async def api_elo(run: str | None = None):
     pred_std = state.get("attacker_pred_std", {})
     ground_truth = _gt_set(state)
 
+    # 评级键 = unit_id（簇指纹）；簇名/规模取自聚类产物的 units 表
+    # （独立于 _load_tree_artifacts——树图降级不影响 units 查询）
+    units: dict = {}
+    try:
+        import joblib
+        if CLUSTER_RESULT_FILE.exists():
+            units = (joblib.load(CLUSTER_RESULT_FILE).get("units") or {})
+    except Exception as _e:
+        logger.warning("降级: %s", _e)
+
     ranking = [
         {
-            "method": m,
+            "unit": m,
+            "name": (units.get(m) or {}).get("name", m),
+            "size": (units.get(m) or {}).get("size"),
             "elo": round(e, 1),
             "tested": m in ground_truth,
             "pred_std": round(pred_std[m], 1) if m in pred_std else None,

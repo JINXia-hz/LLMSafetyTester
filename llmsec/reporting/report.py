@@ -221,15 +221,18 @@ def build_method_registry(method_stats: dict[str, dict], elo_ratings: dict,
 # 树形结构构建
 # ============================================================
 def build_method_stats(results: list[dict], elo_ratings: dict,
-                       metadata: dict) -> dict[str, dict]:
+                       metadata: dict, units: dict | None = None) -> dict[str, dict]:
     """
-    聚合每种攻击方法的统计指标。
-    返回: {method_name: {asr, elo, mean_tax, harm_type, category, source, ...}}
+    聚合每个评级单位（簇）的统计指标。
+    分组键：attack row 的 unit 字段（簇指纹），缺省回退 method。
+    返回: {unit_id: {asr, elo, mean_tax, harm_type, category, source, ...}}
+      entry["method"] = 展示名（簇名，units 提供时），entry["unit"] = unit_id，
+      entry["unit_size"] = 簇内方法数。
     metadata 用于补充结果中缺失的 category/source/functional_category。
     """
     by_method = defaultdict(list)
     for r in results:
-        by_method[r.get("method", "unknown")].append(r)
+        by_method[r.get("unit") or r.get("method", "unknown")].append(r)
 
     method_stats = {}
     for method, items in by_method.items():
@@ -248,7 +251,12 @@ def build_method_stats(results: list[dict], elo_ratings: dict,
                 meta_fallback = metadata[rid]
                 break
 
-        harm_types = list(set(r.get("harm_type", meta_fallback.get("harm_type", "unknown")) for r in items))
+        from llmsec.core.taxonomy import normalize_harm_type
+
+        harm_types = list(set(
+            normalize_harm_type(r.get("harm_type", meta_fallback.get("harm_type", "unknown")))
+            for r in items
+        ))
         categories = list(set(
             r.get("category") or meta_fallback.get("category", "unknown") for r in items
         ))
@@ -259,8 +267,12 @@ def build_method_stats(results: list[dict], elo_ratings: dict,
             r.get("functional_category") or meta_fallback.get("functional_category", "standard") for r in items
         ))
 
+        is_unit = any(r.get("unit") for r in items)
+        _u = (units or {}).get(method, {}) if is_unit else {}
         method_stats[method] = {
-            "method": method,
+            "method": _u.get("name", method) if is_unit else method,
+            "unit": method if is_unit else None,
+            "unit_size": _u.get("size") if is_unit else None,
             "total": n,
             "harmful": len(harmful),
             "asr": round(asr, 4),
@@ -348,9 +360,10 @@ def build_tree(method_stats: dict[str, dict], allergy_data: dict,
         method_strength_gap[m] = max(method_strength_gap[m], ev["elo_gap"])
 
     for m in methods:
-        m["max_weakness_gap"] = round(method_weakness_gap.get(m["method"], 0), 1)
-        m["max_strength_gap"] = round(method_strength_gap.get(m["method"], 0), 1)
-        m["weakness_count"] = method_weakness_count.get(m["method"], 0)
+        mkey = m.get("unit") or m["method"]   # surprises 的 attacker 键 = 评级单位 id
+        m["max_weakness_gap"] = round(method_weakness_gap.get(mkey, 0), 1)
+        m["max_strength_gap"] = round(method_strength_gap.get(mkey, 0), 1)
+        m["weakness_count"] = method_weakness_count.get(mkey, 0)
         # surprise_score：低 ELO 攻击成功带来的意外分差，越大越可能是防御短板
         m["surprise_score"] = m["max_weakness_gap"]
 
@@ -490,6 +503,8 @@ def build_tree(method_stats: dict[str, dict], allergy_data: dict,
     top_threats = [
         {
             "method": m["method"],
+            "unit": m.get("unit"),
+            "size": m.get("unit_size"),
             "elo": m["elo"],
             "asr": m["asr"],
             "surprise_score": m["surprise_score"],
@@ -530,6 +545,8 @@ def build_tree(method_stats: dict[str, dict], allergy_data: dict,
         "strong_defenses": [
             {
                 "method": m["method"],
+                "unit": m.get("unit"),
+                "size": m.get("unit_size"),
                 "elo": m["elo"],
                 "asr": m["asr"],
                 "max_strength_gap": m["max_strength_gap"],

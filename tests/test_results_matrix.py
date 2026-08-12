@@ -27,12 +27,12 @@ def test_results_matrix_basics():
         print("❌ get 取值错误"); return 1
     if set(mat.model_column("qwen").keys()) != {"DAN", "rot13"}:
         print("❌ model_column 错误"); return 1
-    if set(mat.method_row("DAN").keys()) != {"qwen", "gpt"}:
-        print("❌ method_row 错误"); return 1
-    if mat.tested_methods("gpt") != {"DAN"} or mat.n_for_model("gpt") != 1:
+    if set(mat.record_row("DAN").keys()) != {"qwen", "gpt"}:
+        print("❌ record_row 错误"); return 1
+    if mat.tested_records("gpt") != {"DAN"} or mat.n_for_model("gpt") != 1:
         print("❌ 覆盖率统计错误"); return 1
     # 时序：gpt 列只有 DAN(ts=1)；qwen 列应按 ts 升序
-    qwen_order = [r.method for r in mat.ordered_results("qwen")]
+    qwen_order = [r.record for r in mat.ordered_results("qwen")]
     if qwen_order != ["DAN", "rot13"]:
         print(f"❌ ordered_results 时序错误: {qwen_order}"); return 1
     if sorted(mat.all_models()) != ["gpt", "qwen"]:
@@ -41,7 +41,7 @@ def test_results_matrix_basics():
 
 def test_results_matrix_roundtrip():
     """save → load 幂等。"""
-    mat = ResultsMatrix(methods=["DAN", "rot13"])
+    mat = ResultsMatrix(units=["DAN", "rot13"])
     mat.upsert("DAN", "qwen", 3.0, status="fully_compliant", ts=1, extra={"len": 42})
     mat.upsert("rot13", "qwen", -1.0, ts=2)
     with tempfile.TemporaryDirectory() as d:

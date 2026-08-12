@@ -84,6 +84,9 @@ CLUSTER_FEATURES_FILE = OUTPUT_DIR / "cluster_features.json"
 #   - cluster_result.pkl：完整聚类产物，hdb 写、final_fit 增补
 FEATURE_CACHE_FILE = OUTPUT_DIR / "feature_cache.pkl"
 CLUSTER_RESULT_FILE = OUTPUT_DIR / "cluster_result.pkl"
+# Embedding 磁盘缓存：按 (feature_config_hash, prompt_sha256) 键存原始 embedding 向量，
+# 冷启动时只 encode 缓存未命中的 prompt。features.py 动态读此常量（不 import 期冻结）。
+EMBEDDING_CACHE_FILE = OUTPUT_DIR / "embedding_cache.pkl"
 
 
 # ============================================================

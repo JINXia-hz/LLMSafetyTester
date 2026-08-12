@@ -8,6 +8,24 @@
 
 > 本项目评估的是**安全评估管线本身**（自适应采样、威胁排名、能力预测、过敏检测、聚类分析），攻击集只是输入耗材。
 
+项目按**三层架构**组织（单元化设计——每个评测是隔离的工作单元，互不污染）：
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ 控制层 (control/) — 元控制 / agent 中间者                  │
+│ fork 新测试环境 · 历史对比 · 批量并行编排 · LLM 对话        │
+│ 调用方式: subprocess 调 llmsec CLI；绝不 import llmsec 内部 │
+├──────────────────────────────────────────────────────────┤
+│ 代码功能 (llmsec/management/) — 信息管理 / 自我维护        │
+│ 过滤/清理历史垃圾 · 一键清缓存 · 快照导出 · 显式 merge     │
+│ 暴露: llmsec-manage CLI                                   │
+├──────────────────────────────────────────────────────────┤
+│ 工作单元核心 (llmsec/) — 评估管线（现有代码）              │
+│ runner / evaluation / clustering / experiments / server   │
+│ 默认隔离运行（--work-dir），不自动写全局 R                 │
+└──────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## 它做什么
@@ -104,6 +122,7 @@ python -m uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
   - **目标模型管理**：「+」添加目标（写入 .env）、探活检测
   - **环境参数配置**：默认目标 / 生成模型 / Judge 的 base_url + model + api_key（写入 .env，掩码显示）
   - 任务状态与日志实时轮询 + SSE 直播
+- **控制台**（控制层）：LLM 驱动的对话中间者（自然语言 → 自动调 fork/compare/merge 等工具）、Fork 工作区管理（创建/列出/删除，显示合并状态）。底层经 `.env` 的 `GENERATOR_*` 模型（复用项目既定约定）
 
 ---
 
@@ -134,12 +153,41 @@ python -m llmsec.pipeline.runner [--phase {all,1,2}] [--input FILE] [--batch-siz
                                  [--sampler-alpha A] [--sampler-beta B] [--sampler-gamma G]
                                  [--coordinate-rounds R] [--target NAME]
                                  [--concurrency N] [--no-parallel]
+                                 [--work-dir DIR] [--publish-global]
 ```
 
 - `--phase`：`all`（攻击+过敏）、`1`（仅攻击）、`2`（仅过敏）
 - `--input`：攻击集路径，相对仓库根目录（如 `attacks/l1.jsonl`）
 - `--target`：指定单个目标模型（不传则扫描全部声明目标）
 - `--concurrency`：批内并行求值并发度（不传=全并发；0=串行）
+- `--work-dir DIR`：**实验隔离模式**——所有产物（R/elo_cache/probes/prescreen/blend/cluster_report/safe_twins 等 9 类）写入该目录，全局 `output/` 零写入。fork 分支 / HPO trial 用
+- `--publish-global`：全局模式（无 `--work-dir`）下结束时把观测 publish 进全局 R 矩阵。**默认关**（单元化原则）：评估产物只在 run 目录，更新全局 R 用 `llmsec-manage merge`。看板触发的评估自动带此开关
+
+### 信息管理（自我维护）
+
+```bash
+llmsec-manage runs list [--json] [--target NAME] [--since DATE] [--junk-only]  # 列出/过滤 run（含 size）
+llmsec-manage runs delete <run...> [--delete-r] [--yes]                        # 删 run（软删除到 .trash/，可恢复）
+llmsec-manage cache list [--json]                                             # 各类缓存占用
+llmsec-manage cache clean <elo_cache|predictors|feature_cluster|task_logs> [--yes]
+llmsec-manage snapshot export [--source global|run:<name>] [--out FILE]        # 导出快照（控制层 fork 用）
+llmsec-manage merge --sources <src...> --target <global|ws:name> [--models ...] [--yes]  # 显式合并 R
+```
+
+机器友好契约：所有命令支持 `--json` 结构化输出；写操作默认 dry-run 预览，`--yes` 执行；删除走软删除（`output/.trash/`）可恢复。
+
+### 控制层（元控制 / agent）
+
+```bash
+python -m control workspace fork <name> [--source global|run:<run>]            # fork 隔离工作区
+python -m control workspace list                                               # 列出工作区
+python -m control compare <run...> [--json]                                    # 历史对比（支持 ws: 前缀）
+python -m control orchestrate <specs.json> [--workers N]                       # 批量并行 fork + run
+python -m control chat                                                         # 交互式 LLM 对话中间者
+python -m control tool <name> [args.json]                                      # 直接调一个 tool（供脚本/agent）
+```
+
+控制层把 llmsec 当独立工作单元经 subprocess 调用，**绝不 import llmsec 内部**。对话中间者用 `.env` 的 `GENERATOR_*` 模型做 LLM tool-calling（7 个工具：list_runs / compare_runs / fork_workspace / list_workspaces / delete_workspace / orchestrate / merge），未配置 LLM 时自动回退规则版。
 
 ### 实验框架
 
@@ -214,6 +262,8 @@ pytest -n auto                   # 并行（CI 默认）
 
 存储布局（`output/state/`）：`results.json`（R 主存储，权威）+ `elo_cache.json`（派生缓存，可删可重建）。收敛轨迹自轮次编号（`round`）随观测记入 R 的 `extra` 后，`derive_elo` 在 round 单调时按轮回放重建；累积/混杂 R 回退逐场回放。
 
+**单元化原则**：runner 默认不自动把观测 publish 进全局 R（`--work-dir` 模式写隔离 R；全局模式需显式 `--publish-global`）。这避免了「越后面精度越高、分支互相打架」——全局 R 不再被每次 run 累加污染。要把某个工作区/历史 run 的观测合并进全局 R，用显式动作 `llmsec-manage merge`。
+
 ---
 
 ## 配置
@@ -247,9 +297,9 @@ embedding 降级链：API embedding → 本地缓存 → HF 镜像 → TF-IDF。
 ## 目录结构
 
 ```
-llmsec/                   # 纯源码包
+llmsec/                   # 纯源码包（工作单元核心 + 代码功能）
 ├── params.py             # 统一调参入口
-├── core/                 # config / results(R 矩阵) / io / llm / text / logging / seed
+├── core/                 # config / results(R 矩阵) / io / llm / isolation / text / logging / seed
 ├── targets/              # 目标后端路由: openai / local_sim / pcap_judge
 ├── evaluation/           # elo / judge / evaluator / elo_cluster / blend_predictor
 │                         # elo_access / model_fingerprint / samplers / safe_twin
@@ -258,7 +308,14 @@ llmsec/                   # 纯源码包
 ├── reporting/            # report / final_report
 ├── clustering/           # space / hdb / tree / features / posterior / pipeline / cli
 ├── experiments/          # HPO: study / executor / search / metrics / schema
-└── server/               # dashboard_api / routers / local_model_server
+├── management/           # 信息管理: runs / caches / snapshot / merge（llmsec-manage CLI）
+└── server/               # dashboard_api / routers / local_model_server / templates / static
+
+control/                  # 控制层（元控制 / agent，独立于 llmsec）
+├── config.py             # 定位 llmsec（PYTHON / 仓库根 / output 路径）
+├── core/                 # invoker(subprocess) / workspace(fork) / compare / orchestrator
+├── agent/                # tools(schema) / loop(规则对话) / chat(LLM对话) / llm(client)
+└── cli.py                # python -m control CLI
 
 docker/                   # Docker 配置
 ├── Dockerfile            # 完整版镜像（含聚类 + torch）
@@ -278,7 +335,7 @@ output/                   # 所有生成产物
 
 ```
 output/
-├── state/                  # 持久化状态
+├── state/                  # 持久化状态（全局）
 │   ├── results.json        #   R 矩阵（唯一真相，多模型）
 │   ├── elo_cache.json      #   派生 Elo 缓存（可删可重建）
 │   ├── probes.json         #   模型防御指纹（发现层）
@@ -290,8 +347,16 @@ output/
 │   ├── allergy.json              # 过敏报告 + 2D 画像
 │   ├── cluster_security_analysis.json  # 簇级安全分析 + 模型诊断
 │   └── security_report.md        # LLM 叙事报告（最终交付物）
+├── workspaces/<name>/      # 控制层 fork 工作区（隔离的工作单元）
+│   ├── results.json              #   该分支独立的 R 矩阵（fork 起点快照 + 本次观测）
+│   ├── <target>/                 #   runner 产物（runner_report.json 等，同上）
+│   └── _index.json               #   工作区索引（来源/合并状态）
+├── snapshots/<时间戳>/     # 快照导出（临时，控制层 fork 消费后清理）
+├── .trash/<时间戳>/        # 软删除回收站（删 run/清缓存移入，可恢复）
 └── experiments/<name>/     # HPO study
 ```
+
+`--work-dir` 隔离模式下，上述全局产物（results/elo_cache/feature_cache/cluster_result/cluster_report/predictors/probes/prescreen_model/safe_twins/allergy_results 共 9 类）全部重定向到 work-dir，全局 `output/` 零写入。
 
 ---
 

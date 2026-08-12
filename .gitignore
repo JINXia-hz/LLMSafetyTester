@@ -9,7 +9,7 @@ llmsec/.models/
 __pycache__/
 *.py[cod]
 *.egg-info/
-
+.zcode/
 # 生成产物（state/runs/tasks/聚类缓存等）
 output/
 

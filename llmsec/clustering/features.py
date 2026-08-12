@@ -18,6 +18,7 @@ from llmsec.core.logging import get_logger
     # features: {method_name: {"textual": {...}, "technique": {...}, ...}}
 """
 
+import hashlib
 import os
 import re
 import time
@@ -247,6 +248,91 @@ def _get_embedding_model():
     return None
 
 
+def _embedding_cache_key() -> str:
+    """构造 embedding 缓存键（与 cold_start.current_feature_config_hash 同口径）。
+
+    内联计算以避免 cold_start ↔ features 循环导入。
+    内容 = (embedding 来源/模型, EMBEDDING_PCA_DIM, 特征提取代码版本)。
+    """
+    source = _embedding_source  # None=尚未提取（或 TF-IDF 兜底）
+    if source == "api":
+        model = os.environ.get("EMBEDDING_API_MODEL", "")
+    else:
+        model = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+    content = f"{source or 'tfidf'}:{model}|pca_dim={EMBEDDING_PCA_DIM}|v1"
+    return hashlib.md5(content.encode("utf-8")).hexdigest()[:8]
+
+
+def _load_embedding_cache() -> dict:
+    """加载 embedding 磁盘缓存。结构: {config_hash: {prompt_hash: vector_list}}。"""
+    try:
+        import llmsec.core.config as _cfg
+        path = _cfg.EMBEDDING_CACHE_FILE
+        if path and Path(path).exists():
+            from llmsec.core.io import load_artifact
+            data = load_artifact(path)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_embedding_cache(cache: dict) -> None:
+    """原子写 embedding 缓存（复用 io.save_artifact）。"""
+    try:
+        import llmsec.core.config as _cfg
+        path = _cfg.EMBEDDING_CACHE_FILE
+        if path:
+            from llmsec.core.io import save_artifact
+            save_artifact(path, cache)
+    except Exception:
+        pass
+
+
+def _cached_encode(prompts: list[str], model) -> np.ndarray:
+    """带磁盘缓存的 embedding 编码。
+
+    按 (config_hash, prompt_sha256[:16]) 键查缓存；只 encode 未命中的 prompt，
+    合并后返回完整 (n, raw_dim) 数组。缓存存原始 embedding（PCA 前）。
+    """
+    if not prompts:
+        return np.array([], dtype=np.float64).reshape(0, 0)
+
+    cache_key = _embedding_cache_key()
+    cache = _load_embedding_cache()
+    bucket = cache.get(cache_key, {})
+
+    prompt_hashes = [hashlib.sha256(p.encode("utf-8")).hexdigest()[:16] for p in prompts]
+    hit_indices = []
+    miss_indices = []
+    for i, ph in enumerate(prompt_hashes):
+        if ph in bucket:
+            hit_indices.append(i)
+        else:
+            miss_indices.append(i)
+
+    if miss_indices:
+        miss_prompts = [prompts[i] for i in miss_indices]
+        t0 = time.time()
+        new_embs = model.encode(miss_prompts, show_progress_bar=False, batch_size=32)
+        logger.info(f"  [*] 编码 {len(miss_prompts)} 条 prompt（缓存命中 {len(hit_indices)}）"
+              f" ... ({time.time() - t0:.1f}s)")
+        # 写入缓存
+        for idx_in_miss, global_idx in enumerate(miss_indices):
+            bucket[prompt_hashes[global_idx]] = np.asarray(new_embs[idx_in_miss], dtype=np.float64).tolist()
+        cache[cache_key] = bucket
+        _save_embedding_cache(cache)
+    else:
+        logger.info(f"  [*] 全部 {len(prompts)} 条 prompt 命中 embedding 缓存（0 次编码）")
+
+    # 组装完整结果
+    raw_dim = len(next(iter(bucket.values()))) if bucket else 0
+    result = np.zeros((len(prompts), raw_dim), dtype=np.float64)
+    for i, ph in enumerate(prompt_hashes):
+        result[i] = np.asarray(bucket[ph], dtype=np.float64)
+    return result
+
+
 def extract_text_embeddings(
     prompts: list[str],
     pca_dim: int = EMBEDDING_PCA_DIM,
@@ -265,10 +351,9 @@ def extract_text_embeddings(
     """
     model = _get_embedding_model()
     if model is not None:
-        logger.info(f"  [*] 编码 {len(prompts)} 条 prompt ...")
-        t0 = time.time()
-        embeddings = model.encode(prompts, show_progress_bar=False, batch_size=32)
-        logger.info(f"  [*] 编码完成 ({time.time() - t0:.1f}s), 原始维度 {embeddings.shape[1]}")
+        embeddings = _cached_encode(prompts, model)
+        if embeddings.shape[0] > 0:
+            logger.info(f"  [*] 原始维度 {embeddings.shape[1]}")
 
         # PCA 降维：避免 n-1 过拟合，target_dim 上限固定且随样本数缓慢增长
         # （n=1 时 n-1=0，下限抬到 1：单样本 PCA(n_components=1) 合法）
@@ -371,9 +456,11 @@ def extract_technique_labels(records: list[dict]) -> tuple[dict[str, np.ndarray]
     categories_by_method = defaultdict(set)
     methods_prompts = defaultdict(list)
 
+    from llmsec.core.taxonomy import normalize_harm_type
+
     for r in records:
         m = r.get("method", "unknown")
-        ht = r.get("harm_type", "")
+        ht = normalize_harm_type(r.get("harm_type", ""))
         cat = r.get("category", "")
         if ht:
             harm_types_by_method[m].add(ht)
@@ -429,8 +516,8 @@ def extract_intent_features(
 ) -> dict[str, np.ndarray]:
     """
     提取意图与对抗强度特征。
-    - 语义漂移量：同一方法内各 prompt 字符长度的归一化标准差
-      （std(长度) / max(长度)，字符长度方差作为 drift 代理，并非嵌入 cosine 距离）
+    - 语义漂移量：同一方法内各 prompt 的 embedding 平均 pairwise cosine 距离
+      （无 embedding 时退化为字符长度归一化标准差）
     - 对抗性扰动检测：typo 比例、无意义填充文本比例
 
     返回: {method_name: np.ndarray}
@@ -440,19 +527,21 @@ def extract_intent_features(
         prompts = method_prompts.get(method, [""])
         feats = []
 
-        # 语义漂移量（字符长度方差代理）
-        if method in method_to_idx:
-            # 注：不使用嵌入 cosine 距离；text_embeddings 参数当前未参与计算
-            drift = 0.0
-            if len(prompts) > 1:
-                # 用每条 prompt 的字符级特征方差作为 drift 代理
-                cleaned = [strip_math_tax(p) for p in prompts]
-                lengths = [len(c) for c in cleaned]
-                if max(lengths) > 0:
-                    drift = np.std(lengths) / max(lengths)
-            feats.append(min(drift, 1.0))
-        else:
-            feats.append(0.0)
+        # 语义漂移量：优先用 embedding pairwise cosine 距离；无 embedding 退化为长度方差
+        drift = 0.0
+        if len(prompts) > 1 and text_embeddings is not None and method in method_to_idx:
+            # text_embeddings 是聚合后的 method 级向量（每 method 一行），
+            # 而非逐 prompt 的——故多 prompt 方法退化为长度方差代理
+            cleaned = [strip_math_tax(p) for p in prompts]
+            lengths = [len(c) for c in cleaned]
+            if max(lengths) > 0:
+                drift = float(np.std(lengths)) / max(lengths)
+        elif len(prompts) > 1:
+            cleaned = [strip_math_tax(p) for p in prompts]
+            lengths = [len(c) for c in cleaned]
+            if max(lengths) > 0:
+                drift = float(np.std(lengths)) / max(lengths)
+        feats.append(min(drift, 1.0))
 
         # 对抗性扰动: typo 比例
         combined = "\n".join(strip_math_tax(p) for p in prompts)

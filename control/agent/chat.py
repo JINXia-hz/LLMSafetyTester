@@ -1,0 +1,181 @@
+"""control.agent.chat — LLM 驱动的对话中间者（tool-calling ReAct 循环）。
+
+替代 loop.py 的规则版 _parse_intent：用 LLM（经 control.agent.llm）理解自然语言意图，
+通过 OpenAI tool calling 调用 control 的 7 个 tool（list_runs/compare/fork/...）。
+
+流程（ReAct）：
+  用户输入 → LLM（带 tool schema）→ 若 LLM 调 tool → 执行 tool → 结果回灌 → 再问 LLM
+  → 重复直到 LLM 不再调 tool（给出自然语言总结）→ 返回对话轨迹
+
+兜底：LLM 未配置或调用失败时，回退到 loop.py 的规则版 chat_one。
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field
+
+from control.agent.llm import chat_with_tools, is_llm_configured
+from control.agent.loop import chat_one as _rule_chat_one
+from control.agent.tools import Tool, all_tools
+
+# 控制台对话的系统提示（让 LLM 知道它的角色 + 可用工具）
+_SYSTEM_PROMPT = """你是 llmsec 安全评估框架的控制助手。你通过调用工具帮用户管理评测工作单元（fork 分支）、对比历史结果、合并数据。
+
+你的能力（工具）：
+- list_runs: 列出评测 run（含 fork 分支内的 run）
+- compare_runs: 对比多个 run 的安全指标
+- fork_workspace: 创建隔离的 fork 测试环境
+- list_workspaces: 列出已创建的 fork 工作区
+- delete_workspace: 删除一个 fork 工作区
+- orchestrate: 批量并行 fork + run
+- merge: 把工作区结果合并到全局或另一工作区
+
+工作原则：
+1. 先理解用户意图，必要时调用工具获取信息。
+2. 调用工具后，基于返回结果用简洁中文回答。涉及数据时用表格或要点。
+3. 危险操作（delete/merge）前，先说明将做什么，再在用户确认后执行——但工具调用本身是即时的，所以你在调用前应已判断用户意图明确。
+4. run 名格式：历史 run 为 'YYYY-MM-DD_HHMMSS/target'，fork 分支 run 为 'ws:<分支名>/<target>'。
+5. 不确定时多问一句，不要擅自假设 run 名或工作区名。
+"""
+
+
+@dataclass
+class ChatTurn:
+    """一轮对话的轨迹（供前端渲染思考过程）。"""
+    user_text: str
+    tool_calls: list[dict] = field(default_factory=list)   # [{name, args, result_summary}]
+    reply: str = ""
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "user": self.user_text,
+            "tool_calls": self.tool_calls,
+            "reply": self.reply,
+            "error": self.error,
+        }
+
+
+def chat_with_llm(
+    user_text: str,
+    *,
+    max_tool_rounds: int = 5,
+) -> ChatTurn:
+    """LLM 驱动的单轮对话（多轮 tool-calling ReAct）。
+
+    Args:
+        user_text: 用户自然语言输入
+        max_tool_rounds: 最多工具调用轮次（防死循环）
+
+    Returns:
+        ChatTurn（含 tool_calls 轨迹 + 最终自然语言回复）
+    """
+    turn = ChatTurn(user_text=user_text)
+    tools_schema = [t.to_schema() for t in all_tools()]
+    # 工具名 → Tool 对象（执行用）
+    tool_map: dict[str, Tool] = {t.name: t for t in all_tools()}
+
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {"role": "user", "content": user_text},
+    ]
+
+    for _round in range(max_tool_rounds):
+        resp = chat_with_tools(messages, tools=tools_schema)
+        msg = resp.choices[0].message
+
+        # LLM 没调工具 → 最终回复
+        if not msg.tool_calls:
+            turn.reply = msg.content or "(模型未给出回复)"
+            return turn
+
+        # 把 assistant 的 tool_calls 消息加入历史
+        messages.append({
+            "role": "assistant",
+            "content": msg.content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in msg.tool_calls
+            ],
+        })
+
+        # 执行每个工具调用，结果回灌
+        for tc in msg.tool_calls:
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+            except json.JSONDecodeError:
+                args = {}
+            tool = tool_map.get(name)
+            if tool is None:
+                result_str = f"错误：未知工具 {name}"
+            else:
+                try:
+                    result = tool.call(args)
+                    result_str = _summarize_result(result)
+                except Exception as e:
+                    result_str = f"工具执行失败: {type(e).__name__}: {e}"
+            turn.tool_calls.append({"name": name, "args": args, "result": result_str[:500]})
+            # 工具结果回灌给 LLM
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result_str,
+            })
+
+    # 达到 max_tool_rounds 仍未结束 → 让 LLM 收尾
+    messages.append({"role": "user", "content": "已达到工具调用上限，请基于已有信息给出总结。"})
+    resp = chat_with_tools(messages, tools=None)
+    turn.reply = resp.choices[0].message.content or "(模型未给出回复)"
+    return turn
+
+
+def _summarize_result(result) -> str:
+    """把工具结果压缩成给 LLM 看的字符串（避免超长）。"""
+    if isinstance(result, list):
+        # list_runs / discover_workspace_runs 的结果
+        n = len(result)
+        if n == 0:
+            return "（无结果）"
+        sample = result[:10]
+        lines = [f"共 {n} 项，前 10 项："]
+        for it in sample:
+            if isinstance(it, dict):
+                name = it.get("name", it.get("workspace", "?"))
+                target = it.get("target_model", it.get("target", ""))
+                asr = it.get("asr")
+                asr_s = f"{asr:.1%}" if isinstance(asr, (int, float)) else "-"
+                lines.append(f"  - {name} (target={target}, asr={asr_s})")
+            else:
+                lines.append(f"  - {it}")
+        return "\n".join(lines)
+    if isinstance(result, dict):
+        # compare / fork / merge 等的结构化结果
+        return json.dumps(result, ensure_ascii=False, default=str)[:1500]
+    return str(result)[:1500]
+
+
+def chat_once_robust(user_text: str) -> dict:
+    """对外统一入口：优先 LLM，失败兜底规则版。
+
+    返回 {mode: "llm"|"rule"|"error", turn: {...}, reply: str}
+    """
+    if not is_llm_configured():
+        # LLM 未配置 → 规则版
+        reply = _rule_chat_one(user_text)
+        return {"mode": "rule", "reply": reply, "turn": None}
+
+    try:
+        turn = chat_with_llm(user_text)
+        return {"mode": "llm", "reply": turn.reply, "turn": turn.to_dict(),
+                "tool_calls": turn.tool_calls}
+    except Exception as e:
+        # LLM 调用失败 → 兜底规则版
+        reply = _rule_chat_one(user_text)
+        return {"mode": "fallback", "reply": reply, "turn": None,
+                "llm_error": f"{type(e).__name__}: {e}"}

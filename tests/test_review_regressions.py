@@ -95,7 +95,7 @@ def test_fr4_stale_attacker_ratings_cleaned():
     assert 'tracker.attacker_ratings.pop' in src, (
         'FR-4: resume 清理应包含 attacker_ratings.pop'
     )
-    assert 'tracker.history' in src and '_current_methods' in src, (
+    assert 'tracker.history' in src and '_current_units' in src, (
         'FR-4: resume 清理应过滤 history'
     )
 

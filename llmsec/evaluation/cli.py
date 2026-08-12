@@ -102,7 +102,8 @@ def run_evaluation(records: list[dict], args: argparse.Namespace,
             incomplete_count += 1
             continue
         expected_answer = rec.get("expected_answer")
-        harm_type = rec.get("harm_type")
+        from llmsec.core.taxonomy import normalize_harm_type
+        harm_type = normalize_harm_type(rec.get("harm_type", "other"))
         category = rec.get("category")
 
         for round_i in range(args.repeat):
@@ -240,9 +241,9 @@ def print_summary(summary: dict, judge_stats: dict | None,
         logger.info("\n  🎯 ELO 评分:")
         # 读嵌套 attackers 结构（get_summary 不再提供平铺的 total_methods/min_elo 等旧键）
         att = elo_s.get("attackers", {})
-        logger.info(f"    方法数: {elo_s.get('total_attackers', 0)}")
+        logger.info(f"    单位数: {elo_s.get('total_attackers', 0)}")
         logger.info(f"    ELO范围: {att.get('min_elo', 0)} ~ {att.get('max_elo', 0)}")
-        logger.info(f"    TOP5攻击方: {', '.join(t['method'] for t in att.get('top_threats', []))}")
+        logger.info(f"    TOP5攻击方: {', '.join(t['unit'] for t in att.get('top_threats', []))}")
         if elo_b.get("boundary_elo") is not None:
             logger.info(f"    安全边界: {elo_b['boundary_elo']} (置信度 {elo_b['confidence']*100:.0f}%)")
             logger.info(f"    边界以上威胁: {elo_b.get('methods_above_boundary', 0)} 种")

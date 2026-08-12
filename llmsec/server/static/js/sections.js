@@ -275,6 +275,7 @@ function renderThreatTable() {
       : '<span class="badge badge-pred">预测</span>';
     const ci = t.ci95 ? `[${fmtNum(t.ci95[0], 0)}, ${fmtNum(t.ci95[1], 0)}]` : '-';
     tr.innerHTML = `<td class="py-2 pr-4 font-mono text-xs">${esc(t.method)}</td>
+      <td class="py-2 pr-4 text-xs">${t.size != null ? t.size : '-'}</td>
       <td class="py-2 pr-4 font-semibold">${fmtNum(t.elo)}</td>
       <td class="py-2 pr-4">${t.asr != null ? fmtPct(t.asr) : '-'}</td>
       <td class="py-2 pr-4">${t.mean_jailbreak_tax != null ? fmtNum(t.mean_jailbreak_tax, 2) : '-'}</td>
@@ -361,7 +362,7 @@ async function loadThreats() {
     if (!Array.isArray(upsets)) upsets = upsets.weakness || [];
     upsets.slice(0, 8).forEach(u => {
       ul.innerHTML += `<div class="flex justify-between">
-        <span class="font-mono text-xs">${esc(u.attacker || u.method || '')}</span>
+        <span class="font-mono text-xs">${esc(u.name || u.attacker || u.method || '')}</span>
         <span style="color: var(--c-warn); font-weight:600;">gap ${fmtNum(u.elo_gap ?? u.surprise, 0)}</span></div>`;
     });
     if (!ul.innerHTML) ul.innerHTML = '<span style="color: var(--c-muted);">无数据</span>';
