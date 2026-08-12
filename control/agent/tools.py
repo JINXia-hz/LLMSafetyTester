@@ -237,6 +237,33 @@ def _do_merge(args: dict) -> dict:
     return result
 
 
+def _tool_review_run():
+    """门下省事后审查：读 run 报告，识别异常，呈递关键摘要。"""
+    return Tool(
+        name="review_run",
+        description=(
+            "审查一个 run 的安全评测报告：读取 runner_report.json + security_tree.json，"
+            "用阈值规则识别异常（ASR/FPR/收敛/覆盖率/真实盲区），生成中文审查摘要。"
+            "任务完成后自动审查，用户也可主动要求「审查/总结一下 X」。"
+            "run 名支持 'ts/target'（历史）或 'ws:<分支>/<target>'（fork 分支）。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "run": {"type": "string", "description": "run 名，如 '2026-08-11_151938/minimax' 或 'ws:ab1/minimax'"},
+            },
+            "required": ["run"],
+        },
+        call=lambda args: _do_review(args),
+    )
+
+
+def _do_review(args: dict) -> dict:
+    """调 review.review_run（不经 subprocess，直接读文件 + LLM）。"""
+    from control.agent.review import review_run
+    return review_run(args["run"])
+
+
 # ============================================================
 # 注册表（模块级单例：tool 实例稳定，便于 monkeypatch 单测与外部 agent 复用）
 # ============================================================
@@ -255,6 +282,7 @@ def all_tools() -> list[Tool]:
             _tool_delete_workspace(),
             _tool_orchestrate(),
             _tool_merge(),
+            _tool_review_run(),
         ]
     return _REGISTRY
 

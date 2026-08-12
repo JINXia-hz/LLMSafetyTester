@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from llmsec.core.logging import get_logger
@@ -84,6 +85,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p_merge.add_argument("--yes", action="store_true", help="确认执行（默认 dry-run）")
     p_merge.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
+    # ---- thresholds ----（公开阈值常量，供控制层经 CLI 读取，避免复制/漂移）
+    p_thr = sub.add_parser("thresholds", help="导出审查阈值常量（供外部工具/控制层使用）")
+    p_thr.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
     return parser
 
 
@@ -127,6 +132,37 @@ def main() -> int:
             args.sources, args.target, models=args.models,
             yes=args.yes, json_mode=args.json,
         )
+
+    if args.group == "thresholds":
+        # 导出 params.py 的审查阈值（单一真相源；控制层经 CLI 读，不复制不漂移）
+        from llmsec.params import (
+            ALLERGY_FPR_SAFE,
+            CONV_CI_TARGET,
+            CONV_DRIFT_TARGET,
+            MIN_COVERAGE_ABSOLUTE,
+            MIN_COVERAGE_RATIO,
+            PORTRAIT_ASR_SAFE,
+            PORTRAIT_MIN_CONFIDENCE,
+            PORTRAIT_MIN_TESTED,
+            TWIN_SEVERITY_FPR_MED,
+        )
+        thresholds = {
+            "PORTRAIT_MIN_TESTED": PORTRAIT_MIN_TESTED,
+            "PORTRAIT_MIN_CONFIDENCE": PORTRAIT_MIN_CONFIDENCE,
+            "PORTRAIT_ASR_SAFE": PORTRAIT_ASR_SAFE,
+            "ALLERGY_FPR_SAFE": ALLERGY_FPR_SAFE,
+            "TWIN_SEVERITY_FPR_MED": TWIN_SEVERITY_FPR_MED,
+            "CONV_CI_TARGET": CONV_CI_TARGET,
+            "CONV_DRIFT_TARGET": CONV_DRIFT_TARGET,
+            "MIN_COVERAGE_RATIO": MIN_COVERAGE_RATIO,
+            "MIN_COVERAGE_ABSOLUTE": MIN_COVERAGE_ABSOLUTE,
+        }
+        if args.json:
+            print(json.dumps(thresholds, ensure_ascii=False, indent=2))
+        else:
+            for k, v in thresholds.items():
+                print(f"{k} = {v}")
+        return 0
 
     parser.print_help()
     return 1

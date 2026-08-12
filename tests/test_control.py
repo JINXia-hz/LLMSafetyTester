@@ -606,3 +606,97 @@ class TestGatekeeper:
         assert gatekeeper.is_confirmed(t, t.token) is True
         assert gatekeeper.is_confirmed(t, "wrong") is False
         assert gatekeeper.is_confirmed(None, "x") is False
+
+
+# ============================================================
+# review：门下省事后审查（读报告 → 规则判定 findings）
+# ============================================================
+class TestReview:
+    def _make_report(self, *, asr=0.1, fpr=0.01, level="safe", tested=50,
+                     converged=True, coverage=0.5, ci_half=15, drift=2,
+                     confidence=0.8):
+        return {
+            "target_model": "testModel", "security_level": level,
+            "overall_verdict": "ok",
+            "attack_phase": {"asr": asr, "total_tested": tested},
+            "elo": {"boundary_elo": 1700, "boundary_confidence": confidence,
+                    "converged": converged, "ci_half": ci_half, "drift": drift,
+                    "coverage": coverage, "conv_rounds": 5},
+            "allergy": {"fpr": fpr},
+            "recommendation": "ok",
+        }
+
+    def test_high_asr_is_critical(self):
+        from control.agent.review import assess_findings
+        report = self._make_report(asr=0.8, level="broken")
+        findings = assess_findings(report, None)
+        asr_f = [f for f in findings if f["metric"] == "ASR"]
+        assert len(asr_f) == 1 and asr_f[0]["severity"] == "critical"
+
+    def test_safe_asr_is_good(self):
+        from control.agent.review import assess_findings
+        findings = assess_findings(self._make_report(asr=0.05), None)
+        asr_f = [f for f in findings if f["metric"] == "ASR"]
+        assert asr_f[0]["severity"] == "good"
+
+    def test_high_fpr_flags(self):
+        from control.agent.review import assess_findings
+        findings = assess_findings(self._make_report(fpr=0.2), None)
+        fpr_f = [f for f in findings if f["metric"] == "FPR"]
+        assert fpr_f[0]["severity"] == "critical"
+
+    def test_inconclusive_flagged(self):
+        from control.agent.review import assess_findings
+        findings = assess_findings(self._make_report(level="inconclusive"), None)
+        assert any(f["metric"] == "security_level" for f in findings)
+
+    def test_low_coverage_flagged(self):
+        from control.agent.review import assess_findings
+        findings = assess_findings(self._make_report(coverage=0.1), None)
+        assert any(f["metric"] == "coverage" for f in findings)
+
+    def test_not_converged_flagged(self):
+        from control.agent.review import assess_findings
+        findings = assess_findings(self._make_report(converged=False), None)
+        assert any(f["metric"] == "converged" for f in findings)
+
+    def test_findings_sorted_by_severity(self):
+        from control.agent.review import assess_findings
+        findings = assess_findings(
+            self._make_report(asr=0.8, fpr=0.2, coverage=0.1, level="broken"), None)
+        severities = [f["severity"] for f in findings]
+        # critical 应排在 warning/info 前面
+        if "critical" in severities and "warning" in severities:
+            assert severities.index("critical") < severities.index("warning")
+
+    def test_get_thresholds_from_cli(self, monkeypatch):
+        """阈值经 CLI 获取（不复制），mock invoker 验证。"""
+        from control.agent import review
+        review._THRESHOLDS_CACHE = None  # 清缓存
+        from control.core import invoker
+        monkeypatch.setattr(invoker, "_run", lambda argv: type("R", (), {
+            "ok": True, "json": {"PORTRAIT_ASR_SAFE": 0.3, "ALLERGY_FPR_SAFE": 0.05},
+            "returncode": 0, "stdout": "", "stderr": "", "elapsed_s": 0,
+        })())
+        th = review.get_thresholds()
+        assert th["PORTRAIT_ASR_SAFE"] == 0.3
+        review._THRESHOLDS_CACHE = None  # 清理
+
+    def test_review_run_returns_structure(self, tmp_path, monkeypatch):
+        """review_run 完整流程（mock 读报告）。"""
+        from control import config
+        from control.agent import review
+        from control.core import compare as cmp
+        runs = tmp_path / "runs"; runs.mkdir()
+        d = runs / "2026-08-11_120000" / "modelA"; d.mkdir(parents=True)
+        report = self._make_report(asr=0.6, level="vulnerable")
+        import json as _json
+        (d / "runner_report.json").write_text(_json.dumps(report), encoding="utf-8")
+        monkeypatch.setattr(config, "RUNS_DIR", runs)
+        monkeypatch.setattr(cmp, "RUNS_DIR", runs)
+        review._THRESHOLDS_CACHE = None
+        result = review.review_run("2026-08-11_120000/modelA", use_llm=False)
+        assert "error" not in result
+        assert result["summary"]
+        assert len(result["findings"]) > 0
+        assert "digest" in result

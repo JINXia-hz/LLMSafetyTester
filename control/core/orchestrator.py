@@ -95,7 +95,30 @@ def orchestrate(
     if compare_after and n_ok > 0:
         report["comparison"] = _compare_workspaces([r for r in results if r.get("status") == "success"])
 
+    # 门下省事后审查：对每个成功的 workspace 自动生成审查摘要
+    if n_ok > 0:
+        report["reviews"] = _auto_review([r for r in results if r.get("status") == "success"])
+
     return report
+
+
+def _auto_review(success_results: list[dict]) -> list[dict]:
+    """对成功的 workspace 自动跑门下省审查（规则版，不用 LLM，快速呈递）。"""
+    from control.agent.review import review_run
+    reviews = []
+    for r in success_results:
+        ws = r.get("workspace", {})
+        ws_name = ws.get("name", "")
+        if not ws_name:
+            continue
+        try:
+            rev = review_run(f"ws:{ws_name}", use_llm=False)
+            if "error" not in rev:
+                reviews.append({"workspace": ws_name, "summary": rev["summary"],
+                                "n_findings": len(rev["findings"])})
+        except Exception:
+            pass  # 审查失败不影响主流程
+    return reviews
 
 
 def _compare_workspaces(success_results: list[dict]) -> dict:
