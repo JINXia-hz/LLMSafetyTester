@@ -588,8 +588,20 @@ class TestGatekeeper:
     def test_safe_operations_not_blocked(self):
         from control.agent import gatekeeper
         for name, args in [("list_runs", {}), ("compare_runs", {"runs": ["a", "b"]}),
-                           ("fork_workspace", {"name": "x"}), ("list_workspaces", {})]:
+                           ("fork_workspace", {"name": "x"}), ("list_workspaces", {}),
+                           ("delete_runs", {"names": ["ts/x"], "delete_r": False})]:
             assert gatekeeper.assess(name, args) is None
+
+    def test_clean_cache_is_blocked(self):
+        from control.agent import gatekeeper
+        a = gatekeeper.assess("clean_cache", {"categories": ["elo_cache", "predictors"]})
+        assert a is not None and a["action"] == "clean_cache"
+        assert "elo_cache" in a["summary"]
+
+    def test_delete_runs_delete_r_blocked(self):
+        from control.agent import gatekeeper
+        a = gatekeeper.assess("delete_runs", {"names": ["m1"], "delete_r": True})
+        assert a is not None and a["action"] == "delete_r_column"
 
     def test_issue_ticket_has_token(self):
         from control.agent import gatekeeper

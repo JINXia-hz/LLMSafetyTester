@@ -267,6 +267,66 @@ def _do_review(args: dict) -> dict:
     return review_run(args["run"])
 
 
+def _tool_clean_cache():
+    """清理派生缓存（elo_cache / predictors / feature_cluster / task_logs）。"""
+    return Tool(
+        name="clean_cache",
+        description=(
+            "清理 llmsec 的派生缓存。可清理：elo_cache（Elo 派生缓存）、"
+            "predictors（预测器 pkl）、feature_cluster（特征+聚类产物）、"
+            "task_logs（任务日志）。这些都是可重建的缓存（非权威数据）。"
+            "用户说「清缓存/清 elo 缓存/清预测器」时用此工具。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "categories": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "要清理的类别: elo_cache / predictors / feature_cluster / task_logs",
+                },
+            },
+            "required": ["categories"],
+        },
+        call=lambda args: _do_clean_cache(args),
+    )
+
+
+def _do_clean_cache(args: dict) -> dict:
+    """经 invoker 调 llmsec-manage cache clean。"""
+    from control.core.invoker import clean_caches
+    return clean_caches(args["categories"])
+
+
+def _tool_delete_runs():
+    """删除 run 历史（可选同时删 R 矩阵列）。"""
+    return Tool(
+        name="delete_runs",
+        description=(
+            "删除评测 run 历史（软删除到 .trash/ 可恢复）。可选同时从全局 R 矩阵删除该模型的观测列"
+            "（delete_r=True）。用户说「删 run/清除历史/清除某模型数据」时用此工具。"
+            "⚠ delete_r=True 是极危险操作——删除全局 R 观测不可恢复。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "names": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "要删除的 run 名（如 ['2026-08-11_120000/minimax']）",
+                },
+                "delete_r": {"type": "boolean", "description": "是否同时删 R 矩阵中该模型列（极危险）", "default": False},
+            },
+            "required": ["names"],
+        },
+        call=lambda args: _do_delete_runs(args),
+    )
+
+
+def _do_delete_runs(args: dict) -> dict:
+    """经 invoker 调 llmsec-manage runs delete。"""
+    from control.core.invoker import delete_runs
+    return delete_runs(args["names"], delete_r=args.get("delete_r", False))
+
+
 # ============================================================
 # 注册表（模块级单例：tool 实例稳定，便于 monkeypatch 单测与外部 agent 复用）
 # ============================================================
@@ -280,12 +340,14 @@ def all_tools() -> list[Tool]:
         _REGISTRY = [
             _tool_list_runs(),
             _tool_compare_runs(),
+            _tool_review_run(),
             _tool_fork_workspace(),
             _tool_list_workspaces(),
             _tool_delete_workspace(),
+            _tool_delete_runs(),
+            _tool_clean_cache(),
             _tool_orchestrate(),
             _tool_merge(),
-            _tool_review_run(),
         ]
     return _REGISTRY
 

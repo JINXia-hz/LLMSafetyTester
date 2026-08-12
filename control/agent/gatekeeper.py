@@ -65,7 +65,7 @@ def assess(tool_name: str, args: dict) -> dict | None:
                 ),
             }
 
-    # delete_runs --delete-r（经 invoker 调 llmsec-manage）
+    # delete_runs --delete-r（经 invoker 调 llmsec-manage）——极危险
     if tool_name == "delete_runs":
         if args.get("delete_r"):
             names = args.get("names", [])
@@ -79,6 +79,22 @@ def assess(tool_name: str, args: dict) -> dict | None:
                     f"但 R 列本身没有独立备份）。"
                 ),
             }
+
+    # clean_cache ——警告级（缓存可重建，但影响性能 + 可能丢失未落盘预测器）
+    if tool_name == "clean_cache":
+        categories = args.get("categories", [])
+        cat_str = ", ".join(categories) if categories else "全部"
+        return {
+            "action": "clean_cache",
+            "summary": f"即将清理缓存类别：{cat_str}",
+            "detail": (
+                f"这些缓存（{cat_str}）会在下次评估时自动重建，但：\n"
+                f"- elo_cache 清除后下次查询需从 R 重算（几秒）\n"
+                f"- predictors 清除后下次需重训预测器（几十秒）\n"
+                f"- feature_cluster 清除后需重跑特征提取/聚类\n"
+                f"删除是软删除（移到 .trash/），可恢复。确认执行？"
+            ),
+        }
 
     return None  # 放行
 
