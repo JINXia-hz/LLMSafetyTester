@@ -99,6 +99,8 @@ async function sendChat() {
       setStatus('门下省封驳——等待确认');
     } else {
       _pendingConfirm = null;
+      // 中书省计划卡片（先规划后执行）
+      if (data.plan) renderPlanCard(data.plan);
       // 工具调用轨迹：折叠行（器字小印 + name(args) → result）
       for (const tc of (data.tool_calls || [])) appendToolCall(tc);
       // 回复 + 模式小印
@@ -117,6 +119,18 @@ async function sendChat() {
     _chatBusy = false;
     $('ctrl-chat-send').disabled = false;
   }
+}
+
+function renderPlanCard(plan) {
+  // 渲染中书省执行计划卡片（先规划后执行）
+  const log = $('ctrl-chat-log');
+  const div = document.createElement('div');
+  div.className = 'chat-msg chat-plan';
+  div.innerHTML = `
+    <div class="chat-role"><span class="seal-mini seal-accent">书</span> 中书省·拟票</div>
+    <div class="rounded border border-[var(--accent)]/20 bg-[var(--accent)]/5 p-3 mt-1 text-sm">${mdSafe(plan)}</div>`;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
 }
 
 function renderConfirmCard(ticket) {

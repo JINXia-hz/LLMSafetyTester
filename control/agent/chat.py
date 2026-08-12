@@ -20,23 +20,26 @@ from control.agent.loop import chat_one as _rule_chat_one
 from control.agent.tools import Tool, all_tools
 
 # 控制台对话的系统提示（让 LLM 知道它的角色 + 可用工具）
-_SYSTEM_PROMPT = """你是 llmsec 安全评估框架的控制助手。你通过调用工具帮用户管理评测工作单元（fork 分支）、对比历史结果、合并数据。
+_SYSTEM_PROMPT = """你是 llmsec 安全评估框架的中书省控制助手。你通过调用工具帮用户管理评测工作单元（fork 分支）、对比历史结果、审查报告、合并数据。
 
 你的能力（工具）：
 - list_runs: 列出评测 run（含 fork 分支内的 run）
 - compare_runs: 对比多个 run 的安全指标
+- review_run: 审查一个 run 的安全报告（识别异常 + 呈递摘要）
 - fork_workspace: 创建隔离的 fork 测试环境
 - list_workspaces: 列出已创建的 fork 工作区
 - delete_workspace: 删除一个 fork 工作区
 - orchestrate: 批量并行 fork + run
 - merge: 把工作区结果合并到全局或另一工作区
 
-工作原则：
-1. 先理解用户意图，必要时调用工具获取信息。
-2. 调用工具后，基于返回结果用简洁中文回答。涉及数据时用表格或要点。
-3. 危险操作（delete/merge）前，先说明将做什么，再在用户确认后执行——但工具调用本身是即时的，所以你在调用前应已判断用户意图明确。
-4. run 名格式：历史 run 为 'YYYY-MM-DD_HHMMSS/target'，fork 分支 run 为 'ws:<分支名>/<target>'。
-5. 不确定时多问一句，不要擅自假设 run 名或工作区名。
+工作原则（中书省职责——起草与调度）：
+1. **先规划后执行**：收到用户命令后，先在回复正文里简述执行计划（「我将：1.… 2.… 3.…」），再调用工具。简单查询（列一下/查一个数）可省略计划直接调。
+2. **多步任务必拟计划**：涉及多个工具调用时，先说明整体步骤，让用户知道你要做什么。
+3. 调用工具后，基于返回结果用简洁中文回答。涉及数据时用表格或要点。
+4. 危险操作（delete/merge 到全局）会被门下省封驳要求二次确认——你在调用前应已判断用户意图明确。
+5. run 名格式：历史 run 为 'YYYY-MM-DD_HHMMSS/target'，fork 分支 run 为 'ws:<分支名>/<target>'。
+6. 不确定时多问一句，不要擅自假设 run 名或工作区名。
+7. 审查报告时重点看「真实盲区」（surprise_score 高的威胁，即低 Elo 却成功），不是 Elo 高低；inconclusive 的结论要标注「数字待验证」。
 """
 
 
@@ -47,6 +50,7 @@ class ChatTurn:
     tool_calls: list[dict] = field(default_factory=list)   # [{name, args, result_summary}]
     reply: str = ""
     error: str | None = None
+    plan: str = ""   # 中书省拟定的执行计划（先规划后执行）
 
     def to_dict(self) -> dict:
         return {
@@ -54,6 +58,7 @@ class ChatTurn:
             "tool_calls": self.tool_calls,
             "reply": self.reply,
             "error": self.error,
+            "plan": self.plan,
         }
 
 
@@ -90,11 +95,15 @@ def chat_with_llm(
         resp = chat_with_tools(messages, tools=tools_schema)
         msg = resp.choices[0].message
 
-        # LLM 没调工具 → 最终回复
+        # LLM 没调工具 → 最终回复（也可能是纯对话/纯计划）
         if not msg.tool_calls:
             turn.reply = msg.content or "(模型未给出回复)"
             messages.append({"role": "assistant", "content": turn.reply})
             return turn
+
+        # 捕获中书省计划（第一轮 tool_call 附带的 content = 执行计划）
+        if _round == 0 and msg.content and not turn.plan:
+            turn.plan = msg.content.strip()
 
         # 把 assistant 的 tool_calls 消息加入历史
         messages.append({
@@ -262,6 +271,7 @@ def chat_once_robust(
         result = {
             "mode": "llm", "reply": turn.reply, "session_id": session_id,
             "tool_calls": turn.tool_calls,
+            "plan": turn.plan,
         }
         if turn.error == "blocked" and blocked_ticket:
             result["blocked"] = blocked_ticket

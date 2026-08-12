@@ -67,6 +67,11 @@ class ChatRequest(BaseModel):
     confirm_token: str | None = None
 
 
+class ReviewRequest(BaseModel):
+    run: str
+    use_llm: bool = True
+
+
 # ============================================================
 # 工作区管理
 # ============================================================
@@ -186,3 +191,18 @@ async def api_chat_reset(req: ChatRequest):
     if req.session_id:
         sess.reset(req.session_id)
     return {"session_id": req.session_id, "reset": True}
+
+
+@router.post("/api/control/review")
+async def api_review(req: ReviewRequest):
+    """门下省事后审查：读 run 报告，识别异常，呈递摘要。"""
+    from control.agent.review import review_run
+    try:
+        result = review_run(req.run, use_llm=req.use_llm)
+        if "error" in result:
+            raise HTTPException(status_code=404, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
