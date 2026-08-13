@@ -180,8 +180,8 @@ def _on_plan_approved(msg: BusMessage) -> None:
 def _on_step_start(msg: BusMessage) -> None:
     """步骤开始前审查。dangerous → 发封驳令 + notify(KIND_BLOCK)。
 
-    信封字段（msg.plan_id / msg.intent / msg.session_id）让门下省知道
-    这步服务的是什么意图——不再盲判。
+    放行豁免：如果此步骤在当前 Plan 中曾被封驳且已被用户放行（文牍有
+    EV_STEP_UNBLOCKED），跳过封驳——同一 Plan 内同一步骤只封驳一次。
     """
     payload = msg.payload
     capability_name = payload.get("capability", "")
@@ -194,6 +194,14 @@ def _on_step_start(msg: BusMessage) -> None:
     cap = capability_by_name(capability_name)
     if cap is None:
         return
+
+    # ★ 放行豁免：查文牍，此步是否曾被封驳且已被用户放行
+    from control.agent import gazette
+    ctx = gazette.read_plan_context(plan_id)
+    if ctx and step_id in ctx.get("steps", {}):
+        step_info = ctx["steps"][step_id]
+        if step_info.get("block_count", 0) > 0 and step_info["status"] == "pending":
+            return  # 用户已放行过，不再封驳
 
     assessment = assess_step(cap, args)
     if assessment is None:

@@ -181,12 +181,34 @@ function renderPlanPendingCard(pp) {
       <div style="display:flex; gap:8px;">
         <button class="btn-approve plan-approve">准奏</button>
         <button class="btn-reject plan-reject">驳回</button>
+        <button class="btn-rewrite plan-rewrite">改拟</button>
       </div>
     </div>`;
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
   div.querySelector('.plan-approve').onclick = () => approvePlan(pp.plan_id, div);
   div.querySelector('.plan-reject').onclick = () => rejectPlan(pp.plan_id, div);
+  div.querySelector('.plan-rewrite').onclick = () => rewritePlan(pp, div);
+}
+
+function rewritePlan(pp, cardDiv) {
+  // 改拟：把当前方案摘要回填到输入框，用户编辑后发送→重新走拟案流程
+  cardDiv.querySelector('.plan-approve').disabled = true;
+  cardDiv.querySelector('.plan-reject').disabled = true;
+  cardDiv.querySelector('.plan-rewrite').disabled = true;
+  // 驳回旧 Plan
+  try { fetch('/api/control/plan/reject', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({plan_id: pp.plan_id}),
+  }); } catch { /* 忽略 */ }
+  // 回填输入框：列出步骤让用户修改
+  const stepsBrief = (pp.steps || []).map((s, i) =>
+    `${i+1}. ${s.description || s.capability}`).join('；');
+  const input = $('ctrl-chat-input');
+  input.value = `修改方案，当前步骤：${stepsBrief}。请调整：`;
+  input.focus();
+  appendChat('assistant', '陛下要修改方案？请在输入框编辑修改意见后发送，臣将转交尚书省重新拟案。');
+  setStatus('等待修改意见');
 }
 
 async function approvePlan(planId, cardDiv) {

@@ -338,6 +338,19 @@ def _review_target_run_eval(result: dict, args: dict) -> str | None:
     return None  # 临时 eval_runs 目前无报告可审
 
 
+def _review_target_batch(result: dict, args: dict) -> str | None:
+    """run_batch_experiment 产出多个 run，返回第一个成功的可审查 run。"""
+    results = (result or {}).get("results", [])
+    for r in results:
+        if r.get("status") != "success":
+            continue
+        ws_name = (r.get("workspace") or {}).get("name") or r.get("spec", {}).get("name")
+        target = r.get("spec", {}).get("target")
+        if ws_name and target:
+            return f"ws:{ws_name}/{target}"
+    return None
+
+
 # ============================================================
 # 能力清单（固定，尚书省 LLM 在此范围内拟案）
 # ============================================================
@@ -444,6 +457,7 @@ def _build() -> list[Capability]:
                 "每个 spec 独立 fork workspace，互不污染；完成后自动对比 + 审查。"
             ),
             block_message=_blk_run_batch_experiment,
+            extract_review_target=_review_target_batch,
         ),
         Capability(
             name="fork_workspace",
