@@ -30,7 +30,8 @@ MENXIA = "门下省"
 ALL = "全员"  # 广播
 
 # 消息 kind 常量（三省约定的词汇表）
-# 尚书省广播：Plan 执行进度 + 每步状态
+# 尚书省广播：Plan 拟案/执行进度 + 每步状态
+KIND_PLAN_DRAFTED = "plan_drafted"       # 尚书省拟案完成（中书省发通知，门下省审查时机）
 KIND_PLAN_PROGRESS = "plan_progress"      # Plan 执行进度更新（某步状态变化）
 KIND_PLAN_DONE = "plan_done"              # Plan 全部执行完
 KIND_STEP_START = "step_start"            # 某步即将执行（门下省审查时机）

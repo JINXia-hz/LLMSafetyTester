@@ -34,6 +34,7 @@ from control.agent.shangshu.plan import (
     save_plan,
 )
 from control.agent.shangshu.planner import draft_plan
+from control.agent.shangshu.queue import get_queue
 
 
 def approve_plan(plan_id: str) -> Plan:
@@ -77,7 +78,7 @@ def reject_plan(plan_id: str) -> Plan:
 __all__ = [
     "draft_plan", "execute_plan", "approve_plan", "reject_plan",
     "load_plan", "list_plans", "save_plan", "reset_plans",
-    "make_plan_from_llm",
+    "make_plan_from_llm", "get_queue",
     "Plan", "Step",
     "P_DRAFTED", "P_APPROVED", "P_EXECUTING", "P_DONE", "P_REJECTED",
 ]

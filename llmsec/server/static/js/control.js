@@ -34,7 +34,7 @@ async function loadControlSection() {
   } catch { /* 忽略 */ }
   if (!_greeted) {
     _greeted = true;
-    appendChat('assistant', mdSafe('宣政殿候旨。陛下有何吩咐？臣可：**查批次**、**对比 run**、**fork 工作区**、**审查报告**、**合并 R 矩阵**、**清缓存**。'));
+    appendChat('assistant', mdSafe('臣中书令见驾，恭请圣安。臣可：**查批次**、**对比 run**、**fork 工作区**、**审查报告**、**合并 R 矩阵**、**清缓存**。'));
   }
   if (!_ctrlBound) bindControl();
   // 初始化尚书省 + 门下省衙署
@@ -192,15 +192,9 @@ function renderPlanPendingCard(pp) {
 async function approvePlan(planId, cardDiv) {
   cardDiv.querySelector('.plan-approve').disabled = true;
   cardDiv.querySelector('.plan-reject').disabled = true;
-  appendChat('assistant', '陛下已准奏。尚书省领旨执行——进度见**尚书省**衙署。');
-  setProvStatus('zhongshu', '候旨');
-  setProvStatus('shangshu', '执行中…', true);
-  setStatus('尚书省执行中…');
-  // 引圣驾至尚书省衙署（窄屏纵列时滚动定位 + 描金闪高）
-  flashPanel('panel-shangshu');
   // 通知尚书省面板开始跟踪此 plan
   if (window.shangshuTrackPlan) window.shangshuTrackPlan(planId);
-  // 异步触发执行（不等返回，前端轮询进度）
+  // 提交到执行队列（异步，不阻塞——approve 端点立即返回 queue_status）
   try {
     const res = await fetch('/api/control/plan/approve', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -208,8 +202,18 @@ async function approvePlan(planId, cardDiv) {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      appendChat('error', '✕ 执行失败: ' + esc(err.detail || res.status));
+      appendChat('error', '✕ 提交失败: ' + esc(err.detail || res.status));
+      return;
     }
+    const data = await res.json();
+    if (data.queue_status === 'queued') {
+      appendChat('assistant', '陛下已准奏。尚书省领旨，已排入执行队列——进度见**尚书省**面板。');
+    } else if (data.queue_status === 'duplicate') {
+      appendChat('assistant', '此计划已在执行队列中，无需重复提交。');
+    } else {
+      appendChat('assistant', '陛下已准奏，尚书省正在执行——进度见**尚书省**面板。');
+    }
+    setStatus('已提交执行队列');
   } catch (e) {
     appendChat('error', '✕ 网络错误: ' + esc(e.message));
   }

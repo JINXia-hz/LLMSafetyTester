@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from control.agent.bus import (
     KIND_BLOCK,
+    KIND_PLAN_APPROVED,
     KIND_PLAN_DONE,
+    KIND_PLAN_DRAFTED,
     KIND_REVIEW,
     KIND_STEP_FAILED,
     KIND_STEP_START,
@@ -59,11 +61,21 @@ _INITIALIZED = False
 
 
 def init_menxia() -> None:
-    """初始化门下省：订阅总线消息。进程启动时调一次。幂等。"""
+    """初始化门下省：订阅总线消息。进程启动时调一次。幂等。
+
+    三阶段全监控：
+      - 拟案阶段（plan_drafted）→ 整体合理性审查（报告，非封驳）
+      - 准奏阶段（plan_approved）→ 整体风险评估（报告）
+      - 执行阶段（step_start / plan_done / step_failed）→ 单步封驳 + 审查
+    """
     global _INITIALIZED
     if _INITIALIZED:
         return
     bus = get_bus()
+    # 拟案 + 准奏阶段
+    bus.subscribe(MENXIA, [KIND_PLAN_DRAFTED], _on_plan_drafted)
+    bus.subscribe(MENXIA, [KIND_PLAN_APPROVED], _on_plan_approved)
+    # 执行阶段
     bus.subscribe(MENXIA, [KIND_STEP_START], _on_step_start)
     bus.subscribe(MENXIA, [KIND_PLAN_DONE], _on_plan_done)
     bus.subscribe(MENXIA, [KIND_STEP_FAILED], _on_step_failed)
@@ -75,6 +87,94 @@ def reinit_menxia() -> None:
     global _INITIALIZED
     _INITIALIZED = False
     init_menxia()
+
+
+def _on_plan_drafted(msg: BusMessage) -> None:
+    """拟案阶段：整体合理性审查（报告，非封驳）。
+
+    门下省在尚书省拟完案、中书省展示给用户之前，审查 Plan 整体：
+    - 步骤过多 → 建议拆分
+    - 含 critical 步骤 → 提示用户细看
+    - 引用不存在的资源 → 报告
+    发现问题经总线发 KIND_REVIEW 报告给中书省面板。
+    """
+    plan_id = msg.plan_id or ""
+    if not plan_id:
+        return
+
+    from control.agent.shangshu.plan import load_plan
+    plan = load_plan(plan_id)
+    if plan is None:
+        return
+
+    findings = []
+
+    # 步骤过多
+    if len(plan.steps) > 10:
+        findings.append(f"计划含 {len(plan.steps)} 步，过于复杂，建议拆分为多个小计划")
+
+    # 统计风险等级
+    from control.agent.shangshu.capabilities import capability_by_name
+    risk_counts = {"critical": 0, "high": 0, "medium": 0}
+    for s in plan.steps:
+        cap = capability_by_name(s.capability)
+        if cap:
+            risk_counts[cap.risk_level] = risk_counts.get(cap.risk_level, 0) + 1
+
+    if risk_counts["critical"] > 0:
+        findings.append(f"含 {risk_counts['critical']} 个不可逆操作（critical），请陛下细看每步说明")
+    if risk_counts["high"] > 3:
+        findings.append(f"含 {risk_counts['high']} 个高危步骤（high），执行将消耗大量 API 额度")
+
+    # 矛盾检测：同时删 R 列 + merge 到全局
+    has_delete_r = any(
+        s.capability == "delete_runs" and s.args.get("delete_r")
+        for s in plan.steps
+    )
+    has_merge_global = any(
+        s.capability == "merge_results" and s.args.get("target") == "global"
+        for s in plan.steps
+    )
+    if has_delete_r and has_merge_global:
+        findings.append("⚠ 计划同时删 R 列和 merge 到全局——逻辑矛盾，请确认")
+
+    if not findings:
+        return  # 无异常，不报告
+
+    report = "门下省拟案审查：" + "；".join(findings)
+    notify(KIND_REVIEW, from_dept=MENXIA, to_dept=ZHONGSHU,
+           plan_id=plan_id, intent=msg.intent, session_id=msg.session_id,
+           type="draft_review", findings=findings, report=report)
+
+
+def _on_plan_approved(msg: BusMessage) -> None:
+    """准奏阶段：整体风险评估（报告，不阻塞执行）。
+
+    用户准奏后、执行开始前，门下省做最后一道整体检查。
+    """
+    plan_id = msg.plan_id or ""
+    if not plan_id:
+        return
+
+    from control.agent.shangshu.plan import load_plan
+    plan = load_plan(plan_id)
+    if plan is None:
+        return
+
+    from control.agent.shangshu.capabilities import capability_by_name
+    high_risk = 0
+    for s in plan.steps:
+        cap = capability_by_name(s.capability)
+        if cap and cap.risk_level in ("critical", "high"):
+            high_risk += 1
+
+    if high_risk == 0:
+        return  # 无高危步骤，不报告
+
+    report = f"此计划含 {high_risk} 个高危步骤。执行时门下省将逐一封驳确认。"
+    notify(KIND_REVIEW, from_dept=MENXIA, to_dept=ZHONGSHU,
+           plan_id=plan_id, intent=msg.intent, session_id=msg.session_id,
+           type="approval_review", high_risk_count=high_risk, report=report)
 
 
 def _on_step_start(msg: BusMessage) -> None:

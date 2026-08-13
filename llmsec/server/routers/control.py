@@ -256,17 +256,17 @@ def api_review(req: ReviewRequest):
 # ============================================================
 @router.post("/api/control/plan/approve")
 def api_plan_approve(req: PlanApproveRequest):
-    """用户准奏 Plan → 尚书省执行（同步阻塞，长任务前端轮询 bus feed 看进度）。"""
-    from control.agent.shangshu import approve_plan, execute_plan, load_plan
+    """用户准奏 Plan → 提交执行队列（异步，不阻塞）。"""
+    from control.agent.shangshu import approve_plan, get_queue, load_plan
     try:
         plan = load_plan(req.plan_id)
         if plan is None:
             raise HTTPException(status_code=404, detail=f"Plan 不存在: {req.plan_id}")
         if plan.status == "drafted":
             approve_plan(req.plan_id)
-        # 执行（同步）—— 短任务直接返回结果；长任务前端会先看到 bus feed 进度
-        plan = execute_plan(req.plan_id)
-        return plan.to_dict()
+        # 提交到队列，不阻塞——worker 线程串行执行
+        queue_status = get_queue().submit(req.plan_id)
+        return {"plan_id": req.plan_id, "queue_status": queue_status}
     except HTTPException:
         raise
     except Exception as e:
@@ -299,6 +299,13 @@ def api_block_approve(req: BlockApproveRequest):
                          step_id=req.step_id,
                          detail={"capability": "放行重试"})
     return {"plan_id": req.plan_id, "step_id": req.step_id, "approved": True}
+
+
+@router.get("/api/control/plan/queue")
+def api_plan_queue():
+    """查 Plan 执行队列状态（正在执行 + 排队中）。"""
+    from control.agent.shangshu import get_queue
+    return get_queue().status()
 
 
 @router.get("/api/control/plan/{plan_id}/status")

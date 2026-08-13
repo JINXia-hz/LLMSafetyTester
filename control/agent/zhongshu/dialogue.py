@@ -203,6 +203,12 @@ def _hand_to_shangshu(intent: str, messages: list[dict], session_id: str) -> dic
                                           "description": s.description}
                                          for s in plan.steps]})
 
+        # 通知门下省审查拟案（门下省在拟案阶段做整体合理性审查）
+        from control.agent.bus import KIND_PLAN_DRAFTED, ZHONGSHU, notify
+        notify(KIND_PLAN_DRAFTED, from_dept=ZHONGSHU,
+               plan_id=plan.id, intent=plan.intent, session_id=session_id,
+               steps_count=len(plan.steps))
+
         return {
             "plan_id": plan.id,
             "steps": [_step_dict(s) for s in plan.steps],
