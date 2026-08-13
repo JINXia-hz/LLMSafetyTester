@@ -98,47 +98,48 @@ class TestControlRouterSmoke:
 
 
 # ============================================================
-# chat 兜底（mock LLM）
+# chat 兜底（mock LLM）—— 新中书省流程（zhongshu.handle_message）
 # ============================================================
 class TestChatFallback:
     def test_chat_rule_mode_when_unconfigured(self, monkeypatch):
-        from control.agent import chat as chat_mod
-        monkeypatch.setattr(chat_mod, "is_llm_configured", lambda: False)
+        from control.agent import zhongshu as zs_mod
+        monkeypatch.setattr(zs_mod, "is_llm_configured", lambda: False)
         r = _client().post("/api/control/chat", json={"text": "列一下 run"})
         assert r.status_code == 200
         d = r.json()
         assert d["mode"] == "rule" and d["reply"]
 
     def test_chat_fallback_on_llm_error(self, monkeypatch):
-        from control.agent import chat as chat_mod
-        monkeypatch.setattr(chat_mod, "is_llm_configured", lambda: True)
+        from control.agent import zhongshu as zs_mod
+        monkeypatch.setattr(zs_mod, "is_llm_configured", lambda: True)
 
-        def boom(user_text, messages, **k):
+        def boom(messages, **k):
             raise RuntimeError("LLM 连不上")
-        monkeypatch.setattr(chat_mod, "chat_with_llm", boom)
+        monkeypatch.setattr(zs_mod, "chat_with_tools", boom)
         r = _client().post("/api/control/chat", json={"text": "列工作区"})
         assert r.status_code == 200
         d = r.json()
         assert d["mode"] == "fallback"
         assert "LLM 连不上" in d["llm_error"] and d["reply"]
 
-    def test_chat_llm_mode_with_mocked_tool_call(self, monkeypatch):
-        from control.agent import chat as chat_mod
-        from control.agent.chat import ChatTurn
-        monkeypatch.setattr(chat_mod, "is_llm_configured", lambda: True)
+    def test_chat_llm_mode_with_mocked_reply(self, monkeypatch):
+        """中书省 LLM 模式：mock chat_with_tools 返回纯文本回复（无 tool call）。"""
+        from control.agent import zhongshu as zs_mod
+        monkeypatch.setattr(zs_mod, "is_llm_configured", lambda: True)
 
-        def fake_chat(user_text, messages, **k):
-            return ChatTurn(
-                user_text=user_text,
-                tool_calls=[{"name": "list_workspaces", "args": {}, "result": "共 0 项"}],
-                reply="当前没有工作区。",
-            )
-        monkeypatch.setattr(chat_mod, "chat_with_llm", fake_chat)
+        class FakeMsg:
+            content = "当前没有工作区。"
+            tool_calls = None
+        class FakeResp:
+            choices = [type("C", (), {"message": FakeMsg()})()]
+
+        def fake_chat(messages, **k):
+            return FakeResp()
+        monkeypatch.setattr(zs_mod, "chat_with_tools", fake_chat)
         r = _client().post("/api/control/chat", json={"text": "有哪些工作区"})
         assert r.status_code == 200
         d = r.json()
-        assert d["mode"] == "llm" and d["reply"] == "当前没有工作区。"
-        assert d["tool_calls"][0]["name"] == "list_workspaces"
+        assert d["mode"] == "llm" and "工作区" in d["reply"]
 
 
 # ============================================================

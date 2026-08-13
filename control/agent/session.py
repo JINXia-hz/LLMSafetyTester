@@ -18,7 +18,7 @@ import time
 import uuid
 from threading import Lock
 
-from control.agent.chat import _SYSTEM_PROMPT
+from control.agent.prompts import ZHONGSHU_PROMPT as _SYSTEM_PROMPT
 
 # session 存储：session_id → {"messages": [...], "last_active": ts, "pending_confirm": ...}
 _SESSIONS: dict[str, dict] = {}

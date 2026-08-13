@@ -1,8 +1,11 @@
-/* control.js — 宣政殿「中书省」：对话 + 坊·工作区 + 衡·对比合并（依赖 core.js 全局）
+/* control.js — 宣政殿「中书省」面板：对话 + 意图理解 + Plan 准奏（依赖 core.js 全局）
  *
- * 对话经 /api/control/chat（LLM tool-calling，未配置 LLM 时规则兜底）。
- * 工作区经 /api/control/workspaces、/api/control/fork、/api/control/fork-and-run。
- * 对比/合并经 /api/control/compare、/api/control/merge。
+ * 三省制：中书省是对话主入口。
+ *   简单查询 → 自己处理（list_runs/compare/list_workspaces/review_run）
+ *   复杂指令 → 转交尚书省拟案 → 收到 plan_pending → 展示方案 + 准奏/驳回按钮
+ *   用户准奏 → 调 /api/control/plan/approve → 尚书省执行（进度在尚书省面板）
+ *
+ * 封驳不再在此处理——门下省经总线监听尚书省每一步，封驳卡片在门下省面板。
  */
 
 // ---------- 宣政殿 ----------
@@ -10,7 +13,6 @@ let _chatBusy = false;
 let _ctrlBound = false;
 // session_id + pendingConfirm 持久化到 sessionStorage（刷新不丢，关标签页才丢）
 let _sessionId = sessionStorage.getItem('ctrl_session_id') || null;
-let _pendingConfirm = null;   // 门下省待确认的 ticket（blocked 时填）
 let _forkOptsLoaded = false;   // fork+run 抽屉的目标/攻击集下拉是否已填充
 let _greeted = false;          // 开场白只发一次
 
@@ -35,6 +37,9 @@ async function loadControlSection() {
   loadWorkspaces();
   loadPickLists();
   if (!_ctrlBound) bindControl();
+  // 初始化尚书省 + 门下省面板
+  if (window.loadShangshuSection) loadShangshuSection();
+  if (window.loadMenxiaSection) loadMenxiaSection();
 }
 
 function bindControl() {
@@ -52,7 +57,7 @@ function bindControl() {
     input.value = chip.dataset.q;
     sendChat();
   });
-  // 工作区删除：事件委托（名字含引号也不怕）
+  // 工作区删除：事件委托
   $('ctrl-ws-list').addEventListener('click', e => {
     const btn = e.target.closest('.ws-del');
     if (btn) deleteWs(btn.dataset.name);
@@ -62,6 +67,17 @@ function bindControl() {
   // 重置对话（清上下文 + session）
   const resetBtn = $('ctrl-chat-reset');
   if (resetBtn) resetBtn.onclick = resetChat;
+  // 三省 tab 切换
+  document.querySelectorAll('.dept-tab').forEach(tab => {
+    tab.onclick = () => switchDept(tab.dataset.dept);
+  });
+}
+
+function switchDept(dept) {
+  document.querySelectorAll('.dept-tab').forEach(t => t.classList.toggle('active', t.dataset.dept === dept));
+  document.querySelectorAll('.dept-panel').forEach(p => {
+    p.style.display = p.dataset.dept === dept ? '' : 'none';
+  });
 }
 
 async function resetChat() {
@@ -76,7 +92,6 @@ async function resetChat() {
     } catch { /* 忽略 */ }
   }
   _sessionId = null;
-  _pendingConfirm = null;
   sessionStorage.removeItem('ctrl_session_id');
   $('ctrl-chat-log').innerHTML = '';
   setStatus('对话已重置');
@@ -96,14 +111,9 @@ async function sendChat() {
   appendChat('user', text);
   appendChat('thinking', '中书拟票中 <span class="chat-cursor">▍</span>');
   try {
-    const body = { text, session_id: _sessionId };
-    // 若有待确认的封驳令牌，且用户表达了确认意图，带上 token
-    if (_pendingConfirm && ['准奏','确认','confirm','是','准'].includes(text)) {
-      body.confirm_token = _pendingConfirm.token;
-    }
     const res = await fetch('/api/control/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ text, session_id: _sessionId }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -111,97 +121,104 @@ async function sendChat() {
     }
     const data = await res.json();
     removeThinking();
-    // 记住 session_id（上下文记忆 + sessionStorage 持久化）
     if (data.session_id) {
       _sessionId = data.session_id;
       sessionStorage.setItem('ctrl_session_id', _sessionId);
     }
-    // 门下省封驳：只展示劝谏卡片（不再复读——reply 内容与卡片重复）
-    if (data.blocked) {
-      _pendingConfirm = data.blocked;
-      renderConfirmCard(data.blocked);
-      setStatus('门下省封驳——等待确认');
+    // 复杂指令：尚书省已拟案，展示方案 + 准奏/驳回按钮
+    if (data.plan_pending) {
+      renderPlanPendingCard(data.plan_pending);
+      setStatus('尚书省已拟案——待天子圣裁');
     } else {
-      _pendingConfirm = null;
-      // 中书省计划卡片（先规划后执行）
-      if (data.plan) renderPlanCard(data.plan);
-      // 工具调用轨迹：折叠行（器字小印 + name(args) → result）
+      // 简单查询/回复：工具调用轨迹 + 回复
       for (const tc of (data.tool_calls || [])) appendToolCall(tc);
-      // 回复 + 模式小印
       const modeTag = data.mode === 'llm' ? ''
         : `<span class="ws-tag pending" style="margin-left:6px;">${
             data.mode === 'fallback' ? 'LLM失败·规则兜底'
-            : data.mode === 'confirmed' ? '已确认执行'
-            : data.mode === 'cancelled' ? '已取消'
-            : data.mode === 'error' ? '执行失败'
             : data.mode === 'rule' ? '规则模式'
             : data.mode
           }</span>`;
       appendChat('assistant', mdSafe(data.reply) + modeTag);
-      setStatus('宣政殿对话完成');
+      setStatus('对话完成');
     }
-    // LLM 可能动了工作区（fork/delete/merge），静默刷新列表
     loadWorkspaces();
   } catch (e) {
     removeThinking();
     appendChat('error', '✕ ' + esc(e.message));
-    setStatus('宣政殿对话失败: ' + e.message);
+    setStatus('对话失败: ' + e.message);
   } finally {
     _chatBusy = false;
     $('ctrl-chat-send').disabled = false;
   }
 }
 
-function renderPlanCard(plan) {
-  // 渲染中书省执行计划卡片（先规划后执行）
+// ============================================================
+// Plan 准奏（复杂指令 → 尚书省拟案 → 用户裁决）
+// ============================================================
+function renderPlanPendingCard(pp) {
+  // pp = {plan_id, steps, rendered_plan}
   const log = $('ctrl-chat-log');
   const div = document.createElement('div');
   div.className = 'chat-msg chat-plan';
+  // 步骤摘要
+  const stepsHtml = (pp.steps || []).map((s, i) => {
+    const deps = s.depends_on && s.depends_on.length ? ` ← 依赖 ${s.depends_on.join(',')}` : '';
+    return `<div style="padding:2px 0; font-size:0.8rem;">${i+1}. ${esc(s.description || s.capability)}${deps}</div>`;
+  }).join('');
   div.innerHTML = `
-    <div class="chat-role"><span class="seal-mini seal-accent">书</span> 中书省·拟票</div>
-    <div class="rounded border border-[var(--accent)]/20 bg-[var(--accent)]/5 p-3 mt-1 text-sm">${mdSafe(plan)}</div>`;
-  log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
-}
-
-function renderConfirmCard(ticket) {
-  // 渲染门下省劝谏卡片（确认/取消按钮）
-  const log = $('ctrl-chat-log');
-  const div = document.createElement('div');
-  div.className = 'chat-msg chat-blocked';
-  div.innerHTML = `
-    <div class="chat-role"><span class="seal-mini" style="background:#b91c1c;">门</span> <span style="color:#fca5a5;">门下省 · 封驳</span></div>
-    <div style="margin-top:4px; border-left:3px solid #b91c1c; border-radius:0 6px 6px 0; padding:10px 14px; background:rgba(185,28,28,0.08);">
-      <div style="font-weight:600; color:#fca5a5; margin-bottom:6px; font-size:0.875rem;">🛡️ ${esc(ticket.summary)}</div>
-      <div style="color:var(--c-text); opacity:0.75; white-space:pre-line; margin-bottom:10px; font-size:0.8125rem; line-height:1.5;">${esc(ticket.detail)}</div>
-      <div style="font-size:0.75rem; color:var(--c-text); opacity:0.5; margin-bottom:8px;">门下省以为此事关系重大，不敢草率。伏请陛下圣裁。</div>
+    <div class="chat-role"><span class="seal-mini" style="background:#2d6a4f;">尚</span> 尚书省·拟票（经中书省润色）</div>
+    <div style="border-left:3px solid #2d6a4f; border-radius:0 6px 6px 0; padding:10px 14px; margin-top:4px; background:rgba(45,106,79,0.08);">
+      <div style="font-size:0.875rem; line-height:1.6; margin-bottom:8px;">${mdSafe(pp.rendered_plan || '')}</div>
+      <details style="font-size:0.75rem; color:var(--c-text); opacity:0.6; margin-bottom:8px;">
+        <summary style="cursor:pointer;">技术步骤（${(pp.steps||[]).length} 步）</summary>
+        <div style="padding-top:4px;">${stepsHtml}</div>
+      </details>
       <div style="display:flex; gap:8px;">
-        <button class="confirm-yes" style="padding:5px 14px; border-radius:4px; background:#b91c1c; color:#fff; font-size:0.8125rem; border:none; cursor:pointer;">准奏</button>
-        <button class="confirm-no" style="padding:5px 14px; border-radius:4px; background:transparent; color:var(--c-text); opacity:0.6; font-size:0.8125rem; border:1px solid rgba(255,255,255,0.15); cursor:pointer;">作罢</button>
+        <button class="plan-approve" style="padding:5px 16px; border-radius:4px; background:#2d6a4f; color:#fff; font-size:0.8125rem; border:none; cursor:pointer;">准奏</button>
+        <button class="plan-reject" style="padding:5px 16px; border-radius:4px; background:transparent; color:var(--c-text); opacity:0.6; font-size:0.8125rem; border:1px solid rgba(255,255,255,0.15); cursor:pointer;">驳回</button>
       </div>
     </div>`;
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
-  div.querySelector('.confirm-yes').onclick = () => doConfirm(ticket.token);
-  div.querySelector('.confirm-no').onclick = () => doReject();
+  div.querySelector('.plan-approve').onclick = () => approvePlan(pp.plan_id, div);
+  div.querySelector('.plan-reject').onclick = () => rejectPlan(pp.plan_id, div);
 }
 
-async async function doConfirm(token) {
-  const input = $('ctrl-chat-input');
-  input.value = '准奏';
-  await sendChat();
-}
-
-async function doReject() {
-  _pendingConfirm = null;
+async function approvePlan(planId, cardDiv) {
+  cardDiv.querySelector('.plan-approve').disabled = true;
+  cardDiv.querySelector('.plan-reject').disabled = true;
+  appendChat('assistant', '陛下已准奏。尚书省领旨执行——进度见**尚书省**面板。');
+  setStatus('尚书省执行中…');
+  // 切到尚书省面板
+  switchDept('shangshu');
+  // 通知尚书省面板开始跟踪此 plan
+  if (window.shangshuTrackPlan) window.shangshuTrackPlan(planId);
+  // 异步触发执行（不等返回，前端轮询进度）
   try {
-    await fetch('/api/control/chat', {
+    const res = await fetch('/api/control/plan/approve', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: '作罢', session_id: _sessionId, confirm_token: 'REJECT' }),
+      body: JSON.stringify({ plan_id: planId, session_id: _sessionId }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      appendChat('error', '✕ 执行失败: ' + esc(err.detail || res.status));
+    }
+  } catch (e) {
+    appendChat('error', '✕ 网络错误: ' + esc(e.message));
+  }
+}
+
+async function rejectPlan(planId, cardDiv) {
+  cardDiv.querySelector('.plan-approve').disabled = true;
+  cardDiv.querySelector('.plan-reject').disabled = true;
+  try {
+    await fetch('/api/control/plan/reject', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan_id: planId }),
     });
   } catch { /* 忽略 */ }
-  appendChat('assistant', '陛下已下旨作罢。');
-  setStatus('已作罢');
+  appendChat('assistant', '陛下已驳回此案。');
+  setStatus('已驳回');
 }
 
 function appendChat(role, html) {

@@ -122,7 +122,7 @@ python -m uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
   - **目标模型管理**：「+」添加目标（写入 .env）、探活检测
   - **环境参数配置**：默认目标 / 生成模型 / Judge 的 base_url + model + api_key（写入 .env，掩码显示）
   - 任务状态与日志实时轮询 + SSE 直播
-- **控制台**（控制层）：LLM 驱动的对话中间者（自然语言 → 自动调 fork/compare/merge 等工具）、Fork 工作区管理（创建/列出/删除，显示合并状态）。底层经 `.env` 的 `GENERATOR_*` 模型（复用项目既定约定）
+- **宣政殿**（控制层）：中书，门下，尚书三个独立LLM Agent，三省各司其职，调度llmsec六部。用户可以通过简单对话轻松掌控全局。
 
 ---
 

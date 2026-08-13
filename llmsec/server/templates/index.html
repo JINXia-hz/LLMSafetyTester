@@ -574,6 +574,10 @@
     .ctrl-badge { font-size: 0.68rem; padding: 1px 8px; border-radius: 2px; font-weight: 600; }
     .ctrl-badge.on { background: rgba(117,135,107,.20); color: var(--c-safe); box-shadow: inset 0 0 0 1px rgba(117,135,107,.5); }
     .ctrl-badge.off { background: rgba(185,138,68,.16); color: var(--c-ochre); box-shadow: inset 0 0 0 1px rgba(185,138,68,.5); }
+    /* 三省 tab */
+    .dept-tab { font-size: 0.8rem; padding: 4px 12px; border-radius: 4px; color: var(--c-muted); cursor: pointer; border: none; background: transparent; transition: all .15s; }
+    .dept-tab:hover { color: var(--c-text); }
+    .dept-tab.active { color: var(--c-text); background: rgba(191,160,60,.10); box-shadow: inset 0 0 0 1px rgba(191,160,60,.3); }
     /* 快捷指令 chips：楷体小丸，悬停描金 */
     .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
     .chip { font-size: 0.72rem; padding: 3px 10px; border-radius: 10px; border: 1px solid var(--c-line);
@@ -1172,38 +1176,80 @@
         <!-- ============ 宣政殿 ============ -->
         <section id="sec-control" class="section">
          <div class="ctrl-wrap">
-          <div class="grid grid-cols-1 lg:grid-cols-5 gap-4 mb-4">
-            <!-- 中书对话 -->
-            <div class="card lg:col-span-3">
+          <!-- 三省导航 tabs -->
+          <div class="flex items-center gap-3 mb-3 border-b border-[var(--c-line)] pb-2">
+            <div class="flex items-center gap-1">
+              <span class="seal-mini seal-accent">书</span>
+              <button class="dept-tab active" data-dept="zhongshu">中书省</button>
+            </div>
+            <div class="flex items-center gap-1">
+              <span class="seal-mini" style="background:#2d6a4f;">尚</span>
+              <button class="dept-tab" data-dept="shangshu">尚书省</button>
+            </div>
+            <div class="flex items-center gap-1">
+              <span class="seal-mini" style="background:#c0392b;">门</span>
+              <button class="dept-tab" data-dept="menxia">门下省</button>
+            </div>
+            <div class="flex-1"></div>
+            <span id="ctrl-llm-badge" class="ctrl-badge off">检测中…</span>
+          </div>
+
+          <!-- 三省面板（同时显示，tab 切换可见性） -->
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <!-- 中书省：对话 + 意图理解 -->
+            <div class="card dept-panel" data-dept="zhongshu">
               <div class="flex items-center justify-between mb-1">
-                <h3 class="font-semibold text-sm">中书对话</h3>
-                <div class="flex items-center gap-2">
-                  <button id="ctrl-chat-reset" class="text-xs px-2 py-0.5 rounded border border-white/10 hover:bg-white/5" title="清空对话上下文">↻ 重置</button>
-                  <span id="ctrl-llm-badge" class="ctrl-badge off">检测中…</span>
-                </div>
+                <h3 class="font-semibold text-sm flex items-center gap-2"><span class="seal-mini seal-accent">书</span> 中书省·听旨拟票</h3>
+                <button id="ctrl-chat-reset" class="text-xs px-2 py-0.5 rounded border border-white/10 hover:bg-white/5" title="清空对话上下文">↻ 重置</button>
               </div>
-              <div class="text-xs mb-2" style="color: var(--c-muted);">自然语言调度控制层：查批次、对比、fork 工作区、合并 R 矩阵。</div>
+              <div class="text-xs mb-2" style="color: var(--c-muted);">理解天子意图，简单自处理，复杂转交尚书省拟案。</div>
               <div id="ctrl-chat-log" class="chat-log mb-2"></div>
               <div class="chip-row mb-2" id="ctrl-chips">
                 <button class="chip" data-q="列出所有工作区">列工作区</button>
                 <button class="chip" data-q="列出最近的运行批次">近期批次</button>
                 <button class="chip" data-q="对比最近两个 run 的安全指标">对比近两批</button>
-                <button class="chip" data-q="预览把所有工作区合并回全局（dry-run，不执行）">合并预览</button>
+                <button class="chip" data-q="对 ABCD 四个模型跑一遍评估">跑评估（复杂指令示例）</button>
               </div>
               <div class="flex gap-2">
-                <input id="ctrl-chat-input" type="text" class="flex-1" placeholder="吩咐中书省…（Enter 发送，Shift+Enter 换行）">
+                <input id="ctrl-chat-input" type="text" class="flex-1" placeholder="吩咐中书省…（Enter 发送）">
                 <button id="ctrl-chat-send" class="btn btn-primary text-xs">发送</button>
               </div>
             </div>
 
-            <!-- 坊 · 工作区 -->
+            <!-- 尚书省：执行调度 -->
+            <div class="card dept-panel" data-dept="shangshu" style="display:none;">
+              <div class="flex items-center justify-between mb-1">
+                <h3 class="font-semibold text-sm flex items-center gap-2"><span class="seal-mini" style="background:#2d6a4f;">尚</span> 尚书省·调度执行</h3>
+                <button id="ss-refresh" class="btn btn-plain text-xs">刷新</button>
+              </div>
+              <div class="text-xs mb-2" style="color: var(--c-muted);">执行 Plan 步骤进度，每步状态/结果。</div>
+              <div id="ss-plan-area" class="space-y-2" style="max-height: 500px; overflow-y: auto;">
+                <div class="text-xs text-center py-8" style="color: var(--c-muted);">尚无执行计划。复杂指令经中书省拟案、天子准奏后此处显示进度。</div>
+              </div>
+            </div>
+
+            <!-- 门下省：监察 + 封驳 + 简报 -->
+            <div class="card dept-panel" data-dept="menxia" style="display:none;">
+              <div class="flex items-center justify-between mb-1">
+                <h3 class="font-semibold text-sm flex items-center gap-2"><span class="seal-mini" style="background:#c0392b;">门</span> 门下省·封驳审查</h3>
+                <button id="mx-refresh" class="btn btn-plain text-xs">刷新</button>
+              </div>
+              <div class="text-xs mb-2" style="color: var(--c-muted);">封驳记录 + 审查简报 + 异常呈递。</div>
+              <div id="mx-log" class="space-y-2" style="max-height: 500px; overflow-y: auto;">
+                <div class="text-xs text-center py-8" style="color: var(--c-muted);">门下省候旨。执行中的危险步骤将在此封驳，任务完成后呈递简报。</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 坊 · 工作区 + 衡 · 对比合并（手动操作入口，tab 下方常驻） -->
+          <div class="grid grid-cols-1 lg:grid-cols-5 gap-4 mt-4">
             <div class="card lg:col-span-2">
               <div class="flex items-center justify-between mb-1">
                 <h3 class="font-semibold text-sm">坊 · 工作区</h3>
                 <button id="ctrl-ws-refresh" class="btn btn-plain text-xs">刷新</button>
               </div>
               <div class="text-xs mb-2" style="color: var(--c-muted);">fork 隔离副本做 A/B 实验，不污染全局 R。</div>
-              <div id="ctrl-ws-list" class="space-y-2 mb-3" style="max-height: 220px; overflow-y: auto;"></div>
+              <div id="ctrl-ws-list" class="space-y-2 mb-3" style="max-height: 180px; overflow-y: auto;"></div>
               <div class="space-y-2" style="border-top: 1px dashed var(--c-line); padding-top: 10px;">
                 <div class="field"><div class="field-head"><span class="field-label">名称</span>
                   <input id="ctrl-fork-name" type="text" placeholder="如 ab_batch2"></div></div>
@@ -1225,29 +1271,28 @@
                 </div>
               </div>
             </div>
-          </div>
 
-          <!-- 衡 · 对比与合并 -->
-          <div class="card">
-            <h3 class="font-semibold text-sm mb-3">衡 · 对比与合并</h3>
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-3">
-              <div>
-                <div class="text-xs mb-1 font-semibold" style="color: var(--c-muted);">批次对比（勾选 ≥2 个 run）</div>
-                <div id="ctrl-cmp-list" class="pick-list"></div>
-                <button id="ctrl-cmp-btn" class="btn btn-primary w-full text-xs mt-2">对比所选</button>
+            <div class="card lg:col-span-3">
+              <h3 class="font-semibold text-sm mb-3">衡 · 对比与合并</h3>
+              <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-3">
+                <div>
+                  <div class="text-xs mb-1 font-semibold" style="color: var(--c-muted);">批次对比（勾选 ≥2 个 run）</div>
+                  <div id="ctrl-cmp-list" class="pick-list"></div>
+                  <button id="ctrl-cmp-btn" class="btn btn-primary w-full text-xs mt-2">对比所选</button>
+                </div>
+                <div>
+                  <div class="text-xs mb-1 font-semibold" style="color: var(--c-muted);">合并 R 矩阵（勾选源 → 汇入目标）</div>
+                  <div id="ctrl-mrg-list" class="pick-list"></div>
+                  <div class="field mt-2"><div class="field-head"><span class="field-label">目标</span>
+                    <select id="ctrl-mrg-target"><option value="global">global（全局 R）</option></select></div></div>
+                  <label class="flex items-center gap-2 mt-2 text-xs" style="color: var(--c-muted);">
+                    <input type="checkbox" id="ctrl-mrg-confirm"> 确认执行（不勾 = dry-run 预览，不落盘）
+                  </label>
+                  <button id="ctrl-mrg-btn" class="btn btn-plain w-full text-xs mt-2">合并</button>
+                </div>
               </div>
-              <div>
-                <div class="text-xs mb-1 font-semibold" style="color: var(--c-muted);">合并 R 矩阵（勾选源 → 汇入目标）</div>
-                <div id="ctrl-mrg-list" class="pick-list"></div>
-                <div class="field mt-2"><div class="field-head"><span class="field-label">目标</span>
-                  <select id="ctrl-mrg-target"><option value="global">global（全局 R）</option></select></div></div>
-                <label class="flex items-center gap-2 mt-2 text-xs" style="color: var(--c-muted);">
-                  <input type="checkbox" id="ctrl-mrg-confirm"> 确认执行（不勾 = dry-run 预览，不落盘）
-                </label>
-                <button id="ctrl-mrg-btn" class="btn btn-plain w-full text-xs mt-2">合并</button>
-              </div>
+              <div id="ctrl-heng-result" class="mt-3"></div>
             </div>
-            <div id="ctrl-heng-result" class="mt-3"></div>
           </div>
          </div><!-- /ctrl-wrap -->
         </section>
@@ -1261,6 +1306,8 @@
   <script src="/static/js/analysis.js" defer></script>
   <script src="/static/js/run-control.js" defer></script>
   <script src="/static/js/control.js" defer></script>
+  <script src="/static/js/shangshu.js" defer></script>
+  <script src="/static/js/menxia.js" defer></script>
   <script src="/static/app.js" defer></script>
 </body>
 </html>
