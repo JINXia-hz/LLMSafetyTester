@@ -97,8 +97,8 @@ async function sendChat() {
   appendChat('thinking', '中书拟票中 <span class="chat-cursor">▍</span>');
   try {
     const body = { text, session_id: _sessionId };
-    // 若有待确认的封驳令牌，且用户输入了「确认」，带上 token
-    if (_pendingConfirm && (text === '确认' || text === 'confirm' || text === '是')) {
+    // 若有待确认的封驳令牌，且用户表达了确认意图，带上 token
+    if (_pendingConfirm && ['准奏','确认','confirm','是','准'].includes(text)) {
       body.confirm_token = _pendingConfirm.token;
     }
     const res = await fetch('/api/control/chat', {
@@ -116,11 +116,10 @@ async function sendChat() {
       _sessionId = data.session_id;
       sessionStorage.setItem('ctrl_session_id', _sessionId);
     }
-    // 门下省封驳：展示劝谏卡片
+    // 门下省封驳：只展示劝谏卡片（不再复读——reply 内容与卡片重复）
     if (data.blocked) {
       _pendingConfirm = data.blocked;
       renderConfirmCard(data.blocked);
-      appendChat('assistant', mdSafe(data.reply));
       setStatus('门下省封驳——等待确认');
     } else {
       _pendingConfirm = null;
@@ -171,13 +170,14 @@ function renderConfirmCard(ticket) {
   const div = document.createElement('div');
   div.className = 'chat-msg chat-blocked';
   div.innerHTML = `
-    <div class="chat-role"><span class="seal-mini" style="background:#c0392b;">门</span> 门下省·封驳</div>
-    <div class="rounded border border-red-500/30 bg-red-500/5 p-3 mt-1">
-      <div class="font-medium text-red-300 mb-1">⚠ ${esc(ticket.summary)}</div>
-      <div class="text-xs text-white/60 whitespace-pre-line mb-2">${esc(ticket.detail)}</div>
-      <div class="flex gap-2">
-        <button class="confirm-yes px-3 py-1 rounded bg-red-600 text-white text-xs hover:bg-red-500">确认执行</button>
-        <button class="confirm-no px-3 py-1 rounded border border-white/20 text-xs hover:bg-white/5">取消</button>
+    <div class="chat-role"><span class="seal-mini" style="background:#b91c1c;">门</span> <span style="color:#fca5a5;">门下省 · 封驳</span></div>
+    <div style="margin-top:4px; border-left:3px solid #b91c1c; border-radius:0 6px 6px 0; padding:10px 14px; background:rgba(185,28,28,0.08);">
+      <div style="font-weight:600; color:#fca5a5; margin-bottom:6px; font-size:0.875rem;">🛡️ ${esc(ticket.summary)}</div>
+      <div style="color:var(--c-text); opacity:0.75; white-space:pre-line; margin-bottom:10px; font-size:0.8125rem; line-height:1.5;">${esc(ticket.detail)}</div>
+      <div style="font-size:0.75rem; color:var(--c-text); opacity:0.5; margin-bottom:8px;">门下省以为此事关系重大，不敢草率。伏请陛下圣裁。</div>
+      <div style="display:flex; gap:8px;">
+        <button class="confirm-yes" style="padding:5px 14px; border-radius:4px; background:#b91c1c; color:#fff; font-size:0.8125rem; border:none; cursor:pointer;">准奏</button>
+        <button class="confirm-no" style="padding:5px 14px; border-radius:4px; background:transparent; color:var(--c-text); opacity:0.6; font-size:0.8125rem; border:1px solid rgba(255,255,255,0.15); cursor:pointer;">作罢</button>
       </div>
     </div>`;
   log.appendChild(div);
@@ -186,24 +186,22 @@ function renderConfirmCard(ticket) {
   div.querySelector('.confirm-no').onclick = () => doReject();
 }
 
-async function doConfirm(token) {
-  // 带确认令牌重发
+async async function doConfirm(token) {
   const input = $('ctrl-chat-input');
-  input.value = '确认';
+  input.value = '准奏';
   await sendChat();
 }
 
 async function doReject() {
   _pendingConfirm = null;
-  // 通知后端清除 pending
   try {
     await fetch('/api/control/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: '取消', session_id: _sessionId, confirm_token: 'REJECT' }),
+      body: JSON.stringify({ text: '作罢', session_id: _sessionId, confirm_token: 'REJECT' }),
     });
   } catch { /* 忽略 */ }
-  appendChat('assistant', '已取消该操作。');
-  setStatus('已取消');
+  appendChat('assistant', '陛下已下旨作罢。');
+  setStatus('已作罢');
 }
 
 function appendChat(role, html) {
