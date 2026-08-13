@@ -512,12 +512,13 @@ def test_probe_includes_services(monkeypatch):
             def list():
                 return [SimpleNamespace(id="gen-x")]  # judge-y 不在列表
 
-        # chat smoke（探活第二段）：正常返回非 None content，不产生 chat warning
+        # chat smoke（探活第二段）：正常返回非 None content + finish_reason=stop，不产生 chat warning
         class _Completions:
             @staticmethod
             def create(**kw):
                 return SimpleNamespace(choices=[SimpleNamespace(
-                    message=SimpleNamespace(content="pong"))])
+                    message=SimpleNamespace(content="pong"),
+                    finish_reason="stop")])
 
         chat = SimpleNamespace(completions=_Completions())
 

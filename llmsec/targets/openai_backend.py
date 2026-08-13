@@ -8,7 +8,12 @@ targets.openai_backend — 标准 OpenAI /v1/chat/completions 后端
 import time
 
 from llmsec.core.config import TargetConfig
-from llmsec.core.llm import create_openai_client, is_retryable_error, retry_call
+from llmsec.core.llm import (
+    create_openai_client,
+    extract_message_text,
+    is_retryable_error,
+    retry_call,
+)
 from llmsec.params import TARGET_RETRY_DELAY
 from llmsec.targets.base import TargetClient
 
@@ -39,7 +44,8 @@ class OpenAITargetClient(TargetClient):
             )
             latency = (time.perf_counter() - t0) * 1000
 
-            content = response.choices[0].message.content or ""
+            # 推理模型回退读 reasoning_content；helper 带 strip，下游展示对首尾空白不敏感
+            content = extract_message_text(response.choices[0].message)
             usage = response.usage
 
             return {

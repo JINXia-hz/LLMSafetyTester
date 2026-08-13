@@ -40,7 +40,12 @@ from llmsec.core.config import (
     resolve_defender_name,
 )
 from llmsec.core.io import append_jsonl, load_done_ids, read_jsonl, write_json
-from llmsec.core.llm import create_openai_client, is_retryable_error, retry_call
+from llmsec.core.llm import (
+    create_openai_client,
+    extract_message_text,
+    is_retryable_error,
+    retry_call,
+)
 from llmsec.core.logging import get_logger, setup_console
 from llmsec.core.text import extract_json_block, strip_math_tax
 from llmsec.evaluation.judge import FAST_REFUSAL_PATTERNS, Judge, create_judge_client
@@ -154,7 +159,7 @@ def generate_safe_twin(attack_prompt: str, client) -> dict | None:
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
         )
-        raw = (response.choices[0].message.content or "").strip()
+        raw = extract_message_text(response.choices[0].message)
         data = extract_json_block(raw)
         if data is not None:
             return {
@@ -336,7 +341,9 @@ def evaluate_allergy():
                 temperature=0.0,
                 max_tokens=512,
             )
-            return response.choices[0].message.content or ""
+            # 推理模型回退读 reasoning_content；helper 带 strip，下游 judge_allergic
+            # 看关键词，对首尾空白不敏感。
+            return extract_message_text(response.choices[0].message)
 
         try:
             # 与其他路径一致走 retry_call（M-24：4xx 不重试）

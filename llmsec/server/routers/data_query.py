@@ -983,12 +983,52 @@ async def api_targets_probe(name: str | None = None):
 
         try:
             latency, ids = await asyncio.to_thread(_do)
-            return {"name": name, "model": cfg.model, "reachable": True,
-                    "latency_ms": latency, "error": None,
-                    "warning": _model_warning(ids, cfg.model)}
         except Exception as e:
             return {"name": name, "model": cfg.model, "reachable": False,
                     "latency_ms": None, "error": str(e)[:120], "warning": None}
+
+        # 第二段：chat smoke（只对 OpenAI 兼容目标）。
+        # models.list 对很多网关不校验 chat 权限，鉴权失效（401/403）要到真正发 chat 才暴露。
+        # 历史教训：探活亮绿灯、运行全线 401 → ASR=0 假阴性 + 报告崩溃。
+        # 这里发一条 max_tokens=64 的最小 chat：鉴权类错误（401/403）判不可达（注定全线阵亡），
+        # 其他 chat 异常（截断/空 content/偶发抖动）保持 warning 不阻塞（models.list 已通）。
+        warnings = []
+        w = _model_warning(ids, cfg.model)
+        if w:
+            warnings.append(w)
+        if backend != "pcap_judge":
+            try:
+                def _chat():
+                    client = create_openai_client(cfg.api_key, cfg.base_url, timeout=12.0)
+                    resp = client.chat.completions.create(
+                        model=cfg.model,
+                        messages=[{"role": "user", "content": "ping"}],
+                        max_tokens=64,
+                    )
+                    msg = resp.choices[0].message
+                    return (getattr(msg, "content", None),
+                            getattr(msg, "reasoning_content", None),
+                            resp.choices[0].finish_reason)
+                content, reasoning, finish = await asyncio.to_thread(_chat)
+                if content is None and reasoning:
+                    warnings.append("推理模型：content 为空但 reasoning_content 有内容（已自动回退读取）")
+                elif content is None and finish == "length":
+                    warnings.append("chat 探活预算不足被截断（content 为空），真实业务请求不受影响")
+                elif content is None:
+                    warnings.append("chat 返回空 content 且无 reasoning_content（疑似配置问题，需确认）")
+            except Exception as e:
+                status = getattr(e, "status_code", None)
+                msg_text = str(e)[:120]
+                if status in (401, 403):
+                    # 鉴权失败：chat 一定全线阵亡，判不可达让前端拦截，防白跑
+                    return {"name": name, "model": cfg.model, "reachable": False,
+                            "latency_ms": latency, "error": f"chat 鉴权失败({status}): {msg_text}",
+                            "warning": None}
+                # 非 401/403（限流/5xx/超时等）：models.list 已通，不阻塞，仅 warning
+                warnings.append(f"chat 探测失败（不阻塞）: {msg_text}")
+        return {"name": name, "model": cfg.model, "reachable": True,
+                "latency_ms": latency, "error": None,
+                "warning": "；".join(warnings) or None}
 
     async def _probe_service(svc_name: str, cfg, shared: dict):
         """generator / judge 探活。
@@ -996,10 +1036,12 @@ async def api_targets_probe(name: str | None = None):
         两段式：
         1) models.list —— 校验端点连通 + 模型名在册（与目标探活同口径，结果跨 service 复用）。
         2) chat smoke —— 这两个服务实际靠 chat/completions 工作，models.list 通不代表 chat 能用。
-           发一条 max_tokens=8 的最小 chat，检查 message.content 是否非 None。
-           reasoning model（o1/R1/QwQ 等）常把内容放进 reasoning_content 使 content=None，
-           会让下游 judge.evaluate / generate / report 在 .strip() 处崩溃。content=None 不判
-           不可达（仍能调，只是空响应），但记 warning 提示用户。
+           发一条 max_tokens=64 的最小 chat，检查 message.content / reasoning_content / finish_reason。
+           三种 content 为空的情况分别处理：
+           (a) reasoning_content 有内容 → 推理模型，下游 extract_message_text 自动回退读取，良性；
+           (b) finish_reason=length → 探活预算不足被截断（真实业务请求 max_tokens 更大，不受影响），良性；
+           (c) 两者都不是 → 真·空响应，疑似配置/鉴权问题，需确认。
+           均不判不可达（models.list 已通），仅作 warning 暴露给用户。
         """
         key = (cfg.base_url or "", cfg.api_key or "")
         if key in shared:
@@ -1022,7 +1064,12 @@ async def api_targets_probe(name: str | None = None):
 
         # 第二段：chat smoke（只对 generator/judge，目标模型探活走 _probe_one）。
         # timeout 略宽于 models.list：首 token 可能要 1-3s。
+        # max_tokens=64：实测部分模型（如 minimax）需 ~64 tokens 才开始输出 content，
+        # 预算太小（8/16/32）会因 finish_reason=length 被截断成 content=None，
+        # 制造假警报。64 足够让普通模型吐出至少一个 token，同时保持探活廉价。
         content_none = False
+        reasoning_present = False
+        truncated = False
         chat_err = None
         try:
             def _chat():
@@ -1030,12 +1077,17 @@ async def api_targets_probe(name: str | None = None):
                 resp = client.chat.completions.create(
                     model=cfg.model,
                     messages=[{"role": "user", "content": "ping"}],
-                    max_tokens=8,
+                    max_tokens=64,
                 )
-                return resp.choices[0].message.content
-            content = await asyncio.to_thread(_chat)
-            if content is None:
-                content_none = True
+                msg = resp.choices[0].message
+                finish = resp.choices[0].finish_reason
+                return (getattr(msg, "content", None),
+                        getattr(msg, "reasoning_content", None),
+                        finish)
+            content, reasoning, finish = await asyncio.to_thread(_chat)
+            content_none = content is None
+            reasoning_present = bool(reasoning)
+            truncated = finish == "length"
         except Exception as e:
             chat_err = str(e)[:120]
 
@@ -1045,8 +1097,15 @@ async def api_targets_probe(name: str | None = None):
         w = _model_warning(ids, cfg.model)
         if w:
             warnings.append(w)
-        if content_none:
-            warnings.append("chat 返回空 content（疑似 reasoning model，需确认）")
+        if content_none and reasoning_present:
+            # 推理模型：下游 extract_message_text 已自动回退读 reasoning_content，评估正常
+            warnings.append("推理模型：content 为空但 reasoning_content 有内容（已自动回退读取，评估正常）")
+        elif content_none and truncated:
+            # finish_reason=length 且 content 空：探活预算仍不足（极少见，64 通常够）。
+            # 不算模型故障，降级提示而非"配置/鉴权问题"。
+            warnings.append("chat 探活预算不足被截断（content 为空），真实业务请求不受影响")
+        elif content_none:
+            warnings.append("chat 返回空 content 且无 reasoning_content（疑似配置/鉴权问题，需确认）")
         if chat_err:
             warnings.append(f"chat 探测失败：{chat_err}")
         return {"name": svc_name, "model": cfg.model, "reachable": True,

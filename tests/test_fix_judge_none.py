@@ -21,11 +21,14 @@ from llmsec.core.llm import is_retryable_error, retry_call
 # 通用 fake（与 test_retry.py 同范式，独立声明避免跨文件耦合）
 # ============================================================
 class _FakeChatResponse:
-    """模拟 ChatCompletion。content=None 模拟 reasoning model 空响应。"""
+    """模拟 ChatCompletion。content=None 模拟推理模型把内容放进 reasoning_content。"""
 
-    def __init__(self, content):
-        msg = SimpleNamespace(content=content)
-        self.choices = [SimpleNamespace(message=msg)]
+    def __init__(self, content, reasoning_content=None, finish_reason="stop"):
+        # reasoning_content 用 SimpleNamespace 挂载，模拟国产兼容网关的扩展字段；
+        # 标准 OpenAI 响应无此字段，extract_message_text 用 getattr 兜底。
+        # finish_reason 默认 stop；探活用它区分"截断(length)"与"真空响应"。
+        msg = SimpleNamespace(content=content, reasoning_content=reasoning_content)
+        self.choices = [SimpleNamespace(message=msg, finish_reason=finish_reason)]
         self.usage = SimpleNamespace(prompt_tokens=5, completion_tokens=5)
 
 
@@ -63,22 +66,43 @@ class _SleepRecorder:
 
 
 # ============================================================
-# 1. Judge None 响应：_call_judge 对 content=None 返回空串而非崩溃
+# 1. Judge 推理模型响应：content=None 时回退读 reasoning_content；两者皆空才返回空串
 # ============================================================
-def test_judge_call_handles_none_content():
-    """reasoning model 返回 content=None 时，_call_judge 应返回空串而非抛 AttributeError。
+def test_judge_call_falls_back_to_reasoning_content():
+    """推理模型 content=None 但 reasoning_content 有内容时，应回退读取而非返回空串。
 
-    这是本轮修复的核心：原 .strip() 在 None 上崩溃，异常被 evaluator 兜底成全局关键词降级，
-    丢失了 judge_compliance/judge_harmfulness 内部的细粒度 fallback。
+    这是本轮修复的核心：原代码只读 content，推理模型（o1/R1/QwQ/minimax）把答案放进
+    reasoning_content，导致 Judge 每条都拿到空串 → 退化成关键词降级，评分精度大打折扣。
+    现在回退读 reasoning_content，恢复真实输出。
     """
+    from llmsec.evaluation import judge as judge_mod
+
+    client = _FakeOpenAIClient([_FakeChatResponse(None, reasoning_content='  D  ')])
+    judge = judge_mod.Judge(client=client, model='fake')
+    assert judge._call_judge('sys', 'user') == 'D', (
+        'content=None 时应回退读 reasoning_content（含 strip）'
+    )
+
+
+def test_judge_call_content_preferred_over_reasoning():
+    """content 有值时优先用 content，不混入 reasoning_content。"""
+    from llmsec.evaluation import judge as judge_mod
+
+    client = _FakeOpenAIClient([_FakeChatResponse('B', reasoning_content='思考过程...')])
+    judge = judge_mod.Judge(client=client, model='fake')
+    assert judge._call_judge('sys', 'user') == 'B'
+
+
+def test_judge_call_empty_when_both_none():
+    """content 与 reasoning_content 皆空时返回空串，让上层解析 fallback 接管。"""
     from llmsec.evaluation import judge as judge_mod
 
     client = _FakeOpenAIClient([_FakeChatResponse(None)])
     judge = judge_mod.Judge(client=client, model='fake')
-    with _SleepRecorder():  # None 是确定性错误，不应重试（见下个测试）
+    with _SleepRecorder():
         result = judge._call_judge('sys', 'user')
-    assert result == '', 'content=None 应返回空串，让上层解析 fallback 接管'
-    assert client.completions.calls == 1, 'None 是确定性错误，不应重试'
+    assert result == '', '两者皆空应返回空串，让上层解析 fallback 接管'
+    assert client.completions.calls == 1, '解析层已兜底，不应重试'
 
 
 def test_judge_call_normal_content_still_stripped():
@@ -102,10 +126,26 @@ def test_judge_compliance_fallback_on_empty():
 
 
 # ============================================================
-# 2. 同类 None 防御：generate / report / clustering / safe_twin
+# 2. 同类推理模型回退：generate / safe_twin 在 content=None 时读 reasoning_content
 # ============================================================
-def test_generate_handles_none_content():
-    """generate.call_api_two_round 对 content=None 不崩，走 JSON 解析失败路径。"""
+def test_generate_falls_back_to_reasoning_content():
+    """generate.call_api_two_round：content=None 但 reasoning_content 有 JSON 时应成功解析。"""
+    from llmsec.attacks import generate as gen
+
+    method = {'method': 'm1', 'category_name': 'c1', 'description': 'd1'}
+    harm_types = ['violence']
+    # 两轮的 reasoning_content 都给出合法 JSON（推理模型把答案放进 reasoning_content）
+    payload = '[{"method":"m1","harm_type":"violence","prompt":"p1"}]'
+    client = _FakeOpenAIClient([
+        _FakeChatResponse(None, reasoning_content=payload),
+        _FakeChatResponse(None, reasoning_content=payload),
+    ])
+    r = gen.call_api_two_round(client, method, harm_types, model='m')
+    assert r is not None, 'reasoning_content 有合法 JSON 时应成功生成而非返回 None'
+
+
+def test_generate_handles_both_empty():
+    """generate.call_api_two_round 对 content 与 reasoning_content 皆空不崩，走解析失败路径。"""
     from llmsec.attacks import generate as gen
 
     method = {'method': 'm1', 'category_name': 'c1', 'description': 'd1'}
@@ -113,17 +153,17 @@ def test_generate_handles_none_content():
     with _SleepRecorder():
         client = _FakeOpenAIClient([_FakeChatResponse(None)])
         r = gen.call_api_two_round(client, method, harm_types, model='m')
-    assert r is None, 'content=None → JSON 解析失败 → 重试耗尽返回 None（不抛 AttributeError）'
+    assert r is None, '两者皆空 → JSON 解析失败 → 重试耗尽返回 None（不抛 AttributeError）'
 
 
-def test_safe_twin_handles_none_content():
-    """safe_twin.generate_safe_twin 对 content=None 不崩。"""
+def test_safe_twin_handles_both_empty():
+    """safe_twin.generate_safe_twin 对 content 与 reasoning_content 皆空不崩。"""
     from llmsec.evaluation import safe_twin as st
 
     with _SleepRecorder():
         client = _FakeOpenAIClient([_FakeChatResponse(None)])
         r = st.generate_safe_twin('攻击', client)
-    assert r is None, 'content=None → 解析失败 → 耗尽返回 None'
+    assert r is None, '两者皆空 → 解析失败 → 耗尽返回 None'
 
 
 # ============================================================
@@ -168,10 +208,10 @@ def test_attribute_error_not_retried_by_retry_call():
 
 
 # ============================================================
-# 4. 探活 chat smoke：_probe_service 对 content=None 标 warning
+# 4. 探活 chat smoke：区分推理模型（已自动回退）vs 真空响应（需确认）
 # ============================================================
-def test_probe_service_warns_on_none_content(monkeypatch):
-    """generator/judge 探活新增 chat smoke：content=None 时记 warning（不判不可达）。
+def test_probe_service_warns_on_truly_empty(monkeypatch):
+    """content 与 reasoning_content 皆空 → 报"需确认"（疑似配置/鉴权问题）。
 
     通过公开端点 api_targets_probe 间接验证（_probe_service 是闭包，不直接单测）。
     """
@@ -180,14 +220,13 @@ def test_probe_service_warns_on_none_content(monkeypatch):
     from llmsec.core import llm as llm_mod
     from llmsec.server.routers import data_query as dq
 
-    # 让 load_targets 返回空 → 跳过目标探活，只探 generator/judge
     monkeypatch.setattr(dq, 'load_targets', lambda: {}, raising=False)
-    # config 模块的 load_targets 在函数内 import，patch 源
     from llmsec.core import config as cfg_mod
     monkeypatch.setattr(cfg_mod, 'load_targets', lambda: {})
 
     def _fake_create(api_key=None, base_url=None, timeout=60.0):
-        c = _FakeOpenAIClient([_FakeChatResponse(None)])  # chat 返回 content=None
+        # content=None 且无 reasoning_content → 真·空响应
+        c = _FakeOpenAIClient([_FakeChatResponse(None)])
         c.models = SimpleNamespace(list=lambda: [SimpleNamespace(id='rm')])
         return c
 
@@ -199,9 +238,75 @@ def test_probe_service_warns_on_none_content(monkeypatch):
         assert svc in services, f'{svc} 应被探活'
         assert services[svc]['reachable'] is True, f'{svc} models.list 通 → 仍可达'
         w = services[svc].get('warning') or ''
-        assert 'chat 返回空 content' in w, (
-            f'{svc} content=None 应在 warning 提示疑似 reasoning model，实际: {w!r}'
+        assert '需确认' in w, (
+            f'{svc} 真空响应应提示"需确认"，实际: {w!r}'
         )
+        assert '已自动回退' not in w, '真空响应不应误报为"已自动回退"'
+
+
+def test_probe_service_notes_reasoning_model(monkeypatch):
+    """content=None 但 reasoning_content 有内容 → 标记推理模型（已自动回退，不阻塞）。"""
+    import asyncio
+
+    from llmsec.core import config as cfg_mod
+    from llmsec.core import llm as llm_mod
+    from llmsec.server.routers import data_query as dq
+
+    monkeypatch.setattr(dq, 'load_targets', lambda: {}, raising=False)
+    monkeypatch.setattr(cfg_mod, 'load_targets', lambda: {})
+
+    def _fake_create(api_key=None, base_url=None, timeout=60.0):
+        # content=None 但 reasoning_content 有内容 → 推理模型良性场景
+        c = _FakeOpenAIClient([_FakeChatResponse(None, reasoning_content='思考...')])
+        c.models = SimpleNamespace(list=lambda: [SimpleNamespace(id='rm')])
+        return c
+
+    monkeypatch.setattr(llm_mod, 'create_openai_client', _fake_create)
+
+    result = asyncio.run(dq.api_targets_probe())
+    services = {s['name']: s for s in result.get('services', [])}
+    for svc in ('generator', 'judge'):
+        assert svc in services
+        assert services[svc]['reachable'] is True
+        w = services[svc].get('warning') or ''
+        assert '已自动回退' in w, (
+            f'{svc} 推理模型应提示"已自动回退读取"，实际: {w!r}'
+        )
+        assert '需确认' not in w, '推理模型良性场景不应报"需确认"'
+
+
+def test_probe_service_handles_truncation(monkeypatch):
+    """content=None 且 finish_reason=length → 探活预算不足截断，良性提示（不报"需确认"）。
+
+    复现 minimax 真实场景：max_tokens 太小时 finish_reason=length、content=None，
+    既非推理模型也非配置问题，真实业务请求（max_tokens 更大）不受影响。
+    """
+    import asyncio
+
+    from llmsec.core import config as cfg_mod
+    from llmsec.core import llm as llm_mod
+    from llmsec.server.routers import data_query as dq
+
+    monkeypatch.setattr(dq, 'load_targets', lambda: {}, raising=False)
+    monkeypatch.setattr(cfg_mod, 'load_targets', lambda: {})
+
+    def _fake_create(api_key=None, base_url=None, timeout=60.0):
+        # content=None、无 reasoning_content、finish_reason=length → 截断
+        c = _FakeOpenAIClient([_FakeChatResponse(None, finish_reason="length")])
+        c.models = SimpleNamespace(list=lambda: [SimpleNamespace(id='rm')])
+        return c
+
+    monkeypatch.setattr(llm_mod, 'create_openai_client', _fake_create)
+
+    result = asyncio.run(dq.api_targets_probe())
+    services = {s['name']: s for s in result.get('services', [])}
+    for svc in ('generator', 'judge'):
+        assert svc in services
+        w = services[svc].get('warning') or ''
+        assert '不受影响' in w, (
+            f'{svc} 截断应提示"真实业务请求不受影响"，实际: {w!r}'
+        )
+        assert '需确认' not in w, '截断不应报"需确认"（非配置问题）'
 
 
 def test_probe_service_no_warning_on_normal(monkeypatch):
@@ -399,3 +504,184 @@ def test_spawn_injects_pythonunbuffered(monkeypatch, tmp_path):
         '_spawn 应注入 PYTHONUNBUFFERED=1 让子进程日志无缓冲'
     )
     assert captured['env'].get('LLMSEC_TASK_ID') == 'test-id', '原有注入不丢'
+
+
+# ============================================================
+# 10. 目标探活 chat smoke：401/403 鉴权失败判不可达（防假绿灯白跑）
+# ============================================================
+class _AuthError(Exception):
+    """模拟 OpenAI SDK 鉴权异常（带 status_code，供 getattr 判定）。"""
+
+    def __init__(self, status_code, msg="Invalid API Key"):
+        super().__init__(f"{status_code} - {msg}")
+        self.status_code = status_code
+
+
+def test_target_probe_401_marks_unreachable(monkeypatch):
+    """目标模型 chat 鉴权失败(401) → reachable=False，防 models.list 假绿灯导致白跑。
+
+    复现真实故障：DeepSeek key 无效，models.list 通过(不校验 chat 权限)，
+    但 chat.completions 全线 401。原探活只调 models.list → 亮绿灯 → 运行 0 结果。
+    """
+    import asyncio
+
+    from llmsec.core import config as cfg_mod
+    from llmsec.core import llm as llm_mod
+    from llmsec.server.routers import data_query as dq
+
+    fake_target = SimpleNamespace(
+        name='badkey-target', model='m', api_key='wrong', base_url='http://fake/v1',
+        timeout=5.0,
+    )
+    monkeypatch.setattr(cfg_mod, 'load_targets',
+                        lambda: {'badkey-target': fake_target})
+    monkeypatch.setattr(dq, 'load_targets',
+                        lambda: {'badkey-target': fake_target}, raising=False)
+    # generator/judge 不在本测试范围，给空配置避免联网
+    monkeypatch.setattr(cfg_mod.GeneratorConfig, 'from_env',
+                        staticmethod(lambda: SimpleNamespace(
+                            model='m', api_key='k', base_url='http://fake/v1', timeout=5.0, max_retries=1)))
+    monkeypatch.setattr(cfg_mod.JudgeConfig, 'from_env',
+                        staticmethod(lambda: SimpleNamespace(
+                            model='m', api_key='k', base_url='http://fake/v1', timeout=5.0, max_retries=1)))
+
+    def _fake_create(api_key=None, base_url=None, timeout=60.0):
+        class _C:
+            class models:
+                @staticmethod
+                def list():
+                    return [SimpleNamespace(id='m')]  # models.list 通过（假绿灯根源）
+
+            class _Completions:
+                @staticmethod
+                def create(**kw):
+                    raise _AuthError(401)  # chat 才暴露鉴权失败
+            chat = SimpleNamespace(completions=_Completions)
+        return _C()
+
+    monkeypatch.setattr(llm_mod, 'create_openai_client', _fake_create)
+
+    result = asyncio.run(dq.api_targets_probe())
+    targets = {t['name']: t for t in result.get('targets', [])}
+    t = targets.get('badkey-target')
+    assert t is not None, '目标应被探活'
+    assert t['reachable'] is False, '401 鉴权失败应判不可达（防假绿灯白跑）'
+    assert '401' in (t.get('error') or '') or '鉴权' in (t.get('error') or ''), (
+        f'error 应提示鉴权失败，实际: {t.get("error")!r}'
+    )
+
+
+def test_target_probe_403_marks_unreachable(monkeypatch):
+    """403（权限拒绝）同样判不可达。"""
+    import asyncio
+
+    from llmsec.core import config as cfg_mod
+    from llmsec.core import llm as llm_mod
+    from llmsec.server.routers import data_query as dq
+
+    fake_target = SimpleNamespace(
+        name='forbidden', model='m', api_key='k', base_url='http://fake/v1', timeout=5.0)
+    monkeypatch.setattr(cfg_mod, 'load_targets', lambda: {'forbidden': fake_target})
+    monkeypatch.setattr(dq, 'load_targets', lambda: {'forbidden': fake_target}, raising=False)
+
+    def _fake_create(api_key=None, base_url=None, timeout=60.0):
+        class _C:
+            class models:
+                @staticmethod
+                def list():
+                    return [SimpleNamespace(id='m')]
+
+            class _Completions:
+                @staticmethod
+                def create(**kw):
+                    raise _AuthError(403)
+            chat = SimpleNamespace(completions=_Completions)
+        return _C()
+
+    monkeypatch.setattr(llm_mod, 'create_openai_client', _fake_create)
+    result = asyncio.run(dq.api_targets_probe())
+    t = {x['name']: x for x in result.get('targets', [])}['forbidden']
+    assert t['reachable'] is False, '403 应判不可达'
+
+
+def test_target_probe_non_auth_error_not_blocking(monkeypatch):
+    """非鉴权错误（如 429/5xx/超时）不判不可达——models.list 已通，chat 偶发抖动不应阻塞。"""
+    import asyncio
+
+    from llmsec.core import config as cfg_mod
+    from llmsec.core import llm as llm_mod
+    from llmsec.server.routers import data_query as dq
+
+    fake_target = SimpleNamespace(
+        name='flaky', model='m', api_key='k', base_url='http://fake/v1', timeout=5.0)
+    monkeypatch.setattr(cfg_mod, 'load_targets', lambda: {'flaky': fake_target})
+    monkeypatch.setattr(dq, 'load_targets', lambda: {'flaky': fake_target}, raising=False)
+
+    def _fake_create(api_key=None, base_url=None, timeout=60.0):
+        class _C:
+            class models:
+                @staticmethod
+                def list():
+                    return [SimpleNamespace(id='m')]
+
+            class _Completions:
+                @staticmethod
+                def create(**kw):
+                    e = Exception('429 rate limit')
+                    e.status_code = 429  # 限流，非鉴权
+                    raise e
+            chat = SimpleNamespace(completions=_Completions)
+        return _C()
+
+    monkeypatch.setattr(llm_mod, 'create_openai_client', _fake_create)
+    result = asyncio.run(dq.api_targets_probe())
+    t = {x['name']: x for x in result.get('targets', [])}['flaky']
+    assert t['reachable'] is True, '429 限流不应判不可达（models.list 已通）'
+    assert t.get('warning'), '应有 warning 提示 chat 探测失败'
+
+
+# ============================================================
+# 11. 报告 fpr=None 不崩（过敏检测无有效样本时）
+# ============================================================
+def test_recommendation_handles_fpr_none():
+    """_generate_recommendation 接受 fpr=None 不崩（参数标注 float 但函数体只用 level）。"""
+    from llmsec.reporting.final_report import _generate_recommendation
+
+    # fpr=None 不应抛 TypeError
+    for level in ('safe', 'allergic', 'vulnerable', 'broken', 'inconclusive'):
+        rec = _generate_recommendation(0.5, None, level)
+        assert isinstance(rec, str) and rec, f'level={level} 应返回非空建议文案'
+
+
+def test_final_report_fpr_none_no_crash():
+    """generate_final_report 在 allergy fpr=None 时不抛 NoneType 比较异常。
+
+    复现真实故障：目标鉴权失效 → 过敏检测全线跳过 → fpr=None →
+    报告 '<' not supported between NoneType and float 崩溃。
+    构造 tested_methods≥5 + confidence≥0.5 强制走到 fpr 比较分支，验证不崩。
+    """
+    from llmsec.reporting import final_report as fr
+
+    fake_tracker = SimpleNamespace(
+        # confidence=0.9 ≥ 0.5 阈值，强制不走 inconclusive 早退，直奔 fpr 比较
+        compute_security_boundary=lambda name: {'boundary_elo': 1500, 'confidence': 0.9},
+        defender_ratings=SimpleNamespace(values={}),
+        get_attacker_ranking=lambda: [],
+    )
+    attack_summary = {'asr': 0.0, 'total_attacks': 10}  # total_attacks≥5 走 fpr 分支
+    allergy_summary = {'fpr': None, 'total_tested': 0, 'allergic': 0}
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            fr.generate_final_report(
+                run_dir=td, tracker=fake_tracker, defender_name='t',
+                attack_summary=attack_summary, allergy_summary=allergy_summary,
+                total_methods=5, units={},
+            )
+        except TypeError as e:
+            if 'NoneType' in str(e) and ('float' in str(e) or 'int' in str(e)):
+                pytest.fail(f'fpr=None 在比较分支触发崩溃: {e}')
+            # 其他 TypeError（fake 不全）可接受
+        except Exception:
+            pass  # fake 不全可能抛其他，本测试只验证不崩在 NoneType 比较

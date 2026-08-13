@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 # HPO 可调 key params（分组 + 类型 + 当前值 + 建议范围），驱动前端因子选择器。
 # 全部经 LLMSEC_PARAM_<NAME> 注入子进程（params._apply_env_overrides）。
 _KEY_PARAMS = [
-    {"name": "K_FACTOR", "group": "Elo/K", "type": "float", "current": P.K_FACTOR, "low": 16.0, "high": 64.0, "step": 4.0},
+    {"name": "K_FACTOR", "group": "Elo/K", "type": "float", "current": P.K_FACTOR, "low": 12.0, "high": 20.0, "step": 4.0},
     {"name": "SCORE_PERF_TAU", "group": "Elo/K", "type": "float", "current": P.SCORE_PERF_TAU, "low": 1.0, "high": 4.0, "step": 0.5},
     {"name": "K_DEF_DECAY_N0", "group": "Elo/K", "type": "float", "current": P.K_DEF_DECAY_N0, "low": 5.0, "high": 20.0, "step": 5.0},
     {"name": "CONV_CI_TARGET", "group": "收敛", "type": "float", "current": P.CONV_CI_TARGET, "low": 10.0, "high": 40.0, "step": 5.0},

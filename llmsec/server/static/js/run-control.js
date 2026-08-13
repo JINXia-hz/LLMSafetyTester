@@ -462,9 +462,10 @@ function checkServicesBeforeStart() {
     if (info && !info.reachable) {
       if (!confirm(`⚠ ${label}探活不可达（${info.error || '连接失败'}），继续将大概率全部失败白跑。\n仍要启动吗？`)) return false;
     }
-    // chat 探测异常（content=None / chat 失败）：不阻塞（代码已防御），但提示用户确认配置
-    if (info && info.reachable && info.warning && info.warning.includes('chat')) {
-      if (!confirm(`⚠ ${label}探测异常：${info.warning}。\n评估会自动降级但结果可能失真，建议先确认模型配置。\n仍要启动吗？`)) return false;
+    // chat 探测异常：仅在"需确认"类（真空响应/探测失败）时提示用户确认配置；
+    // "已自动回退读取"的推理模型属良性，不打扰。
+    if (info && info.reachable && info.warning && info.warning.includes('需确认')) {
+      if (!confirm(`⚠ ${label}探测异常：${info.warning}。\n评估可能失败或失真，建议先确认模型配置。\n仍要启动吗？`)) return false;
     }
   }
   return true;

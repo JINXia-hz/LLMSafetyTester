@@ -61,6 +61,25 @@ def retry_call(
     raise last_error
 
 
+def extract_message_text(message) -> str:
+    """从 OpenAI chat 响应的 message 提取文本，兼容推理模型。
+
+    推理模型（o1/R1/QwQ/minimax 等）常把内容放进 message.reasoning_content
+    而 message.content 返回 None。这里 content 优先、为空时回退读
+    reasoning_content，两者皆空返回空串（交由下游 extract_json_block /
+    parse_compliance_level 走各自的解析失败分支）。不做内容清洗——
+    reasoning_content 里混有思考过程，但现有解析器（json 围栏匹配、
+    等级关键词）对噪声有容错，复用它们即可。
+
+    用 getattr 访问 reasoning_content：标准 OpenAI 响应对象无此属性，
+    只有国产兼容网关会塞，裸访问会 AttributeError。
+    """
+    text = getattr(message, "content", None)
+    if not text:
+        text = getattr(message, "reasoning_content", None)
+    return (text or "").strip()
+
+
 def is_retryable_error(e: Exception) -> bool:
     """判定异常是否值得重试。
 

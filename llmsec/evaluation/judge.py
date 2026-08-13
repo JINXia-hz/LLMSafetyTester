@@ -14,7 +14,12 @@ import re
 import threading
 
 from llmsec.core.config import JudgeConfig
-from llmsec.core.llm import create_openai_client, is_retryable_error, retry_call
+from llmsec.core.llm import (
+    create_openai_client,
+    extract_message_text,
+    is_retryable_error,
+    retry_call,
+)
 from llmsec.core.logging import get_logger, setup_console
 from llmsec.core.text import extract_json_block
 
@@ -259,15 +264,12 @@ class Judge:
                 temperature=JUDGE_TEMPERATURE,
                 max_tokens=JUDGE_MAX_TOKENS,
             )
-            # 防御 content=None：reasoning model（o1/R1/QwQ 等）会把内容放进
-            # reasoning_content、或走 tool_calls / 空响应，使 message.content 为 None。
-            # 历史上 .strip() 在此处抛 AttributeError，被 evaluator 兜底成全局关键词降级，
-            # 丢失了 Judge 内部的细粒度 fallback。这里返回空串，让 parse_compliance_level /
-            # extract_json_block 走各自的"解析失败"分支，保留 judge_compliance/judge_harmfulness
-            # 内部的关键词降级语义。项目内 targets/openai_backend.py:42 / safe_twin.py:339
-            # 已用同样的 or "" 范式。
-            content = response.choices[0].message.content
-            return (content or "").strip()
+            # 推理模型（o1/R1/QwQ/minimax 等）会把内容放进 reasoning_content，
+            # 使 message.content 为 None。extract_message_text 会自动回退读
+            # reasoning_content，恢复真实输出；两者皆空才返回空串，让
+            # parse_compliance_level / extract_json_block 走各自的"解析失败"分支，
+            # 保留 judge_compliance/judge_harmfulness 内部的关键词降级语义。
+            return extract_message_text(response.choices[0].message)
 
         def _on_retry(attempt, e):
             if self.verbose:

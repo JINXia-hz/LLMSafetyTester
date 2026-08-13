@@ -29,6 +29,7 @@ from llmsec.core import (
     GeneratorConfig,
     append_jsonl,
     create_openai_client,
+    extract_message_text,
     load_done_ids,
     retry_call,
     setup_console,
@@ -244,7 +245,7 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
         )
-        raw1 = (resp1.choices[0].message.content or "").strip()
+        raw1 = extract_message_text(resp1.choices[0].message)
         m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw1, re.DOTALL)
         if m:
             raw1 = m.group(1)
@@ -264,7 +265,7 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
         )
-        raw2 = (resp2.choices[0].message.content or "").strip()
+        raw2 = extract_message_text(resp2.choices[0].message)
         m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw2, re.DOTALL)
         if m:
             raw2 = m.group(1)

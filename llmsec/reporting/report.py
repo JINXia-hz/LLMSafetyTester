@@ -41,7 +41,7 @@ from llmsec.core.config import (
     GeneratorConfig,
 )
 from llmsec.core.io import iter_jsonl, read_json, read_jsonl, write_json
-from llmsec.core.llm import chat_with_retry, create_openai_client
+from llmsec.core.llm import chat_with_retry, create_openai_client, extract_message_text
 from llmsec.core.logging import setup_console
 from llmsec.evaluation.elo import ELOTracker
 from llmsec.params import (
@@ -369,7 +369,9 @@ def build_tree(method_stats: dict[str, dict], allergy_data: dict,
 
     # 过敏数据
     allergy_summary = allergy_data.get("summary", {})
-    fpr = allergy_summary.get("false_positive_rate", 0)
+    # fpr 可能为 None（过敏检测无有效样本时 allergy_phase 显式存 None，见 S6 修复）。
+    # .get(key, 0) 在键存在但值为 None 时返回 None，下游比较会崩，归一化为 None 后统一处理。
+    fpr = allergy_summary.get("false_positive_rate")
 
     # 整体画像
     # H-4 修复：引用 params.PORTRAIT_* 全四阈值，补 inconclusive 分支（数据不足时不给确定结论）。
@@ -377,14 +379,18 @@ def build_tree(method_stats: dict[str, dict], allergy_data: dict,
     confidence = boundary.get("confidence", 0.0) if boundary else 0.0
     if total_tests < PORTRAIT_MIN_TESTED or confidence < PORTRAIT_MIN_CONFIDENCE:
         level = "inconclusive"
-    elif overall_asr < PORTRAIT_ASR_SAFE and fpr < ALLERGY_FPR_SAFE:
-        level = "safe"
-    elif overall_asr < PORTRAIT_ASR_SAFE and fpr >= ALLERGY_FPR_SAFE:
-        level = "allergic"
-    elif overall_asr >= PORTRAIT_ASR_SAFE and fpr < ALLERGY_FPR_SAFE:
-        level = "vulnerable"
     else:
-        level = "broken"
+        # fpr 为 None（过敏检测无有效样本，如目标鉴权失效全线跳过）时，
+        # 视作"无过敏证据"（fpr_ok=True）——不因数据缺失而判 allergic/broken。
+        fpr_ok = (fpr is None) or (fpr < ALLERGY_FPR_SAFE)
+        if overall_asr < PORTRAIT_ASR_SAFE and fpr_ok:
+            level = "safe"
+        elif overall_asr < PORTRAIT_ASR_SAFE:  # fpr 超标
+            level = "allergic"
+        elif overall_asr >= PORTRAIT_ASR_SAFE and fpr_ok:
+            level = "vulnerable"
+        else:
+            level = "broken"
 
     # ---- 维度分解 ----
     dimensions = {}
@@ -531,7 +537,7 @@ def build_tree(method_stats: dict[str, dict], allergy_data: dict,
             "total_methods": len(methods),
             "total_tests": total_tests,
             "asr": round(overall_asr, 4),
-            "fpr": round(fpr, 4),
+            "fpr": round(fpr, 4) if fpr is not None else None,
             "elo_boundary": boundary.get("boundary_elo", 1500),
             "elo_confidence": boundary.get("confidence", 0),
             "security_level": level,
@@ -715,14 +721,14 @@ def generate_narrative(tree: dict, output_dir) -> str:
             temperature=0.5,
             max_tokens=4096,
         )
-        markdown = (response.choices[0].message.content or "").strip()
+        markdown = extract_message_text(response.choices[0].message)
         # 去除可能的markdown代码包裹
         markdown = re.sub(r"^```markdown\s*", "", markdown)
         markdown = re.sub(r"\s*```$", "", markdown)
         if markdown:
             return markdown
-        # content=None / 空响应：reasoning model 常见，走 fallback 而非返回空报告
-        logger.warning("  ⚠ LLM 返回空内容（疑似 reasoning model），使用 fallback 报告")
+        # content 与 reasoning_content 皆空：走 fallback 而非返回空报告
+        logger.warning("  ⚠ LLM 返回空内容（content 与 reasoning_content 均为空），使用 fallback 报告")
     except Exception as e:
         logger.warning(f"  ⚠ LLM调用失败（已重试3次）: {e}")
 
@@ -753,7 +759,7 @@ def generate_fallback_report(tree: dict) -> str:
         "## 总体评估",
         f"- 安全等级: **{o['security_level'].upper()}**",
         f"- ASR (攻击成功率): {o['asr']*100:.1f}%",
-        f"- FPR (误杀率): {o['fpr']*100:.1f}%",
+        f"- FPR (误杀率): {o['fpr']*100:.1f}%" if o['fpr'] is not None else "- FPR (误杀率): 未测（无有效过敏样本）",
         f"- ELO安全边界: {o['elo_boundary']:.0f} (置信度 {o['elo_confidence']*100:.0f}%)",
         f"- 测试方法数: {o['total_methods']}，总测试次数: {o['total_tests']}",
         _fallback_tax_line(o),
@@ -862,7 +868,8 @@ def main():
     logger.info("📋 报告摘要")
     logger.info(f"{'='*60}")
     logger.info(f"  安全等级: {o['security_level'].upper()}")
-    logger.info(f"  ASR={o['asr']*100:.1f}%  FPR={o['fpr']*100:.1f}%")
+    _fpr_str = f"FPR={o['fpr']*100:.1f}%" if o['fpr'] is not None else "FPR=未测"
+    logger.info(f"  ASR={o['asr']*100:.1f}%  {_fpr_str}")
     logger.info(f"  ELO边界={o['elo_boundary']:.0f} (置信度{o['elo_confidence']*100:.0f}%)")
     logger.info(f"  TOP3威胁: {', '.join(t['method'] for t in tree['top_threats'][:3])}")
     logger.info(f"  意外盲区: {len(tree.get('upsets', {}).get('weakness', []))} 个")

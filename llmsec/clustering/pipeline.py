@@ -164,7 +164,7 @@ def ai_rename_clusters(
         return cluster_names
     try:
         from llmsec.core import GeneratorConfig, create_openai_client, retry_call
-        from llmsec.core.llm import is_retryable_error
+        from llmsec.core.llm import extract_message_text, is_retryable_error
     except Exception:
         return cluster_names
 
@@ -205,9 +205,9 @@ def ai_rename_clusters(
             temperature=0.3,
             max_tokens=800,
         )
-        # content=None 防御：reasoning model / 空响应时下游 extract_json_block 返回 None，
-        # 走"保留技术名"分支，不抛 AttributeError（参见 judge.py:_call_judge 同类修复）
-        return (resp.choices[0].message.content or "").strip()
+        # 推理模型把内容放 reasoning_content 使 content=None；extract_message_text
+        # 自动回退。两者皆空时下游 extract_json_block 返回 None，走"保留技术名"分支。
+        return extract_message_text(resp.choices[0].message)
 
     try:
         client = create_openai_client(cfg.api_key, cfg.base_url, cfg.timeout)

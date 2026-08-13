@@ -49,7 +49,12 @@ from llmsec.core.io import (
     write_json,
     write_jsonl,
 )
-from llmsec.core.llm import chat_with_retry, create_openai_client, retry_call
+from llmsec.core.llm import (
+    chat_with_retry,
+    create_openai_client,
+    extract_message_text,
+    retry_call,
+)
 from llmsec.core.logging import get_logger, setup_console
 from llmsec.core.results import MatchResult, ResultsMatrix
 from llmsec.core.seed import get_global_seed, set_global_seed
@@ -80,7 +85,7 @@ __all__ = [
     # results
     "ResultsMatrix", "MatchResult",
     # llm
-    "create_openai_client", "chat_with_retry", "retry_call",
+    "create_openai_client", "chat_with_retry", "retry_call", "extract_message_text",
     # logging
     "setup_console", "get_logger",
     # seed
