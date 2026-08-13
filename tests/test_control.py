@@ -537,17 +537,8 @@ class TestSession:
         sid, _ = sess.get_or_create(None)
         sess.append_raw(sid, {"role": "assistant", "content": None, "tool_calls": [{"id": "x"}]})
         _, msgs = sess.get_or_create(sid)
-        assert len(msgs) == 2 and msgs[1].get("tool_calls")
-
-    def test_pending_confirm_set_get_clear(self):
-        from control.agent import session as sess
-        sess._SESSIONS.clear()
-        sid, _ = sess.get_or_create(None)
-        assert sess.get_pending_confirm(sid) is None
-        sess.set_pending_confirm(sid, {"token": "abc", "action": "merge"})
-        assert sess.get_pending_confirm(sid)["token"] == "abc"
-        sess.set_pending_confirm(sid, None)
-        assert sess.get_pending_confirm(sid) is None
+        assert len(msgs) == 2  # system + assistant
+        assert msgs[1].get("tool_calls")
 
     def test_reset_clears_history(self):
         from control.agent import session as sess
@@ -557,67 +548,6 @@ class TestSession:
         sess.reset(sid)
         _, msgs = sess.get_or_create(sid)
         assert len(msgs) == 1 and msgs[0]["role"] == "system"
-
-
-# ============================================================
-# gatekeeper：门下省封驳
-# ============================================================
-class TestGatekeeper:
-    def test_merge_to_global_is_blocked(self):
-        from control.agent import gatekeeper
-        a = gatekeeper.assess("merge", {"sources": ["ws:ab"], "target": "global"})
-        assert a is not None
-        assert a["action"] == "merge_to_global"
-        assert "不可逆" in a["detail"]
-
-    def test_merge_to_workspace_not_blocked(self):
-        from control.agent import gatekeeper
-        a = gatekeeper.assess("merge", {"sources": ["ws:ab"], "target": "ws:other"})
-        assert a is None  # 融合到另一个 ws，不触发封驳
-
-    def test_delete_runs_with_delete_r_blocked(self):
-        from control.agent import gatekeeper
-        a = gatekeeper.assess("delete_runs", {"names": ["m1"], "delete_r": True})
-        assert a is not None and a["action"] == "delete_r_column"
-
-    def test_delete_runs_without_delete_r_not_blocked(self):
-        from control.agent import gatekeeper
-        a = gatekeeper.assess("delete_runs", {"names": ["m1"], "delete_r": False})
-        assert a is None
-
-    def test_safe_operations_not_blocked(self):
-        from control.agent import gatekeeper
-        for name, args in [("list_runs", {}), ("compare_runs", {"runs": ["a", "b"]}),
-                           ("fork_workspace", {"name": "x"}), ("list_workspaces", {}),
-                           ("delete_runs", {"names": ["ts/x"], "delete_r": False})]:
-            assert gatekeeper.assess(name, args) is None
-
-    def test_clean_cache_is_blocked(self):
-        from control.agent import gatekeeper
-        a = gatekeeper.assess("clean_cache", {"categories": ["elo_cache", "predictors"]})
-        assert a is not None and a["action"] == "clean_cache"
-        assert "elo_cache" in a["summary"]
-
-    def test_delete_runs_delete_r_blocked(self):
-        from control.agent import gatekeeper
-        a = gatekeeper.assess("delete_runs", {"names": ["m1"], "delete_r": True})
-        assert a is not None and a["action"] == "delete_r_column"
-
-    def test_issue_ticket_has_token(self):
-        from control.agent import gatekeeper
-        a = gatekeeper.assess("merge", {"sources": ["ws:x"], "target": "global"})
-        t = gatekeeper.issue_ticket("merge", {"sources": ["ws:x"], "target": "global"}, a)
-        assert t.token and len(t.token) > 0
-        assert t.action == "merge_to_global"
-        assert "merge" in t.tool_name
-
-    def test_is_confirmed_matches_token(self):
-        from control.agent import gatekeeper
-        a = gatekeeper.assess("merge", {"sources": ["ws:x"], "target": "global"})
-        t = gatekeeper.issue_ticket("merge", {"sources": ["ws:x"], "target": "global"}, a)
-        assert gatekeeper.is_confirmed(t, t.token) is True
-        assert gatekeeper.is_confirmed(t, "wrong") is False
-        assert gatekeeper.is_confirmed(None, "x") is False
 
 
 # ============================================================

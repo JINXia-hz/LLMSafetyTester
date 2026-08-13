@@ -7,9 +7,11 @@
   - 进程内 dict 存储（_SESSIONS），按 session_id 索引。
   - TTL 自动清理：超过 2h 未活动的 session 回收，防内存泄漏。
   - history 上限 40 条（~20 轮对话），超出时滑窗丢弃最旧的非 system 消息。
-  - 首次对话时注入 system prompt（控制助手角色）。
+  - 首次对话时注入 system prompt（中书省角色）。
 
 session_id 由前端生成（首次进入控制台时 uuid），随每次 chat 请求带上。
+
+注意：封驳（门下省）不再经 session 管理——走总线 + menxia.py 的 block 机制。
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from threading import Lock
 
 from control.agent.prompts import ZHONGSHU_PROMPT as _SYSTEM_PROMPT
 
-# session 存储：session_id → {"messages": [...], "last_active": ts, "pending_confirm": ...}
+# session 存储：session_id → {"messages": [...], "last_active": ts}
 _SESSIONS: dict[str, dict] = {}
 _LOCK = Lock()
 
@@ -49,11 +51,10 @@ def get_or_create(session_id: str | None) -> tuple[str, list[dict]]:
             _SESSIONS[session_id] = {
                 "messages": [{"role": "system", "content": _SYSTEM_PROMPT}],
                 "last_active": time.time(),
-                "pending_confirm": None,   # 门下省待确认的操作
             }
         s = _SESSIONS[session_id]
         s["last_active"] = time.time()
-        # 返回原始 list 引用（非副本）：chat_with_llm 会直接 append 到此 list，
+        # 返回原始 list 引用（非副本）：调用方会直接 append 到此 list，
         # 使上下文跨请求累积。对话按 session 串行（前端 _chatBusy 保证），无并发写。
         return session_id, s["messages"]
 
@@ -85,37 +86,6 @@ def append_raw(session_id: str, message: dict) -> None:
             s["messages"].pop(0)
 
 
-def get_pending_confirm(session_id: str) -> dict | None:
-    """获取该 session 待确认的危险操作（门下省封驳用）。"""
-    with _LOCK:
-        s = _SESSIONS.get(session_id)
-        return s["pending_confirm"] if s else None
-
-
-def pop_pending_confirm_if_match(session_id: str, token: str) -> dict | None:
-    """原子操作：若 pending_confirm 的 token 匹配，取出并清除；否则返回 None。
-
-    解决 check-then-clear 的 TOCTOU：防止双确认请求各执行一次。
-    """
-    with _LOCK:
-        s = _SESSIONS.get(session_id)
-        if not s or not s["pending_confirm"]:
-            return None
-        pending = s["pending_confirm"]
-        if pending.get("token") == token:
-            s["pending_confirm"] = None
-            return pending
-        return None
-
-
-def set_pending_confirm(session_id: str, confirm: dict | None) -> None:
-    """设置/清除待确认操作。confirm = {token, action, summary, detail}。"""
-    with _LOCK:
-        s = _SESSIONS.get(session_id)
-        if s is not None:
-            s["pending_confirm"] = confirm
-
-
 def reset(session_id: str) -> None:
     """清空 session 历史（用户点「重新开始」）。"""
     with _LOCK:
@@ -123,7 +93,6 @@ def reset(session_id: str) -> None:
             _SESSIONS[session_id] = {
                 "messages": [{"role": "system", "content": _SYSTEM_PROMPT}],
                 "last_active": time.time(),
-                "pending_confirm": None,
             }
 
 

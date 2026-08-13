@@ -109,9 +109,6 @@ def handle_message(
     """
     session_id, messages = sess.get_or_create(session_id)
 
-    # 清除 stale pending_confirm（用户换话题了）
-    sess.set_pending_confirm(session_id, None)
-
     if not is_llm_configured():
         reply = _rule_chat_one(user_text)
         sess.append(session_id, "user", user_text)
@@ -135,7 +132,7 @@ def _react_loop(user_text: str, messages: list[dict], session_id: str,
                 max_rounds: int = 4) -> ZhongshuTurn:
     """中书省 ReAct 循环：LLM + 简单工具 + request_shangshu_plan。
 
-    比原 chat_with_llm 更短（4 轮），因为复杂任务转交尚书省。
+    最多 4 轮（复杂任务转交尚书省，不需要长循环）。
     """
     from control.agent.tools import call_tool
     turn = ZhongshuTurn(user_text=user_text)

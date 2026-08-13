@@ -10,8 +10,8 @@
   - 只挡该步，不依赖它的步骤继续执行（executor._propagate_blockage 处理依赖链）。
   - 用户准奏 → 清该步的 ticket → executor 重入时重试该步。
 
-保留：现有 gatekeeper.assess 的危险判据（merge_to_global / delete_r / clean_cache），
-扩展为按 capability + risk_level 判断，并增加 .env 相关封驳。
+封驳判据：按 capability + risk_level 判断，覆盖 merge 到全局 / 删 R 列 / clean_cache /
+改全局 .env / 跑评估等场景。
 """
 
 from __future__ import annotations
