@@ -154,7 +154,7 @@ def generate_safe_twin(attack_prompt: str, client) -> dict | None:
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
         )
-        raw = response.choices[0].message.content.strip()
+        raw = (response.choices[0].message.content or "").strip()
         data = extract_json_block(raw)
         if data is not None:
             return {

@@ -83,6 +83,25 @@ async function loadClusters() {
     setMetric('cl_sil', d.validation?.silhouette ?? null, v => fmtNum(v, 4));
     setMetric('cl_db', d.validation?.davies_bouldin ?? null, v => fmtNum(v, 4));
 
+    // 聚类退化提示：HDBSCAN 密度视图在小样本/特征区分度低时会把全部方法判为噪声（n_noise≈n_methods），
+    // silhouette 归零。原看板默默显示 0 值，用户无法察觉聚类无效。这里显式提示。
+    const degEl = $('clDegenerate');
+    if (degEl) {
+      const sil = d.validation?.silhouette;
+      const nNoise = d.n_noise ?? 0;
+      const nMethods = d.n_methods ?? 0;
+      const allNoise = nMethods > 0 && nNoise >= nMethods;
+      const silZero = sil != null && Math.abs(sil) < 1e-6;
+      if (allNoise || silZero) {
+        degEl.classList.remove('hidden');
+        degEl.textContent = allNoise
+          ? `⚠ 聚类退化为全噪声（${nNoise}/${nMethods} 方法被判为噪声）：密度视图未能区分出簇，本次聚类结论不可用。通常因样本不足或特征区分度低，建议增加测试轮次。`
+          : '⚠ 轮廓系数为 0：簇间无明确分离，聚类结果参考价值有限。';
+      } else {
+        degEl.classList.add('hidden');
+      }
+    }
+
     const cl = (d.clusters || []).slice(0, 20);
     Plotly.newPlot('chart_cluster_cover', [
       {

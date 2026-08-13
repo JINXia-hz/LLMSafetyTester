@@ -244,7 +244,7 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
         )
-        raw1 = resp1.choices[0].message.content.strip()
+        raw1 = (resp1.choices[0].message.content or "").strip()
         m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw1, re.DOTALL)
         if m:
             raw1 = m.group(1)
@@ -264,7 +264,7 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
         )
-        raw2 = resp2.choices[0].message.content.strip()
+        raw2 = (resp2.choices[0].message.content or "").strip()
         m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw2, re.DOTALL)
         if m:
             raw2 = m.group(1)

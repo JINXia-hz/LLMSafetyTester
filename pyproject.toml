@@ -102,7 +102,14 @@ known-first-party = ["llmsec"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "--tb=short -n 4"
+# -m 'not real_api and not e2e'：默认排除真实 API / 端到端测试（产生费用、需凭证、
+# 分钟级延迟）。这些测试仅在显式 `pytest -m real_api` / `pytest -m e2e` 时才跑，
+# 保证 `pytest tests/` 行为与离线套件完全一致。
+addopts = "--tb=short -n 4 -m 'not real_api and not e2e'"
+markers = [
+    "real_api: 真实外部 API 测试（产生费用/延迟，默认不跑；手动 pytest -m real_api 触发）",
+    "e2e: 端到端全流程测试（含子进程 + 真实 API，默认不跑；手动 pytest -m e2e 触发）",
+]
 # -n 4 而非 -n auto：本套件是"海量毫秒级小测试 + 少数聚类重测试"分布，
 # worker 冷启动 + import llmsec/numpy/sklearn 的固定开销约 5-6s/worker，
 # -n auto(=12 逻辑核)下该开销远超并行收益（实测 130s vs 串行 37s）。

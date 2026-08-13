@@ -43,8 +43,53 @@ _NETWORK_ENV_KEYS = (
 
 
 @pytest.fixture(autouse=True)
-def _isolate_network_env():
-    """每个测试期间清空网络相关环境变量，结束后恢复，避免 .env 内网地址泄漏进测试。"""
+def _isolate_network_env(request):
+    """每个测试期间清空网络相关环境变量，结束后恢复，避免 .env 内网地址泄漏进测试。
+
+    标了 real_api / e2e marker 的用例**不清**——它们需要 .env 注入的真实网络凭证
+    去打外部 API，清掉会让代码走"未配置→早退"分支而失去测试意义。
+    """
+    if request.node.get_closest_marker("real_api") or request.node.get_closest_marker("e2e"):
+        # 真实 API / 端到端测试：保留 .env 凭证，不清
+        yield
+        return
     saved = {k: os.environ.pop(k) for k in _NETWORK_ENV_KEYS if k in os.environ}
     yield
     os.environ.update(saved)
+
+
+# ============================================================
+# 真实 API / 端到端测试的凭证门控
+# ============================================================
+# .env.example 里的占位符示例值（sk-yyy / sk-xxx），用于识别"未真正配置"的 .env，
+# 避免误把模板当成真实凭证放行真实 API 测试。
+_PLACEHOLDER_KEYS = ("sk-yyy", "sk-xxx")
+
+
+def _has_real_credentials() -> tuple[bool, str]:
+    """检测 .env 是否配了可用的真实 API 凭证。返回 (ok, reason)。
+
+    判定标准：TARGET_API_KEY / TARGET_BASE_URL 非空且非占位符，且 GENERATOR_API_KEY
+    非空且非占位符（Judge / 生成 / 报告叙事都依赖它）。任一缺失 → 视为未配置。
+    """
+    target_key = os.getenv("TARGET_API_KEY", "").strip()
+    target_url = os.getenv("TARGET_BASE_URL", "").strip()
+    if not target_key or any(target_key.startswith(p) for p in _PLACEHOLDER_KEYS) or not target_url:
+        return False, "TARGET_API_KEY/TARGET_BASE_URL 未配置或为占位符"
+    gen_key = os.getenv("GENERATOR_API_KEY", "").strip()
+    if not gen_key or any(gen_key.startswith(p) for p in _PLACEHOLDER_KEYS):
+        return False, "GENERATOR_API_KEY 未配置或为占位符（Judge/生成依赖它）"
+    return True, "ok"
+
+
+@pytest.fixture
+def require_real_api(request):
+    """real_api / e2e 用例的凭证门控：无真实凭证时优雅 skip 并给出配置提示。
+
+    用法：在标了 @pytest.mark.real_api 或 @pytest.mark.e2e 的测试函数参数里
+    加 `require_real_api`。无凭证时该用例 skip（非失败），有凭证时正常执行。
+    """
+    ok, reason = _has_real_credentials()
+    if not ok:
+        pytest.skip(f"跳过真实 API 测试：{reason}（配置 .env 后可启用）")
+    yield

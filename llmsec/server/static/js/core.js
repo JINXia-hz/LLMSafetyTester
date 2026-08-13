@@ -67,26 +67,41 @@ const fmtNum = (v, d = 1) => (v == null ? 'N/A' : Number(v).toFixed(d));
 // ---------- 动效基础设施 ----------
 const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-// 数字滚动：值变化时 500ms rAF 插值（ease-out cubic）；null/初设/未变化/reduced-motion 直接写终值
+// 数字滚动：值变化时 500ms 插值（ease-out cubic）；null/初设/未变化/reduced-motion 直接写终值。
+// 动画用 rAF 驱动，但 rAF 在页面不可见/某些嵌入式 webview 中会被节流或暂停，
+// 导致切批次后指标卡停在旧值（动画回调永不触发）。故 rAF 动画之外，始终安排一个
+// setTimeout(dur) 兜底强制写终值——setTimeout 不受页面可见性影响，保证最终值可靠落盘。
 function setMetric(id, num, fmt) {
   const el = $(id);
   if (!el) return;
   const prev = el._v;
   el._v = num;
+  // prev 用宽松相等判 null/undefined：元素初次渲染时 _v 为 undefined（HTML 初始 "-"），
+  // 严格 prev===null 会漏判 undefined → 走动画分支用 undefined 算术得 NaN。
+  // null/undefined/未变化/reduced-motion 均直接写终值。
   if (num == null || prev == null || prev === num || REDUCED_MOTION) {
     el.textContent = fmt(num);
     return;
   }
-  cancelAnimationFrame(el._raf);
+  if (el._raf) cancelAnimationFrame(el._raf);
+  if (el._settleTimer) clearTimeout(el._settleTimer);
   const t0 = performance.now(), dur = 500;
   const step = t => {
     if (el._v !== num) return;                     // 已被更新的值取代，旧动画静默终止
     const k = Math.min(1, (t - t0) / dur);
     const e = 1 - Math.pow(1 - k, 3);
     el.textContent = fmt(prev + (num - prev) * e);
-    if (k < 1) el._raf = requestAnimationFrame(step);
+    if (k < 1) {
+      el._raf = requestAnimationFrame(step);
+    }
   };
   el._raf = requestAnimationFrame(step);
+  // rAF 兜底：页面不可见时 rAF 暂停，动画卡在首帧。setTimeout 不受可见性影响，
+  // dur 后强制写终值，保证最终值正确（与 _v 不一致检查配合，被新值取代时跳过）。
+  el._settleTimer = setTimeout(() => {
+    el._settleTimer = null;
+    if (el._v === num) el.textContent = fmt(num);
+  }, dur + 16);
 }
 
 // 盖印开卷 splash 收尾：淡出后移除节点；每会话标记在播完时才写入

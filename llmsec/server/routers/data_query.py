@@ -422,13 +422,18 @@ async def api_overview(run: str | None = None):
         for k, v in tree.get("dimensions", {}).get("by_harm_type", {}).items()
     }
 
-    # stale 检测：仅当存在"更新的且带报告的批次"时提示（批次名 = 时间戳，字典序即时间序），
-    # 不再按 mtime 差判定——mtime 只看新旧，历史批次恒被误报"看旧了"
+    # stale 检测：仅当存在"更新的且带报告的批次"时提示。
+    # 批次名格式为 "时间戳/目标"（如 2026-08-11_151938/gemma-4-12B-it）。原实现按完整批次名
+    # 做字典序比较，导致同一时间戳目录下的不同目标互判"更新"（gemma < minimax 字典序 →
+    # 看 gemma 时误报"存在更新批次 minimax"）。正确语义是只比较时间戳目录部分：
+    # 同一 run 目录下的多目标评估是并行的，不存在先后关系。
     reason = None
     message = None
+    cur_name = _run_name(run_dir, run)
+    cur_batch = cur_name.split("/", 1)[0]
     newer = next(
         (r["name"] for r in _discover_runs()
-         if r["has_report"] and r["name"] > _run_name(run_dir, run)),
+         if r["has_report"] and r["name"].split("/", 1)[0] > cur_batch),
         None,
     )
     if newer:
@@ -986,7 +991,16 @@ async def api_targets_probe(name: str | None = None):
                     "latency_ms": None, "error": str(e)[:120], "warning": None}
 
     async def _probe_service(svc_name: str, cfg, shared: dict):
-        """generator / judge 探活；与已探端点同 base_url 时复用其 models.list 结果（省一次调用）。"""
+        """generator / judge 探活。
+
+        两段式：
+        1) models.list —— 校验端点连通 + 模型名在册（与目标探活同口径，结果跨 service 复用）。
+        2) chat smoke —— 这两个服务实际靠 chat/completions 工作，models.list 通不代表 chat 能用。
+           发一条 max_tokens=8 的最小 chat，检查 message.content 是否非 None。
+           reasoning model（o1/R1/QwQ 等）常把内容放进 reasoning_content 使 content=None，
+           会让下游 judge.evaluate / generate / report 在 .strip() 处崩溃。content=None 不判
+           不可达（仍能调，只是空响应），但记 warning 提示用户。
+        """
         key = (cfg.base_url or "", cfg.api_key or "")
         if key in shared:
             latency, ids, err = shared[key]
@@ -1005,9 +1019,39 @@ async def api_targets_probe(name: str | None = None):
         if err is not None:
             return {"name": svc_name, "model": cfg.model, "reachable": False,
                     "latency_ms": None, "error": err, "warning": None}
+
+        # 第二段：chat smoke（只对 generator/judge，目标模型探活走 _probe_one）。
+        # timeout 略宽于 models.list：首 token 可能要 1-3s。
+        content_none = False
+        chat_err = None
+        try:
+            def _chat():
+                client = create_openai_client(cfg.api_key, cfg.base_url, timeout=12.0)
+                resp = client.chat.completions.create(
+                    model=cfg.model,
+                    messages=[{"role": "user", "content": "ping"}],
+                    max_tokens=8,
+                )
+                return resp.choices[0].message.content
+            content = await asyncio.to_thread(_chat)
+            if content is None:
+                content_none = True
+        except Exception as e:
+            chat_err = str(e)[:120]
+
+        # chat 错误不判不可达（models.list 已通，chat 偶发抖动不应阻塞启动），
+        # 但作为 warning 暴露给用户。
+        warnings = []
+        w = _model_warning(ids, cfg.model)
+        if w:
+            warnings.append(w)
+        if content_none:
+            warnings.append("chat 返回空 content（疑似 reasoning model，需确认）")
+        if chat_err:
+            warnings.append(f"chat 探测失败：{chat_err}")
         return {"name": svc_name, "model": cfg.model, "reachable": True,
                 "latency_ms": latency, "error": None,
-                "warning": _model_warning(ids, cfg.model)}
+                "warning": "；".join(warnings) or None}
 
     results = await asyncio.gather(*[_probe_one(n, c) for n, c in targets_cfg.items()])
     services: list[dict] = []

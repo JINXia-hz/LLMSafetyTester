@@ -329,7 +329,16 @@ def analyze_clusters(
                 elif gt_n < (pred.min_cluster_size if pred else 3):
                     reason = f"GT 数 {gt_n} 不足（min_cluster_size={pred.min_cluster_size if pred else 3}）"
                 else:
-                    reason = f"GT {gt_n} 但模型未训练（原因未知）"
+                    # 兜底：GT 够、特征也在，但模型仍未训练。细化原因而非"未知"：
+                    # 1) predictor.model 本身为 None（冷启动未装配模型）
+                    # 2) 训练后 model.w 仍 None（特征矩阵奇异/零方差/数值问题导致 Ridge 解退化）
+                    if model is None:
+                        reason = f"GT {gt_n} 充足但 predictor.model 未装配（冷启动模型装配失败）"
+                    elif getattr(model, "w", None) is None:
+                        reason = (f"GT {gt_n} 充足但 Ridge 解退化（model.w=None）："
+                                  "特征矩阵可能奇异或零方差，无法求逆。建议检查特征提取是否产出常量列。")
+                    else:
+                        reason = f"GT {gt_n} 但模型未训练（未预期路径，请附日志反馈）"
                 analysis["svd_ridge_skipped"] = reason
                 logger.warning("SVD-Ridge 诊断跳过: %s", reason)
     except Exception as e:

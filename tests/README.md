@@ -1,18 +1,43 @@
 # 测试说明（tests/）
 
-本目录是 llmsec 的回归 + 冒烟测试集，**201 个 pytest 用例**，按被测子系统组织。
+本目录是 llmsec 的回归 + 冒烟测试集，按被测子系统组织。分两层：
+- **离线测试**（默认）：mock/stub 目标与 Judge，秒级、零费用、`-n 4` 并行。
+- **真实 API / 端到端测试**（默认排除）：打真实外部 API，产生费用，需手动触发。
 
 ## 怎么跑
 
 ```bash
-pytest tests/                               # 全量（串行）
+pytest tests/                               # 离线全量（默认 -n 4 并行，真实 API/e2e 自动排除）
 pytest tests/test_elo.py                    # 单文件
 pytest tests/test_elo.py::test_convergence_true_positive   # 单个用例
-pytest -n auto                              # 并行（pytest-xdist，CI 默认用此模式）
+pytest -n auto                              # 强制更多 worker（注意冷启动开销）
+
+# —— 真实 API / 端到端测试（默认不跑，需手动触发）——
+pytest -m real_api tests/test_real_api.py -v -n 0    # 真实目标/Judge/Generator 连通性
+pytest -m e2e tests/test_e2e_dashboard.py -v -n 0    # 看板评估全流程（子进程 + 真实 API）
 ```
 
-- `conftest.py` 统一做路径注入 + Windows 控制台 UTF-8。
-- **绝大多数离线可跑**（mock/stub 目标与 Judge）；少数端到端冒烟依赖本机环境。
+- `conftest.py` 统一做路径注入 + Windows 控制台 UTF-8 + 网络隔离。
+- **离线测试**：autouse fixture `_isolate_network_env` 每个用例清空网络 env，保证不打外部 API。
+- **真实 API 测试**：标 `@pytest.mark.real_api`，fixture 不清 env（保留 .env 凭证）；`require_real_api` fixture 在无凭证时优雅 skip。
+
+## 真实 API / 端到端测试
+
+默认被 `addopts = "-m 'not real_api and not e2e'"` 排除，`pytest tests/` 行为与离线套件完全一致。
+
+| marker | 文件 | 测什么 | 触发方式 |
+|---|---|---|---|
+| `real_api` | `test_real_api` | 目标模型/Judge/Generator 真实连通性 + OpenAI 契约 + 安全基线（拒绝有害）| `pytest -m real_api` |
+| `e2e` | `test_e2e_dashboard` | 看板 `POST /api/run/evaluate` → 子进程 → 进度轮询 → 取消，全链路真实 API | `pytest -m e2e` |
+
+**前提**：项目 `.env` 已配真实凭证（`TARGET_API_KEY`/`TARGET_BASE_URL`/`GENERATOR_API_KEY` 非占位符 `sk-yyy`/`sk-xxx`）。未配置时用例自动 skip 并给出提示。
+
+**费用**：`real_api` 约 3~5 次 API 调用（极低）；`e2e` 约 2~4 次目标 + 2~4 次 Judge（`batch=2 + rounds=1`，最小攻击集 `_unit_smoke.jsonl`）。
+
+**隔离**：`e2e` 测试通过 `isolated_tasks` fixture patch `tasks._start_task`，把 `--publish-global` 改写为 `--work-dir <tmp>`，全局 `output/state/results.json` 零污染。
+
+**建议串行**（`-n 0`）：真实 API 并行易触发限速；子进程轮询不适合 xdist worker。
+> 注意：禁用并行用 `-n 0`（覆盖 addopts 的 `-n 4`），**不要**用 `-p no:xdist`（会让 addopts 的 `-n 4` 因插件缺失而报错）。
 
 ## 文件清单（20 个，按子系统分组）
 
@@ -66,6 +91,13 @@ pytest -n auto                              # 并行（pytest-xdist，CI 默认�
 | `test_data_integrity` | 19 | P0 数据完整性（NaN 校验/原子写/多目标映射/local_sim 数学优先级） |
 | `test_review_regressions` | 17 | 全面审查 FR1-FR13（落盘顺序/logger/stale GT/boundary 键集/no-judge 兜底/dedup） |
 
+### 真实 API / 端到端（默认排除，手动触发）
+
+| 文件 | marker | 测什么 |
+|---|---|---|
+| `test_real_api` | `real_api` | 目标模型真实连通性 + OpenAI 契约 + 安全基线（拒绝有害）；Judge 评分契约（正常→A、有害→C/D/E）；Generator 客户端可达 |
+| `test_e2e_dashboard` | `e2e` | 看板 `POST /api/run/evaluate` 全链路（子进程 + 真实 API）：触发→轮询→success；progress.jsonl 进度记录；`POST /cancel` 任务取消 |
+
 ## 速查：出问题该看哪个测试
 
 | 症状 | 看这里 |
@@ -79,3 +111,5 @@ pytest -n auto                              # 并行（pytest-xdist，CI 默认�
 | 看板接口/任务 | `test_dashboard` |
 | 目标路由/legacy .env | `test_targets` |
 | 越狱税/数学探针 | `test_jailbreak_tax` |
+| 目标/Judge 真实不通 | `test_real_api`（`-m real_api`）|
+| 看板评估端到端跑不通 | `test_e2e_dashboard`（`-m e2e`）|

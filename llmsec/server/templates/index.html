@@ -860,7 +860,7 @@
             <div class="overflow-auto"><table class="min-w-full text-sm">
               <thead><tr class="text-left" style="color: var(--c-muted);">
                 <th class="py-2 pr-4">威胁簇</th><th class="py-2 pr-4">规模</th><th class="py-2 pr-4" data-sort="elo">ELO</th><th class="py-2 pr-4" data-sort="asr">ASR</th>
-                <th class="py-2 pr-4" data-sort="tax">税</th><th class="py-2 pr-4" data-sort="tested">来源</th><th class="py-2">95% CI</th>
+                <th class="py-2 pr-4" data-sort="tax">税</th><th class="py-2 pr-4" data-sort="tested">实测</th><th class="py-2">95% CI</th>
               </tr></thead>
               <tbody id="threatTable"></tbody>
             </table></div>
@@ -922,6 +922,7 @@
             <div class="card"><div class="metric-label">轮廓系数</div><div class="metric-value" id="cl_sil">-</div></div>
             <div class="card"><div class="metric-label">Davies-Bouldin</div><div class="metric-value" id="cl_db">-</div></div>
           </div>
+          <div id="clDegenerate" class="text-xs mb-3 hidden" style="color: var(--c-warn); padding: 8px 12px; border: 1px solid var(--c-line); border-radius: 6px; background: var(--c-card);"></div>
           <div class="card mb-4">
             <h3 class="font-semibold mb-2 text-sm">簇效验证（ANOVA / Kruskal-Wallis）</h3>
             <div id="rvBanner" class="banner level-inconclusive mb-3" style="padding: 12px 16px;">

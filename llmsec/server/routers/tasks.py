@@ -120,6 +120,10 @@ def _spawn(task_id: str, t: dict) -> None:
         # 把逐轮/逐 trial 进度落到 output/tasks/<task_id>.progress.jsonl，供看板消费。
         env = os.environ.copy()
         env["LLMSEC_TASK_ID"] = task_id
+        # 强制子进程 stdout/stderr 无缓冲：logging 的 StreamHandler 在非 TTY（重定向到文件）
+        # 下走块缓冲，任务长时间运行时看板读到的 log_tail 滞后数分钟，用户误判任务卡死。
+        # PYTHONUNBUFFERED=1 让 print/logging 每行即落盘，代价可忽略（日志量小）。
+        env["PYTHONUNBUFFERED"] = "1"
         proc = subprocess.Popen(
             [sys.executable, *t["argv"]],
             cwd=WORKSPACE_ROOT,

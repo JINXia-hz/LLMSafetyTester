@@ -715,11 +715,14 @@ def generate_narrative(tree: dict, output_dir) -> str:
             temperature=0.5,
             max_tokens=4096,
         )
-        markdown = response.choices[0].message.content.strip()
+        markdown = (response.choices[0].message.content or "").strip()
         # 去除可能的markdown代码包裹
         markdown = re.sub(r"^```markdown\s*", "", markdown)
         markdown = re.sub(r"\s*```$", "", markdown)
-        return markdown
+        if markdown:
+            return markdown
+        # content=None / 空响应：reasoning model 常见，走 fallback 而非返回空报告
+        logger.warning("  ⚠ LLM 返回空内容（疑似 reasoning model），使用 fallback 报告")
     except Exception as e:
         logger.warning(f"  ⚠ LLM调用失败（已重试3次）: {e}")
 

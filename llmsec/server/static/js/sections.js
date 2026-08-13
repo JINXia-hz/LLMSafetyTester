@@ -11,7 +11,10 @@ function _runLabel(r) {
   if (r.has_report) {
     const seal = SEAL_CHARS[r.security_level] || '▫';
     const tg = r.target_model || r.target || '?';
-    return `${seal} ${shortTs} · ${tg} · ASR ${fmtPct(r.asr)}`;
+    // has_md=false：runner_report.json 在但 security_report.md 缺失（任务被取消/LLM 叙事失败）。
+    // 标注"无叙事"提示用户报告页可能只有结构化数据、无 LLM 叙事，避免误以为是完整批次。
+    const mdTag = r.has_md === false ? ' · 无叙事' : '';
+    return `${seal} ${shortTs} · ${tg} · ASR ${fmtPct(r.asr)}${mdTag}`;
   }
   return `${r.name} (无报告)`;
 }

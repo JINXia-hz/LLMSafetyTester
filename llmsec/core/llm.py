@@ -68,11 +68,19 @@ def is_retryable_error(e: Exception) -> bool:
     保留 429 限流、5xx 服务端错误、网络错误。原代码对所有异常重试，
     错误 API Key 跑 500 条 prompt 会白等 75 分钟。
 
+    Judge-None 修复：排除确定性 Python 解析错误（AttributeError / TypeError）。
+    这类错误源于响应体本身（如 reasoning model 返回 content=None 被 .strip()），
+    同一 prompt 重试只会得到同样的 None，白等 retries×delay。它们没有 status_code，
+    原逻辑会把它们当可重试网络错误。代码层错误应在源头防御（如 or ""），不应靠重试兜。
+
     用 status_code 属性判定（不依赖具体异常类，跨 OpenAI 版本健壮）。
     """
     status = getattr(e, "status_code", None)
     if status is not None and 400 <= status < 500 and status != 429:
         return False  # 4xx（非 429）= 确定性错误，重试无意义
+    # 确定性解析错误：响应体导致的代码层崩溃，重试无意义
+    if isinstance(e, (AttributeError, TypeError)):
+        return False
     return True
 
 

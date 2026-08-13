@@ -257,12 +257,24 @@ def main():
     if len(names) > 1:
         logger.info(f"🎯 攻击目标: {len(names)} 个（{', '.join(names)}），逐目标评估")
     else:
+        # 单目标：优先用该目标自己的声明配置（--target X 或 TARGETS 中唯一项），
+        # 而非全局 TARGET_MODEL/TARGET_BASE_URL——后者只是兜底默认，可能与实际单目标不符
+        # （如 --target minimax 但全局 TARGET_MODEL=gemma 时，原日志误导性地显示 gemma）。
+        single = names[0]
+        try:
+            from llmsec.core.config import load_targets as _load_targets
+            declared_targets = _load_targets()
+        except Exception:
+            declared_targets = {}
+        tcfg = declared_targets.get(single)
+        t_url = tcfg.base_url if tcfg else TARGET_BASE_URL
+        t_model = tcfg.model if tcfg else TARGET_MODEL
         target_desc = {
             "pcap_judge": f"PCAP Judge @ {PCAP_JUDGE_URL} (模型: {PCAP_MODEL_VERSION})",
-            "local_sim": f"本地模拟 @ {TARGET_BASE_URL} (模型: {TARGET_MODEL})",
-            "openai": f"OpenAI @ {TARGET_BASE_URL} (模型: {TARGET_MODEL})",
-        }.get(TARGET_TYPE, f"{TARGET_TYPE} @ {TARGET_BASE_URL} (模型: {TARGET_MODEL})")
-        logger.info(f"🎯 攻击目标: {target_desc}")
+            "local_sim": f"本地模拟 @ {t_url} (模型: {t_model})",
+            "openai": f"OpenAI @ {t_url} (模型: {t_model})",
+        }.get(TARGET_TYPE, f"{TARGET_TYPE} @ {t_url} (模型: {t_model})")
+        logger.info(f"🎯 攻击目标: {single} → {target_desc}")
         logger.info(f"   模式: {TARGET_TYPE}")
 
     # ---- 1. 快照：R + 特征（运行前一次性获取，运行期间不读不写 R）----
@@ -488,9 +500,24 @@ def main():
                 logger.error(f"  ❌ {name} 写入 R 失败: {e}")
     elif args.publish_global:
         logger.info(f"\n{'='*60}\n  💾 写入全局 R（--publish-global）\n{'='*60}")
+        # 全局 R 防注入：只接受 .env TARGETS 声明的目标。历史上测试用 test_model/t1/t2
+        # 跑评估时误 publish 进全局 R，污染 BlendPredictor（samples_per_model 出现假目标）。
+        # work-dir 模式不受此限（隔离实验可任意命名）。load_targets 失败时不校验（放行交由
+        # 既有逻辑），仅在能读到声明名单时拒绝未声明目标。
+        try:
+            from llmsec.core.config import load_targets as _load_targets
+            declared = set(_load_targets().keys())
+        except Exception:
+            declared = set()
         for name in names:
             tracker = trackers.get(name)
             if tracker is None:
+                continue
+            if declared and name not in declared:
+                logger.warning(
+                    f"  ⏭️ {name}: 未在 .env TARGETS 中声明，跳过全局 R 写入（防测试目标污染生产数据）。"
+                    f" 如需隔离测试，请用 --work-dir。"
+                )
                 continue
             try:
                 publish_tracker(tracker, name)

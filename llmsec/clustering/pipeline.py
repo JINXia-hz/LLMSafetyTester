@@ -205,7 +205,9 @@ def ai_rename_clusters(
             temperature=0.3,
             max_tokens=800,
         )
-        return resp.choices[0].message.content.strip()
+        # content=None 防御：reasoning model / 空响应时下游 extract_json_block 返回 None，
+        # 走"保留技术名"分支，不抛 AttributeError（参见 judge.py:_call_judge 同类修复）
+        return (resp.choices[0].message.content or "").strip()
 
     try:
         client = create_openai_client(cfg.api_key, cfg.base_url, cfg.timeout)

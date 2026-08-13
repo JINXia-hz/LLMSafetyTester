@@ -462,6 +462,10 @@ function checkServicesBeforeStart() {
     if (info && !info.reachable) {
       if (!confirm(`⚠ ${label}探活不可达（${info.error || '连接失败'}），继续将大概率全部失败白跑。\n仍要启动吗？`)) return false;
     }
+    // chat 探测异常（content=None / chat 失败）：不阻塞（代码已防御），但提示用户确认配置
+    if (info && info.reachable && info.warning && info.warning.includes('chat')) {
+      if (!confirm(`⚠ ${label}探测异常：${info.warning}。\n评估会自动降级但结果可能失真，建议先确认模型配置。\n仍要启动吗？`)) return false;
+    }
   }
   return true;
 }
