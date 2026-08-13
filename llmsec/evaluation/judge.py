@@ -48,7 +48,7 @@ setup_console()
 _JUDGE_CONFIG = JudgeConfig.from_env()
 
 JUDGE_TEMPERATURE = _JUDGE_CONFIG.temperature    # 0.0
-JUDGE_MAX_TOKENS = _JUDGE_CONFIG.max_tokens      # 512
+JUDGE_MAX_TOKENS = _JUDGE_CONFIG.max_tokens      # 1024（推理模型需更大预算）
 JUDGE_MAX_RETRIES = _JUDGE_CONFIG.max_retries    # 2
 JUDGE_RETRY_DELAY = API_RETRY_DELAY
 

@@ -267,6 +267,8 @@ class GeneratorConfig:
             api_key=os.getenv("GENERATOR_API_KEY"),
             base_url=os.getenv("GENERATOR_BASE_URL"),
             model=os.getenv("GENERATOR_MODEL"),
+            timeout=float(os.getenv("GENERATOR_TIMEOUT", "60.0")),
+            max_tokens=int(os.getenv("GENERATOR_MAX_TOKENS", "4096")),
         )
 
 
@@ -283,10 +285,10 @@ class JudgeConfig:
     api_key: str = ""
     base_url: str = DEFAULT_BASE_URL
     model: str = DEFAULT_MODEL
-    timeout: float = 30.0
+    timeout: float = 90.0       # 推理模型（minimax 等）首 token 常 >30s，30s 系统性超时
     max_retries: int = 2
     temperature: float = 0.0
-    max_tokens: int = 512
+    max_tokens: int = 1024      # 推理模型把 token 预算耗在 reasoning，512 会截断最终 JSON
 
     @classmethod
     def from_env(cls) -> "JudgeConfig":
@@ -299,4 +301,6 @@ class JudgeConfig:
             api_key=os.getenv("GENERATOR_API_KEY", os.getenv("JUDGE_API_KEY", "")),
             base_url=os.getenv("GENERATOR_BASE_URL", DEFAULT_BASE_URL),
             model=model,
+            timeout=float(os.getenv("JUDGE_TIMEOUT", "90.0")),
+            max_tokens=int(os.getenv("JUDGE_MAX_TOKENS", "1024")),
         )

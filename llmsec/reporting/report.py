@@ -66,13 +66,18 @@ setup_console()
 logger = get_logger(__name__)
 
 def _report_config() -> GeneratorConfig:
-    """报告生成模型配置（沿用 GENERATOR_* 环境变量，缺省回退默认模型/地址）。"""
+    """报告生成模型配置（沿用 GENERATOR_* 环境变量，缺省回退默认模型/地址）。
+
+    timeout 独立配置：叙事报告是 15K 输入 + 4096 输出的长任务，推理模型（minimax 等）
+    单次生成常超 60s。优先读 REPORT_TIMEOUT（默认 180s），未设时回退 GENERATOR_TIMEOUT。
+    """
     cfg = GeneratorConfig.from_env()
+    report_timeout = float(os.getenv("REPORT_TIMEOUT", "180.0"))
     return GeneratorConfig(
         api_key=cfg.api_key or "",
         base_url=cfg.base_url or DEFAULT_BASE_URL,
         model=cfg.model or DEFAULT_MODEL,
-        timeout=cfg.timeout,
+        timeout=report_timeout,
     )
 
 

@@ -110,7 +110,7 @@ def generate_reports(
         "overall_verdict": portrait,
         "security_level": level,
         "attack_phase": {
-            "asr": round(asr, 4) if asr else None,
+            "asr": round(asr, 4) if asr is not None else None,
             "total_tested": attack_summary.get("total_tested", tested_methods),
             "successful": attack_summary.get("successful", 0),
             "rounds": attack_summary.get("rounds", 0),
