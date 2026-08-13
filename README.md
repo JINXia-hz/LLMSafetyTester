@@ -122,7 +122,11 @@ python -m uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
   - **目标模型管理**：「+」添加目标（写入 .env）、探活检测
   - **环境参数配置**：默认目标 / 生成模型 / Judge 的 base_url + model + api_key（写入 .env，掩码显示）
   - 任务状态与日志实时轮询 + SSE 直播
-- **宣政殿**（控制层）：中书，门下，尚书三个独立LLM Agent，三省各司其职，调度llmsec六部。用户可以通过简单对话轻松掌控全局。
+- **宣政殿**（控制层）：三省各司其职的 LLM Agent 系统——
+  - **中书省**：对话主入口，理解用户意图，简单查询自己处理，复杂指令转交尚书省拟案后润色呈给用户
+  - **尚书省**：基于完整能力清单（16 个 capability），把复杂指令拆解成结构化 Plan（步骤 + 依赖），用户准奏后拓扑分层并行执行
+  - **门下省**：总线订阅者，常态监听，对危险步骤（跑评估 / merge 全局 / 删 R 列）封驳要求确认，任务完成后自动审查呈递简报
+  - 三省经进程内消息总线协作，前端各有独立面板
 
 ---
 
@@ -176,18 +180,25 @@ llmsec-manage merge --sources <src...> --target <global|ws:name> [--models ...] 
 
 机器友好契约：所有命令支持 `--json` 结构化输出；写操作默认 dry-run 预览，`--yes` 执行；删除走软删除（`output/.trash/`）可恢复。
 
-### 控制层（元控制 / agent）
+### 控制层（元控制 / 三省 Agent）
 
 ```bash
 python -m control workspace fork <name> [--source global|run:<run>]            # fork 隔离工作区
 python -m control workspace list                                               # 列出工作区
 python -m control compare <run...> [--json]                                    # 历史对比（支持 ws: 前缀）
 python -m control orchestrate <specs.json> [--workers N]                       # 批量并行 fork + run
-python -m control chat                                                         # 交互式 LLM 对话中间者
+python -m control chat                                                         # 交互式 LLM 对话（中书省）
 python -m control tool <name> [args.json]                                      # 直接调一个 tool（供脚本/agent）
 ```
 
-控制层把 llmsec 当独立工作单元经 subprocess 调用，**绝不 import llmsec 内部**。对话中间者用 `.env` 的 `GENERATOR_*` 模型做 LLM tool-calling（7 个工具：list_runs / compare_runs / fork_workspace / list_workspaces / delete_workspace / orchestrate / merge），未配置 LLM 时自动回退规则版。
+控制层把 llmsec 当独立工作单元经 subprocess 调用，**绝不 import llmsec 内部**。三省 Agent 用 `.env` 的 `GENERATOR_*` 模型做 LLM tool-calling，未配置 LLM 时自动回退规则版。
+
+**三省架构**（`control/agent/`）：
+- **中书省**（`zhongshu.py`）：对话前台，理解意图判断复杂度，简单查询自处理，复杂指令调 `request_shangshu_plan` 转交尚书省
+- **尚书省**（`shangshu/`）：`planner.py` 拟结构化 Plan → 用户准奏 → `executor.py` 拓扑分层并行执行；16 个 capability（run_evaluation / fork_workspace / create_env_snapshot / merge_results 等）
+- **门下省**（`menxia.py`）：总线订阅者，按 risk_level 封驳危险步骤，plan_done 自动审查；`.env` 快照（`env_snapshot.py`）隔离连接配置
+
+**.env 快照**（`output/env_snapshots/`）：独立资源，create/edit/merge/delete。跑实验时用隔离的模型列表 / judge / 参数，不碰全局 `.env`。
 
 ### 实验框架
 
@@ -311,10 +322,21 @@ llmsec/                   # 纯源码包（工作单元核心 + 代码功能）
 ├── management/           # 信息管理: runs / caches / snapshot / merge（llmsec-manage CLI）
 └── server/               # dashboard_api / routers / local_model_server / templates / static
 
-control/                  # 控制层（元控制 / agent，独立于 llmsec）
+control/                  # 控制层（三省 Agent，独立于 llmsec）
 ├── config.py             # 定位 llmsec（PYTHON / 仓库根 / output 路径）
 ├── core/                 # invoker(subprocess) / workspace(fork) / compare / orchestrator
-├── agent/                # tools(schema) / loop(规则对话) / chat(LLM对话) / llm(client)
+│                         # env_snapshot(.env 快照隔离)
+├── agent/                # 三省 Agent + 消息总线
+│   ├── prompts.py        #   三省 system prompts（集中管理）
+│   ├── bus.py            #   消息总线（发布/订阅/留存）
+│   ├── zhongshu.py       #   中书省（意图理解 + 转交 + 润色）
+│   ├── menxia.py         #   门下省（总线订阅 + 封驳 + 自动审查）
+│   ├── shangshu/         #   尚书省（plan / capabilities / docs / planner / executor）
+│   ├── tools.py          #   中书省查询工具（6 个）
+│   ├── review.py         #   审查报告（读报告 → 规则判定 → 呈递摘要）
+│   ├── session.py        #   对话 session 管理
+│   ├── loop.py           #   规则版对话兜底
+│   └── llm.py            #   OpenAI client（读 GENERATOR_* env）
 └── cli.py                # python -m control CLI
 
 docker/                   # Docker 配置
@@ -351,6 +373,10 @@ output/
 │   ├── results.json              #   该分支独立的 R 矩阵（fork 起点快照 + 本次观测）
 │   ├── <target>/                 #   runner 产物（runner_report.json 等，同上）
 │   └── _index.json               #   工作区索引（来源/合并状态）
+├── env_snapshots/<name>/   # .env 快照（隔离的连接配置，独立资源）
+│   ├── .env                      #   完整 .env 副本（可编辑 key 后用 env_snapshot 跑 run）
+│   └── _index.json               #   快照索引
+├── plans/<id>.json        # 尚书省 Plan 持久化（步骤 + 依赖 + 执行状态）
 ├── snapshots/<时间戳>/     # 快照导出（临时，控制层 fork 消费后清理）
 ├── .trash/<时间戳>/        # 软删除回收站（删 run/清缓存移入，可恢复）
 └── experiments/<name>/     # HPO study
