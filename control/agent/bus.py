@@ -27,6 +27,7 @@ from threading import Lock
 ZHONGSHU = "中书省"
 SHANGSHU = "尚书省"
 MENXIA = "门下省"
+USER = "用户"
 ALL = "全员"  # 广播
 
 # 消息 kind 常量（三省约定的词汇表）

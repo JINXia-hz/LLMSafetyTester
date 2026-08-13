@@ -290,15 +290,54 @@ def api_plan_reject(req: PlanRejectRequest):
 
 @router.post("/api/control/plan/block/approve")
 def api_block_approve(req: BlockApproveRequest):
-    """用户准奏某步封驳（放行该步，下次执行时重试）。写文牍 step_unblocked。"""
+    """用户准奏某步封驳（放行该步）。写文牍 step_unblocked。
+
+    如果 Plan 已执行完（status=done）且有 blocked 步骤被放行，
+    自动重新提交到执行队列——让 executor 重入时重试放行的步骤。
+    """
     from control.agent import gazette
+    from control.agent.shangshu import get_queue, load_plan
     ok = menxia.approve_block(req.plan_id, req.step_id)
     if not ok:
         raise HTTPException(status_code=404, detail="封驳令不存在（可能已放行或已过期）")
     gazette.append_event(req.plan_id, gazette.EV_STEP_UNBLOCKED, "用户",
                          step_id=req.step_id,
                          detail={"capability": "放行重试"})
-    return {"plan_id": req.plan_id, "step_id": req.step_id, "approved": True}
+    # 检查是否需要重新入队
+    plan = load_plan(req.plan_id)
+    requeued = False
+    if plan and plan.status == "done":
+        # 放行的步骤 + 因它被跳过的后续步骤都要重置
+        unblocked_sids = set()
+        for s in plan.steps:
+            if s.id == req.step_id:
+                s.status = "pending"
+                s.ticket = None
+                unblocked_sids.add(s.id)
+        # 因依赖被放行步骤而 skipped 的也要重置
+        changed = True
+        while changed:
+            changed = False
+            for s in plan.steps:
+                if s.status == "skipped" and any(d in unblocked_sids for d in s.depends_on):
+                    s.status = "pending"
+                    unblocked_sids.add(s.id)
+                    changed = True
+        # 其他 blocked 步骤（未被放行的）也重置为 pending（它们的 ticket 可能已过时）
+        for s in plan.steps:
+            if s.status == "blocked":
+                s.status = "pending"
+                s.ticket = None
+                unblocked_sids.add(s.id)
+        has_pending = any(s.status == "pending" for s in plan.steps)
+        if has_pending:
+            plan.status = "approved"
+            from control.agent.shangshu import save_plan
+            save_plan(plan)
+            get_queue().submit(req.plan_id)
+            requeued = True
+    return {"plan_id": req.plan_id, "step_id": req.step_id, "approved": True,
+            "requeued": requeued}
 
 
 @router.get("/api/control/plan/queue")
