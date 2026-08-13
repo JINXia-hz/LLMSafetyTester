@@ -51,6 +51,8 @@ class Step:
     started: float | None = None     # 执行开始时间
     finished: float | None = None    # 执行结束时间
     block_history: list[dict] = field(default_factory=list)  # 封驳历史（append，不覆盖）
+    # 便宜行事标记（拟案后自动标注）
+    auto_execute: bool = False       # True=可跳过用户准奏直接执行
 
 
 @dataclass
@@ -107,7 +109,7 @@ class Plan:
                     "depends_on": s.depends_on, "description": s.description,
                     "status": s.status, "result": s.result, "error": s.error,
                     "ticket": s.ticket, "started": s.started, "finished": s.finished,
-                    "block_history": s.block_history,
+                    "block_history": s.block_history, "auto_execute": s.auto_execute,
                 }
                 for s in self.steps
             ],
@@ -165,6 +167,7 @@ def _from_json(d: dict) -> Plan:
             error=sd.get("error"), ticket=sd.get("ticket"),
             started=sd.get("started"), finished=sd.get("finished"),
             block_history=sd.get("block_history", []),
+            auto_execute=sd.get("auto_execute", False),
         ))
     with _LOCK:
         _PLANS[plan.id] = plan

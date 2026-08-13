@@ -163,5 +163,45 @@ def _extract_plan(tc, intent: str, session_id: str | None) -> plan_mod.Plan:
 
     plan = plan_mod.make_plan_from_llm(args.get("intent", intent), steps_raw)
     plan.session_id = session_id
+    # 便宜行事标注：自动判断每个步骤是否可以跳过用户准奏
+    _annotate_auto_execute(plan, session_id)
     plan_mod.save_plan(plan)
     return plan
+
+
+def _annotate_auto_execute(plan: plan_mod.Plan, session_id: str | None) -> None:
+    """便宜行事标注——自动判断每个步骤是否可以跳过用户准奏。
+
+    规则：
+    - risk_level=low → auto_execute=True（查询/只读/创建隔离副本）
+    - risk_level=medium → 查文牍：同一 session 内该 capability 曾被准奏过 → True
+    - risk_level=high/critical → False（一律走准奏）
+    """
+    from control.agent.shangshu.capabilities import capability_by_name
+
+    # 查文牍历史：同 session 内哪些 capability 曾被准奏过
+    prior_caps = set()
+    if session_id:
+        try:
+            from control.agent import gazette
+            for g in gazette.list_gazettes(session_id=session_id, recent=50):
+                events = gazette.read_events(g["plan_id"])
+                # 找该 Plan 的事件中：step_succeeded 的 capability（说明曾执行过=曾准奏过）
+                for ev in events:
+                    if ev.kind in (gazette.EV_STEP_SUCCEEDED, gazette.EV_PLAN_APPROVED):
+                        cap = ev.detail.get("capability", "")
+                        if cap:
+                            prior_caps.add(cap)
+        except Exception:
+            pass  # 文牍查询失败不影响拟案
+
+    for step in plan.steps:
+        cap = capability_by_name(step.capability)
+        if cap is None:
+            step.auto_execute = False
+        elif cap.risk_level == "low":
+            step.auto_execute = True
+        elif cap.risk_level == "medium":
+            step.auto_execute = step.capability in prior_caps  # 熟能生巧
+        else:
+            step.auto_execute = False  # high/critical 一律走准奏

@@ -205,6 +205,19 @@ def _hand_to_shangshu(intent: str, messages: list[dict], session_id: str) -> dic
                plan_id=plan.id, intent=plan.intent, session_id=session_id,
                steps_count=len(plan.steps))
 
+        # 便宜行事：如果所有步骤都标了 auto_execute=True，直接提交执行不走准奏
+        all_auto = all(s.auto_execute for s in plan.steps)
+        if all_auto:
+            from control.agent.shangshu import approve_plan, get_queue
+            approve_plan(plan.id)  # 自动准奏
+            get_queue().submit(plan.id)  # 提交执行队列
+            return {
+                "plan_id": plan.id,
+                "steps": [_step_dict(s) for s in plan.steps],
+                "rendered_plan": rendered,
+                "auto_executed": True,  # ★ 前端据此不展示准奏卡片
+            }
+
         return {
             "plan_id": plan.id,
             "steps": [_step_dict(s) for s in plan.steps],
@@ -221,7 +234,7 @@ def _step_dict(s) -> dict:
     return {
         "id": s.id, "capability": s.capability, "args": s.args,
         "depends_on": s.depends_on, "description": s.description,
-        "status": s.status,
+        "status": s.status, "auto_execute": s.auto_execute,
     }
 
 

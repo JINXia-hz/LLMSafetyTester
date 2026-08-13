@@ -127,12 +127,19 @@ async function sendChat() {
       _sessionId = data.session_id;
       sessionStorage.setItem('ctrl_session_id', _sessionId);
     }
-    // 复杂指令：尚书省已拟案，展示方案 + 准奏/驳回按钮
+    // 复杂指令：尚书省已拟案
     if (data.plan_pending) {
-      renderPlanPendingCard(data.plan_pending);
-      setProvStatus('zhongshu', '案已拟就');
-      setProvStatus('shangshu', '待准奏', true);
-      setStatus('尚书省已拟案——待天子圣裁');
+      if (data.plan_pending.auto_executed) {
+        // 便宜行事：全部 low 级，自动执行，不展示准奏卡片
+        appendChat('assistant', mdSafe(data.plan_pending.rendered_plan || '尚书省已便宜行事。') +
+          '<br><span class="ws-tag merged" style="margin-left:6px;">便宜行事·已自动执行</span>');
+        if (window.shangshuTrackPlan) window.shangshuTrackPlan(data.plan_pending.plan_id);
+        setStatus('便宜行事——已提交执行');
+      } else {
+        // 正常流程：展示方案 + 准奏/驳回/改拟按钮
+        renderPlanPendingCard(data.plan_pending);
+        setStatus('尚书省已拟案——待天子圣裁');
+      }
     } else {
       // 简单查询/回复：工具调用轨迹 + 回复
       for (const tc of (data.tool_calls || [])) appendToolCall(tc);
