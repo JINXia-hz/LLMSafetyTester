@@ -1,10 +1,12 @@
-"""control.agent.tools — 把控制层能力暴露为结构化 tool 定义。
+"""control.agent.tools — 中书省 + 规则兜底共用的查询/管理工具。
+
+三省重构后，工具职责划分：
+  - 中书省保留**查询类**工具（list_runs/compare_runs/review_run/list_workspaces）
+    + **简单管理类**（fork_workspace/delete_workspace，规则兜底 loop.py 也会解析这两个意图）
+  - 执行类操作（merge/clean_cache/delete_runs/orchestrate）统一由尚书省 capabilities 承担
 
 每个 tool = {name, description, parameters (JSON schema), call(args) -> result}。
-供 agent/loop.py 的对话循环调用，也可被外部 agent 框架（如 LLM tool-calling）直接消费。
-
-设计：tool 是纯函数 + schema 声明，不绑定任何特定 agent 框架。
-切换 LLM 后端（OpenAI function calling / 自研循环）只需改 loop.py，tools 不变。
+供 zhongshu._react_loop / loop._parse_intent / cli tool 子命令调用。
 """
 
 from __future__ import annotations
@@ -13,7 +15,6 @@ from collections.abc import Callable
 from typing import Any
 
 from control.core import compare as compare_mod
-from control.core import orchestrator as orch_mod
 from control.core import workspace as ws_mod
 from control.core.invoker import list_runs
 
@@ -110,6 +111,32 @@ def _tool_compare_runs():
     )
 
 
+def _tool_review_run():
+    """门下省事后审查：读 run 报告，识别异常，呈递关键摘要。"""
+    return Tool(
+        name="review_run",
+        description=(
+            "审查一个 run 的安全评测报告：读取 runner_report.json + security_tree.json，"
+            "用阈值规则识别异常（ASR/FPR/收敛/覆盖率/真实盲区），生成中文审查摘要。"
+            "run 名支持 'ts/target'（历史）或 'ws:<分支>/<target>'（fork 分支）。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "run": {"type": "string", "description": "run 名，如 '2026-08-11_151938/minimax' 或 'ws:ab1/minimax'"},
+            },
+            "required": ["run"],
+        },
+        call=lambda args: _do_review(args),
+    )
+
+
+def _do_review(args: dict) -> dict:
+    """调 review.review_run（不经 subprocess，直接读文件 + LLM）。"""
+    from control.agent.review import review_run
+    return review_run(args["run"])
+
+
 def _tool_fork_workspace():
     return Tool(
         name="fork_workspace",
@@ -151,182 +178,6 @@ def _tool_delete_workspace():
     )
 
 
-def _tool_orchestrate():
-    return Tool(
-        name="orchestrate",
-        description="批量并行 fork + run 多个工作单元（A/B 对比实验）。每个 spec 起一个隔离 run。",
-        parameters={
-            "type": "object",
-            "properties": {
-                "specs": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "source": {"type": "string", "default": "global"},
-                            "target": {"type": "string"},
-                            "max_rounds": {"type": "integer", "default": 5},
-                            "seed": {"type": "integer"},
-                        },
-                        "required": ["name"],
-                    },
-                },
-                "max_workers": {"type": "integer", "default": 2},
-                "compare_after": {"type": "boolean", "default": True},
-            },
-            "required": ["specs"],
-        },
-        call=lambda args: orch_mod.orchestrate(
-            [orch_mod.RunSpec(**s) for s in args["specs"]],
-            max_workers=args.get("max_workers", 2),
-            compare_after=args.get("compare_after", True),
-        ),
-    )
-
-
-def _tool_merge():
-    """merge：把一个或多个工作区/run 的结果合并到全局或另一工作区（显式统一动作）。"""
-    return Tool(
-        name="merge",
-        description=(
-            "把一个或多个源（work-dir/workspace/global）的 R 矩阵观测合并到目标（global 或 ws:<name>）。"
-            "runner 默认不再自动 publish 全局 R，更新全局 R 必须经此 tool 显式触发。"
-            "默认 dry-run 预览，confirm=True 执行。"
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "sources": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "源列表：'global' / 'ws:<name>' / work-dir 目录路径",
-                },
-                "target": {"type": "string", "description": "目标：'global' 或 'ws:<name>'"},
-                "models": {"type": "array", "items": {"type": "string"}, "description": "只合并指定 model（默认全部）"},
-                "confirm": {"type": "boolean", "description": "True 执行合并（默认 False=dry-run 预览）", "default": False},
-            },
-            "required": ["sources", "target"],
-        },
-        call=lambda args: _do_merge(args),
-    )
-
-
-def _do_merge(args: dict) -> dict:
-    """经 invoker 调 llmsec-manage merge（控制层不碰 R 内部）。
-
-    执行合并（confirm=True）后，对每个 ws:<name> 源回写 _index.json 的 merged 状态，
-    使分支生命循环的「合并」阶段可追踪。
-    """
-    from control.core.invoker import _manage_argv, _run
-    sub = ["merge", "--sources", *args["sources"], "--target", args["target"], "--json"]
-    if args.get("models"):
-        sub += ["--models", *args["models"]]
-    if args.get("confirm"):
-        sub.append("--yes")
-    res = _run(_manage_argv(sub))
-    res.require_ok()
-    result = res.json or {}
-    # 状态闭合：执行合并后标记各 workspace 源为已合并（容错——merge 已成功不可逆）
-    if args.get("confirm") and result.get("dry_run") is False:
-        from control.core.workspace import mark_merged
-        target = args["target"]
-        for src in args["sources"]:
-            if src.startswith("ws:"):
-                ok = mark_merged(src[3:], target)
-                if not ok:
-                    result.setdefault("warnings", []).append(
-                        f"工作区 {src[3:]} 状态更新失败（merge 已生效）")
-    return result
-
-
-def _tool_review_run():
-    """门下省事后审查：读 run 报告，识别异常，呈递关键摘要。"""
-    return Tool(
-        name="review_run",
-        description=(
-            "审查一个 run 的安全评测报告：读取 runner_report.json + security_tree.json，"
-            "用阈值规则识别异常（ASR/FPR/收敛/覆盖率/真实盲区），生成中文审查摘要。"
-            "任务完成后自动审查，用户也可主动要求「审查/总结一下 X」。"
-            "run 名支持 'ts/target'（历史）或 'ws:<分支>/<target>'（fork 分支）。"
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "run": {"type": "string", "description": "run 名，如 '2026-08-11_151938/minimax' 或 'ws:ab1/minimax'"},
-            },
-            "required": ["run"],
-        },
-        call=lambda args: _do_review(args),
-    )
-
-
-def _do_review(args: dict) -> dict:
-    """调 review.review_run（不经 subprocess，直接读文件 + LLM）。"""
-    from control.agent.review import review_run
-    return review_run(args["run"])
-
-
-def _tool_clean_cache():
-    """清理派生缓存（elo_cache / predictors / feature_cluster / task_logs）。"""
-    return Tool(
-        name="clean_cache",
-        description=(
-            "清理 llmsec 的派生缓存。可清理：elo_cache（Elo 派生缓存）、"
-            "predictors（预测器 pkl）、feature_cluster（特征+聚类产物）、"
-            "task_logs（任务日志）。这些都是可重建的缓存（非权威数据）。"
-            "用户说「清缓存/清 elo 缓存/清预测器」时用此工具。"
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "categories": {
-                    "type": "array", "items": {"type": "string"},
-                    "description": "要清理的类别: elo_cache / predictors / feature_cluster / task_logs",
-                },
-            },
-            "required": ["categories"],
-        },
-        call=lambda args: _do_clean_cache(args),
-    )
-
-
-def _do_clean_cache(args: dict) -> dict:
-    """经 invoker 调 llmsec-manage cache clean。"""
-    from control.core.invoker import clean_caches
-    return clean_caches(args["categories"])
-
-
-def _tool_delete_runs():
-    """删除 run 历史（可选同时删 R 矩阵列）。"""
-    return Tool(
-        name="delete_runs",
-        description=(
-            "删除评测 run 历史（软删除到 .trash/ 可恢复）。可选同时从全局 R 矩阵删除该模型的观测列"
-            "（delete_r=True）。用户说「删 run/清除历史/清除某模型数据」时用此工具。"
-            "⚠ delete_r=True 是极危险操作——删除全局 R 观测不可恢复。"
-        ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "names": {
-                    "type": "array", "items": {"type": "string"},
-                    "description": "要删除的 run 名（如 ['2026-08-11_120000/minimax']）",
-                },
-                "delete_r": {"type": "boolean", "description": "是否同时删 R 矩阵中该模型列（极危险）", "default": False},
-            },
-            "required": ["names"],
-        },
-        call=lambda args: _do_delete_runs(args),
-    )
-
-
-def _do_delete_runs(args: dict) -> dict:
-    """经 invoker 调 llmsec-manage runs delete。"""
-    from control.core.invoker import delete_runs
-    return delete_runs(args["names"], delete_r=args.get("delete_r", False))
-
-
 # ============================================================
 # 注册表（模块级单例：tool 实例稳定，便于 monkeypatch 单测与外部 agent 复用）
 # ============================================================
@@ -334,7 +185,12 @@ _REGISTRY: list[Tool] | None = None
 
 
 def all_tools() -> list[Tool]:
-    """返回全部已注册 tool（首次调用构建，之后复用同一批实例）。"""
+    """返回全部已注册 tool（首次调用构建，之后复用同一批实例）。
+
+    工具集 = 查询类（list_runs/compare_runs/review_run/list_workspaces）
+           + 简单管理类（fork_workspace/delete_workspace）。
+    执行类操作（merge/clean_cache/delete_runs/orchestrate）由尚书省 capabilities 承担。
+    """
     global _REGISTRY
     if _REGISTRY is None:
         _REGISTRY = [
@@ -344,10 +200,6 @@ def all_tools() -> list[Tool]:
             _tool_fork_workspace(),
             _tool_list_workspaces(),
             _tool_delete_workspace(),
-            _tool_delete_runs(),
-            _tool_clean_cache(),
-            _tool_orchestrate(),
-            _tool_merge(),
         ]
     return _REGISTRY
 

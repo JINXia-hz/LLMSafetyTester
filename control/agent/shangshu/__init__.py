@@ -13,7 +13,7 @@
   execute_plan(plan_id, on_progress) → Plan   执行（executor.py）
   approve_plan(plan_id) → Plan                用户准奏（设状态）
   reject_plan(plan_id) → Plan                 用户驳回
-  get_plan(plan_id) / load_plan(plan_id)      查询
+  load_plan(plan_id) / list_plans()           查询
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ from control.agent.shangshu.plan import (
     P_REJECTED,
     Plan,
     Step,
-    get_plan,
     list_plans,
     load_plan,
     make_plan_from_llm,
@@ -63,7 +62,7 @@ def reject_plan(plan_id: str) -> Plan:
 
 __all__ = [
     "draft_plan", "execute_plan", "approve_plan", "reject_plan",
-    "get_plan", "load_plan", "list_plans", "save_plan", "reset_plans",
+    "load_plan", "list_plans", "save_plan", "reset_plans",
     "make_plan_from_llm",
     "Plan", "Step",
     "P_DRAFTED", "P_APPROVED", "P_EXECUTING", "P_DONE", "P_REJECTED",

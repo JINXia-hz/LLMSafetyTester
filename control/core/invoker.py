@@ -132,13 +132,6 @@ def delete_runs(names: list[str], *, delete_r: bool = False) -> dict:
     return res.json or {}
 
 
-def list_caches() -> list[dict]:
-    """列出各类缓存占用（经 llmsec-manage cache list --json）。"""
-    res = _run(_manage_argv(["cache", "list", "--json"])).require_ok()
-    data = res.json or {}
-    return data.get("categories", []) if isinstance(data, dict) else data
-
-
 def clean_caches(categories: list[str], *, yes: bool = True) -> dict:
     """清理缓存（经 llmsec-manage cache clean）。默认 yes=True 直接执行（已过门下省确认）。"""
     sub = ["cache", "clean", *categories, "--yes", "--json"]

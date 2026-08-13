@@ -237,7 +237,7 @@ def _hand_to_shangshu(intent: str, messages: list[dict], session_id: str) -> dic
 
         return {
             "plan_id": plan.id,
-            "steps": [s.to_dict() if hasattr(s, 'to_dict') else _step_dict(s) for s in plan.steps],
+            "steps": [_step_dict(s) for s in plan.steps],
             "rendered_plan": rendered,
         }
     except Exception as e:
@@ -247,7 +247,7 @@ def _hand_to_shangshu(intent: str, messages: list[dict], session_id: str) -> dic
 
 
 def _step_dict(s) -> dict:
-    """Step 对象转 dict（plan.py 的 Step 不是 dataclass to_dict，手动转）。"""
+    """Step 对象转 dict（Step 无 to_dict 方法，手动转）。"""
     return {
         "id": s.id, "capability": s.capability, "args": s.args,
         "depends_on": s.depends_on, "description": s.description,

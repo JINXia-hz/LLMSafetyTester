@@ -213,24 +213,6 @@ def edit_key(name: str, key: str, value: str) -> dict:
     return {"name": name, "key": key, "value": value, "keys": sorted(keys.keys())}
 
 
-def remove_key(name: str, key: str) -> dict:
-    """删除快照内某个 key。"""
-    snap_dir = ENV_SNAPSHOTS_DIR / name
-    env_file = snap_dir / ".env"
-    if not env_file.exists():
-        raise FileNotFoundError(f"快照不存在: {name}")
-    keys = _parse_env(env_file.read_text(encoding="utf-8"))
-    if key not in keys:
-        raise KeyError(f"key 不存在于快照: {key}")
-    del keys[key]
-    env_file.write_text(_serialize_env(keys), encoding="utf-8")
-    with _INDEX_LOCK:
-        idx = _load_index()
-        if name in idx.get("snapshots", {}):
-            idx["snapshots"][name]["keys"] = sorted(keys.keys())
-            _save_index(idx)
-    return {"name": name, "key": key, "removed": True, "keys": sorted(keys.keys())}
-
 
 def delete(name: str) -> dict:
     """删除快照（目录 + 索引项）。"""

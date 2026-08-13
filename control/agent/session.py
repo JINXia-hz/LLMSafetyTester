@@ -74,18 +74,6 @@ def append(session_id: str, role: str, content: str, **extra) -> None:
             s["messages"].pop(0)
 
 
-def append_raw(session_id: str, message: dict) -> None:
-    """追加一条已构造好的完整消息（含 tool_calls 等复杂结构）。"""
-    with _LOCK:
-        s = _SESSIONS.get(session_id)
-        if s is None:
-            return
-        s["messages"].append(message)
-        s["last_active"] = time.time()
-        while len(s["messages"]) > _HISTORY_MAX and s["messages"][0]["role"] != "system":
-            s["messages"].pop(0)
-
-
 def reset(session_id: str) -> None:
     """清空 session 历史（用户点「重新开始」）。"""
     with _LOCK:
@@ -94,9 +82,3 @@ def reset(session_id: str) -> None:
                 "messages": [{"role": "system", "content": _SYSTEM_PROMPT}],
                 "last_active": time.time(),
             }
-
-
-def session_count() -> int:
-    """当前活跃 session 数（诊断用）。"""
-    with _LOCK:
-        return len(_SESSIONS)

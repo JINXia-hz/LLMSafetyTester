@@ -27,25 +27,19 @@ from threading import Lock
 ZHONGSHU = "中书省"
 SHANGSHU = "尚书省"
 MENXIA = "门下省"
-USER = "用户"
 ALL = "全员"  # 广播
 
 # 消息 kind 常量（三省约定的词汇表）
-# 中书省 → 尚书省
-KIND_PLAN_REQUEST = "plan_request"        # 中书省请尚书省拟案
-# 尚书省 → 中书省（经总线回呈）
-KIND_PLAN_DRAFTED = "plan_drafted"        # 尚书省拟好了 Plan
+# 尚书省广播：Plan 执行进度 + 每步状态
 KIND_PLAN_PROGRESS = "plan_progress"      # Plan 执行进度更新（某步状态变化）
 KIND_PLAN_DONE = "plan_done"              # Plan 全部执行完
-# 尚书省 → 门下省（每步执行前后广播）
 KIND_STEP_START = "step_start"            # 某步即将执行（门下省审查时机）
 KIND_STEP_DONE = "step_done"              # 某步成功
 KIND_STEP_BLOCKED = "step_blocked"        # 某步被封驳
 KIND_STEP_FAILED = "step_failed"          # 某步执行异常
-# 门下省 → 中书省 / 尚书省
+# 门下省 → 中书省
 KIND_REVIEW = "review"                    # 门下省审查简报（plan_done 后自动，或主动）
 KIND_BLOCK = "block"                      # 门下省封驳令（附 ticket）
-KIND_UNBLOCK = "unblock"                  # 用户准奏后放行
 # 用户经中书省
 KIND_PLAN_APPROVED = "plan_approved"      # 用户准奏
 KIND_PLAN_REJECTED = "plan_rejected"      # 用户驳回

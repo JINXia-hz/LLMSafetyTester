@@ -169,11 +169,6 @@ def list_workspaces() -> list[dict]:
     return ws
 
 
-def get_workspace(name: str) -> dict | None:
-    idx = _load_index()
-    return idx.get("workspaces", {}).get(name)
-
-
 def mark_merged(name: str, target: str) -> bool:
     """标记工作区已 merge 到某目标（merge tool 执行后调）。
 

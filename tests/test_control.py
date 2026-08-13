@@ -298,58 +298,6 @@ class TestMergeStatusClosure:
         assert idx2["workspaces"]["ab1"]["merged_to"] == "global"
         assert idx2["workspaces"]["ab1"]["merged_at"] is not None
 
-    def test_merge_tool_confirm_marks_workspace_merged(self, tmp_path, monkeypatch):
-        """merge tool confirm=True 执行后回写 ws 源的 merged 状态。"""
-        from control import config
-        from control.agent import tools
-        from control.core import invoker
-        from control.core import workspace as ws
-        ws_root = tmp_path / "workspaces"
-        ws_root.mkdir()
-        monkeypatch.setattr(config, "WORKSPACES_DIR", ws_root)
-        monkeypatch.setattr(ws, "WORKSPACES_DIR", ws_root)
-        idx = {"workspaces": {"ab1": {"name": "ab1", "merged": False}}}
-        (ws_root / "_index.json").write_text(json.dumps(idx), encoding="utf-8")
-
-        # mock _do_merge 经 invoker._run 的 subprocess 调用，返回 executed 结果
-        _FakeRes = type("R", (), {
-            "require_ok": lambda self: self, "json": {"action": "merge", "dry_run": False},
-            "returncode": 0, "stdout": "", "stderr": "", "elapsed_s": 0,
-        })
-        monkeypatch.setattr(invoker, "_run", lambda argv: _FakeRes())
-        tools.reset_registry()
-        result = tools.call_tool("merge", {
-            "sources": ["ws:ab1"], "target": "global", "confirm": True,
-        })
-        assert result["dry_run"] is False
-        # _index.json 已回写
-        idx2 = json.loads((ws_root / "_index.json").read_text(encoding="utf-8"))
-        assert idx2["workspaces"]["ab1"]["merged"] is True
-        assert idx2["workspaces"]["ab1"]["merged_to"] == "global"
-
-    def test_merge_tool_dry_run_does_not_mark(self, tmp_path, monkeypatch):
-        """merge tool confirm=False（dry-run）不回写 merged 状态。"""
-        from control import config
-        from control.agent import tools
-        from control.core import invoker
-        from control.core import workspace as ws
-        ws_root = tmp_path / "workspaces"
-        ws_root.mkdir()
-        monkeypatch.setattr(config, "WORKSPACES_DIR", ws_root)
-        monkeypatch.setattr(ws, "WORKSPACES_DIR", ws_root)
-        idx = {"workspaces": {"ab1": {"name": "ab1", "merged": False}}}
-        (ws_root / "_index.json").write_text(json.dumps(idx), encoding="utf-8")
-
-        _FakeRes = type("R", (), {
-            "require_ok": lambda self: self, "json": {"action": "merge", "dry_run": True},
-            "returncode": 0, "stdout": "", "stderr": "", "elapsed_s": 0,
-        })
-        monkeypatch.setattr(invoker, "_run", lambda argv: _FakeRes())
-        tools.reset_registry()
-        tools.call_tool("merge", {"sources": ["ws:ab1"], "target": "global", "confirm": False})
-        idx2 = json.loads((ws_root / "_index.json").read_text(encoding="utf-8"))
-        assert idx2["workspaces"]["ab1"]["merged"] is False
-
 
 # ============================================================
 # workspace：fork 编排（mock invoker，验证流程 + 隔离契约）
@@ -530,15 +478,6 @@ class TestSession:
         assert len(msgs2) == 3  # system + user + assistant
         assert msgs2[1]["content"] == "帮我 fork"
         assert msgs2[2]["content"] == "已 fork"
-
-    def test_append_raw_with_tool_calls(self):
-        from control.agent import session as sess
-        sess._SESSIONS.clear()
-        sid, _ = sess.get_or_create(None)
-        sess.append_raw(sid, {"role": "assistant", "content": None, "tool_calls": [{"id": "x"}]})
-        _, msgs = sess.get_or_create(sid)
-        assert len(msgs) == 2  # system + assistant
-        assert msgs[1].get("tool_calls")
 
     def test_reset_clears_history(self):
         from control.agent import session as sess

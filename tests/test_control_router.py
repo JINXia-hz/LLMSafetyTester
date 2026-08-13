@@ -84,8 +84,11 @@ class TestControlRouterSmoke:
         r = _client().get("/api/control/tools")
         assert r.status_code == 200
         names = {t["function"]["name"] for t in r.json()["tools"]}
+        # 中书省保留 6 个查询/管理工具（执行类在 /api/control/capabilities）
         assert {"list_runs", "compare_runs", "fork_workspace", "list_workspaces",
-                "delete_workspace", "orchestrate", "merge"} <= names
+                "delete_workspace", "review_run"} <= names
+        assert "orchestrate" not in names  # 执行类已移至尚书省 capabilities
+        assert "merge" not in names
         for t in r.json()["tools"]:
             assert t["type"] == "function" and "parameters" in t["function"]
 

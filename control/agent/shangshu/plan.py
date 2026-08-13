@@ -61,12 +61,6 @@ class Plan:
     finished: float | None = None
     summary: str = ""                # 执行完毕的总结（门下省简报附此）
 
-    def step_by_id(self, sid: str) -> Step | None:
-        for s in self.steps:
-            if s.id == sid:
-                return s
-        return None
-
     def topological_layers(self) -> list[list[Step]]:
         """按依赖拓扑排序，返回分层列表（同层无依赖关系，可并行）。
 
@@ -131,12 +125,6 @@ def save_plan(plan: Plan) -> None:
         _PLANS[plan.id] = plan
     p = _plans_dir() / f"{plan.id}.json"
     p.write_text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def get_plan(plan_id: str) -> Plan | None:
-    """从内存注册表取 Plan（不存在返回 None）。"""
-    with _LOCK:
-        return _PLANS.get(plan_id)
 
 
 def load_plan(plan_id: str) -> Plan | None:

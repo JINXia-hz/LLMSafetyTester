@@ -85,7 +85,6 @@ class MergeRequest(BaseModel):
 class ChatRequest(BaseModel):
     text: str
     session_id: str | None = None
-    confirm_token: str | None = None
 
 
 class ReviewRequest(BaseModel):
