@@ -47,13 +47,21 @@ KIND_PLAN_REJECTED = "plan_rejected"      # 用户驳回
 
 @dataclass
 class BusMessage:
-    """总线消息。"""
+    """总线消息。
+
+    公共信封字段（plan_id / intent / session_id）让每条消息自解释——
+    前端轮询 bus feed 时不需要额外反查 Plan 就知道"这是哪个计划的、为了什么"。
+    """
     from_dept: str               # 发送部门
     to_dept: str                 # 接收部门（ALL=广播）
     kind: str                    # 消息类型（KIND_* 常量）
     payload: dict                # 消息体（结构由 kind 约定）
     ts: float = field(default_factory=time.time)
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    # 公共信封（可选，plan 相关消息必带）
+    plan_id: str | None = None
+    intent: str | None = None
+    session_id: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -135,3 +143,27 @@ def reset_bus() -> None:
     """重置单例（测试用）。"""
     global _BUS
     _BUS = None
+
+
+def notify(
+    kind: str,
+    *,
+    from_dept: str,
+    to_dept: str = ALL,
+    plan_id: str | None = None,
+    intent: str | None = None,
+    session_id: str | None = None,
+    **payload,
+) -> None:
+    """构造带公共信封的 BusMessage 并发布。三省统一用这个发消息。
+
+    payload 的 key-value 直接成为消息体，无需手动包 dict。
+    例：notify(KIND_STEP_START, from_dept=SHANGSHU, plan_id=p.id, intent=p.intent,
+              step_id=s.id, capability=s.capability)
+    """
+    msg = BusMessage(
+        from_dept=from_dept, to_dept=to_dept, kind=kind,
+        payload=dict(payload),
+        plan_id=plan_id, intent=intent, session_id=session_id,
+    )
+    get_bus().publish(msg)

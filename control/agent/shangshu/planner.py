@@ -1,7 +1,12 @@
 """control.agent.shangshu.planner — 尚书省拟案（draft_plan）。
 
-收中书省转交的用户意图，经 LLM + submit_plan 工具产出结构化 Plan。
-LLM 用尚书省专属 system prompt（含完整能力文档），在能力清单内组合步骤。
+收中书省转交的用户意图，经 LLM 产出结构化 Plan。
+
+拟案时 LLM 可先查询项目现状（list_runs / list_workspaces / list_env_snapshots /
+get_env_config），再调 submit_plan 提交计划。这是 ReAct 循环（最多 4 轮）：
+  轮 1: LLM 可能先查"现在有哪些 run / 配了什么模型"
+  轮 2: LLM 基于查询结果调 submit_plan 提交计划
+  （或直接调 submit_plan 不查，也行）
 """
 
 from __future__ import annotations
@@ -12,6 +17,9 @@ from control.agent.llm import chat_with_tools, is_llm_configured
 from control.agent.shangshu import plan as plan_mod
 from control.agent.shangshu.docs import build_system_prompt
 
+# 拟案时可用的查询工具（只读，让 LLM 了解项目现状）
+_QUERY_CAPS = {"list_runs", "list_workspaces", "list_env_snapshots", "get_env_config"}
+
 
 def _submit_plan_schema() -> dict:
     """submit_plan 工具的 schema（约束 LLM 产出结构化 Plan）。"""
@@ -20,8 +28,8 @@ def _submit_plan_schema() -> dict:
         "function": {
             "name": "submit_plan",
             "description": (
-                "提交一个结构化执行计划。你必须在收到指令后**只调用此工具一次**，"
-                "把拆解好的步骤序列提交。不要先调别的工具。"
+                "提交一个结构化执行计划。你应该在充分了解项目现状后调用此工具。"
+                "如果需要查 run 历史/工作区/配置，先调查询工具，再调此工具。"
             ),
             "parameters": {
                 "type": "object",
@@ -41,7 +49,7 @@ def _submit_plan_schema() -> dict:
                                 "depends_on": {
                                     "type": "array",
                                     "items": {"type": "string"},
-                                    "description": "前置步骤 id（空数组=无依赖，可立即执行）",
+                                    "description": "前置步骤 id（空数组=无依赖）",
                                 },
                                 "description": {"type": "string", "description": "一句话说明这步干什么"},
                             },
@@ -55,54 +63,98 @@ def _submit_plan_schema() -> dict:
     }
 
 
-def draft_plan(intent: str, context: dict | None = None) -> plan_mod.Plan:
+def _query_tool_schemas() -> list[dict]:
+    """从 capabilities 清单派生查询工具 schema（只读类）。"""
+    from control.agent.shangshu.capabilities import all_capabilities
+    return [c.to_schema() for c in all_capabilities() if c.name in _QUERY_CAPS]
+
+
+def _run_query_tool(name: str, args: dict) -> str:
+    """执行查询工具，返回截断的结果字符串（给 LLM 回灌）。"""
+    from control.agent.shangshu.capabilities import call
+    try:
+        result = call(name, args)
+        return json.dumps(result, ensure_ascii=False, default=str)[:1200]
+    except Exception as e:
+        return f"查询失败: {type(e).__name__}: {e}"
+
+
+def draft_plan(intent: str, *, session_id: str | None = None) -> plan_mod.Plan:
     """中书省转交的意图 → 结构化 Plan。
 
-    用尚书省专属 LLM 会话（完整能力文档），经 submit_plan 工具产出 Plan。
-    LLM 只调一次 submit_plan 就返回（不做 ReAct 多轮）。
+    ReAct 循环（最多 4 轮）：LLM 可先查项目现状再拟案。
 
     Args:
         intent: 用户意图（中书省转交时已清晰化）
-        context: 可选上下文（如当前有哪些 workspace/env_snapshot，帮 LLM 决策）
+        session_id: 关联 session（写入 Plan 供文牍追溯用户身份）
 
     Returns:
         Plan（已持久化，status=drafted，待用户准奏）
-
-    Raises:
-        RuntimeError: LLM 未配置或拟案失败
     """
     if not is_llm_configured():
         raise RuntimeError("尚书省拟案需要 LLM 配置（GENERATOR_* 环境变量）")
 
-    context_str = ""
-    if context:
-        context_str = "\n\n[上下文信息]\n"
-        for k, v in context.items():
-            context_str += f"- {k}: {json.dumps(v, ensure_ascii=False)[:500] if not isinstance(v, str) else v[:500]}\n"
-
     messages = [
         {"role": "system", "content": build_system_prompt()},
-        {"role": "user", "content": f"请为以下指令拟定执行计划：\n\n{intent}{context_str}"},
+        {"role": "user", "content": f"请为以下指令拟定执行计划：\n\n{intent}"},
     ]
 
+    tools_schema = [_submit_plan_schema()] + _query_tool_schemas()
+
+    for _round in range(4):
+        resp = chat_with_tools(messages, tools=tools_schema)
+        msg = resp.choices[0].message
+
+        if not msg.tool_calls:
+            # LLM 没调工具（不应该发生，因为 tool_choice 默认 auto + 有 submit_plan）
+            raise RuntimeError(f"尚书省未产出 Plan：{msg.content[:200]}")
+
+        # 检查是否调了 submit_plan
+        for tc in msg.tool_calls:
+            if tc.function.name == "submit_plan":
+                return _extract_plan(tc, intent, session_id)
+
+        # 否则执行查询工具，结果回灌，继续循环
+        messages.append({
+            "role": "assistant",
+            "content": msg.content,
+            "tool_calls": [
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                for tc in msg.tool_calls
+            ],
+        })
+        for tc in msg.tool_calls:
+            name = tc.function.name
+            try:
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+            except json.JSONDecodeError:
+                args = {}
+            result_str = _run_query_tool(name, args) if name in _QUERY_CAPS else f"未知工具: {name}"
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_str})
+
+    # 达到轮次仍未提交 Plan → 最后一轮强制只要 submit_plan
+    messages.append({"role": "user", "content": "请立即调 submit_plan 提交计划。"})
     resp = chat_with_tools(messages, tools=[_submit_plan_schema()], tool_choice="required")
     msg = resp.choices[0].message
+    if msg.tool_calls:
+        for tc in msg.tool_calls:
+            if tc.function.name == "submit_plan":
+                return _extract_plan(tc, intent, session_id)
+    raise RuntimeError("尚书省拟案超时（4 轮查询后仍未提交 Plan）")
 
-    if not msg.tool_calls:
-        raise RuntimeError(f"尚书省未产出 Plan（LLM 未调 submit_plan）：{msg.content[:200]}")
 
-    tc = msg.tool_calls[0]
+def _extract_plan(tc, intent: str, session_id: str | None) -> plan_mod.Plan:
+    """从 submit_plan 工具调用提取 Plan。"""
     try:
         args = json.loads(tc.function.arguments) if tc.function.arguments else {}
     except json.JSONDecodeError as e:
         raise RuntimeError(f"submit_plan 参数解析失败: {e}") from e
 
-    # 校验 + 构造 Plan
     steps_raw = args.get("steps", [])
     if not steps_raw:
         raise RuntimeError("submit_plan 返回空步骤列表")
 
-    # 校验每个步骤的 capability 存在
     from control.agent.shangshu.capabilities import capability_by_name
     for s in steps_raw:
         cap_name = s.get("capability", "")
@@ -110,5 +162,6 @@ def draft_plan(intent: str, context: dict | None = None) -> plan_mod.Plan:
             raise RuntimeError(f"步骤 {s.get('id')} 引用了未知能力: {cap_name}")
 
     plan = plan_mod.make_plan_from_llm(args.get("intent", intent), steps_raw)
+    plan.session_id = session_id
     plan_mod.save_plan(plan)
     return plan

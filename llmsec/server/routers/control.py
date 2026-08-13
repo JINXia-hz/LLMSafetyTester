@@ -290,10 +290,14 @@ def api_plan_reject(req: PlanRejectRequest):
 
 @router.post("/api/control/plan/block/approve")
 def api_block_approve(req: BlockApproveRequest):
-    """用户准奏某步封驳（放行该步，下次执行时重试）。"""
+    """用户准奏某步封驳（放行该步，下次执行时重试）。写文牍 step_unblocked。"""
+    from control.agent import gazette
     ok = menxia.approve_block(req.plan_id, req.step_id)
     if not ok:
         raise HTTPException(status_code=404, detail="封驳令不存在（可能已放行或已过期）")
+    gazette.append_event(req.plan_id, gazette.EV_STEP_UNBLOCKED, "用户",
+                         step_id=req.step_id,
+                         detail={"capability": "放行重试"})
     return {"plan_id": req.plan_id, "step_id": req.step_id, "approved": True}
 
 

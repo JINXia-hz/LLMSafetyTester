@@ -47,6 +47,10 @@ class Step:
     result: dict | None = None       # 执行结果（成功时）
     error: str | None = None         # 失败原因
     ticket: dict | None = None       # 封驳令（blocked 时）
+    # 执行时间戳（executor 填写）
+    started: float | None = None     # 执行开始时间
+    finished: float | None = None    # 执行结束时间
+    block_history: list[dict] = field(default_factory=list)  # 封驳历史（append，不覆盖）
 
 
 @dataclass
@@ -60,6 +64,8 @@ class Plan:
     approved: float | None = None
     finished: float | None = None
     summary: str = ""                # 执行完毕的总结（门下省简报附此）
+    session_id: str | None = None   # 关联 session（用户身份追溯）
+    started: float | None = None    # 执行开始时间
 
     def topological_layers(self) -> list[list[Step]]:
         """按依赖拓扑排序，返回分层列表（同层无依赖关系，可并行）。
@@ -92,13 +98,16 @@ class Plan:
             "created": self.created,
             "approved": self.approved,
             "finished": self.finished,
+            "started": self.started,
             "summary": self.summary,
+            "session_id": self.session_id,
             "steps": [
                 {
                     "id": s.id, "capability": s.capability, "args": s.args,
                     "depends_on": s.depends_on, "description": s.description,
                     "status": s.status, "result": s.result, "error": s.error,
-                    "ticket": s.ticket,
+                    "ticket": s.ticket, "started": s.started, "finished": s.finished,
+                    "block_history": s.block_history,
                 }
                 for s in self.steps
             ],
@@ -146,6 +155,7 @@ def _from_json(d: dict) -> Plan:
         id=d["id"], intent=d.get("intent", ""), status=d.get("status", P_DRAFTED),
         created=d.get("created", time.time()), approved=d.get("approved"),
         finished=d.get("finished"), summary=d.get("summary", ""),
+        session_id=d.get("session_id"), started=d.get("started"),
     )
     for sd in d.get("steps", []):
         plan.steps.append(Step(
@@ -153,6 +163,8 @@ def _from_json(d: dict) -> Plan:
             depends_on=sd.get("depends_on", []), description=sd.get("description", ""),
             status=sd.get("status", S_PENDING), result=sd.get("result"),
             error=sd.get("error"), ticket=sd.get("ticket"),
+            started=sd.get("started"), finished=sd.get("finished"),
+            block_history=sd.get("block_history", []),
         ))
     with _LOCK:
         _PLANS[plan.id] = plan

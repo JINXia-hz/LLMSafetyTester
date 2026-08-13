@@ -125,7 +125,9 @@
       box-shadow: 0 0 0 1px rgba(0,0,0,.18), inset 0 0 0 1.5px rgba(248,239,216,.35);
     }
     /* 侧边栏：石青窄列 ↔ 悬停整栏展开；印章单字 + 同首字中文标签 */
-    aside { width: 64px; overflow: hidden; transition: width .25s ease; }
+    /* sticky 钉住视口：不随主区上下滚动，仍留在文档流内（悬停展宽行为不变） */
+    aside { width: 64px; overflow: hidden; transition: width .25s ease;
+      position: sticky; top: 0; height: 100vh; align-self: flex-start; flex: none; }
     aside:hover { width: 200px; }
     .side-row { display: flex; align-items: center; gap: 12px; padding: 6px 17px; white-space: nowrap; }
     .nav-item { cursor: pointer; }

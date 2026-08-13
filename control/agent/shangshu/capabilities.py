@@ -202,6 +202,22 @@ def _h_merge_env_to_global(args: dict) -> dict:
     return env_snapshot.merge_to_global(args["name"])
 
 
+def _h_get_env_config(args: dict) -> dict:
+    """只读查询当前 .env 的关键配置（脱敏 API key）。供尚书省拟案时了解项目现状。"""
+    from control.core.env_snapshot import _read_global_env
+    keys_raw = _read_global_env()
+    # 只返回关键配置 key，API key 脱敏
+    safe = {}
+    for k, v in keys_raw.items():
+        if "API_KEY" in k or "SECRET" in k:
+            safe[k] = v[:4] + "****" if len(v) > 4 else "****"
+        elif k in ("TARGETS", "JUDGE_MODEL", "GENERATOR_MODEL", "TARGET_MODEL",
+                    "JUDGE_BASE_URL", "GENERATOR_BASE_URL", "TARGET_BASE_URL",
+                    "TARGET_TYPE") or k.startswith("TARGET_"):
+            safe[k] = v
+    return safe
+
+
 # ============================================================
 # block_message 判据函数（封驳文案由 capability 自己提供）
 # ============================================================
@@ -626,6 +642,13 @@ def _build() -> list[Capability]:
                 "required": ["run"],
             },
             handler=_h_request_review,
+            risk_level="low",
+        ),
+        Capability(
+            name="get_env_config",
+            description="只读查询当前 .env 的关键配置（TARGETS/JUDGE_MODEL/GENERATOR_MODEL 等，API key 脱敏）。了解项目现状用。",
+            parameters={"type": "object", "properties": {}},
+            handler=_h_get_env_config,
             risk_level="low",
         ),
     ]

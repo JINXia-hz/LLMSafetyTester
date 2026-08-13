@@ -178,13 +178,30 @@ def _react_loop(user_text: str, messages: list[dict], session_id: str,
 
 
 def _hand_to_shangshu(intent: str, messages: list[dict], session_id: str) -> dict | None:
-    """转交尚书省拟案，再润色成给用户看的方案。"""
+    """转交尚书省拟案，再润色成给用户看的方案。
+
+    文牍流程：下旨 → 拟案 → 记录拟案完成。
+    """
     try:
+        from control.agent import gazette
         from control.agent.shangshu import draft_plan
 
-        context = _collect_context()
-        plan = draft_plan(intent, context=context)
+        # 下旨：记录用户原始指令到文牍
+        gazette.append_event("__pending__", gazette.EV_COMMISSION, "用户",
+                             session_id=session_id,
+                             detail={"user_text": intent})
+
+        plan = draft_plan(intent, session_id=session_id)
         rendered = _render_plan_for_user(plan, messages)
+
+        # 记录拟案完成
+        gazette.append_event(plan.id, gazette.EV_PLAN_DRAFTED, "尚书省",
+                             session_id=session_id, intent=plan.intent,
+                             detail={"steps_count": len(plan.steps),
+                                     "steps_summary": [
+                                         {"id": s.id, "capability": s.capability,
+                                          "description": s.description}
+                                         for s in plan.steps]})
 
         return {
             "plan_id": plan.id,
@@ -204,22 +221,6 @@ def _step_dict(s) -> dict:
         "depends_on": s.depends_on, "description": s.description,
         "status": s.status,
     }
-
-
-def _collect_context() -> dict:
-    """收集当前状态上下文（帮尚书省拟案）。失败静默跳过。"""
-    ctx = {}
-    try:
-        from control.core.workspace import list_workspaces
-        ctx["workspaces"] = [w["name"] for w in list_workspaces()]
-    except Exception:
-        pass
-    try:
-        from control.core.env_snapshot import list_snapshots
-        ctx["env_snapshots"] = [s["name"] for s in list_snapshots()]
-    except Exception:
-        pass
-    return ctx
 
 
 def _render_plan_for_user(plan, messages: list[dict]) -> str:

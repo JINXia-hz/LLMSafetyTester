@@ -37,7 +37,7 @@ from control.agent.shangshu.planner import draft_plan
 
 
 def approve_plan(plan_id: str) -> Plan:
-    """用户准奏 Plan：状态 drafted → approved（不执行，等 execute_plan 调用）。"""
+    """用户准奏 Plan：状态 drafted → approved + 文牍记录 + 总线通知。"""
     plan = load_plan(plan_id)
     if plan is None:
         raise KeyError(f"Plan 不存在: {plan_id}")
@@ -47,16 +47,30 @@ def approve_plan(plan_id: str) -> Plan:
     plan.status = P_APPROVED
     plan.approved = time.time()
     save_plan(plan)
+    from control.agent import gazette
+    from control.agent.bus import KIND_PLAN_APPROVED, SHANGSHU, USER, notify
+    gazette.append_event(plan.id, gazette.EV_PLAN_APPROVED, USER,
+                         session_id=plan.session_id, intent=plan.intent,
+                         detail={"approved_at": plan.approved})
+    notify(KIND_PLAN_APPROVED, from_dept=USER, to_dept=SHANGSHU,
+           plan_id=plan.id, intent=plan.intent, session_id=plan.session_id)
     return plan
 
 
 def reject_plan(plan_id: str) -> Plan:
-    """用户驳回 Plan。"""
+    """用户驳回 Plan + 文牍记录 + 总线通知。"""
     plan = load_plan(plan_id)
     if plan is None:
         raise KeyError(f"Plan 不存在: {plan_id}")
     plan.status = P_REJECTED
     save_plan(plan)
+    from control.agent import gazette
+    from control.agent.bus import KIND_PLAN_REJECTED, USER, notify
+    gazette.append_event(plan.id, gazette.EV_PLAN_REJECTED, USER,
+                         session_id=plan.session_id, intent=plan.intent,
+                         detail={})
+    notify(KIND_PLAN_REJECTED, from_dept=USER, plan_id=plan.id,
+           intent=plan.intent, session_id=plan.session_id)
     return plan
 
 

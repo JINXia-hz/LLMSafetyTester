@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 from control.agent.bus import (
-    ALL,
     KIND_BLOCK,
     KIND_PLAN_DONE,
     KIND_REVIEW,
@@ -22,6 +21,7 @@ from control.agent.bus import (
     ZHONGSHU,
     BusMessage,
     get_bus,
+    notify,
 )
 from control.agent.menxia.block import (
     get_block,
@@ -78,19 +78,22 @@ def reinit_menxia() -> None:
 
 
 def _on_step_start(msg: BusMessage) -> None:
-    """步骤开始前审查。dangerous → 发封驳令 + 发 KIND_BLOCK 消息。"""
+    """步骤开始前审查。dangerous → 发封驳令 + notify(KIND_BLOCK)。
+
+    信封字段（msg.plan_id / msg.intent / msg.session_id）让门下省知道
+    这步服务的是什么意图——不再盲判。
+    """
     payload = msg.payload
     capability_name = payload.get("capability", "")
     risk_level = payload.get("risk_level", "low")
-    plan_id = payload.get("plan_id", "")
+    plan_id = msg.plan_id or payload.get("plan_id", "")
     step_id = payload.get("step_id", "")
     args = payload.get("args", {})
 
-    # 从 capability 清单取 block_message 判据
     from control.agent.shangshu.capabilities import capability_by_name
     cap = capability_by_name(capability_name)
     if cap is None:
-        return  # 未知 capability，不审查（executor 会报错）
+        return
 
     assessment = assess_step(cap, args)
     if assessment is None:
@@ -99,29 +102,24 @@ def _on_step_start(msg: BusMessage) -> None:
     # 已有封驳令且未被清除 → 保持封驳
     existing = get_block(plan_id, step_id)
     if existing is not None:
-        bus = get_bus()
-        bus.publish(BusMessage(
-            from_dept=MENXIA, to_dept=ALL, kind=KIND_BLOCK,
-            payload={"plan_id": plan_id, "step_id": step_id,
-                     "ticket": existing.to_dict()},
-        ))
+        notify(KIND_BLOCK, from_dept=MENXIA, plan_id=plan_id,
+               intent=msg.intent, session_id=msg.session_id,
+               step_id=step_id, ticket=existing.to_dict())
         return
 
     ticket = issue_block(plan_id, step_id, capability_name, risk_level, assessment)
-    bus = get_bus()
-    bus.publish(BusMessage(
-        from_dept=MENXIA, to_dept=ALL, kind=KIND_BLOCK,
-        payload={"plan_id": plan_id, "step_id": step_id, "ticket": ticket.to_dict()},
-    ))
+    notify(KIND_BLOCK, from_dept=MENXIA, plan_id=plan_id,
+           intent=msg.intent, session_id=msg.session_id,
+           step_id=step_id, ticket=ticket.to_dict())
 
 
 def _on_plan_done(msg: BusMessage) -> None:
-    """Plan 执行完，自动审查所有产生的 run，呈递简报到中书省面板。"""
-    payload = msg.payload
-    plan_id = payload.get("plan_id", "")
-
+    """Plan 执行完，自动审查所有产生的 run，呈递简报 + 写文牍。"""
+    from control.agent import gazette
     from control.agent.shangshu.capabilities import capability_by_name
     from control.agent.shangshu.plan import load_plan
+
+    plan_id = msg.plan_id or msg.payload.get("plan_id", "")
     plan = load_plan(plan_id)
     if plan is None:
         return
@@ -139,15 +137,18 @@ def _on_plan_done(msg: BusMessage) -> None:
         review = _try_review(run_name)
         if review:
             reviews.append({"step_id": s.id, "review": review})
+            # 写文牍：审查呈递
+            gazette.append_event(plan_id, gazette.EV_REVIEW_FILED, MENXIA,
+                                 step_id=s.id, session_id=msg.session_id, intent=msg.intent,
+                                 detail={"run_name": run_name,
+                                         "digest": (review.get("digest", "") or "")[:500]})
 
     if not reviews:
         return
 
-    bus = get_bus()
-    bus.publish(BusMessage(
-        from_dept=MENXIA, to_dept=ZHONGSHU, kind=KIND_REVIEW,
-        payload={"plan_id": plan_id, "reviews": reviews},
-    ))
+    notify(KIND_REVIEW, from_dept=MENXIA, to_dept=ZHONGSHU,
+           plan_id=plan_id, intent=msg.intent, session_id=msg.session_id,
+           reviews=reviews)
 
 
 def _try_review(run_name: str) -> dict | None:
@@ -161,15 +162,9 @@ def _try_review(run_name: str) -> dict | None:
 
 def _on_step_failed(msg: BusMessage) -> None:
     """步骤失败，呈递异常简报到中书省面板。"""
-    payload = msg.payload
-    bus = get_bus()
-    bus.publish(BusMessage(
-        from_dept=MENXIA, to_dept=ZHONGSHU, kind=KIND_REVIEW,
-        payload={
-            "plan_id": payload.get("plan_id", ""),
-            "step_id": payload.get("step_id", ""),
-            "capability": payload.get("capability", ""),
-            "error": payload.get("error", ""),
-            "type": "failure_report",
-        },
-    ))
+    notify(KIND_REVIEW, from_dept=MENXIA, to_dept=ZHONGSHU,
+           plan_id=msg.plan_id, intent=msg.intent, session_id=msg.session_id,
+           step_id=msg.payload.get("step_id", ""),
+           capability=msg.payload.get("capability", ""),
+           error=msg.payload.get("error", ""),
+           type="failure_report")

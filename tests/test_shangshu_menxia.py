@@ -321,8 +321,10 @@ class TestExecutor:
 
     def test_simple_plan_executes(self, tmp_path, monkeypatch):
         """简单 plan（无封驳）执行成功。"""
+        from control.agent import gazette
         from control.agent.shangshu import plan as plan_mod
         monkeypatch.setattr(plan_mod, "_PLANS_DIR", tmp_path / "plans")
+        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
         plan_mod._PLANS_DIR.mkdir(parents=True, exist_ok=True)
         plan_mod.reset_plans()
 
@@ -358,8 +360,10 @@ class TestExecutor:
 
     def test_blocked_step_skips_dependents(self, tmp_path, monkeypatch):
         """被封驳的步骤，其依赖者标 skipped。"""
+        from control.agent import gazette
         from control.agent.shangshu import plan as plan_mod
         monkeypatch.setattr(plan_mod, "_PLANS_DIR", tmp_path / "plans")
+        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
         plan_mod._PLANS_DIR.mkdir(parents=True, exist_ok=True)
         plan_mod.reset_plans()
 
@@ -383,8 +387,10 @@ class TestExecutor:
 
     def test_non_dependent_continues_after_block(self, tmp_path, monkeypatch):
         """被封驳步骤的不依赖者继续执行。"""
+        from control.agent import gazette
         from control.agent.shangshu import plan as plan_mod
         monkeypatch.setattr(plan_mod, "_PLANS_DIR", tmp_path / "plans")
+        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
         plan_mod._PLANS_DIR.mkdir(parents=True, exist_ok=True)
         plan_mod.reset_plans()
 
