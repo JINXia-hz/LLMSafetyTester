@@ -40,8 +40,9 @@ from control.agent import menxia
 from control.agent.bus import get_bus
 from control.agent.llm import is_llm_configured
 from control.agent.shangshu import capabilities as caps_mod
-from control.agent.tools import all_tools
 from control.agent.zhongshu import handle_message as zhongshu_handle
+from control.agent.zhongshu import session as sess
+from control.agent.zhongshu import tools as zs_tools
 from control.config import WORKSPACES_DIR
 from control.core import compare as compare_mod
 from control.core import workspace as ws_mod
@@ -204,7 +205,7 @@ def api_llm_status():
 @router.get("/api/control/tools")
 def api_tools():
     """中书省保留的简单工具 schema。"""
-    return {"tools": [t.to_schema() for t in all_tools()]}
+    return {"tools": [t.to_schema() for t in zs_tools.all_tools()]}
 
 
 @router.get("/api/control/capabilities")
@@ -230,7 +231,6 @@ def api_chat(req: ChatRequest):
 @router.post("/api/control/chat/reset")
 def api_chat_reset(req: ResetRequest):
     """清空 session 历史（重新开始对话）。"""
-    from control.agent import session as sess
     if req.session_id:
         sess.reset(req.session_id)
     return {"session_id": req.session_id, "reset": True}
@@ -239,7 +239,7 @@ def api_chat_reset(req: ResetRequest):
 @router.post("/api/control/review")
 def api_review(req: ReviewRequest):
     """门下省审查：读 run 报告，识别异常，呈递摘要。"""
-    from control.agent.review import review_run
+    from control.agent.menxia import review_run
     try:
         result = review_run(req.run, use_llm=req.use_llm)
         if "error" in result:

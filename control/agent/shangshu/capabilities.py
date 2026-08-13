@@ -1,15 +1,18 @@
 """control.agent.shangshu.capabilities — 尚书省能力清单（固定）。
 
-每个 capability = {name, description, parameters(JSON schema), handler, risk_level, doc}。
-尚书省 LLM 在此清单内组合步骤拟 Plan。
+每个 capability = {name, description, parameters, handler, risk_level, doc,
+                   block_message?, extract_review_target?}。
 
-risk_level（门下省封驳判据）：
-  - low:      无副作用或只读，不封驳
-  - medium:   有副作用但可恢复（清缓存），封驳提示
-  - high:     耗资源/有副作用（跑评估、删 run），封驳确认
-  - critical: 不可逆全局变更（merge 到全局 R、删 R 列、改全局 .env），必封驳
+封驳判据**数据化**：每个 capability 自带 block_message(args) → {summary, detail} | None。
+门下省不再用 switch 判断哪个 capability 危险——由 capability 自己声明。
+- block_message 为 None：该能力永不封驳
+- block_message(args) 返回 None：本次调用放行
+- block_message(args) 返回 dict：封驳，附 summary/detail 文案
 
-handler 签名：handler(args: dict) -> dict（结果结构化，供 Plan 记录 + 门下省审查）
+extract_review_target(result, args) → str | None：从执行结果提取可审查的 run 名，
+供门下省事后审查。为 None 表示该能力不产出可审查的 run。
+
+handler 签名：handler(args: dict) -> dict
 所有 handler 经 control.core.* 调底层，绝不 import llmsec 内部。
 """
 
@@ -27,8 +30,10 @@ class Capability:
     description: str
     parameters: dict                  # JSON schema（给 LLM 看）
     handler: Callable[[dict], Any]    # 执行函数
-    risk_level: str = "low"           # low / medium / high / critical
+    risk_level: str = "low"           # low / medium / high / critical（文档 + 前端展示）
     doc: str = ""                     # 详细文档（参数含义/约束/示例/失败模式）
+    block_message: Callable[[dict], dict | None] | None = None       # 封驳判据（None=永不封驳）
+    extract_review_target: Callable[[dict, dict], str | None] | None = None  # 事后审查的 run 名提取
 
     def to_schema(self) -> dict:
         """OpenAI function-calling 兼容 schema。"""
@@ -51,26 +56,22 @@ def _h_run_evaluation(args: dict) -> dict:
     from control.core import env_snapshot
     from control.core.invoker import run_runner
 
-    # 确定 work-dir：指定 workspace 用它，否则创建临时 work-dir
     ws = args.get("workspace")
     if ws:
         work_dir = WORKSPACES_DIR / ws
         if not work_dir.exists():
             raise FileNotFoundError(f"工作区不存在: {ws}")
     else:
-        # 临时 work-dir（用 run 名或自动命名）
         import time
         wname = args.get("work_dir_name") or f"eval_{int(time.time())}"
         work_dir = OUTPUT_DIR / "eval_runs" / wname
         work_dir.mkdir(parents=True, exist_ok=True)
 
-    # env_snapshot 注入
     env_override = None
     snap = args.get("env_snapshot")
     if snap:
         env_override = env_snapshot.load_env_dict(snap)
 
-    # 参数注入（LLMSEC_PARAM_*）
     if args.get("param_overrides"):
         env_override = dict(env_override or {})
         for k, v in args["param_overrides"].items():
@@ -191,7 +192,7 @@ def _h_delete_env_snapshot(args: dict) -> dict:
 
 def _h_request_review(args: dict) -> dict:
     """请门下省审查某 run。返回审查摘要。"""
-    from control.agent.review import review_run
+    from control.agent.menxia import review_run
     return review_run(args["run"])
 
 
@@ -199,6 +200,126 @@ def _h_merge_env_to_global(args: dict) -> dict:
     """把 .env 快照写回全局 .env（critical）。"""
     from control.core import env_snapshot
     return env_snapshot.merge_to_global(args["name"])
+
+
+# ============================================================
+# block_message 判据函数（封驳文案由 capability 自己提供）
+# ============================================================
+def _blk_run_evaluation(args: dict) -> dict | None:
+    targets = args.get("targets") or [args.get("target", "?")]
+    max_rounds = args.get("max_rounds", 5)
+    return {
+        "summary": f"即将对 {targets} 跑评估（{max_rounds} 轮自适应）",
+        "detail": (
+            f"将消耗 API 额度（调目标模型 + judge），{max_rounds} 轮 × batch_size 次。"
+            f"产物落在隔离 work-dir，不污染全局。确认执行？"
+        ),
+    }
+
+
+def _blk_run_batch_experiment(args: dict) -> dict | None:
+    specs = args.get("specs", [])
+    workers = args.get("max_workers", 2)
+    return {
+        "summary": f"即将批量跑 {len(specs)} 个实验（并行度 {workers}）",
+        "detail": (
+            f"{len(specs)} 个 spec 各起隔离 workspace + runner，是 API 开销大头。"
+            f"完成后自动对比 + 审查。确认执行？"
+        ),
+    }
+
+
+def _blk_merge_results(args: dict) -> dict | None:
+    """target=global 必封；target=ws 封驳提示。"""
+    sources = args.get("sources", [])
+    src_str = ", ".join(str(s) for s in sources) if sources else "（未指定）"
+    target = args.get("target", "")
+    if target == "global":
+        models = args.get("models")
+        model_str = f"，仅模型 [{', '.join(models)}]" if models else "（全部模型）"
+        return {
+            "summary": f"即将把 {src_str} 的观测合并到全局 R 矩阵",
+            "detail": (
+                f"目标：全局 R（output/state/results.json，唯一真相）\n"
+                f"来源：{src_str}\n范围{model_str}\n"
+                f"全局 R 将永久累加这些观测，不可按来源精确剔除。"
+                f"这是不可逆的全局状态变更。"
+            ),
+        }
+    # target=ws:<name>：分支融合也封驳（影响目标工作区 R）
+    return {
+        "summary": f"即将把 {src_str} 合并到 {target}",
+        "detail": f"分支融合：{src_str} → {target}。目标工作区的 R 将被覆盖更新。",
+    }
+
+
+def _blk_delete_runs(args: dict) -> dict | None:
+    names = args.get("names", [])
+    if args.get("delete_r"):
+        return {
+            "summary": f"即将删除 R 矩阵中 {names} 的观测列",
+            "detail": (
+                f"永久删除全局 R 中这些模型的全部观测（{names}）。\n"
+                f"derive_elo 对这些模型的回放将失效。属于最危险操作——不可从 R 重算恢复。"
+            ),
+        }
+    return {
+        "summary": f"即将删除 {len(names)} 个 run",
+        "detail": f"软删除到 .trash/（可恢复）。目标：{names}。",
+    }
+
+
+def _blk_clean_cache(args: dict) -> dict | None:
+    cats = args.get("categories", [])
+    cat_str = ", ".join(cats) if cats else "全部"
+    return {
+        "summary": f"即将清理缓存：{cat_str}",
+        "detail": (
+            f"这些缓存（{cat_str}）下次评估时自动重建，但：\n"
+            f"- elo_cache 清后下次查询需从 R 重算（几秒）\n"
+            f"- predictors 清后下次需重训预测器（几十秒）\n"
+            f"软删除到 .trash/，可恢复。"
+        ),
+    }
+
+
+def _blk_edit_env_snapshot(args: dict) -> dict | None:
+    name = args.get("name", "")
+    key = args.get("key", "")
+    return {
+        "summary": f"即将改 .env 快照「{name}」的 {key}",
+        "detail": f"修改隔离快照内的 {key}。不影响全局 .env，只影响引用此快照的 run。",
+    }
+
+
+def _blk_merge_env_to_global(args: dict) -> dict | None:
+    name = args.get("name", "")
+    return {
+        "summary": f"即将把 .env 快照「{name}」写回全局 .env",
+        "detail": (
+            "全局 .env 会被覆盖（先备份到 .env.bak.<ts>）。"
+            "改全局连接配置会让所有后续 run 受影响——目标模型/judge/参数全部变更。"
+            "快照里有的 key 覆盖全局同名 key；快照里没有的不动。"
+        ),
+    }
+
+
+# ============================================================
+# extract_review_target 函数（从执行结果提取可审查的 run 名）
+# ============================================================
+def _review_target_run_eval(result: dict, args: dict) -> str | None:
+    """run_evaluation 产出：从 work_dir 推导 run 名。"""
+    work_dir = (result or {}).get("work_dir", "")
+    if not work_dir:
+        return None
+    target = args.get("target") or (
+        args.get("targets", [""])[0] if args.get("targets") else "")
+    if not target:
+        return None
+    if "workspaces" in work_dir:
+        parts = work_dir.split("/")
+        return f"ws:{parts[-1]}/{target}"
+    return None  # 临时 eval_runs 目前无报告可审
 
 
 # ============================================================
@@ -268,6 +389,8 @@ def _build() -> list[Capability]:
                 "param_overrides 临时覆写实验参数（如 BATCH_SIZE/JUDGE_K_FACTOR），只在本次 run 生效。"
                 "失败模式：目标模型不可达 → returncode!=0，看 stderr_tail。"
             ),
+            block_message=_blk_run_evaluation,
+            extract_review_target=_review_target_run_eval,
         ),
         Capability(
             name="run_batch_experiment",
@@ -304,6 +427,7 @@ def _build() -> list[Capability]:
                 "max_workers 控制并行度（默认 2，太高会触发目标模型限流）。"
                 "每个 spec 独立 fork workspace，互不污染；完成后自动对比 + 审查。"
             ),
+            block_message=_blk_run_batch_experiment,
         ),
         Capability(
             name="fork_workspace",
@@ -344,6 +468,7 @@ def _build() -> list[Capability]:
                 "target=ws:<name>：合并到另一工作区（分支融合，high 级）。"
                 "默认 dry-run 预览将合并多少条；confirm=True 才真正执行。"
             ),
+            block_message=_blk_merge_results,
         ),
         Capability(
             name="delete_runs",
@@ -359,6 +484,7 @@ def _build() -> list[Capability]:
             handler=_h_delete_runs,
             risk_level="high",
             doc="delete_r=True 时升级为 critical（删全局 R 观测不可恢复）。",
+            block_message=_blk_delete_runs,
         ),
         Capability(
             name="clean_cache",
@@ -372,6 +498,7 @@ def _build() -> list[Capability]:
             },
             handler=_h_clean_cache,
             risk_level="medium",
+            block_message=_blk_clean_cache,
         ),
         # ---------- .env 快照 ----------
         Capability(
@@ -412,6 +539,7 @@ def _build() -> list[Capability]:
                 "改 JUDGE_MODEL 时若 judge 在不同服务商，还要设 JUDGE_API_KEY/JUDGE_BASE_URL。"
                 "改实验参数用 LLMSEC_PARAM_ 前缀的 key（如 LLMSEC_PARAM_BATCH_SIZE=8）。"
             ),
+            block_message=_blk_edit_env_snapshot,
         ),
         Capability(
             name="list_env_snapshots",
@@ -442,6 +570,7 @@ def _build() -> list[Capability]:
             handler=_h_merge_env_to_global,
             risk_level="critical",
             doc="改全局连接配置会让所有后续 run 受影响。先备份 .env.bak.<ts> 再写。",
+            block_message=_blk_merge_env_to_global,
         ),
         # ---------- 查询类 ----------
         Capability(

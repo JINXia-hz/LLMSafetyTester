@@ -15,7 +15,7 @@ import json
 import re
 from typing import Any
 
-from control.agent.tools import all_tools, call_tool
+from control.agent.zhongshu.tools import all_tools, call_tool
 
 
 # ============================================================

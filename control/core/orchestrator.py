@@ -104,7 +104,7 @@ def orchestrate(
 
 def _auto_review(success_results: list[dict]) -> list[dict]:
     """对成功的 workspace 自动跑门下省审查（规则版，不用 LLM，快速呈递）。"""
-    from control.agent.review import review_run
+    from control.agent.menxia import review_run
     reviews = []
     for r in success_results:
         ws = r.get("workspace", {})

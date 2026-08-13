@@ -1,19 +1,21 @@
 /* control.js — 宣政殿「中书省」面板：对话 + 意图理解 + Plan 准奏（依赖 core.js 全局）
  *
- * 三省制：中书省是对话主入口。
- *   简单查询 → 自己处理（list_runs/compare/list_workspaces/review_run）
- *   复杂指令 → 转交尚书省拟案 → 收到 plan_pending → 展示方案 + 准奏/驳回按钮
- *   用户准奏 → 调 /api/control/plan/approve → 尚书省执行（进度在尚书省面板）
+ * 三省同殿：三衙同列并览，无 tab 切换。
+ *   中书省（本文件）：对话主入口。
+ *     简单查询 → 自己处理（list_runs/compare/list_workspaces/review_run）
+ *     复杂指令 → 转交尚书省拟案 → 收到 plan_pending → 展示方案 + 准奏/驳回按钮
+ *     用户准奏 → 调 /api/control/plan/approve → 尚书省执行（进度在尚书省衙署）
+ *   流程条节点实时显三省职守状态（setProvStatus），点击节点跳转对应衙署。
  *
- * 封驳不再在此处理——门下省经总线监听尚书省每一步，封驳卡片在门下省面板。
+ * 封驳不再在此处理——门下省经总线监听尚书省每一步，封驳卡片在门下省衙署。
+ * 坊·工作区 / 衡·对比合并 的手动看板已撤，相关操作由中书对话（工具调用）承接。
  */
 
 // ---------- 宣政殿 ----------
 let _chatBusy = false;
 let _ctrlBound = false;
-// session_id + pendingConfirm 持久化到 sessionStorage（刷新不丢，关标签页才丢）
+// session_id 持久化到 sessionStorage（刷新不丢，关标签页才丢）
 let _sessionId = sessionStorage.getItem('ctrl_session_id') || null;
-let _forkOptsLoaded = false;   // fork+run 抽屉的目标/攻击集下拉是否已填充
 let _greeted = false;          // 开场白只发一次
 
 async function loadControlSection() {
@@ -34,10 +36,8 @@ async function loadControlSection() {
     _greeted = true;
     appendChat('assistant', mdSafe('宣政殿候旨。陛下有何吩咐？臣可：**查批次**、**对比 run**、**fork 工作区**、**审查报告**、**合并 R 矩阵**、**清缓存**。'));
   }
-  loadWorkspaces();
-  loadPickLists();
   if (!_ctrlBound) bindControl();
-  // 初始化尚书省 + 门下省面板
+  // 初始化尚书省 + 门下省衙署
   if (window.loadShangshuSection) loadShangshuSection();
   if (window.loadMenxiaSection) loadMenxiaSection();
 }
@@ -47,9 +47,6 @@ function bindControl() {
   const input = $('ctrl-chat-input');
   $('ctrl-chat-send').onclick = sendChat;
   input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } });
-  $('ctrl-ws-refresh').onclick = loadWorkspaces;
-  $('ctrl-fork-btn').onclick = () => doFork(false);
-  $('ctrl-fork-run-btn').onclick = onForkRun;
   // 快捷指令 chips：点击即发送
   $('ctrl-chips').addEventListener('click', e => {
     const chip = e.target.closest('.chip');
@@ -57,27 +54,30 @@ function bindControl() {
     input.value = chip.dataset.q;
     sendChat();
   });
-  // 工作区删除：事件委托
-  $('ctrl-ws-list').addEventListener('click', e => {
-    const btn = e.target.closest('.ws-del');
-    if (btn) deleteWs(btn.dataset.name);
-  });
-  $('ctrl-cmp-btn').onclick = doCompare;
-  $('ctrl-mrg-btn').onclick = doMerge;
   // 重置对话（清上下文 + session）
   const resetBtn = $('ctrl-chat-reset');
   if (resetBtn) resetBtn.onclick = resetChat;
-  // 三省 tab 切换
-  document.querySelectorAll('.dept-tab').forEach(tab => {
-    tab.onclick = () => switchDept(tab.dataset.dept);
+  // 流程条节点：点击跳转对应衙署（窄屏纵列时定位用）+ 描金闪高
+  document.querySelectorAll('.court-node').forEach(node => {
+    node.onclick = () => flashPanel(node.dataset.goto);
   });
 }
 
-function switchDept(dept) {
-  document.querySelectorAll('.dept-tab').forEach(t => t.classList.toggle('active', t.dataset.dept === dept));
-  document.querySelectorAll('.dept-panel').forEach(p => {
-    p.style.display = p.dataset.dept === dept ? '' : 'none';
-  });
+// ---------- 三省职守状态（流程条节点） ----------
+function setProvStatus(prov, text, busy) {
+  const el = $('st-' + prov);
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle('busy', !!busy);
+}
+
+// 跳转并描金闪高某衙署（准奏后引至尚书省 / 流程条点击共用）
+function flashPanel(id) {
+  const p = $(id);
+  if (!p) return;
+  p.scrollIntoView({ behavior: REDUCED_MOTION ? 'auto' : 'smooth', block: 'nearest' });
+  p.classList.remove('clcard-flash'); void p.offsetWidth; p.classList.add('clcard-flash');
+  setTimeout(() => p.classList.remove('clcard-flash'), 1200);
 }
 
 async function resetChat() {
@@ -94,6 +94,7 @@ async function resetChat() {
   _sessionId = null;
   sessionStorage.removeItem('ctrl_session_id');
   $('ctrl-chat-log').innerHTML = '';
+  setProvStatus('zhongshu', '候旨');
   setStatus('对话已重置');
 }
 
@@ -108,6 +109,7 @@ async function sendChat() {
   input.value = '';
   _chatBusy = true;
   $('ctrl-chat-send').disabled = true;
+  setProvStatus('zhongshu', '拟票中…', true);
   appendChat('user', text);
   appendChat('thinking', '中书拟票中 <span class="chat-cursor">▍</span>');
   try {
@@ -128,23 +130,26 @@ async function sendChat() {
     // 复杂指令：尚书省已拟案，展示方案 + 准奏/驳回按钮
     if (data.plan_pending) {
       renderPlanPendingCard(data.plan_pending);
+      setProvStatus('zhongshu', '案已拟就');
+      setProvStatus('shangshu', '待准奏', true);
       setStatus('尚书省已拟案——待天子圣裁');
     } else {
       // 简单查询/回复：工具调用轨迹 + 回复
       for (const tc of (data.tool_calls || [])) appendToolCall(tc);
       const modeTag = data.mode === 'llm' ? ''
-        : `<span class="ws-tag pending" style="margin-left:6px;">${
+        : `<span class="mini-tag warn" style="margin-left:6px;">${
             data.mode === 'fallback' ? 'LLM失败·规则兜底'
             : data.mode === 'rule' ? '规则模式'
             : data.mode
           }</span>`;
       appendChat('assistant', mdSafe(data.reply) + modeTag);
+      setProvStatus('zhongshu', '候旨');
       setStatus('对话完成');
     }
-    loadWorkspaces();
   } catch (e) {
     removeThinking();
     appendChat('error', '✕ ' + esc(e.message));
+    setProvStatus('zhongshu', '候旨');
     setStatus('对话失败: ' + e.message);
   } finally {
     _chatBusy = false;
@@ -166,16 +171,16 @@ function renderPlanPendingCard(pp) {
     return `<div style="padding:2px 0; font-size:0.8rem;">${i+1}. ${esc(s.description || s.capability)}${deps}</div>`;
   }).join('');
   div.innerHTML = `
-    <div class="chat-role"><span class="seal-mini" style="background:#2d6a4f;">尚</span> 尚书省·拟票（经中书省润色）</div>
-    <div style="border-left:3px solid #2d6a4f; border-radius:0 6px 6px 0; padding:10px 14px; margin-top:4px; background:rgba(45,106,79,0.08);">
+    <div class="chat-role"><span class="seal-mini" style="background:var(--c-safe);">尚</span> 尚书省·拟票（经中书省润色）</div>
+    <div class="chat-plan-card">
       <div style="font-size:0.875rem; line-height:1.6; margin-bottom:8px;">${mdSafe(pp.rendered_plan || '')}</div>
-      <details style="font-size:0.75rem; color:var(--c-text); opacity:0.6; margin-bottom:8px;">
+      <details style="font-size:0.75rem; color:var(--c-muted); margin-bottom:8px;">
         <summary style="cursor:pointer;">技术步骤（${(pp.steps||[]).length} 步）</summary>
         <div style="padding-top:4px;">${stepsHtml}</div>
       </details>
       <div style="display:flex; gap:8px;">
-        <button class="plan-approve" style="padding:5px 16px; border-radius:4px; background:#2d6a4f; color:#fff; font-size:0.8125rem; border:none; cursor:pointer;">准奏</button>
-        <button class="plan-reject" style="padding:5px 16px; border-radius:4px; background:transparent; color:var(--c-text); opacity:0.6; font-size:0.8125rem; border:1px solid rgba(255,255,255,0.15); cursor:pointer;">驳回</button>
+        <button class="btn-approve plan-approve">准奏</button>
+        <button class="btn-reject plan-reject">驳回</button>
       </div>
     </div>`;
   log.appendChild(div);
@@ -187,10 +192,12 @@ function renderPlanPendingCard(pp) {
 async function approvePlan(planId, cardDiv) {
   cardDiv.querySelector('.plan-approve').disabled = true;
   cardDiv.querySelector('.plan-reject').disabled = true;
-  appendChat('assistant', '陛下已准奏。尚书省领旨执行——进度见**尚书省**面板。');
+  appendChat('assistant', '陛下已准奏。尚书省领旨执行——进度见**尚书省**衙署。');
+  setProvStatus('zhongshu', '候旨');
+  setProvStatus('shangshu', '执行中…', true);
   setStatus('尚书省执行中…');
-  // 切到尚书省面板
-  switchDept('shangshu');
+  // 引圣驾至尚书省衙署（窄屏纵列时滚动定位 + 描金闪高）
+  flashPanel('panel-shangshu');
   // 通知尚书省面板开始跟踪此 plan
   if (window.shangshuTrackPlan) window.shangshuTrackPlan(planId);
   // 异步触发执行（不等返回，前端轮询进度）
@@ -218,6 +225,8 @@ async function rejectPlan(planId, cardDiv) {
     });
   } catch { /* 忽略 */ }
   appendChat('assistant', '陛下已驳回此案。');
+  setProvStatus('zhongshu', '候旨');
+  setProvStatus('shangshu', '待命');
   setStatus('已驳回');
 }
 
@@ -260,300 +269,4 @@ function removeThinking() {
   const log = $('ctrl-chat-log');
   const last = log.lastElementChild;
   if (last && last.classList.contains('chat-thinking')) last.remove();
-}
-
-// ============================================================
-// 坊 · 工作区
-// ============================================================
-async function loadWorkspaces() {
-  try {
-    const data = await api('/api/control/workspaces');
-    renderWorkspaces(data.workspaces || []);
-    refreshForkSources();
-  } catch (e) {
-    $('ctrl-ws-list').innerHTML = `<div class="text-xs" style="color: var(--c-accent);">加载失败: ${esc(e.message)}</div>`;
-  }
-}
-
-function renderWorkspaces(list) {
-  const el = $('ctrl-ws-list');
-  if (!list.length) {
-    el.innerHTML = '<div class="ws-meta" style="padding:6px 2px;">（暂无工作区——fork 一个隔离副本做实验）</div>';
-    return;
-  }
-  el.innerHTML = list.map(w => {
-    const tag = w.merged
-      ? `<span class="ws-tag merged" title="已合并→${esc(w.merged_to || '')}">已合并</span>`
-      : `<span class="ws-tag pending">未合并</span>`;
-    const size = w.size ? `${(w.size / 1024).toFixed(0)}KB` : '';
-    return `<div class="ws-row">
-      <span class="seal-mini">坊</span>
-      <div style="min-width:0;flex:1;">
-        <div class="flex items-center gap-2"><span class="ws-name">${esc(w.name)}</span>${tag}</div>
-        <div class="ws-meta">源 ${esc(w.source)} · ${w.records || 0} 条${size ? ' · ' + size : ''}</div>
-      </div>
-      <button class="ws-del" data-name="${esc(w.name)}" title="删除该工作区（不影响全局）">删</button>
-    </div>`;
-  }).join('');
-}
-
-async function refreshForkSources() {
-  // fork 来源：global + 最近的历史 run
-  const sel = $('ctrl-fork-source');
-  const cur = sel.value;
-  let opts = '<option value="global">global（当前全局 R）</option>';
-  try {
-    const data = await api('/api/runs');
-    for (const r of (data.runs || []).filter(r => r.has_report).slice(0, 15)) {
-      opts += `<option value="run:${esc(r.name)}">run: ${esc(r.name)}</option>`;
-    }
-  } catch { /* 忽略 */ }
-  sel.innerHTML = opts;
-  sel.value = cur;
-}
-
-// 「建立并运行」：第一次点击展开参数抽屉，第二次点击才执行
-async function onForkRun() {
-  const drawer = $('ctrl-fork-opts');
-  const btn = $('ctrl-fork-run-btn');
-  if (!drawer.classList.contains('open')) {
-    drawer.classList.add('open');
-    btn.textContent = '确认运行 ▸';
-    if (!_forkOptsLoaded) { _forkOptsLoaded = true; loadForkOpts(); }
-    return;
-  }
-  await doFork(true);
-}
-
-async function loadForkOpts() {
-  try {
-    const [sets, tgts] = await Promise.all([api('/api/attack-sets'), api('/api/targets')]);
-    const isel = $('ctrl-fork-input');
-    isel.innerHTML = '';
-    (sets.files || []).forEach(f => {
-      const name = typeof f === 'string' ? f : f.name;
-      const opt = document.createElement('option');
-      opt.value = name; opt.textContent = name;
-      isel.appendChild(opt);
-    });
-    const tsel = $('ctrl-fork-target');
-    tsel.innerHTML = '<option value="">全部目标</option>';
-    (tgts.targets || []).forEach(t => {
-      const opt = document.createElement('option');
-      opt.value = t.name; opt.textContent = t.name;
-      tsel.appendChild(opt);
-    });
-  } catch { /* 静默：下拉留默认 */ }
-}
-
-function closeForkOpts() {
-  $('ctrl-fork-opts').classList.remove('open');
-  $('ctrl-fork-run-btn').textContent = '建立并运行';
-}
-
-async function doFork(andRun) {
-  const name = $('ctrl-fork-name').value.trim();
-  const source = $('ctrl-fork-source').value;
-  if (!name) { setStatus('请输入工作区名'); return; }
-  setStatus(`Fork ${name}…`);
-  try {
-    const body = { name, source, note: andRun ? '看板 fork+run' : '看板 fork' };
-    const url = andRun ? '/api/control/fork-and-run' : '/api/control/fork';
-    if (andRun) {
-      body.target = $('ctrl-fork-target').value || null;
-      body.input_file = $('ctrl-fork-input').value || 'attacks/l1.jsonl';
-      body.max_rounds = parseInt($('ctrl-fork-rounds').value, 10) || 5;
-    }
-    const res = await fetch(url, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || res.status);
-    }
-    const data = await res.json();
-    if (andRun && data.task) {
-      setStatus(`✓ ${name} fork 成功，runner 任务已启动（任务ID: ${data.task.id}）。进度见「运行控制」`);
-      setTimeout(() => document.querySelector('[data-section="run"]')?.click(), 1500);
-    } else {
-      setStatus(`✓ 工作区 ${name} 创建成功`);
-    }
-    $('ctrl-fork-name').value = '';
-    closeForkOpts();
-    loadWorkspaces();
-    loadPickLists();
-  } catch (e) {
-    setStatus('Fork 失败: ' + e.message);
-  }
-}
-
-async function deleteWs(name) {
-  if (!confirm(`确认删除工作区 ${name}？（仅删隔离副本，不影响全局）`)) return;
-  try {
-    const res = await fetch(`/api/control/workspaces/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || res.status);
-    }
-    setStatus(`✓ 工作区 ${name} 已删除`);
-    loadWorkspaces();
-    loadPickLists();
-  } catch (e) {
-    setStatus('删除失败: ' + e.message);
-  }
-}
-
-// ============================================================
-// 衡 · 对比与合并
-// ============================================================
-// 共享数据：历史 run + 工作区，供对比/合并两个多选列表
-let _pickRuns = [];        // [{value, label, tag}]
-let _pickWs = [];          // 工作区名列表
-
-async function loadPickLists() {
-  try {
-    const [runsData, wsData] = await Promise.all([api('/api/runs'), api('/api/control/workspaces')]);
-    _pickWs = (wsData.workspaces || []).map(w => w.name);
-    _pickRuns = (runsData.runs || []).filter(r => r.has_report)
-      .map(r => ({ value: r.name, label: r.name, tag: 'batch' }));
-    // 工作区 run（ws:<name>，compare 会解析其下第一份报告）
-    const wsRuns = _pickWs.map(n => ({ value: 'ws:' + n, label: n, tag: 'ws' }));
-    renderPickList($('ctrl-cmp-list'), [..._pickRuns, ...wsRuns], 'cmp');
-    // 合并源：global + 各工作区
-    const mrgSources = [{ value: 'global', label: 'global（全局 R）', tag: 'batch' }, ...wsRuns];
-    renderPickList($('ctrl-mrg-list'), mrgSources, 'mrg');
-    // 合并目标：global + 各工作区
-    const tsel = $('ctrl-mrg-target');
-    const cur = tsel.value;
-    tsel.innerHTML = '<option value="global">global（全局 R）</option>'
-      + _pickWs.map(n => `<option value="ws:${esc(n)}">ws: ${esc(n)}</option>`).join('');
-    tsel.value = cur;
-  } catch { /* 静默 */ }
-}
-
-function renderPickList(el, items, ns) {
-  if (!items.length) {
-    el.innerHTML = '<div class="ws-meta" style="padding:6px;">（暂无可选项）</div>';
-    return;
-  }
-  el.innerHTML = items.map(it => `<label class="pick-row">
-    <input type="checkbox" data-ns="${ns}" value="${esc(it.value)}">
-    <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(it.label)}</span>
-    ${it.tag === 'ws' ? '<span class="ws-tag pending" style="margin-left:auto;">坊</span>' : ''}
-  </label>`).join('');
-}
-
-function pickedValues(ns) {
-  return [...document.querySelectorAll(`input[type="checkbox"][data-ns="${ns}"]:checked`)].map(c => c.value);
-}
-
-// ---- 对比 ----
-const CMP_METRICS = [
-  ['security_level', '安全等级', v => v || '-'],
-  ['asr', 'ASR 攻击成功率', fmtPct],
-  ['fpr', 'FPR 误杀率', fmtPct],
-  ['boundary_elo', '边界 ELO', v => fmtNum(v, 0)],
-  ['boundary_confidence', '边界置信度', fmtPct],
-  ['coverage', '覆盖率', fmtPct],
-  ['conv_rounds', '收敛轮次', v => v ?? '-'],
-  ['ci_half', 'CI 半宽', v => fmtNum(v, 1)],
-  ['total_methods', '方法数', v => v ?? '-'],
-  ['methods_above_boundary', '越界威胁', v => v ?? '-'],
-];
-
-async function doCompare() {
-  const runs = pickedValues('cmp');
-  if (runs.length < 2) { setStatus('对比至少勾选 2 个 run'); return; }
-  const out = $('ctrl-heng-result');
-  out.innerHTML = '<div class="ws-meta">对比中…</div>';
-  try {
-    const res = await fetch('/api/control/compare', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ runs }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || res.status);
-    }
-    const d = await res.json();
-    renderCompare(d, out);
-    setStatus('✓ 对比完成');
-  } catch (e) {
-    out.innerHTML = `<div class="text-xs" style="color: var(--c-accent);">对比失败: ${esc(e.message)}</div>`;
-  }
-}
-
-function renderCompare(d, out) {
-  const rows = d.runs || [];
-  if (!rows.length) { out.innerHTML = '<div class="ws-meta">所选 run 均无报告</div>'; return; }
-  const short = n => n.length > 26 ? '…' + n.slice(-25) : n;
-  let html = '<div class="overflow-x-auto"><table class="cmp-table"><thead><tr><th>指标</th>'
-    + rows.map(r => `<th title="${esc(r.run)}">${esc(short(r.run))}</th>`).join('') + '</tr></thead><tbody>';
-  for (const [key, label, fmt] of CMP_METRICS) {
-    html += `<tr><td style="color: var(--c-muted);">${label}</td>`
-      + rows.map(r => `<td>${esc(fmt(r[key]))}</td>`).join('') + '</tr>';
-  }
-  html += '</tbody></table></div>';
-  if (d.missing && d.missing.length) {
-    html += `<div class="ws-meta mt-1">⚠ 无报告被跳过：${d.missing.map(esc).join('、')}</div>`;
-  }
-  out.innerHTML = html;
-}
-
-// ---- 合并 ----
-async function doMerge() {
-  const sources = pickedValues('mrg');
-  const target = $('ctrl-mrg-target').value;
-  const confirm = $('ctrl-mrg-confirm').checked;
-  if (!sources.length) { setStatus('合并至少勾选 1 个源'); return; }
-  if (confirm && !window.confirm(`确认把 ${sources.join('、')} 合并进 ${target}？该操作会写目标 R 矩阵。`)) return;
-  const out = $('ctrl-heng-result');
-  out.innerHTML = `<div class="ws-meta">${confirm ? '合并执行中…' : '合并预览（dry-run）…'}</div>`;
-  try {
-    const res = await fetch('/api/control/merge', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sources, target, models: null, confirm }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || res.status);
-    }
-    const d = await res.json();
-    renderMerge(d, out);
-    setStatus(confirm ? '✓ 合并已执行' : '✓ 合并预览完成（未落盘）');
-    if (confirm) { $('ctrl-mrg-confirm').checked = false; loadWorkspaces(); }
-  } catch (e) {
-    out.innerHTML = `<div class="text-xs" style="color: var(--c-accent);">合并失败: ${esc(e.message)}</div>`;
-  }
-}
-
-function renderMerge(d, out) {
-  const extra = d.extra || {};
-  const dry = d.dry_run !== false;
-  const badge = dry
-    ? '<span class="ws-tag pending">dry-run 预览</span>'
-    : '<span class="ws-tag merged">已执行</span>';
-  let html = `<div class="flex items-center gap-2 mb-1">${badge}<span class="text-xs" style="color: var(--c-muted);">汇入 ${esc(extra.target || '')}</span></div>`;
-  if (dry) {
-    const pm = extra.per_model || {};
-    const entries = Object.entries(pm);
-    html += `<div class="text-xs mb-1">将新增 <b>${extra.total_new ?? 0}</b> 条记录：</div>`;
-    if (entries.length) {
-      html += '<table class="cmp-table"><thead><tr><th>模型</th><th>新增条数</th></tr></thead><tbody>'
-        + entries.map(([m, p]) => `<tr><td>${esc(m)}</td><td>${p.new_to_target ?? 0}</td></tr>`).join('')
-        + '</tbody></table>';
-    }
-    html += '<div class="ws-meta mt-1">勾选「确认执行」后再点合并即真正落盘。</div>';
-  } else {
-    const mc = extra.merged_counts || {};
-    html += `<div class="text-xs mb-1">已合并 <b>${extra.total_merged ?? 0}</b> 条记录。</div>`;
-    const entries = Object.entries(mc);
-    if (entries.length) {
-      html += '<table class="cmp-table"><thead><tr><th>模型</th><th>合并条数</th></tr></thead><tbody>'
-        + entries.map(([m, n]) => `<tr><td>${esc(m)}</td><td>${n}</td></tr>`).join('')
-        + '</tbody></table>';
-    }
-  }
-  out.innerHTML = html;
 }

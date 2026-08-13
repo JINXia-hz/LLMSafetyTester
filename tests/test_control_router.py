@@ -105,7 +105,7 @@ class TestControlRouterSmoke:
 # ============================================================
 class TestChatFallback:
     def test_chat_rule_mode_when_unconfigured(self, monkeypatch):
-        from control.agent import zhongshu as zs_mod
+        from control.agent.zhongshu import dialogue as zs_mod
         monkeypatch.setattr(zs_mod, "is_llm_configured", lambda: False)
         r = _client().post("/api/control/chat", json={"text": "列一下 run"})
         assert r.status_code == 200
@@ -113,7 +113,7 @@ class TestChatFallback:
         assert d["mode"] == "rule" and d["reply"]
 
     def test_chat_fallback_on_llm_error(self, monkeypatch):
-        from control.agent import zhongshu as zs_mod
+        from control.agent.zhongshu import dialogue as zs_mod
         monkeypatch.setattr(zs_mod, "is_llm_configured", lambda: True)
 
         def boom(messages, **k):
@@ -127,7 +127,7 @@ class TestChatFallback:
 
     def test_chat_llm_mode_with_mocked_reply(self, monkeypatch):
         """中书省 LLM 模式：mock chat_with_tools 返回纯文本回复（无 tool call）。"""
-        from control.agent import zhongshu as zs_mod
+        from control.agent.zhongshu import dialogue as zs_mod
         monkeypatch.setattr(zs_mod, "is_llm_configured", lambda: True)
 
         class FakeMsg:

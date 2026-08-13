@@ -1,20 +1,10 @@
-"""control.agent.zhongshu — 中书省（前台 + 意图理解 + 润色）。
+"""control.agent.zhongshu.dialogue — 中书省对话主循环（前台 + 意图理解 + 润色）。
 
-重构后的中书省是对话主入口，但**不再自己执行复杂任务**：
+中书省是对话主入口：
+  简单查询 → 自己用工具处理
+  复杂指令 → 调尚书省 draft_plan → 润色成给用户的中文方案 → 返回 plan_pending
 
-  简单查询（list_runs/compare/list_workspaces 等）→ 自己用工具处理
-  复杂指令（多步/跨模块/改配置+跑实验）→ 调尚书省.draft_plan
-    → 收到 Plan → LLM 润色成给用户的中文方案 → 返回 plan_pending
-    → 用户准奏 → 尚书省.execute_plan
-
-中书省有**简略能力概览**（不像尚书省有完整文档），
-判断复杂度的依据写进 system prompt：
-  指令含「然后/再/接着/同时/对比 A 和 B 之后」等多步信号 → 复杂 → 转交尚书省。
-
-人设（保持原有）：
-  - 称用户「陛下」，自称「臣」
-  - 简洁得体，有古风不迂腐
-  - 数据说话，不空谈
+人设：称用户「陛下」，自称「臣」。
 """
 
 from __future__ import annotations
@@ -22,20 +12,15 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from control.agent import session as sess
 from control.agent.llm import chat_with_tools, is_llm_configured
-from control.agent.loop import chat_one as _rule_chat_one
 from control.agent.prompts import ZHONGSHU_PROMPT as _SYSTEM_PROMPT
+from control.agent.zhongshu import session as sess
+from control.agent.zhongshu.fallback import chat_one as _rule_chat_one
+from control.agent.zhongshu.tools import all_tools, call_tool
 
-# 中书省 system prompt 在 prompts.py（避免循环导入）
 
-
-# ============================================================
-# 中书省的简单查询工具（复杂操作转交尚书省）
-# ============================================================
 def _simple_tools() -> list[dict]:
     """中书省保留的简单查询工具 schema（执行类交给尚书省）。"""
-    from control.agent.tools import all_tools
     keep = {"list_runs", "compare_runs", "review_run", "list_workspaces"}
     return [t.to_schema() for t in all_tools() if t.name in keep]
 
@@ -65,17 +50,14 @@ def _shangshu_plan_schema() -> dict:
     }
 
 
-# ============================================================
-# 一轮对话的结果
-# ============================================================
 @dataclass
 class ZhongshuTurn:
     """中书省一轮对话的结果。"""
     user_text: str
     reply: str = ""
     tool_calls: list[dict] = field(default_factory=list)
-    plan_pending: dict | None = None   # {plan_id, rendered_plan}（复杂指令拟案后）
-    mode: str = "llm"                   # llm / rule / fallback / error
+    plan_pending: dict | None = None
+    mode: str = "llm"
     error: str | None = None
 
     def to_dict(self) -> dict:
@@ -89,24 +71,12 @@ class ZhongshuTurn:
         }
 
 
-# ============================================================
-# 主入口
-# ============================================================
 def handle_message(
     user_text: str,
     *,
     session_id: str | None = None,
 ) -> dict:
-    """中书省主入口。处理用户消息，返回结构化结果。
-
-    流程：
-      1. LLM 理解意图 + 判断复杂度
-      2. 简单 → 自己用工具处理
-      3. 复杂 → 调 request_shangshu_plan → 收到 Plan → 润色 → 返回 plan_pending
-      4. LLM 未配置/失败 → 规则兜底
-
-    返回 dict（含 mode/reply/plan_pending/tool_calls/session_id）。
-    """
+    """中书省主入口。处理用户消息，返回结构化结果。"""
     session_id, messages = sess.get_or_create(session_id)
 
     if not is_llm_configured():
@@ -121,7 +91,6 @@ def handle_message(
         turn = _react_loop(user_text, messages, session_id)
         return turn.to_dict() | {"session_id": session_id}
     except Exception as e:
-        # LLM 失败 → 规则兜底
         reply = _rule_chat_one(user_text)
         sess.append(session_id, "assistant", reply)
         return {"mode": "fallback", "reply": reply, "session_id": session_id,
@@ -130,27 +99,20 @@ def handle_message(
 
 def _react_loop(user_text: str, messages: list[dict], session_id: str,
                 max_rounds: int = 4) -> ZhongshuTurn:
-    """中书省 ReAct 循环：LLM + 简单工具 + request_shangshu_plan。
-
-    最多 4 轮（复杂任务转交尚书省，不需要长循环）。
-    """
-    from control.agent.tools import call_tool
+    """中书省 ReAct 循环：LLM + 简单工具 + request_shangshu_plan。"""
     turn = ZhongshuTurn(user_text=user_text)
-
     tools_schema = _simple_tools() + [_shangshu_plan_schema()]
 
     for _round in range(max_rounds):
         resp = chat_with_tools(messages, tools=tools_schema)
         msg = resp.choices[0].message
 
-        # LLM 没调工具 → 最终回复
         if not msg.tool_calls:
             turn.reply = msg.content or "(臣无以作答)"
             messages.append({"role": "assistant", "content": turn.reply})
             sess.append(session_id, "assistant", turn.reply)
             return turn
 
-        # 执行工具调用
         messages.append({
             "role": "assistant",
             "content": msg.content,
@@ -168,13 +130,11 @@ def _react_loop(user_text: str, messages: list[dict], session_id: str,
             except json.JSONDecodeError:
                 args = {}
 
-            # request_shangshu_plan → 转交尚书省
             if name == "request_shangshu_plan":
                 plan_dict = _hand_to_shangshu(args.get("intent", user_text), messages, session_id)
                 if plan_dict:
                     turn.plan_pending = plan_dict
                     turn.reply = plan_dict.get("rendered_plan", "尚书省已拟案，请陛下过目。")
-                    # 回灌 tool 结果
                     messages.append({
                         "role": "tool", "tool_call_id": tc.id,
                         "content": json.dumps({"plan_id": plan_dict["plan_id"],
@@ -190,7 +150,6 @@ def _react_loop(user_text: str, messages: list[dict], session_id: str,
                     })
                 continue
 
-            # 简单工具 → 直接调
             if name in {"list_runs", "compare_runs", "review_run", "list_workspaces"}:
                 try:
                     result = call_tool(name, args)
@@ -210,7 +169,6 @@ def _react_loop(user_text: str, messages: list[dict], session_id: str,
                     "content": f"中书省不直接执行 {name}——请转交尚书省拟案。",
                 })
 
-    # 达到轮次上限 → 让 LLM 收尾
     messages.append({"role": "user", "content": "请基于已有信息总结回复。"})
     resp = chat_with_tools(messages, tools=None)
     turn.reply = resp.choices[0].message.content or "(臣无以作答)"
@@ -220,19 +178,12 @@ def _react_loop(user_text: str, messages: list[dict], session_id: str,
 
 
 def _hand_to_shangshu(intent: str, messages: list[dict], session_id: str) -> dict | None:
-    """转交尚书省拟案，再润色成给用户看的方案。
-
-    Returns:
-        {plan_id, steps, rendered_plan} 或 None（拟案失败）
-    """
+    """转交尚书省拟案，再润色成给用户看的方案。"""
     try:
         from control.agent.shangshu import draft_plan
 
-        # 收集上下文（当前 workspace/env_snapshot 列表，帮尚书省决策）
         context = _collect_context()
         plan = draft_plan(intent, context=context)
-
-        # 润色：LLM 把技术步骤翻译成给用户的话
         rendered = _render_plan_for_user(plan, messages)
 
         return {
@@ -247,7 +198,7 @@ def _hand_to_shangshu(intent: str, messages: list[dict], session_id: str) -> dic
 
 
 def _step_dict(s) -> dict:
-    """Step 对象转 dict（Step 无 to_dict 方法，手动转）。"""
+    """Step 对象转 dict。"""
     return {
         "id": s.id, "capability": s.capability, "args": s.args,
         "depends_on": s.depends_on, "description": s.description,
@@ -265,8 +216,7 @@ def _collect_context() -> dict:
         pass
     try:
         from control.core.env_snapshot import list_snapshots
-        snaps = list_snapshots()
-        ctx["env_snapshots"] = [s["name"] for s in snaps]
+        ctx["env_snapshots"] = [s["name"] for s in list_snapshots()]
     except Exception:
         pass
     return ctx

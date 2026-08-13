@@ -532,13 +532,135 @@
     .run-wrap::after, .ctrl-wrap::after { right: 6px; }
     @media (max-width: 1000px) { .run-wrap, .ctrl-wrap { padding: 0; } .run-wrap::before, .run-wrap::after, .ctrl-wrap::before, .ctrl-wrap::after { display: none; } }
 
-    /* ---------- 宣政殿：对话笺条 / 坊 · 工作区 / 衡 · 对比合并 ---------- */
-    /* 小方印角色标（对话/工作区/工具行共用印章语言） */
+    /* ---------- 宣政殿：三衙同朝（中书拟旨 → 尚书执行 → 门下封驳，并览一殿） ---------- */
+    /* 省色立籍：中书=土红(朱批) 尚书=石绿(行政) 门下=赭黄(谏纸)，取全局唐色，昼夜自适应 */
+    .prov-shu   { --prov: var(--c-accent); --prov-tint: rgba(168,91,67,.09); }
+    .prov-shang { --prov: var(--c-safe);   --prov-tint: rgba(117,135,107,.11); }
+    .prov-men   { --prov: var(--c-ochre);  --prov-tint: rgba(185,138,68,.10); }
+    [data-theme="dark"] .prov-shu   { --prov-tint: rgba(192,73,43,.17); }
+    [data-theme="dark"] .prov-shang { --prov-tint: rgba(126,148,120,.15); }
+    [data-theme="dark"] .prov-men   { --prov-tint: rgba(201,154,82,.15); }
+    /* 殿内需宽：三衙同列，覆写 ctrl-wrap 的窄列上限（卷草侧带保留） */
+    #sec-control .ctrl-wrap { max-width: calc(1440px + 88px); }
+    /* 小方印角色标（对话/衙署/工具行共用印章语言） */
     .seal-mini { width: 22px; height: 22px; flex: none; display: inline-flex; align-items: center; justify-content: center;
       font-family: var(--serif); font-size: 12px; border-radius: 3px; color: var(--c-on-seal);
       background: var(--c-primary); box-shadow: inset 0 0 0 1.5px rgba(248,239,216,.35); }
     .seal-mini.seal-accent { background: var(--c-accent); }
     .seal-mini.seal-gold { background: var(--c-gold); color: #2F343B; box-shadow: inset 0 0 0 1.5px rgba(47,52,59,.25); }
+    /* 殿额：石青匾额横披压住院首（与总览匾额同语言） */
+    .court-head { display: flex; align-items: center; gap: 14px; margin-bottom: 12px;
+      background: linear-gradient(160deg, var(--c-plaque1) 0%, var(--c-plaque2) 100%);
+      border: 1px solid var(--c-plaque2); border-left: 3px solid var(--c-gold);
+      border-radius: 6px; padding: 13px 20px; color: var(--c-on-seal); }
+    .court-head .court-seal { width: 34px; height: 34px; font-size: 17px; background: var(--c-accent); }
+    .court-name { font-family: var(--serif); font-size: 1.12rem; font-weight: 700; letter-spacing: .04em; }
+    .court-sub { font-size: .73rem; opacity: .72; margin-top: 2px; }
+    .court-head .ctrl-badge { margin-left: auto; flex: none; }
+    /* 匾额底色深，状态小印在匾额上反白 */
+    .court-head .ctrl-badge.on { background: rgba(126,148,120,.30); color: #C9D6BC; box-shadow: inset 0 0 0 1px rgba(201,214,188,.4); }
+    .court-head .ctrl-badge.off { background: rgba(201,154,82,.22); color: #E3C88F; box-shadow: inset 0 0 0 1px rgba(227,200,143,.4); }
+    /* 议政流程条：三省序进一览，金篆相衔；节点实时显职守状态，点击跳转对应衙署 */
+    .court-flow { display: flex; align-items: stretch; gap: 8px; margin-bottom: 14px; }
+    .court-node { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+      background: var(--c-card); border: 1px solid var(--c-line); border-left: 3px solid var(--prov);
+      border-radius: 6px; cursor: pointer; text-align: left; transition: box-shadow .2s ease; }
+    .court-node:hover { box-shadow: 0 0 0 1.5px rgba(191,160,60,.45); }
+    .court-node .seal-mini { background: var(--prov); }
+    .court-node .n-meta { min-width: 0; display: flex; flex-direction: column; }
+    .court-node .n-name { font-family: var(--serif); font-weight: 700; font-size: .86rem; color: var(--c-text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .court-node .n-status { font-size: .68rem; color: var(--c-muted); margin-top: 1px; }
+    .court-node .n-status.busy { color: var(--prov); font-weight: 700; }
+    .court-arrow { align-self: center; flex: none; color: var(--c-gold); font-size: .8rem; opacity: .85; }
+    /* 三衙同列：中书主场加宽，尚书次之，门下居侧 */
+    .court-grid { display: grid; grid-template-columns: 10fr 8fr 7fr; gap: 14px; align-items: stretch; }
+    .court-panel { display: flex; flex-direction: column; height: 560px; padding: 0; overflow: hidden;
+      border-top: 3px solid var(--prov); }
+    .court-panel-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+      background: var(--prov-tint); border-bottom: 1px solid var(--c-line); }
+    .court-panel-head .seal-mini { background: var(--prov); }
+    .court-panel-head .p-title { flex: none; white-space: nowrap; font-family: var(--serif); font-weight: 700; font-size: .92rem; color: var(--c-text); }
+    .court-panel-head .p-sub { font-size: .66rem; color: var(--c-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .p-btn { flex: none; margin-left: auto; font-size: .7rem; padding: 3px 10px; border-radius: 3px;
+      border: 1px solid var(--c-line); background: var(--c-card); color: var(--c-muted); cursor: pointer;
+      transition: border-color .15s, color .15s; }
+    .p-btn:hover { color: var(--c-text); border-color: var(--c-gold); }
+    .court-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px;
+      scrollbar-width: thin; scrollbar-color: rgba(191,160,60,.45) transparent; }
+    .court-scroll::-webkit-scrollbar { width: 8px; }
+    .court-scroll::-webkit-scrollbar-thumb { background: rgba(191,160,60,.45); border-radius: 4px; }
+    /* 衙署空态：省印淡押 + 楷体 */
+    .court-empty { text-align: center; padding: 52px 18px; }
+    .court-empty-seal { width: 40px; height: 40px; margin: 0 auto 10px; display: flex; align-items: center; justify-content: center;
+      font-family: var(--serif); font-size: 20px; border-radius: 4px; color: var(--prov);
+      box-shadow: inset 0 0 0 1.5px var(--prov); opacity: .45; }
+    .court-empty .e-title { font-family: var(--serif); font-weight: 700; font-size: .92rem; color: var(--c-text); }
+    .court-empty .e-sub { font-size: .73rem; color: var(--c-muted); margin-top: 5px; line-height: 1.6; }
+    /* 中书省：对话主场（笺条流 + 常驻旨意栏） */
+    .court-chat { flex: 1; min-height: 0; height: auto; padding: 10px 12px; }
+    .court-foot { flex: none; border-top: 1px solid var(--c-line); padding: 10px 12px; background: var(--prov-tint); }
+    .court-input-row { display: flex; gap: 8px; margin-top: 8px; }
+    /* 尚书省：拟票待裁卡（嵌于中书对话流内） */
+    .chat-plan-card { border-left: 3px solid var(--c-safe); border-radius: 0 6px 6px 0;
+      padding: 10px 14px; margin-top: 4px; background: rgba(117,135,107,.10); }
+    .btn-approve { padding: 5px 18px; border-radius: 4px; background: var(--c-safe); color: #F3E9CE;
+      font-size: .8rem; font-weight: 600; border: none; cursor: pointer; }
+    .btn-approve:hover { opacity: .88; }
+    .btn-reject { padding: 5px 16px; border-radius: 4px; background: transparent; color: var(--c-muted);
+      font-size: .8rem; border: 1px solid var(--c-line); cursor: pointer; }
+    .btn-reject:hover { color: var(--c-text); border-color: var(--c-gold); }
+    /* 尚书省：步骤行（左缘状态线 + 状态环） */
+    .ss-step { border-left: 2px solid var(--c-line); padding: 7px 0 7px 10px; margin: 3px 0; }
+    .ss-step .ss-row { display: flex; align-items: center; gap: 8px; }
+    .ss-ico { flex: none; width: 17px; height: 17px; display: inline-flex; align-items: center; justify-content: center;
+      font-size: 10px; border-radius: 50%; color: var(--c-muted); box-shadow: inset 0 0 0 1.5px var(--c-line); }
+    .ss-step .ss-title { font-size: .8rem; color: var(--c-text); min-width: 0; }
+    .ss-step .ss-cap { font-size: .66rem; color: var(--c-muted); margin-left: auto; flex: none; }
+    .ss-step .ss-detail { font-size: .72rem; color: var(--c-muted); padding: 3px 0 0 25px; line-height: 1.55; }
+    .ss-step[data-st="running"] { border-left-color: var(--c-gold); }
+    .ss-step[data-st="running"] .ss-ico { box-shadow: none; border: 2px solid var(--c-gold);
+      border-top-color: transparent; animation: spin 1s linear infinite; }
+    .ss-step[data-st="running"] .ss-title { font-weight: 600; }
+    .ss-step[data-st="done"] { border-left-color: var(--c-safe); }
+    .ss-step[data-st="done"] .ss-ico { color: var(--c-safe); box-shadow: inset 0 0 0 1.5px var(--c-safe); }
+    .ss-step[data-st="blocked"] { border-left-color: var(--c-warn); }
+    .ss-step[data-st="blocked"] .ss-ico { color: var(--c-on-seal); background: var(--c-warn); box-shadow: none;
+      border-radius: 3px; font-family: var(--serif); }
+    .ss-step[data-st="blocked"] .ss-detail { color: var(--c-warn); }
+    .ss-step[data-st="failed"] { border-left-color: var(--c-warn); }
+    .ss-step[data-st="failed"] .ss-ico { color: var(--c-warn); box-shadow: inset 0 0 0 1.5px var(--c-warn); }
+    .ss-step[data-st="failed"] .ss-detail { color: var(--c-warn); }
+    .ss-step[data-st="skipped"] .ss-title { color: var(--c-muted); }
+    .ss-summary { margin-top: 10px; padding: 9px 12px; border-radius: 4px; font-size: .78rem;
+      background: rgba(117,135,107,.12); border-left: 3px solid var(--c-safe); }
+    /* 门下省：封驳/警讯/简报条目 */
+    .mx-entry { border-left: 3px solid var(--c-line); border-radius: 0 4px 4px 0; padding: 8px 12px; font-size: .76rem; }
+    .mx-entry .mx-title { font-weight: 700; font-size: .8rem; display: flex; align-items: center; gap: 6px; }
+    .mx-entry .mx-body { color: var(--c-muted); margin-top: 4px; line-height: 1.6; white-space: pre-line; }
+    .mx-block { border-left-color: var(--c-warn); background: rgba(168,91,67,.08); }
+    .mx-block .mx-title { color: var(--c-warn); }
+    .mx-fail { border-left-color: var(--c-ochre); background: rgba(185,138,68,.08); }
+    .mx-fail .mx-title { color: var(--c-ochre); }
+    .mx-review { border-left-color: var(--c-safe); background: rgba(117,135,107,.10); }
+    .mx-review .mx-title { color: var(--c-safe); }
+    .mx-fin { border-left-color: transparent; background: none; text-align: center; color: var(--c-muted); padding: 4px; }
+    .mx-unblock { margin-left: auto; flex: none; padding: 3px 10px; border-radius: 3px; background: var(--c-warn);
+      color: var(--c-on-seal); font-size: .7rem; border: none; cursor: pointer; }
+    .mx-unblock:hover { opacity: .88; }
+    .mx-unblock:disabled { opacity: .55; cursor: default; }
+    /* 小印标签（模式印 / plan 状态印） */
+    .mini-tag { font-size: .66rem; padding: 0 6px; border-radius: 2px; font-weight: 600; }
+    .mini-tag.warn { background: rgba(185,138,68,.16); color: var(--c-ochre); }
+    .mini-tag.ok { background: rgba(117,135,107,.20); color: var(--c-safe); }
+    .mini-tag.mut { background: var(--c-btn-plain-bg); color: var(--c-muted); }
+    /* 窄屏：三衙纵列，流程条保持横排可点 */
+    @media (max-width: 1100px) {
+      .court-grid { grid-template-columns: 1fr; }
+      .court-panel { height: auto; }
+      .court-chat { height: 360px; flex: none; }
+      .court-scroll { max-height: 420px; flex: none; }
+    }
     /* 对话流：用户右靠石青条，助手左靠描金签条 */
     .chat-log { height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 2px;
       scrollbar-width: thin; scrollbar-color: rgba(191,160,60,.45) transparent; }
@@ -575,44 +697,12 @@
     .ctrl-badge.on { background: rgba(117,135,107,.20); color: var(--c-safe); box-shadow: inset 0 0 0 1px rgba(117,135,107,.5); }
     .ctrl-badge.off { background: rgba(185,138,68,.16); color: var(--c-ochre); box-shadow: inset 0 0 0 1px rgba(185,138,68,.5); }
     /* 三省 tab */
-    .dept-tab { font-size: 0.8rem; padding: 4px 12px; border-radius: 4px; color: var(--c-muted); cursor: pointer; border: none; background: transparent; transition: all .15s; }
-    .dept-tab:hover { color: var(--c-text); }
-    .dept-tab.active { color: var(--c-text); background: rgba(191,160,60,.10); box-shadow: inset 0 0 0 1px rgba(191,160,60,.3); }
     /* 快捷指令 chips：楷体小丸，悬停描金 */
     .chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
     .chip { font-size: 0.72rem; padding: 3px 10px; border-radius: 10px; border: 1px solid var(--c-line);
       background: var(--c-card); color: var(--c-muted); cursor: pointer; font-family: var(--serif);
       transition: border-color .15s, color .15s; }
     .chip:hover { border-color: var(--c-gold); color: var(--c-text); }
-    /* 工作区行：坊字小印 + 悬停描金 */
-    .ws-row { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid var(--c-line);
-      border-radius: 4px; background: var(--c-bg); transition: box-shadow .2s; }
-    .ws-row:hover { box-shadow: 0 0 0 1.5px rgba(191,160,60,.45); }
-    .ws-name { font-family: var(--serif); font-weight: 700; font-size: 0.85rem; color: var(--c-text); }
-    .ws-meta { font-size: 0.68rem; color: var(--c-muted); }
-    .ws-del { flex: none; font-size: 0.7rem; color: var(--c-accent); background: none; border: none;
-      cursor: pointer; padding: 2px 6px; border-radius: 3px; }
-    .ws-del:hover { background: rgba(168,91,67,.12); }
-    /* 工作区状态小印 */
-    .ws-tag { font-size: 0.66rem; padding: 0 6px; border-radius: 2px; font-weight: 600; }
-    .ws-tag.merged { background: rgba(117,135,107,.20); color: var(--c-safe); }
-    .ws-tag.pending { background: rgba(185,138,68,.16); color: var(--c-ochre); }
-    /* fork+run 内联参数抽屉 */
-    .fork-opts { max-height: 0; overflow: hidden; transition: max-height .3s ease; }
-    .fork-opts.open { max-height: 240px; }
-    /* run 多选列表（对比/合并共用） */
-    .pick-list { max-height: 170px; overflow-y: auto; border: 1px solid var(--c-line); border-radius: 4px;
-      padding: 4px; background: var(--c-input-bg);
-      scrollbar-width: thin; scrollbar-color: rgba(191,160,60,.45) transparent; }
-    .pick-row { display: flex; align-items: center; gap: 6px; padding: 3px 6px; font-size: 0.75rem;
-      border-radius: 3px; cursor: pointer; color: var(--c-text); }
-    .pick-row:hover { background: var(--c-th-bg); }
-    .pick-row .ws-tag { flex: none; }
-    /* 对比结果表：描金表头线（与威胁表同语言） */
-    .cmp-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
-    .cmp-table th, .cmp-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--c-line); }
-    .cmp-table th { color: var(--c-muted); font-weight: 600; font-size: 0.7rem; font-family: var(--serif); }
-    .cmp-table thead tr { border-bottom: 2px solid var(--c-gold); }
 
     /* 雾霭：feTurbulence 分形噪声真雾，贴在未选卡上（白天=白纱+暖灰双层，夜=牙白雾） */
     /* 选中卡与表单卡：去描金光晕（用户反馈金光泛滥）——选中态用石青描边，
@@ -622,7 +712,8 @@
     @media (prefers-reduced-motion: reduce) {
       .medal svg, .clouds, .seal-anim, .section.visible .card,
       .section-enter, .section-exit, .metric-value.loading::after, .chart-loading::before,
-      .splash-medal, .splash-seal, .splash-title, .splash-sub, .splash-line, .pg-cursor
+      .splash-medal, .splash-seal, .splash-title, .splash-sub, .splash-line, .pg-cursor,
+      .ss-step[data-st="running"] .ss-ico
       { animation: none !important; }
       .nav-label, .nav-seal, .task-card, .factor-drawer, .factor-toggle .caret { transition: none !important; }
     }
@@ -1176,122 +1267,100 @@
         <!-- ============ 宣政殿 ============ -->
         <section id="sec-control" class="section">
          <div class="ctrl-wrap">
-          <!-- 三省导航 tabs -->
-          <div class="flex items-center gap-3 mb-3 border-b border-[var(--c-line)] pb-2">
-            <div class="flex items-center gap-1">
-              <span class="seal-mini seal-accent">书</span>
-              <button class="dept-tab active" data-dept="zhongshu">中书省</button>
+          <!-- 殿额：石青横披 + LLM 状态印 -->
+          <div class="court-head">
+            <span class="seal-mini court-seal">殿</span>
+            <div>
+              <div class="court-name">宣政殿 · 三省议政</div>
+              <div class="court-sub">旨意自中书入，尚书奉行之，门下监察之——三衙同朝，进度并览</div>
             </div>
-            <div class="flex items-center gap-1">
-              <span class="seal-mini" style="background:#2d6a4f;">尚</span>
-              <button class="dept-tab" data-dept="shangshu">尚书省</button>
-            </div>
-            <div class="flex items-center gap-1">
-              <span class="seal-mini" style="background:#c0392b;">门</span>
-              <button class="dept-tab" data-dept="menxia">门下省</button>
-            </div>
-            <div class="flex-1"></div>
             <span id="ctrl-llm-badge" class="ctrl-badge off">检测中…</span>
           </div>
 
-          <!-- 三省面板（同时显示，tab 切换可见性） -->
-          <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <!-- 议政流程：三省序进一览，节点实时显职守状态，点击跳转对应衙署 -->
+          <div class="court-flow">
+            <button class="court-node prov-shu" data-goto="panel-zhongshu">
+              <span class="seal-mini">书</span>
+              <span class="n-meta">
+                <span class="n-name">中书省 · 听旨拟票</span>
+                <span class="n-status" id="st-zhongshu">候旨</span>
+              </span>
+            </button>
+            <span class="court-arrow">❯</span>
+            <button class="court-node prov-shang" data-goto="panel-shangshu">
+              <span class="seal-mini">尚</span>
+              <span class="n-meta">
+                <span class="n-name">尚书省 · 调度执行</span>
+                <span class="n-status" id="st-shangshu">待命</span>
+              </span>
+            </button>
+            <span class="court-arrow">❯</span>
+            <button class="court-node prov-men" data-goto="panel-menxia">
+              <span class="seal-mini">门</span>
+              <span class="n-meta">
+                <span class="n-name">门下省 · 封驳审查</span>
+                <span class="n-status" id="st-menxia">监察中</span>
+              </span>
+            </button>
+          </div>
+
+          <!-- 三衙同列：中书主场加宽，尚书次之，门下居侧 -->
+          <div class="court-grid">
             <!-- 中书省：对话 + 意图理解 -->
-            <div class="card dept-panel" data-dept="zhongshu">
-              <div class="flex items-center justify-between mb-1">
-                <h3 class="font-semibold text-sm flex items-center gap-2"><span class="seal-mini seal-accent">书</span> 中书省·听旨拟票</h3>
-                <button id="ctrl-chat-reset" class="text-xs px-2 py-0.5 rounded border border-white/10 hover:bg-white/5" title="清空对话上下文">↻ 重置</button>
+            <div class="card court-panel prov-shu" id="panel-zhongshu">
+              <div class="court-panel-head">
+                <span class="seal-mini">书</span>
+                <span class="p-title">中书省</span>
+                <span class="p-sub">理解圣意 · 简事自办 · 繁务转尚书拟案</span>
+                <button id="ctrl-chat-reset" class="p-btn" title="清空对话上下文">↻ 重置</button>
               </div>
-              <div class="text-xs mb-2" style="color: var(--c-muted);">理解天子意图，简单自处理，复杂转交尚书省拟案。</div>
-              <div id="ctrl-chat-log" class="chat-log mb-2"></div>
-              <div class="chip-row mb-2" id="ctrl-chips">
-                <button class="chip" data-q="列出所有工作区">列工作区</button>
-                <button class="chip" data-q="列出最近的运行批次">近期批次</button>
-                <button class="chip" data-q="对比最近两个 run 的安全指标">对比近两批</button>
-                <button class="chip" data-q="对 ABCD 四个模型跑一遍评估">跑评估（复杂指令示例）</button>
-              </div>
-              <div class="flex gap-2">
-                <input id="ctrl-chat-input" type="text" class="flex-1" placeholder="吩咐中书省…（Enter 发送）">
-                <button id="ctrl-chat-send" class="btn btn-primary text-xs">发送</button>
+              <div id="ctrl-chat-log" class="chat-log court-chat"></div>
+              <div class="court-foot">
+                <div class="chip-row" id="ctrl-chips">
+                  <button class="chip" data-q="列出所有工作区">列工作区</button>
+                  <button class="chip" data-q="列出最近的运行批次">近期批次</button>
+                  <button class="chip" data-q="对比最近两个 run 的安全指标">对比近两批</button>
+                  <button class="chip" data-q="对 ABCD 四个模型跑一遍评估">跑评估（复杂指令示例）</button>
+                </div>
+                <div class="court-input-row">
+                  <input id="ctrl-chat-input" type="text" class="flex-1" placeholder="吩咐中书省…（Enter 发送）">
+                  <button id="ctrl-chat-send" class="btn btn-primary text-xs">发送</button>
+                </div>
               </div>
             </div>
 
             <!-- 尚书省：执行调度 -->
-            <div class="card dept-panel" data-dept="shangshu" style="display:none;">
-              <div class="flex items-center justify-between mb-1">
-                <h3 class="font-semibold text-sm flex items-center gap-2"><span class="seal-mini" style="background:#2d6a4f;">尚</span> 尚书省·调度执行</h3>
-                <button id="ss-refresh" class="btn btn-plain text-xs">刷新</button>
+            <div class="card court-panel prov-shang" id="panel-shangshu">
+              <div class="court-panel-head">
+                <span class="seal-mini">尚</span>
+                <span class="p-title">尚书省</span>
+                <span class="p-sub">奉旨执行 · 步骤进度</span>
+                <button id="ss-refresh" class="p-btn">刷新</button>
               </div>
-              <div class="text-xs mb-2" style="color: var(--c-muted);">执行 Plan 步骤进度，每步状态/结果。</div>
-              <div id="ss-plan-area" class="space-y-2" style="max-height: 500px; overflow-y: auto;">
-                <div class="text-xs text-center py-8" style="color: var(--c-muted);">尚无执行计划。复杂指令经中书省拟案、天子准奏后此处显示进度。</div>
+              <div id="ss-plan-area" class="court-scroll">
+                <div class="court-empty">
+                  <div class="court-empty-seal">尚</div>
+                  <div class="e-title">尚无执行计划</div>
+                  <div class="e-sub">复杂旨意经中书拟票、陛下准奏后，此处呈现步骤进度</div>
+                </div>
               </div>
             </div>
 
             <!-- 门下省：监察 + 封驳 + 简报 -->
-            <div class="card dept-panel" data-dept="menxia" style="display:none;">
-              <div class="flex items-center justify-between mb-1">
-                <h3 class="font-semibold text-sm flex items-center gap-2"><span class="seal-mini" style="background:#c0392b;">门</span> 门下省·封驳审查</h3>
-                <button id="mx-refresh" class="btn btn-plain text-xs">刷新</button>
+            <div class="card court-panel prov-men" id="panel-menxia">
+              <div class="court-panel-head">
+                <span class="seal-mini">门</span>
+                <span class="p-title">门下省</span>
+                <span class="p-sub">封驳危险步骤 · 呈递审查简报</span>
+                <button id="mx-refresh" class="p-btn">刷新</button>
               </div>
-              <div class="text-xs mb-2" style="color: var(--c-muted);">封驳记录 + 审查简报 + 异常呈递。</div>
-              <div id="mx-log" class="space-y-2" style="max-height: 500px; overflow-y: auto;">
-                <div class="text-xs text-center py-8" style="color: var(--c-muted);">门下省候旨。执行中的危险步骤将在此封驳，任务完成后呈递简报。</div>
-              </div>
-            </div>
-          </div>
-
-          <!-- 坊 · 工作区 + 衡 · 对比合并（手动操作入口，tab 下方常驻） -->
-          <div class="grid grid-cols-1 lg:grid-cols-5 gap-4 mt-4">
-            <div class="card lg:col-span-2">
-              <div class="flex items-center justify-between mb-1">
-                <h3 class="font-semibold text-sm">坊 · 工作区</h3>
-                <button id="ctrl-ws-refresh" class="btn btn-plain text-xs">刷新</button>
-              </div>
-              <div class="text-xs mb-2" style="color: var(--c-muted);">fork 隔离副本做 A/B 实验，不污染全局 R。</div>
-              <div id="ctrl-ws-list" class="space-y-2 mb-3" style="max-height: 180px; overflow-y: auto;"></div>
-              <div class="space-y-2" style="border-top: 1px dashed var(--c-line); padding-top: 10px;">
-                <div class="field"><div class="field-head"><span class="field-label">名称</span>
-                  <input id="ctrl-fork-name" type="text" placeholder="如 ab_batch2"></div></div>
-                <div class="field"><div class="field-head"><span class="field-label">来源</span>
-                  <select id="ctrl-fork-source"></select></div></div>
-                <div class="fork-opts" id="ctrl-fork-opts">
-                  <div class="space-y-2 pt-2">
-                    <div class="field"><div class="field-head"><span class="field-label">目标</span>
-                      <select id="ctrl-fork-target"><option value="">全部目标</option></select></div></div>
-                    <div class="field"><div class="field-head"><span class="field-label">攻击集</span>
-                      <select id="ctrl-fork-input"></select></div></div>
-                    <div class="field"><div class="field-head"><span class="field-label">轮次</span>
-                      <div class="unit-wrap"><input id="ctrl-fork-rounds" type="number" value="5" min="1" max="50"><span class="unit">轮</span></div></div></div>
-                  </div>
-                </div>
-                <div class="flex gap-2">
-                  <button id="ctrl-fork-btn" class="btn btn-plain flex-1 text-xs">建立副本</button>
-                  <button id="ctrl-fork-run-btn" class="btn btn-accent flex-1 text-xs">建立并运行</button>
+              <div id="mx-log" class="court-scroll">
+                <div class="court-empty">
+                  <div class="court-empty-seal">门</div>
+                  <div class="e-title">门下省候旨</div>
+                  <div class="e-sub">执行中的危险步骤将在此封驳，任务完成后呈递简报</div>
                 </div>
               </div>
-            </div>
-
-            <div class="card lg:col-span-3">
-              <h3 class="font-semibold text-sm mb-3">衡 · 对比与合并</h3>
-              <div class="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-3">
-                <div>
-                  <div class="text-xs mb-1 font-semibold" style="color: var(--c-muted);">批次对比（勾选 ≥2 个 run）</div>
-                  <div id="ctrl-cmp-list" class="pick-list"></div>
-                  <button id="ctrl-cmp-btn" class="btn btn-primary w-full text-xs mt-2">对比所选</button>
-                </div>
-                <div>
-                  <div class="text-xs mb-1 font-semibold" style="color: var(--c-muted);">合并 R 矩阵（勾选源 → 汇入目标）</div>
-                  <div id="ctrl-mrg-list" class="pick-list"></div>
-                  <div class="field mt-2"><div class="field-head"><span class="field-label">目标</span>
-                    <select id="ctrl-mrg-target"><option value="global">global（全局 R）</option></select></div></div>
-                  <label class="flex items-center gap-2 mt-2 text-xs" style="color: var(--c-muted);">
-                    <input type="checkbox" id="ctrl-mrg-confirm"> 确认执行（不勾 = dry-run 预览，不落盘）
-                  </label>
-                  <button id="ctrl-mrg-btn" class="btn btn-plain w-full text-xs mt-2">合并</button>
-                </div>
-              </div>
-              <div id="ctrl-heng-result" class="mt-3"></div>
             </div>
           </div>
          </div><!-- /ctrl-wrap -->

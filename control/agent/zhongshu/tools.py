@@ -132,8 +132,8 @@ def _tool_review_run():
 
 
 def _do_review(args: dict) -> dict:
-    """调 review.review_run（不经 subprocess，直接读文件 + LLM）。"""
-    from control.agent.review import review_run
+    """调 menxia.review_run（不经 subprocess，直接读文件 + LLM）。"""
+    from control.agent.menxia import review_run
     return review_run(args["run"])
 
 

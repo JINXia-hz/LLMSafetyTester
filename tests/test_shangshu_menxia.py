@@ -245,32 +245,55 @@ class TestEnvSnapshot:
 # 门下省封驳判据
 # ============================================================
 class TestMenxiaAssess:
+    """封驳判据测试——基于 capability.block_message（数据化判据）。"""
+    def _cap(self, name):
+        from control.agent.shangshu.capabilities import capability_by_name
+        return capability_by_name(name)
+
     def test_critical_merge_to_global(self):
         from control.agent.menxia import assess_step
-        a = assess_step("merge_results", {"target": "global", "sources": ["ws:x"]}, "critical")
+        cap = self._cap("merge_results")
+        a = assess_step(cap, {"target": "global", "sources": ["ws:x"]})
         assert a is not None
         assert "全局 R" in a["summary"]
 
+    def test_merge_to_ws_also_blocks(self):
+        """merge target=ws 也封驳（分支融合）。"""
+        from control.agent.menxia import assess_step
+        cap = self._cap("merge_results")
+        a = assess_step(cap, {"target": "ws:other", "sources": ["ws:x"]})
+        assert a is not None and "ws:other" in a["summary"]
+
     def test_critical_delete_r(self):
         from control.agent.menxia import assess_step
-        a = assess_step("delete_runs", {"delete_r": True, "names": ["m1"]}, "high")
-        # delete_r=True 升级为 critical 判据
+        cap = self._cap("delete_runs")
+        a = assess_step(cap, {"delete_r": True, "names": ["m1"]})
         assert a is not None and "R 矩阵" in a["summary"]
+
+    def test_delete_runs_without_r(self):
+        from control.agent.menxia import assess_step
+        cap = self._cap("delete_runs")
+        a = assess_step(cap, {"delete_r": False, "names": ["m1"]})
+        assert a is not None and "删除" in a["summary"]
 
     def test_high_run_evaluation(self):
         from control.agent.menxia import assess_step
-        a = assess_step("run_evaluation", {"targets": ["A"], "max_rounds": 5}, "high")
+        cap = self._cap("run_evaluation")
+        a = assess_step(cap, {"targets": ["A"], "max_rounds": 5})
         assert a is not None and "评估" in a["summary"]
 
     def test_medium_clean_cache(self):
         from control.agent.menxia import assess_step
-        a = assess_step("clean_cache", {"categories": ["elo_cache"]}, "medium")
+        cap = self._cap("clean_cache")
+        a = assess_step(cap, {"categories": ["elo_cache"]})
         assert a is not None and "elo_cache" in a["summary"]
 
     def test_low_passthrough(self):
+        """low capability（block_message=None）永不封驳。"""
         from control.agent.menxia import assess_step
-        assert assess_step("list_runs", {}, "low") is None
-        assert assess_step("list_workspaces", {}, "low") is None
+        assert assess_step(self._cap("list_runs"), {}) is None
+        assert assess_step(self._cap("list_workspaces"), {}) is None
+        assert assess_step(self._cap("fork_workspace"), {}) is None
 
     def test_block_lifecycle(self):
         from control.agent.menxia import approve_block, get_block, issue_block, reset_blocks

@@ -24,7 +24,7 @@ def _print(obj, *, json_mode: bool, title: str = "") -> None:
         out = {"_title": title, **obj} if isinstance(obj, dict) and title else obj
         print(json.dumps(out, ensure_ascii=False, indent=2, default=str))
     else:
-        from control.agent.loop import _render
+        from control.agent.zhongshu.fallback import _render
         print(_render(obj) if not title else f"=== {title} ===\n{_render(obj)}")
 
 
@@ -114,12 +114,12 @@ def main() -> int:
         return 0
 
     if args.cmd == "chat":
-        from control.agent.loop import chat_loop
+        from control.agent.zhongshu.fallback import chat_loop
         chat_loop()
         return 0
 
     if args.cmd == "tool":
-        from control.agent.tools import call_tool
+        from control.agent.zhongshu.tools import call_tool
         tool_args = json.loads(args.args) if args.args else {}
         r = call_tool(args.name, tool_args)
         _print(r, json_mode=True)  # tool 调用默认 JSON（机器消费）

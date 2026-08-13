@@ -1,7 +1,8 @@
-/* shangshu.js — 宣政殿「尚书省」面板：Plan 执行进度（依赖 core.js 全局）
+/* shangshu.js — 宣政殿「尚书省」衙署：Plan 执行进度（依赖 core.js / control.js 全局）
  *
  * 跟踪正在执行的 Plan，轮询 /api/control/bus/feed 获取步骤进度。
- * 每步显示状态（pending/running/done/blocked/failed/skipped）+ 结果摘要。
+ * 每步显示状态（pending/running/done/blocked/failed/skipped）+ 结果摘要，
+ * 同步更新议政流程条「尚书省」节点的职守状态。
  *
  * 被 control.js 调用：window.shangshuTrackPlan(planId) 开始跟踪某 plan。
  */
@@ -37,28 +38,47 @@ async function refreshPlanDisplay() {
     _planStatus[_trackedPlanId] = data;
     renderPlan(data);
   } catch (e) {
-    $('ss-plan-area').innerHTML = `<div class="text-xs" style="color:var(--c-accent);">加载失败: ${esc(e.message)}</div>`;
+    $('ss-plan-area').innerHTML = `<div class="text-xs" style="color: var(--c-accent);">加载失败: ${esc(e.message)}</div>`;
   }
+}
+
+// 流程条职守状态：plan 状态 + 步骤完成度
+function updateShangshuStatus(plan) {
+  const steps = plan.steps || [];
+  const done = steps.filter(s => s.status === 'done' || s.status === 'skipped').length;
+  const map = {
+    drafted:   ['待准奏', true],
+    approved:  ['已准奏 · 待发', true],
+    executing: [`执行中 · ${done}/${steps.length}`, true],
+    done:      ['已完成'],
+    rejected:  ['已驳回'],
+  };
+  const [text, busy] = map[plan.status] || [plan.status || '待命'];
+  setProvStatus('shangshu', text, busy);
 }
 
 function renderPlan(plan) {
   const area = $('ss-plan-area');
   if (!plan) {
-    area.innerHTML = '<div class="text-xs text-center py-8" style="color:var(--c-muted);">尚无执行计划。</div>';
+    area.innerHTML = `<div class="court-empty">
+      <div class="court-empty-seal">尚</div>
+      <div class="e-title">尚无执行计划</div>
+      <div class="e-sub">复杂旨意经中书拟票、陛下准奏后，此处呈现步骤进度</div>
+    </div>`;
     return;
   }
-  const statusBadge = {
-    drafted: '<span class="ws-tag pending">待准奏</span>',
-    approved: '<span class="ws-tag pending">已准奏</span>',
-    executing: '<span class="ws-tag pending">执行中</span>',
-    done: '<span class="ws-tag merged">已完成</span>',
-    rejected: '<span class="ws-tag" style="background:#555;">已驳回</span>',
-  }[plan.status] || `<span class="ws-tag">${esc(plan.status)}</span>`;
+  updateShangshuStatus(plan);
+  const statusTag = {
+    drafted: '<span class="mini-tag warn">待准奏</span>',
+    approved: '<span class="mini-tag warn">已准奏</span>',
+    executing: '<span class="mini-tag warn">执行中</span>',
+    done: '<span class="mini-tag ok">已完成</span>',
+    rejected: '<span class="mini-tag mut">已驳回</span>',
+  }[plan.status] || `<span class="mini-tag mut">${esc(plan.status)}</span>`;
 
   let html = `<div class="flex items-center gap-2 mb-2">
-    <span class="seal-mini" style="background:#2d6a4f;">尚</span>
-    <span style="font-weight:600; font-size:0.9rem;">${esc(plan.intent || '执行计划')}</span>
-    ${statusBadge}
+    <span style="font-weight:700; font-size:0.9rem; font-family:var(--serif);">${esc(plan.intent || '执行计划')}</span>
+    ${statusTag}
   </div>`;
 
   // 步骤列表
@@ -68,49 +88,37 @@ function renderPlan(plan) {
 
   // 完成摘要
   if (plan.status === 'done' && plan.summary) {
-    html += `<div style="margin-top:8px; padding:8px; border-radius:4px; background:rgba(45,106,79,0.1); font-size:0.8rem;">${mdSafe(plan.summary)}</div>`;
+    html += `<div class="ss-summary">${mdSafe(plan.summary)}</div>`;
   }
 
   area.innerHTML = html;
 }
 
 function renderStep(s) {
-  const statusIcon = {
-    pending: '⏳',
-    running: '🔄',
-    done: '✓',
-    blocked: '🛡️',
-    failed: '✕',
-    skipped: '⊘',
-  }[s.status] || '?';
-  const statusColor = {
-    pending: 'var(--c-muted)',
-    running: '#fbbf24',
-    done: '#2d6a4f',
-    blocked: '#b91c1c',
-    failed: '#b91c1c',
-    skipped: 'var(--c-muted)',
-  }[s.status] || 'var(--c-text)';
+  // 状态环字符：running 由 CSS 画旋转金环，无字符
+  const statusMark = {
+    pending: '○', running: '', done: '✓', blocked: '驳', failed: '✕', skipped: '⊘',
+  }[s.status] ?? '?';
 
   let detail = '';
   if (s.status === 'done' && s.result) {
     const r = typeof s.result === 'string' ? s.result : JSON.stringify(s.result);
     const brief = r.length > 200 ? r.slice(0, 200) + '…' : r;
-    detail = `<div style="font-size:0.75rem; color:var(--c-text); opacity:0.6; padding-top:2px;">${esc(brief)}</div>`;
+    detail = `<div class="ss-detail">${esc(brief)}</div>`;
   } else if (s.status === 'failed' && s.error) {
-    detail = `<div style="font-size:0.75rem; color:#fca5a5; padding-top:2px;">${esc(s.error)}</div>`;
+    detail = `<div class="ss-detail">${esc(s.error)}</div>`;
   } else if (s.status === 'blocked' && s.ticket) {
-    detail = `<div style="font-size:0.75rem; color:#fca5a5; padding-top:2px;">🛡️ ${esc(s.ticket.summary || '')}（门下省面板可准奏）</div>`;
+    detail = `<div class="ss-detail">${esc(s.ticket.summary || '')}（门下省衙署可准奏放行）</div>`;
   } else if (s.status === 'skipped' && s.error) {
-    detail = `<div style="font-size:0.75rem; color:var(--c-muted); padding-top:2px;">${esc(s.error)}</div>`;
+    detail = `<div class="ss-detail">${esc(s.error)}</div>`;
   }
 
-  const deps = s.depends_on && s.depends_on.length ? ` <span style="color:var(--c-muted);">←${s.depends_on.join(',')}</span>` : '';
-  return `<div style="padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.05);">
-    <div style="display:flex; align-items:center; gap:6px;">
-      <span style="color:${statusColor};">${statusIcon}</span>
-      <span style="font-size:0.8125rem;">${esc(s.description || s.capability)}</span>
-      <span style="font-size:0.7rem; color:var(--c-muted); margin-left:auto;">${esc(s.capability)}${deps}</span>
+  const deps = s.depends_on && s.depends_on.length ? ` ←${s.depends_on.join(',')}` : '';
+  return `<div class="ss-step" data-st="${esc(s.status)}">
+    <div class="ss-row">
+      <span class="ss-ico">${statusMark}</span>
+      <span class="ss-title">${esc(s.description || s.capability)}</span>
+      <span class="ss-cap">${esc(s.capability)}${esc(deps)}</span>
     </div>
     ${detail}
   </div>`;

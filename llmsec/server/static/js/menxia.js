@@ -1,16 +1,18 @@
-/* menxia.js — 宣政殿「门下省」面板：封驳记录 + 审查简报（依赖 core.js 全局）
+/* menxia.js — 宣政殿「门下省」衙署：封驳记录 + 审查简报（依赖 core.js / control.js 全局）
  *
  * 轮询总线消息，展示：
  *   - 封驳令（block）+ 准奏按钮（放行该步）
  *   - 审查简报（review）
  *   - 异常呈递（step_failed）
  *   - Plan 完成通知（plan_done）
+ * 待裁封驳计数同步到议政流程条「门下省」节点。
  */
 
 let _mxBound = false;
 let _mxPollTimer = null;
 let _mxLatestTs = 0;
-let _mxEntries = [];   // 门下省日志条目 [{type, ts, html}]
+let _mxEntries = [];        // 门下省日志条目 [{type, ts, html, blockKey?}]
+let _mxPendingBlocks = 0;   // 待圣裁的封驳数
 
 function loadMenxiaSection() {
   if (!_mxBound) bindMenxia();
@@ -23,6 +25,15 @@ function bindMenxia() {
   _mxBound = true;
   const refresh = $('mx-refresh');
   if (refresh) refresh.onclick = () => { refreshBlocks(); renderMenxiaLog(); };
+}
+
+// 流程条职守状态：有待裁封驳时显计数，否则监察中
+function updateMenxiaStatus() {
+  if (_mxPendingBlocks > 0) {
+    setProvStatus('menxia', `封驳 ${_mxPendingBlocks} 起 · 待圣裁`, true);
+  } else {
+    setProvStatus('menxia', '监察中');
+  }
 }
 
 async function pollMenxiaBus() {
@@ -43,15 +54,16 @@ function handleBusMessage(m) {
   if (m.kind === 'block') {
     const t = m.payload.ticket;
     if (!t) return;
+    _mxPendingBlocks++;
+    updateMenxiaStatus();
     _mxEntries.push({
-      type: 'block', ts: m.ts,
-      html: `<div style="border-left:3px solid #b91c1c; padding:8px 12px; background:rgba(185,28,28,0.08); border-radius:0 4px 4px 0;">
-        <div style="font-weight:600; color:#fca5a5; font-size:0.8125rem;">🛡️ ${esc(t.summary)}</div>
-        <div style="font-size:0.75rem; color:var(--c-text); opacity:0.7; white-space:pre-line; margin:4px 0;">${esc(t.detail)}</div>
-        <div style="display:flex; gap:6px; align-items:center;">
-          <span style="font-size:0.7rem; color:var(--c-muted);">步骤 ${esc(m.payload.step_id)} · ${esc(t.capability)} · ${esc(t.risk_level)}级</span>
-          <button class="mx-unblock" data-plan="${esc(m.payload.plan_id)}" data-step="${esc(m.payload.step_id)}"
-            style="margin-left:auto; padding:3px 10px; border-radius:3px; background:#b91c1c; color:#fff; font-size:0.7rem; border:none; cursor:pointer;">准奏放行</button>
+      type: 'block', ts: m.ts, blockKey: `${m.payload.plan_id}:${m.payload.step_id}`,
+      html: `<div class="mx-entry mx-block">
+        <div class="mx-title"><span class="seal-mini" style="width:18px;height:18px;font-size:10px;background:var(--c-warn);">驳</span> ${esc(t.summary)}</div>
+        <div class="mx-body">${esc(t.detail)}</div>
+        <div style="display:flex; gap:6px; align-items:center; margin-top:6px;">
+          <span style="font-size:0.68rem; color:var(--c-muted);">步骤 ${esc(m.payload.step_id)} · ${esc(t.capability)} · ${esc(t.risk_level)}级</span>
+          <button class="mx-unblock" data-plan="${esc(m.payload.plan_id)}" data-step="${esc(m.payload.step_id)}">准奏放行</button>
         </div>
       </div>`,
     });
@@ -60,9 +72,9 @@ function handleBusMessage(m) {
     if (p.type === 'failure_report') {
       _mxEntries.push({
         type: 'failure', ts: m.ts,
-        html: `<div style="border-left:3px solid #f59e0b; padding:8px 12px; background:rgba(245,158,11,0.08); border-radius:0 4px 4px 0;">
-          <div style="color:#fbbf24; font-size:0.8125rem;">⚠ 步骤 ${esc(p.step_id)} 执行失败</div>
-          <div style="font-size:0.75rem; color:var(--c-text); opacity:0.7; margin-top:2px;">${esc(p.error || '')}</div>
+        html: `<div class="mx-entry mx-fail">
+          <div class="mx-title">⚠ 步骤 ${esc(p.step_id)} 执行失败</div>
+          <div class="mx-body">${esc(p.error || '')}</div>
         </div>`,
       });
     } else if (p.reviews && p.reviews.length) {
@@ -70,9 +82,9 @@ function handleBusMessage(m) {
         const digest = rv.review?.digest || rv.review?.summary || JSON.stringify(rv.review || {}).slice(0, 300);
         _mxEntries.push({
           type: 'review', ts: m.ts,
-          html: `<div style="border-left:3px solid #2d6a4f; padding:8px 12px; background:rgba(45,106,79,0.08); border-radius:0 4px 4px 0;">
-            <div style="color:#52b788; font-size:0.8125rem;">📋 审查简报（步骤 ${esc(rv.step_id)}）</div>
-            <div style="font-size:0.75rem; color:var(--c-text); opacity:0.8; white-space:pre-line; margin-top:4px;">${mdSafe(digest)}</div>
+          html: `<div class="mx-entry mx-review">
+            <div class="mx-title">📋 审查简报（步骤 ${esc(rv.step_id)}）</div>
+            <div class="mx-body">${mdSafe(digest)}</div>
           </div>`,
         });
       }
@@ -80,7 +92,7 @@ function handleBusMessage(m) {
   } else if (m.kind === 'plan_done') {
     _mxEntries.push({
       type: 'plan_done', ts: m.ts,
-      html: `<div style="text-align:center; font-size:0.75rem; color:var(--c-muted); padding:4px;">— 执行完毕 —</div>`,
+      html: `<div class="mx-entry mx-fin">— 执行完毕 —</div>`,
     });
   }
   // 只保留最近 30 条
@@ -97,7 +109,11 @@ async function refreshBlocks() {
 function renderMenxiaLog() {
   const log = $('mx-log');
   if (!_mxEntries.length) {
-    log.innerHTML = '<div class="text-xs text-center py-8" style="color:var(--c-muted);">门下省候旨。</div>';
+    log.innerHTML = `<div class="court-empty">
+      <div class="court-empty-seal">门</div>
+      <div class="e-title">门下省候旨</div>
+      <div class="e-sub">执行中的危险步骤将在此封驳，任务完成后呈递简报</div>
+    </div>`;
     return;
   }
   log.innerHTML = _mxEntries.map(e => e.html).join('');
@@ -117,7 +133,11 @@ async function unblockStep(planId, stepId, btn) {
     });
     if (res.ok) {
       btn.textContent = '已放行';
-      btn.style.background = '#2d6a4f';
+      btn.style.background = 'var(--c-safe)';
+      _mxPendingBlocks = Math.max(0, _mxPendingBlocks - 1);
+      updateMenxiaStatus();
+    } else {
+      btn.disabled = false;
     }
   } catch { btn.disabled = false; }
 }

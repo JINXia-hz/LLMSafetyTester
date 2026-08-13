@@ -257,7 +257,7 @@ class TestWorkspaceObservability:
     def test_list_runs_tool_includes_workspaces(self, tmp_path, monkeypatch):
         """list_runs tool 默认包含 workspace run。"""
         from control import config
-        from control.agent import tools
+        from control.agent.zhongshu import tools
         from control.core import compare as cmp
         ws_root = tmp_path / "workspaces"
         runs_dir = tmp_path / "runs"; runs_dir.mkdir()
@@ -377,7 +377,7 @@ class TestWorkspace:
 # ============================================================
 class TestTools:
     def test_all_tools_have_schema(self):
-        from control.agent.tools import all_tools
+        from control.agent.zhongshu.tools import all_tools
         for t in all_tools():
             schema = t.to_schema()
             assert schema["type"] == "function"
@@ -387,14 +387,14 @@ class TestTools:
 
     def test_call_tool_dispatch(self, monkeypatch):
         """call_tool 按名分发到对应 tool.call，透传 args。"""
-        from control.agent import tools
+        from control.agent.zhongshu import tools
         t = tools.tool_by_name("list_runs")
         monkeypatch.setattr(t, "call", lambda args: {"echoed": args})
         result = tools.call_tool("list_runs", {"target": "mA"})
         assert result == {"echoed": {"target": "mA"}}
 
     def test_call_unknown_tool_raises(self):
-        from control.agent.tools import call_tool
+        from control.agent.zhongshu.tools import call_tool
         with pytest.raises(KeyError):
             call_tool("bogus", {})
 
@@ -404,32 +404,32 @@ class TestTools:
 # ============================================================
 class TestLoop:
     def test_parse_list_runs(self):
-        from control.agent.loop import _parse_intent
+        from control.agent.zhongshu.fallback import _parse_intent
         assert _parse_intent("列一下 run") == ("list_runs", {})
         assert _parse_intent("list runs") == ("list_runs", {})
         r = _parse_intent("列 run target=modelA")
         assert r == ("list_runs", {"target": "modelA"})
 
     def test_parse_list_junk(self):
-        from control.agent.loop import _parse_intent
+        from control.agent.zhongshu.fallback import _parse_intent
         r = _parse_intent("列一下垃圾 run")
         assert r is not None and r[0] == "list_runs" and r[1].get("junk_only") is True
 
     def test_parse_compare(self):
-        from control.agent.loop import _parse_intent
+        from control.agent.zhongshu.fallback import _parse_intent
         r = _parse_intent("对比 2026-08-11_120000/A 和 2026-08-11_130000/B")
         assert r is not None and r[0] == "compare_runs"
         assert len(r[1]["runs"]) == 2
 
     def test_parse_fork(self):
-        from control.agent.loop import _parse_intent
+        from control.agent.zhongshu.fallback import _parse_intent
         r = _parse_intent("fork ws1")
         assert r == ("fork_workspace", {"name": "ws1"})
         r = _parse_intent("fork ws1 from run:2026-08-11_120000/A")
         assert r == ("fork_workspace", {"name": "ws1", "source": "run:2026-08-11_120000/A"})
 
     def test_parse_workspace_list_and_delete(self):
-        from control.agent.loop import _parse_intent
+        from control.agent.zhongshu.fallback import _parse_intent
         assert _parse_intent("列工作区") == ("list_workspaces", {})
         assert _parse_intent("list workspaces") == ("list_workspaces", {})
         r = _parse_intent("删工作区 demo-ws")
@@ -438,13 +438,13 @@ class TestLoop:
         assert r == ("delete_workspace", {"name": "demo-ws"})
 
     def test_chat_one_json_direct_call(self, monkeypatch):
-        from control.agent import loop
+        from control.agent.zhongshu import fallback as loop
         monkeypatch.setattr(loop, "call_tool", lambda name, args: [{"name": "t"}])
         out = loop.chat_one('{"tool": "list_runs", "args": {}}')
         assert "共 1 项" in out
 
     def test_chat_one_unknown(self):
-        from control.agent.loop import chat_one
+        from control.agent.zhongshu.fallback import chat_one
         out = chat_one("xyzzy nonsense")
         assert "未识别" in out
 
@@ -454,14 +454,14 @@ class TestLoop:
 # ============================================================
 class TestSession:
     def test_get_or_create_assigns_id(self):
-        from control.agent import session as sess
+        from control.agent.zhongshu import session as sess
         sess._SESSIONS.clear()
         sid, msgs = sess.get_or_create(None)
         assert sid is not None and len(sid) > 0
         assert len(msgs) >= 1 and msgs[0]["role"] == "system"
 
     def test_reuse_existing_session(self):
-        from control.agent import session as sess
+        from control.agent.zhongshu import session as sess
         sess._SESSIONS.clear()
         sid1, _ = sess.get_or_create(None)
         sid2, msgs2 = sess.get_or_create(sid1)
@@ -469,7 +469,7 @@ class TestSession:
 
     def test_messages_accumulate(self):
         """跨调用累积消息（上下文记忆的核心）。"""
-        from control.agent import session as sess
+        from control.agent.zhongshu import session as sess
         sess._SESSIONS.clear()
         sid, msgs = sess.get_or_create(None)
         sess.append(sid, "user", "帮我 fork")
@@ -480,7 +480,7 @@ class TestSession:
         assert msgs2[2]["content"] == "已 fork"
 
     def test_reset_clears_history(self):
-        from control.agent import session as sess
+        from control.agent.zhongshu import session as sess
         sess._SESSIONS.clear()
         sid, _ = sess.get_or_create(None)
         sess.append(sid, "user", "hello")
@@ -508,41 +508,41 @@ class TestReview:
         }
 
     def test_high_asr_is_critical(self):
-        from control.agent.review import assess_findings
+        from control.agent.menxia.review import assess_findings
         report = self._make_report(asr=0.8, level="broken")
         findings = assess_findings(report, None)
         asr_f = [f for f in findings if f["metric"] == "ASR"]
         assert len(asr_f) == 1 and asr_f[0]["severity"] == "critical"
 
     def test_safe_asr_is_good(self):
-        from control.agent.review import assess_findings
+        from control.agent.menxia.review import assess_findings
         findings = assess_findings(self._make_report(asr=0.05), None)
         asr_f = [f for f in findings if f["metric"] == "ASR"]
         assert asr_f[0]["severity"] == "good"
 
     def test_high_fpr_flags(self):
-        from control.agent.review import assess_findings
+        from control.agent.menxia.review import assess_findings
         findings = assess_findings(self._make_report(fpr=0.2), None)
         fpr_f = [f for f in findings if f["metric"] == "FPR"]
         assert fpr_f[0]["severity"] == "critical"
 
     def test_inconclusive_flagged(self):
-        from control.agent.review import assess_findings
+        from control.agent.menxia.review import assess_findings
         findings = assess_findings(self._make_report(level="inconclusive"), None)
         assert any(f["metric"] == "security_level" for f in findings)
 
     def test_low_coverage_flagged(self):
-        from control.agent.review import assess_findings
+        from control.agent.menxia.review import assess_findings
         findings = assess_findings(self._make_report(coverage=0.1), None)
         assert any(f["metric"] == "coverage" for f in findings)
 
     def test_not_converged_flagged(self):
-        from control.agent.review import assess_findings
+        from control.agent.menxia.review import assess_findings
         findings = assess_findings(self._make_report(converged=False), None)
         assert any(f["metric"] == "converged" for f in findings)
 
     def test_findings_sorted_by_severity(self):
-        from control.agent.review import assess_findings
+        from control.agent.menxia.review import assess_findings
         findings = assess_findings(
             self._make_report(asr=0.8, fpr=0.2, coverage=0.1, level="broken"), None)
         severities = [f["severity"] for f in findings]
@@ -552,7 +552,7 @@ class TestReview:
 
     def test_get_thresholds_from_cli(self, monkeypatch):
         """阈值经 CLI 获取（不复制），mock invoker 验证。"""
-        from control.agent import review
+        from control.agent.menxia import review
         review._THRESHOLDS_CACHE = None  # 清缓存
         from control.core import invoker
         monkeypatch.setattr(invoker, "_run", lambda argv: type("R", (), {
@@ -566,7 +566,7 @@ class TestReview:
     def test_review_run_returns_structure(self, tmp_path, monkeypatch):
         """review_run 完整流程（mock 读报告）。"""
         from control import config
-        from control.agent import review
+        from control.agent.menxia import review
         from control.core import compare as cmp
         runs = tmp_path / "runs"; runs.mkdir()
         d = runs / "2026-08-11_120000" / "modelA"; d.mkdir(parents=True)
