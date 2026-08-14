@@ -47,8 +47,11 @@ from control.config import WORKSPACES_DIR
 from control.core import compare as compare_mod
 from control.core import workspace as ws_mod
 from control.core.paths import safe_component
+from llmsec.core.logging import get_logger
 
 router = APIRouter()
+
+logger = get_logger(__name__)
 
 # 门下省在 router 加载时初始化（订阅总线）
 menxia.init_menxia()
@@ -228,8 +231,10 @@ def api_chat(req: ChatRequest):
     try:
         result = zhongshu_handle(req.text, session_id=req.session_id)
         return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        # 不把内部异常文本回传客户端（可能含文件路径等敏感信息），仅记日志
+        logger.exception("api_chat 处理失败")
+        raise HTTPException(status_code=500, detail="处理失败，请重试或查看服务端日志")
 
 
 @router.post("/api/control/chat/reset")

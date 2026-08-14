@@ -1,0 +1,19 @@
+# CodeQL 分析配置。
+#
+# packs 引入本仓库自有的 model pack（.github/codeql/），其中声明了
+# safe_component / safe_subpath 为 path-injection barrier，消除经它们处理的误报。
+# paths 限定只扫 llmsec/ + control/（项目代码），跳过 .venv / tests / 生成产物。
+name: "LLMsec CodeQL config"
+
+packs:
+  # 本地 model pack：路径相对仓库根，含 qlpack.yml + models/*.yml
+  - ./.github/codeql
+
+paths:
+  - llmsec
+  - control
+
+paths-ignore:
+  - llmsec/**/__pycache__
+  - '**/.venv'
+  - '**/node_modules'

@@ -1,0 +1,23 @@
+# CodeQL models-as-data: 把项目自有的路径校验函数声明为 path-injection barrier（sanitizer）。
+#
+# 背景：CodeQL 的 py/path-injection 只认内置 sanitizer（os.path.basename / Path.resolve
+# 等），不认识自定义函数。本项目 safe_component / safe_subpath 做了黑名单 + resolve 越界
+# 双重校验，但 CodeQL 无法跨函数推断，仍把经它们处理的调用点标为路径穿越（误报）。
+#
+# 本 data extension 把这两个函数的返回值标记为 "path-injection" barrier，使污点在此截断。
+# 需在 codeql-config.yml 的 packs 里引入本文件才会生效。
+#
+# 格式参考：
+#   https://codeql.github.com/docs/codeql-language-guides/customizing-library-models-for-python/
+# kind "path-injection" 对应 PathInjectionCustomizations.qll 的 SanitizerFromModel。
+extensions:
+  - addsTo:
+      pack: codeql/python-all
+      extensible: barrierModel
+    data:
+      # [模块点号路径, 函数返回值定位, barrier kind]
+      - ["llmsec.core.paths", "Member[safe_component].ReturnValue", "path-injection"]
+      - ["llmsec.core.paths", "Member[safe_subpath].ReturnValue", "path-injection"]
+      # control.core.paths 是 llmsec.core.paths 的薄封装（re-export），两处都声明
+      - ["control.core.paths", "Member[safe_component].ReturnValue", "path-injection"]
+      - ["control.core.paths", "Member[safe_subpath].ReturnValue", "path-injection"]

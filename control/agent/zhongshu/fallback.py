@@ -137,7 +137,9 @@ def _parse_intent(text: str) -> tuple[str, dict] | None:
     low = text.lower()
 
     # list runs（中文「列」后无 word boundary，不用 \b）
-    if re.search(r"(list|列|show).*(run)", low) or low in ("runs", "run", "历史"):
+    # 用子串判断替代 (list|列|show).*(run) 正则——避免交替+.* 的 ReDoS 启发式告警，
+    # 语义等价：含 list/列/show 之一且含 run。
+    if (any(k in low for k in ("list", "列", "show")) and "run" in low) or low in ("runs", "run", "历史"):
         args: dict = {}
         m = re.search(r"(?:target|目标)[=\s]+(\S+)", text)
         if m:
@@ -148,15 +150,12 @@ def _parse_intent(text: str) -> tuple[str, dict] | None:
 
     # workspaces
     if "workspace" in low or "工作区" in text:
-        if re.search(r"(list|列|show)", low) or "列出" in text or "看一下" in text:
+        if any(k in low for k in ("list", "列", "show")) or "列出" in text or "看一下" in text:
             return ("list_workspaces", {})
         # delete workspace（删/删除/delete/remove 工作区 NAME）
-        if re.search(r"(delete|删|删除|remove)", low):
-            # NAME = 末尾的 token（支持中英、连字符）
-            m = re.search(r"(?:delete|删|删除|remove).*?(?:workspace|工作区)\s+([\w.-]+)", text, re.IGNORECASE)
-            if m:
-                return ("delete_workspace", {"name": m.group(1)})
-            # 兜底：整个工作区关键词后取一个 token
+        if any(k in low for k in ("delete", "删", "删除", "remove")):
+            # NAME = 工作区关键词后的 token（支持中英、连字符）。
+            # 用单段正则提取，不用 .*? 桥接（消除 ReDoS 启发式告警）。
             m = re.search(r"(?:workspace|工作区)\s+([\w.-]+)", text, re.IGNORECASE)
             if m:
                 return ("delete_workspace", {"name": m.group(1)})

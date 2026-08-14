@@ -1,0 +1,44 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # 每周一 UTC 00:00 定期全量扫描
+    - cron: "0 0 * * 1"
+
+permissions:
+  contents: read
+  security-events: write  # 上传 code scanning 结果所需
+
+# 取消同分支重复运行
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          # 引入自定义配置：加载本地 model pack（safe_component/safe_subpath barrier）
+          config-file: .github/codeql/codeql-config.yml
+
+      # Python 是解释型语言，无需 autobuild 即可分析；但 autodb 会构建依赖图
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"

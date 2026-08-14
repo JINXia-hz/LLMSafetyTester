@@ -17,6 +17,7 @@ from pathlib import Path
 from threading import Lock
 
 from control.config import OUTPUT_DIR
+from control.core.paths import safe_component
 
 # 步骤状态
 S_PENDING = "pending"      # 未开始
@@ -134,7 +135,7 @@ def save_plan(plan: Plan) -> None:
     """持久化 Plan 到内存注册表 + 磁盘（output/plans/<id>.json）。"""
     with _LOCK:
         _PLANS[plan.id] = plan
-    p = _plans_dir() / f"{plan.id}.json"
+    p = safe_component(_plans_dir(), f"{plan.id}.json")
     p.write_text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -144,8 +145,11 @@ def load_plan(plan_id: str) -> Plan | None:
         p = _PLANS.get(plan_id)
     if p is not None:
         return p
-    # 尝试磁盘
-    fp = _plans_dir() / f"{plan_id}.json"
+    # 尝试磁盘（plan_id 外部可控，走 safe_component 防穿越）
+    try:
+        fp = safe_component(_plans_dir(), f"{plan_id}.json")
+    except ValueError:
+        return None  # 非法 plan_id 视为不存在
     if not fp.exists():
         return None
     return _from_json(json.loads(fp.read_text(encoding="utf-8")))

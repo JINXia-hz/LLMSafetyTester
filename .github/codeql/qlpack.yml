@@ -1,0 +1,9 @@
+name: llmsec/codeql-python-models
+version: 1.0.0
+library: true
+# 扩展 codeql/python-all（path-injection 等查询所属的库）
+extensionTargets:
+  codeql/python-all: ~1.0.0
+# 本 pack 内的 data extension YAML（models-as-data）
+dataExtensions:
+  - models/**/*.yml
