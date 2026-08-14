@@ -40,10 +40,16 @@ dev = [
     "pytest-xdist>=3",
     "ruff",
 ]
+# MCP 工具库接口（llmsec-mcp server，供外部 agent 调用）
+# 安装：pip install -e ".[mcp]"
+mcp = [
+    "fastmcp>=2,<4",
+]
 
 [project.scripts]
 llmsec = "llmsec.pipeline.runner:main"
 llmsec-manage = "llmsec.management.__main__:main"
+llmsec-mcp = "llmsec.mcp.server:main"
 
 [tool.setuptools.packages.find]
 include = ["llmsec*"]

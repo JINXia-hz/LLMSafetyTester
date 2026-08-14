@@ -220,6 +220,89 @@ pytest -n auto                   # 并行（CI 默认）
 
 ---
 
+## MCP 工具库接口
+
+llmsec 可作为 **MCP（Model Context Protocol）工具库**暴露，让外部 agent（ZCode / Cursor / Claude Desktop 等）直接调用 llmsec 的能力，自己决策编排——不需要通过 CLI 或 Web 面板。
+
+### 定位
+
+MCP 接口把 llmsec 退回为**安全测试工具库**，让外部 agent 成为真正的决策者：
+
+- **工具库 + 轻护栏**：低风险操作（查询、计算）直接放行；危险操作（删除、清理）走 dry-run 预览 + 两步确认 token。
+- **最小配置**：只需配跑评估必需的 `TARGET_*` / `GENERATOR_*` / `JUDGE_*`，**不需要配置三省制（中书省/尚书省/门下省）的 LLM**。
+- **不走路由进三省制**：外部 agent 全权编排，llmsec 只提供原子能力。
+
+### 安装
+
+```bash
+pip install -e ".[mcp]"     # 安装 fastmcp 依赖
+```
+
+### 启动
+
+```bash
+llmsec-mcp                              # stdio 传输（默认，适配 IDE 集成）
+llmsec-mcp --transport http --port 8765 # HTTP 传输（远程访问）
+```
+
+### 在 ZCode / Cursor 中配置
+
+在 MCP 配置文件中添加（stdio 模式）：
+
+```json
+{
+  "mcpServers": {
+    "llmsec": {
+      "command": "llmsec-mcp",
+      "cwd": "<项目根目录>"
+    }
+  }
+}
+```
+
+### 工具清单（52 个，按功能分层）
+
+| 类别 | 工具 | 说明 |
+|------|------|------|
+| **纯函数计算** | `obfuscate_prompt` / `compute_eval_score` / `compute_math_score` / `extract_math_answer` / `extract_textual_features` / `extract_report_metrics` / `aggregate_metrics` | 零副作用，直接调用 |
+| **查询：评估 run** | `list_runs` / `compare_runs` / `read_run_report` / `assess_run_findings` / `review_run` / `get_thresholds` | run 历史与审查 |
+| **查询：R 矩阵 & Elo** | `get_results_summary` / `elo_ranking` / `elo_security_boundary` / `elo_find_surprises` / `elo_suggest_next_pairing` / `get_allergy_report` / `get_cluster_report` | 安全画像全维度 |
+| **查询：工作区 & 目标** | `list_workspaces` / `list_workspace_runs` / `list_targets` | 环境发现 |
+| **查询：Plan & 文牍** | `list_plans` / `get_plan` / `list_gazettes` / `get_plan_context` / `read_plan_events` / `list_capabilities` | 编排历史与自省 |
+| **写操作（两步确认）** | `delete_runs_preview`+`confirm` / `clean_caches_preview`+`confirm` / `merge_workspaces_preview`+`confirm` / `merge_env_snapshot_to_global_preview`+`confirm` | 危险操作 preview→confirm |
+| **写操作（直接）** | `fork_workspace` / `delete_workspace` / `export_snapshot` | 低风险直接执行 |
+| **配置管理** | `create/edit/list/delete_env_snapshot` / `get_env_config` | .env 快照 CRUD |
+| **长任务** | `run_evaluation` / `orchestrate_runs` / `get_task_status` / `get_task_progress` / `get_task_log` / `cancel_task` / `list_tasks` | 异步提交 + 轮询 |
+
+### 隔离配置：env_snapshot
+
+用户**不需要手动编辑 .env**——agent 可以通过 env_snapshot 工具动态创建隔离配置：
+
+1. `create_env_snapshot("my-config", source="blank")` — 创建空白快照
+2. `edit_env_snapshot("my-config", "TARGET_x_BASE_URL", "http://...")` — 逐条写入配置
+3. `edit_env_snapshot("my-config", "GENERATOR_API_KEY", "sk-...")` — 写入 API key
+4. `run_evaluation(target="x", env_snapshot="my-config")` — 用隔离配置跑评估
+
+快照里的配置只注入 runner 子进程，不碰全局 .env。受管理的 key 前缀：`TARGETS` / `TARGET_*` / `GENERATOR_*` / `JUDGE_*` / `CONTROL_*` / `LLMSEC_PARAM_*`。
+
+### 两步确认机制
+
+`delete_runs` / `clean_caches` 这类危险操作采用 **preview → confirm** 两步模式：
+
+1. agent 调 `delete_runs_preview(names)` → 获取影响摘要 + `confirm_token`（5 分钟有效）
+2. agent 审阅后调 `delete_runs_confirm(token)` → 才真执行
+
+token 一次性消费，过期自动失效。
+
+### 长任务轮询
+
+`run_evaluation` 跑几分钟到几十分钟，不阻塞等待：
+
+1. agent 调 `run_evaluation(target="model-x")` → 立即返回 `task_id`
+2. agent 轮询 `get_task_status(task_id)` 直到 `status` 变为 `success` / `failed` / `cancelled`
+
+---
+
 ## 核心概念
 
 ### 反向 ELO + K 动力学
