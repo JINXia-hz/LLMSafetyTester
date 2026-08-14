@@ -88,6 +88,7 @@ def run_evaluation(
     twin_window: int | None = None,
     no_early_stop: bool = False,
     concurrency: int | None = None,
+    param_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """提交一次 llmsec 安全评估任务（异步，立即返回 task_id）。
 
@@ -112,6 +113,9 @@ def run_evaluation(
         twin_window:  过敏检测方法数上限（控制过敏阶段成本）。None 用默认自适应。
         no_early_stop: 跑满 max_rounds 不提前停止（实验可比性，固定预算下 ci_half 可比）。
         concurrency:  批内并行度（每轮同时发起多少个攻击请求）。None 用默认全并发。
+        param_overrides: 覆写 params.py 的行为参数（只在本次评估生效，不改全局）。
+                      格式 {"PARAM_NAME": value}，如 {"K_FACTOR": 32, "CONV_CI_TARGET": 15.0}。
+                      可用参数名用 get_params 查。类型推断：bool/int/float/str。
 
     Returns:
         task_view dict（含 id/status/started_at）。用 id 轮询 get_task_status。
@@ -156,6 +160,13 @@ def run_evaluation(
                 return {"error": f"env 快照不存在: {env_snapshot}", "hint": "用 list_env_snapshots 查可用快照"}
             except Exception as e:
                 return {"error": f"读取 env 快照失败: {e}"}
+
+        # param_overrides → LLMSEC_PARAM_<NAME>=value 环境变量注入
+        if param_overrides:
+            if env_override is None:
+                env_override = {}
+            for k, v in param_overrides.items():
+                env_override[f"LLMSEC_PARAM_{k}"] = str(v)
 
         argv = _build_eval_argv(
             target=target, targets=targets, input_file=resolved_input,
@@ -299,13 +310,14 @@ def orchestrate_runs(
 
     Args:
         specs:          工作单元规格列表，每条含：
-            - name (必须): workspace 名（唯一）
-            - target:      目标模型名
-            - source:      fork 来源（默认 "global"）
-            - input_file:  攻击集（默认 "attacks/l1.jsonl"）
-            - max_rounds:  最大轮数（默认 5）
-            - seed:        随机种子
-            - note:        备注
+            - name (必须):     workspace 名（唯一）
+            - target:         目标模型名
+            - source:         fork 来源（默认 "global"）
+            - input_file:     攻击集（默认 "attacks/l1.jsonl"）
+            - max_rounds:     最大轮数（默认 5）
+            - seed:           随机种子
+            - note:           备注
+            - param_overrides: 覆写 params.py 参数（如 {"K_FACTOR": 32}）
         max_workers:    并行度（同时跑多少个 runner 子进程，默认 2）。
         compare_after:  全部完成后是否自动跑 compare。
 
@@ -324,13 +336,19 @@ def orchestrate_runs(
                 return {"error": f"specs[{i}] 缺少 name 字段"}
 
         # 构造一个 python -c 脚本，让 task_manager 子进程执行 orchestrate
+        # param_overrides 通过 LLMSEC_PARAM_<NAME> 环境变量注入（子进程继承）
         script = (
             "from control.core.orchestrator import orchestrate, RunSpec\n"
-            "import json, sys\n"
+            "import json, os, sys\n"
             f"specs_data = {repr(_json.dumps(specs))}\n"
             f"max_workers = {max_workers}\n"
             f"compare_after = {compare_after}\n"
-            "specs = [RunSpec(**s) for s in json.loads(specs_data)]\n"
+            "raw = json.loads(specs_data)\n"
+            "# 提取各 spec 的 param_overrides → 环境变量（全局生效，所有 worker 继承）\n"
+            "for s in raw:\n"
+            "    for k, v in (s.pop('param_overrides', None) or {}).items():\n"
+            "        os.environ[f'LLMSEC_PARAM_{k}'] = str(v)\n"
+            "specs = [RunSpec(**s) for s in raw]\n"
             "result = orchestrate(specs, max_workers=max_workers, compare_after=compare_after)\n"
             "print(json.dumps(result, ensure_ascii=False, default=str))\n"
         )

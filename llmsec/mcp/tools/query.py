@@ -476,28 +476,92 @@ def get_cluster_report() -> dict[str, Any] | None:
     return _try(load_cluster_report)
 
 
-def list_capabilities() -> list[dict[str, Any]]:
-    """列出三省制（尚书省）已注册的全部能力清单及 schema。
+def get_params(category: str | None = None) -> dict[str, Any]:
+    """读取 llmsec 的全部行为调参参数（params.py），含当前值、类型和注释。
 
-    这让外部 agent 能自省"系统内置了哪些能力"及其参数 schema。
-    注意：MCP 不走三省制执行流程，此工具仅供了解系统能力边界。
+    这些是控制评估行为的"旋钮"——Elo K 因子、收敛阈值、采样器权重、Judge 评分映射、
+    聚类参数等。用 run_evaluation(param_overrides={...}) 可临时覆写（只影响本次评估）。
+
+    参数分 9 组：pipeline（流水线）、elo（Elo 评分与收敛）、ridge（SVD-Ridge 预测）、
+    sampler（采样器）、judge（评判与评分）、cluster（聚类与特征）、blend（Blend 预测器）、
+    twin（安全双胞胎/过敏）、report（报告）、sim（本地模拟）。
+
+    Args:
+        category: 只返回指定分组的参数（如 "elo" / "sampler" / "judge"）。
+                  None 返回全部分组。
 
     Returns:
-        能力列表，每条含 name/description/risk_level/parameters(JSON schema)。
+        {分组名: {参数名: {value, type, description}}}。
     """
-    from control.agent.shangshu.capabilities import all_capabilities
+    import ast
+    import re
 
-    def _do():
-        caps = all_capabilities()
-        return [
-            {
-                "name": c.name,
-                "description": c.description,
-                "risk_level": c.risk_level,
-                "parameters": c.parameters,
+    from llmsec import params as params_mod
+
+    def _do() -> dict[str, Any]:
+        src_path = params_mod.__file__
+        with open(src_path, encoding="utf-8") as f:
+            source = f.read()
+        source_lines = source.splitlines()
+        tree = ast.parse(source)
+
+        # 预扫描：确定每个行号属于哪个分组。
+        # 分组标题格式：# N. 标题（括注），两边是 # === 行
+        cat_title_pattern = re.compile(r"#\s*(\d+\w?)\.\s*(.+)")
+        line_to_cat: dict[int, str] = {}
+        current_cat = "other"
+        for i, line in enumerate(source_lines):
+            stripped = line.strip()
+            m = cat_title_pattern.match(stripped)
+            if m and i > 0 and source_lines[i - 1].strip().startswith("# ==="):
+                # 这是一个分组标题行
+                current_cat = m.group(2).strip().split("（")[0].strip()
+            line_to_cat[i] = current_cat
+
+        categories: dict[str, dict[str, Any]] = {}
+
+        # 解析每个赋值语句 + 关联注释
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            for target in node.targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                name = target.id
+                if name.startswith("_"):
+                    continue
+                if not hasattr(params_mod, name):
+                    continue
+                val = getattr(params_mod, name)
+                cat = line_to_cat.get(node.lineno - 1, "other")
+                if cat not in categories:
+                    categories[cat] = {}
+                # 收集同行尾注释 + 下方注释行（描述参数含义）
+                desc_parts = []
+                line_text = source_lines[node.lineno - 1]
+                inline = re.search(r"#\s*(.+)$", line_text)
+                if inline:
+                    desc_parts.append(inline.group(1).strip())
+                for ln2 in range(node.lineno, min(len(source_lines), node.lineno + 5)):
+                    nl = source_lines[ln2].strip()
+                    if nl.startswith("# ") and not cat_title_pattern.match(nl):
+                        desc_parts.append(nl.lstrip("# ").strip())
+                    elif nl and not nl.startswith("#"):
+                        break
+                categories[cat][name] = {
+                    "value": val if not isinstance(val, tuple) else list(val),
+                    "type": type(val).__name__,
+                    "description": " ".join(desc_parts)[:300] if desc_parts else "",
+                }
+
+        if category:
+            cat_lower = category.lower()
+            matched = {k: v for k, v in categories.items() if cat_lower in k.lower()}
+            return matched if matched else {
+                "error": f"未找到匹配 '{category}' 的分组",
+                "available": list(categories.keys()),
             }
-            for c in caps
-        ]
+        return categories
 
     return _try(_do)
 
@@ -523,9 +587,9 @@ def register(mcp: Any) -> None:
     mcp.tool(list_workspaces)
     mcp.tool(list_workspace_runs)
     mcp.tool(get_cluster_report)
+    mcp.tool(get_params)
     mcp.tool(list_plans)
     mcp.tool(get_plan)
     mcp.tool(list_gazettes)
     mcp.tool(get_plan_context)
     mcp.tool(read_plan_events)
-    mcp.tool(list_capabilities)
