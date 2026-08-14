@@ -18,6 +18,7 @@ from pathlib import Path
 from llmsec.core.config import RUNS_DIR
 from llmsec.core.io import read_json
 from llmsec.core.logging import get_logger
+from llmsec.core.paths import safe_subpath
 from llmsec.core.results import RESULTS_FILE, ResultsMatrix, _file_lock, extract_report_metrics
 from llmsec.management.common import (
     Plan,
@@ -107,9 +108,15 @@ def _run_entry(run_dir: Path, batch: str, target: str, report: dict) -> dict:
 
 
 def run_dir_for(name: str, runs_dir: Path | None = None) -> Path | None:
-    """run 名 → 目录路径。name 可以是 'ts/target' 或 'ts'。"""
+    """run 名 → 目录路径。name 可以是 'ts/target' 或 'ts'。
+
+    name 外部可控，走 safe_subpath 逐段校验防穿越；非法名称视为目录不存在。
+    """
     runs_dir = runs_dir or RUNS_DIR
-    d = runs_dir / name
+    try:
+        d = safe_subpath(runs_dir, *name.split("/"))
+    except ValueError:
+        return None
     return d if d.is_dir() else None
 
 
@@ -221,7 +228,13 @@ def plan_delete(
     for name in names:
         run_dir = run_dir_for(name)
         if run_dir is None:
-            plan.add(RUNS_DIR / name, size=0, kind="missing", detail="目录不存在，跳过")
+            # 名称非法或目录不存在——用 try 拿到（校验后的）路径仅用于展示，
+            # 该项 kind=missing 不会被 execute_delete 删除
+            try:
+                disp = safe_subpath(RUNS_DIR, *name.split("/"))
+            except ValueError:
+                disp = RUNS_DIR / "<invalid>"
+            plan.add(disp, size=0, kind="missing", detail="目录不存在，跳过")
             continue
         size = dir_size(run_dir)
         plan.add(run_dir, size=size, kind="run_dir", detail="将软删除到 .trash/")

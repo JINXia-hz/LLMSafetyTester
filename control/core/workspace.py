@@ -19,6 +19,7 @@ from pathlib import Path
 
 from control.config import LLMSEC_REPO, WORKSPACES_DIR, ensure_workspaces_dir
 from control.core.invoker import export_snapshot, run_runner
+from control.core.paths import safe_component
 from control.core.store import AtomicIndexStore
 
 # workspace 索引存储（原子读写 + Windows PermissionError 重试 + 并发锁）
@@ -46,7 +47,7 @@ def fork(
         工作区信息 dict（name/path/source/created/models/records）
     """
     ensure_workspaces_dir()
-    ws_dir = WORKSPACES_DIR / name
+    ws_dir = safe_component(WORKSPACES_DIR, name)
     if ws_dir.exists():
         raise FileExistsError(f"工作区已存在: {name}（{ws_dir}）")
 
@@ -108,7 +109,7 @@ def fork_and_run(
     返回 {workspace, run}，run 含 returncode/elapsed。
     """
     info = fork(name, source=source, note=note)
-    ws_dir = WORKSPACES_DIR / name
+    ws_dir = safe_component(WORKSPACES_DIR, name)
     log_file = ws_dir / "runner.log"
 
     res = run_runner(
@@ -166,7 +167,7 @@ def delete_workspace(name: str) -> dict:
     def _delete(idx):
         if name not in idx.get("workspaces", {}):
             raise KeyError(f"工作区不存在: {name}")
-        ws_dir = WORKSPACES_DIR / name
+        ws_dir = safe_component(WORKSPACES_DIR, name)
         if ws_dir.exists():
             shutil.rmtree(ws_dir)
         info = idx["workspaces"].pop(name)
@@ -215,8 +216,11 @@ def gc_merged_workspaces(older_than_days: int = 7) -> dict:
             if merged_at > cutoff:
                 skipped_fresh += 1
                 continue
-            # 超期：物理删除目录
-            ws_dir = WORKSPACES_DIR / name
+            # 超期：物理删除目录（name 来自索引，但仍走校验防被污染的索引项穿越）
+            try:
+                ws_dir = safe_component(WORKSPACES_DIR, name)
+            except ValueError:
+                continue  # 索引项名称非法，跳过不删
             size = _dir_size(ws_dir) if ws_dir.exists() else 0
             if ws_dir.exists():
                 shutil.rmtree(ws_dir, ignore_errors=True)

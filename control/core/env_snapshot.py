@@ -19,6 +19,7 @@ from __future__ import annotations
 import shutil
 
 from control.config import LLMSEC_REPO
+from control.core.paths import safe_component
 from control.core.store import AtomicIndexStore
 
 ENV_SNAPSHOTS_DIR = LLMSEC_REPO / "output" / "env_snapshots"
@@ -103,7 +104,7 @@ def create(name: str, *, source: str = "global", note: str = "") -> dict:
         note: 备注
     """
     _ensure_dir()
-    snap_dir = ENV_SNAPSHOTS_DIR / name
+    snap_dir = safe_component(ENV_SNAPSHOTS_DIR, name)
     if snap_dir.exists():
         raise FileExistsError(f"env 快照已存在: {name}")
 
@@ -116,8 +117,8 @@ def create(name: str, *, source: str = "global", note: str = "") -> dict:
     elif source == "blank":
         keys = {}
     else:
-        # source 可以是另一个快照名（基于它创建）
-        src_dir = ENV_SNAPSHOTS_DIR / source
+        # source 可以是另一个快照名（基于它创建）——同样走校验防穿越
+        src_dir = safe_component(ENV_SNAPSHOTS_DIR, source)
         src_env = src_dir / ".env"
         if not src_env.exists():
             raise FileNotFoundError(f"源快照不存在: {source}")
@@ -165,7 +166,7 @@ def edit_key(name: str, key: str, value: str) -> dict:
         raise ValueError(
             f"不允许的 key: {key}。受管理的 key 前缀: {_ALLOWED_KEY_PREFIXES}"
         )
-    snap_dir = ENV_SNAPSHOTS_DIR / name
+    snap_dir = safe_component(ENV_SNAPSHOTS_DIR, name)
     env_file = snap_dir / ".env"
     if not env_file.exists():
         raise FileNotFoundError(f"快照不存在: {name}")
@@ -189,7 +190,7 @@ def delete(name: str) -> dict:
     def _delete(idx):
         if name not in idx.get("snapshots", {}):
             raise KeyError(f"快照不存在: {name}")
-        snap_dir = ENV_SNAPSHOTS_DIR / name
+        snap_dir = safe_component(ENV_SNAPSHOTS_DIR, name)
         if snap_dir.exists():
             shutil.rmtree(snap_dir)
         info = idx["snapshots"].pop(name)
@@ -201,7 +202,7 @@ def delete(name: str) -> dict:
 
 def load_env_dict(name: str) -> dict[str, str]:
     """读快照的 .env 为 dict（供 invoker 注入 env_override）。"""
-    snap_dir = ENV_SNAPSHOTS_DIR / name
+    snap_dir = safe_component(ENV_SNAPSHOTS_DIR, name)
     env_file = snap_dir / ".env"
     if not env_file.exists():
         raise FileNotFoundError(f"快照不存在: {name}")

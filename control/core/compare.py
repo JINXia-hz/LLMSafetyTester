@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 
 from control.config import RUNS_DIR, WORKSPACES_DIR
+from control.core.paths import safe_component, safe_subpath
 
 
 def _load_json_named(run_dir: Path, filename: str) -> dict | None:
@@ -50,26 +51,37 @@ def _resolve_run_dir(run_name: str) -> Path | None:
 
     workspace 模式下 runner 产物在 <ws>/<target>/runner_report.json（runner.py 把
     runs_dir 重绑到 work-dir，per-target 子目录即 target 名）。
+
+    外部 run_name 走 safe_subpath 逐段校验，防路径穿越；非法名称视为目录不存在（返回 None）。
     """
     # workspace 来源
     if run_name.startswith("ws:"):
         rest = run_name[3:]
         parts = rest.split("/", 1)
-        ws_name = parts[0]
-        ws_dir = WORKSPACES_DIR / ws_name
+        try:
+            ws_dir = safe_component(WORKSPACES_DIR, parts[0])
+        except ValueError:
+            return None
         if not ws_dir.is_dir():
             return None
         # 指定了 target：ws:<name>/<target>
         if len(parts) == 2:
-            d = ws_dir / parts[1]
+            try:
+                d = safe_component(ws_dir, parts[1])
+            except ValueError:
+                return None
             return d if (d / "runner_report.json").exists() else None
         # 未指定 target：扫子目录找第一个含报告的
         for sub in ws_dir.iterdir():
             if sub.is_dir() and (sub / "runner_report.json").exists():
                 return sub
         return None
-    # 历史来源：output/runs/<name>
-    d = RUNS_DIR / run_name
+    # 历史来源：output/runs/<ts>[/<target>]
+    try:
+        parts = run_name.split("/", 1)
+        d = safe_subpath(RUNS_DIR, *parts)
+    except ValueError:
+        return None
     return d if d.is_dir() else None
 
 

@@ -46,6 +46,7 @@ from control.agent.zhongshu import tools as zs_tools
 from control.config import WORKSPACES_DIR
 from control.core import compare as compare_mod
 from control.core import workspace as ws_mod
+from control.core.paths import safe_component
 
 router = APIRouter()
 
@@ -146,7 +147,7 @@ def api_fork_and_run(req: ForkRunRequest):
     except (FileExistsError, FileNotFoundError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     from llmsec.server.routers.tasks import _start_task
-    ws_dir = WORKSPACES_DIR / req.name
+    ws_dir = safe_component(WORKSPACES_DIR, req.name)
     argv = ["-m", "llmsec.pipeline.runner", "--work-dir", str(ws_dir),
             "--input", req.input_file, "--max-rounds", str(req.max_rounds),
             "--phase", "all", "--no-early-stop"]
@@ -164,6 +165,9 @@ def api_delete_workspace(name: str):
         return ws_mod.delete_workspace(name)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"工作区不存在: {name}")
+    except ValueError as e:
+        # 名称非法（路径穿越）
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -396,7 +400,7 @@ def api_env_snapshots_create(req: EnvSnapshotCreateRequest):
     from control.core import env_snapshot
     try:
         return env_snapshot.create(req.name, source=req.source, note=req.note)
-    except (FileExistsError, FileNotFoundError) as e:
+    except (FileExistsError, FileNotFoundError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -407,7 +411,10 @@ def api_env_snapshots_delete(name: str):
     from control.core import env_snapshot
     try:
         return env_snapshot.delete(name)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"快照不存在: {name}")
+    except (KeyError, ValueError) as e:
+        # KeyError=不存在；ValueError=名称非法（路径穿越）
+        if isinstance(e, KeyError):
+            raise HTTPException(status_code=404, detail=f"快照不存在: {name}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

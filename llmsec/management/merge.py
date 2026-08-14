@@ -19,6 +19,7 @@ from pathlib import Path
 
 from llmsec.core.config import OUTPUT_DIR, RESULTS_FILE
 from llmsec.core.logging import get_logger
+from llmsec.core.paths import safe_component
 from llmsec.core.results import ResultsMatrix, _file_lock
 from llmsec.management.common import Plan, emit, fmt_size, print_table
 
@@ -35,15 +36,22 @@ def _resolve_results_path(spec: str) -> Path:
 
     spec 形式：
       "global"         → output/state/results.json
-      "ws:<name>"      → output/workspaces/<name>/results.json
-      其他             → 视为目录路径，取其下 results.json
+      "ws:<name>"      → output/workspaces/<name>/results.json（name 走校验防穿越）
+      其他             → 视为目录/文件路径（绝对或相对），取其下 results.json
+
+    裸路径分支用于「合并任意 work-dir 的 results.json」（合法且只读：合并只解析
+    JSON，读不到有效结构即视作空矩阵）。为防路径穿越注入，拒绝含 ``..`` 段的
+    相对穿越路径；绝对路径（如 pytest tmp_path、外部已导出快照）允许通过。
     """
     if spec == "global":
         return RESULTS_FILE
     if spec.startswith("ws:"):
-        return WORKSPACES_DIR / spec[3:] / "results.json"
+        # spec[3:] 外部可控，走 safe_component 防越界
+        return safe_component(WORKSPACES_DIR, spec[3:]) / "results.json"
     p = Path(spec)
-    # 若直接指向文件就用它，否则视为目录取 results.json
+    # 拒绝相对穿越（.. 段）；绝对路径与正常相对路径放行
+    if not p.is_absolute() and any(part == ".." for part in p.parts):
+        raise ValueError(f"路径越界（含 .. 段）: {spec!r}")
     if p.suffix == ".json":
         return p
     return p / "results.json"

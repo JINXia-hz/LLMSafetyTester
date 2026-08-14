@@ -137,17 +137,15 @@ def run_evaluation(
             return {"error": f"sampler 须为 gap/infogain/coordinate/hybrid，收到 {sampler!r}"}
 
         # 攻击集存在性检查
+        # input_file 外部可控：先取末段文件名（剥离目录部分）防路径穿越，
+        # 再到 ATTACKS_DIR 下定位（对齐 tasks router 的既有防御范式）。
         resolved_input = input_file
-        attack_path = Path(input_file)
-        if not attack_path.is_absolute():
-            attack_path = Path(".") / input_file
-        if not attack_path.exists():
-            # 也检查 ATTACKS_DIR
-            alt = ATTACKS_DIR / Path(input_file).name
-            if alt.exists():
-                resolved_input = str(alt).replace("\\", "/")
-            else:
-                return {"error": f"攻击集不存在: {input_file}", "hint": "可用攻击集在 attacks/ 目录下"}
+        attack_name = Path(input_file).name
+        attack_path = ATTACKS_DIR / attack_name
+        if attack_path.exists():
+            resolved_input = str(attack_path).replace("\\", "/")
+        else:
+            return {"error": f"攻击集不存在: {input_file}", "hint": "可用攻击集在 attacks/ 目录下"}
 
         # 加载 env_snapshot（如果指定）
         env_override = None

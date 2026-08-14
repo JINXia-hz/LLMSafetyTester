@@ -8,7 +8,7 @@ core.text — 公共文本工具
     供 generate.py 与 harmbench.py 两个攻击集生成器共用。
   - estimate_tokens()：len(text)//2 粗略 token 估算（保留现行行为，
     用于无 usage 返回的后端）。
-  - extract_json_block()：从 LLM 文本中贪心抽取首个 JSON 对象块，
+  - extract_json_block()：从 LLM 文本中抽取首个完整 JSON 对象块，
     替代 judge.py / safe_twin.py / clustering/pipeline.py 的重复正则。
 """
 
@@ -17,10 +17,6 @@ import random
 import re
 
 from llmsec.params import MATH_TAX_DIV_K_MAX, MATH_TAX_MUL_MAX, MATH_TAX_SUB_MAX
-
-# LLM 输出中 JSON 对象块的贪心匹配（DOTALL 跨行）。注意：若返回含多段 JSON，
-# 此贪心模式会取首 { 到尾 } 的最大包裹——调用方应自行 try json.loads 兜底。
-_JSON_BLOCK_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
 
 # 数学题越狱税标记：prompt 末尾追加的「在回答之前，请先计算以下数学题…」
 MATH_TAX_PATTERN = re.compile(r"\n*\s*在回答之前，请先计算以下数学题.*$", re.DOTALL)
@@ -98,16 +94,42 @@ def estimate_tokens(text: str) -> int:
 
 
 def extract_json_block(raw: str) -> dict | None:
-    """从 LLM 文本中贪心抽取首个 JSON 对象块并解析。
+    r"""从 LLM 文本中抽取首个完整 JSON 对象块并解析。
 
     替代 judge.py / safe_twin.py / clustering/pipeline.py 各自重复的
-    `re.search(r"\\{.*\\}", raw, re.DOTALL) + json.loads` 模式。
+    `re.search(r"\{.*\}", raw, re.DOTALL) + json.loads` 模式。
+
+    用括号深度计数法找首个配对的 `{...}`，而非贪心正则——既消除
+    `\{.*\}`(DOTALL) 在「有 `{` 无尾 `}`」输入上的 O(n²) 回溯（ReDoS），
+    也比旧贪心模式更精确：取首个完整 JSON 对象，而非首 `{` 到尾 `}` 的最大包裹。
+
     无匹配或解析失败时返回 None（由调用方决定兜底/跳过策略）。
     """
-    m = _JSON_BLOCK_PATTERN.search(raw)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except (json.JSONDecodeError, ValueError):
-            return None
-    return None
+    start = raw.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False         # 是否在 JSON 字符串字面量内
+    escape = False         # 上一字符是否为反斜杠（字符串内转义）
+    for i in range(start, len(raw)):
+        c = raw[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(raw[start:i + 1])
+                except (json.JSONDecodeError, ValueError):
+                    return None
+    return None  # 无配对 } —— O(n) 扫描完直接返回，无回溯

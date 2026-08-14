@@ -30,6 +30,35 @@ def _try(fn, *, error_hint: str = "") -> Any:
         return {"error": f"{type(e).__name__}: {e}", "hint": error_hint}
 
 
+def _validate_merge_spec(spec: str, *, is_target: bool = False) -> str:
+    """校验 merge 的 source/target 描述符，防 LLM 传外部路径穿越。
+
+    允许的形式：
+      "global"        — 全局 R
+      "ws:<name>"     — 工作区（name 由 management 层 safe_component 再校验）
+      绝对/相对路径   — 须落在 OUTPUT_DIR 内（合并已导出快照的合法场景）
+
+    target 额外约束：仅允许 "global" / "ws:<name>"（写目标不能是裸路径）。
+    """
+    from pathlib import Path
+
+    from llmsec.core.config import OUTPUT_DIR
+
+    if spec == "global" or spec.startswith("ws:"):
+        return spec
+    if is_target:
+        raise ValueError(f"target 仅支持 'global' 或 'ws:<name>'，收到 {spec!r}")
+    # source 裸路径：须落在 OUTPUT_DIR 内
+    p = Path(spec)
+    if any(part == ".." for part in p.parts):
+        raise ValueError(f"source 路径含穿越段（..）: {spec!r}")
+    pr = p.resolve() if p.is_absolute() else (OUTPUT_DIR / p).resolve()
+    out_r = OUTPUT_DIR.resolve()
+    if pr != out_r and out_r not in pr.parents:
+        raise ValueError(f"source 路径越界，须在 output/ 内: {spec!r}")
+    return spec
+
+
 # ============================================================
 # delete_runs — 两步确认
 # ============================================================
@@ -364,6 +393,10 @@ def merge_workspaces_preview(
     from llmsec.management.merge import plan_merge
 
     def _do() -> dict[str, Any]:
+        # source/target 走入口校验，防 LLM 传外部路径穿越
+        for src in sources:
+            _validate_merge_spec(src, is_target=False)
+        _validate_merge_spec(target, is_target=True)
         plan = plan_merge(sources, target, models=models)
         plan_dict = plan.to_dict()
         token = confirm_mod.issue(

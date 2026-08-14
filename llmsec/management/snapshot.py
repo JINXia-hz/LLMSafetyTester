@@ -24,6 +24,7 @@ from pathlib import Path
 from llmsec.core.config import ELO_CACHE_FILE, OUTPUT_DIR, RUNS_DIR
 from llmsec.core.io import read_json, write_json
 from llmsec.core.logging import get_logger
+from llmsec.core.paths import safe_subpath
 from llmsec.core.results import ResultsMatrix
 from llmsec.management.common import emit, print_table
 
@@ -65,6 +66,11 @@ def export_snapshot(
         archive = None
     else:
         out = Path(out)
+        # out 外部可控（MCP/CLI 传入），约束在 OUTPUT_DIR 子树内防穿越写出
+        out_r = out.resolve() if out.is_absolute() else (OUTPUT_DIR / out).resolve()
+        out_root = OUTPUT_DIR.resolve()
+        if out_r != out_root and out_root not in out_r.parents:
+            raise ValueError(f"输出路径越界，须在 output/ 内: {out}")
         if out.suffix == ".gz" and ".tar" in out.name:
             out_dir = OUTPUT_DIR / ".snapshot_staging" / out.stem
             archive = out
@@ -130,11 +136,13 @@ def _R_from_run(run_name: str) -> ResultsMatrix:
     state.json 是 ELOTracker 快照（history 含每场对局），重建为 record→model→MatchResult。
     若 run 目录无 state.json，报错。
     """
-    run_dir = RUNS_DIR / run_name
+    # run_name 外部可控（source[4:]），走 safe_subpath 逐段校验防穿越
+    parts = run_name.split("/")
+    run_dir = safe_subpath(RUNS_DIR, *parts)
     state_path = run_dir / "state.json"
     if not state_path.exists():
         # 旧布局
-        state_path = RUNS_DIR / run_name.split("/")[0] / "state.json"
+        state_path = safe_subpath(RUNS_DIR, parts[0]) / "state.json"
     if not state_path.exists():
         raise FileNotFoundError(
             f"run {run_name!r} 无 state.json，无法重建 R。"

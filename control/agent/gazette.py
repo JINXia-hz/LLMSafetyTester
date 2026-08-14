@@ -24,6 +24,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from control.config import OUTPUT_DIR
+from control.core.paths import safe_component
 from control.core.store import AtomicIndexStore
 
 _GAZETTE_DIR = OUTPUT_DIR / "gazette"
@@ -78,7 +79,8 @@ class GazetteEvent:
 # ============================================================
 def _gazette_path(plan_id: str) -> Path:
     _store.ensure_dir()
-    return _GAZETTE_DIR / f"{plan_id}.jsonl"
+    # plan_id 外部可控，走校验防穿越（`../x` 逃出 gazette 目录）
+    return safe_component(_GAZETTE_DIR, f"{plan_id}.jsonl")
 
 
 # ============================================================
