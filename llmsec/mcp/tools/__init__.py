@@ -45,9 +45,24 @@ def _warmup_imports() -> None:
     import llmsec.reporting.report  # noqa: F401
 
 
+def _warmup_caches() -> None:
+    """预热运行时缓存，避免首次工具调用时在子线程触发慢操作。
+
+    get_thresholds 首次调用会 subprocess 跑 llmsec-manage（~2s），
+    在并发请求场景下会导致超时。在启动时（主线程）预填充缓存。
+    """
+    try:
+        from control.agent.menxia import review
+
+        review.get_thresholds()
+    except Exception:
+        pass  # 预热失败不阻塞启动，后续调用会重试
+
+
 def register_all(mcp: Any) -> None:
     """把全部工具注册到 FastMCP server。"""
     _warmup_imports()
+    _warmup_caches()
     compute.register(mcp)
     query.register(mcp)
     actions.register(mcp)

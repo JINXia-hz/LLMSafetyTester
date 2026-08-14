@@ -336,19 +336,21 @@ def orchestrate_runs(
                 return {"error": f"specs[{i}] 缺少 name 字段"}
 
         # 构造一个 python -c 脚本，让 task_manager 子进程执行 orchestrate
-        # param_overrides 通过 LLMSEC_PARAM_<NAME> 环境变量注入（子进程继承）
+        # 每个 spec 的 param_overrides → env_override（LLMSEC_PARAM_<NAME>），
+        # 由 RunSpec.env_override 承载，经 fork_and_run → run_runner 注入各自的 runner 子进程。
+        # 不用 os.environ 全局注入——多 spec 不同参数时全局环境变量会互相覆盖。
         script = (
             "from control.core.orchestrator import orchestrate, RunSpec\n"
-            "import json, os, sys\n"
+            "import json, sys\n"
             f"specs_data = {repr(_json.dumps(specs))}\n"
             f"max_workers = {max_workers}\n"
             f"compare_after = {compare_after}\n"
             "raw = json.loads(specs_data)\n"
-            "# 提取各 spec 的 param_overrides → 环境变量（全局生效，所有 worker 继承）\n"
+            "specs = []\n"
             "for s in raw:\n"
-            "    for k, v in (s.pop('param_overrides', None) or {}).items():\n"
-            "        os.environ[f'LLMSEC_PARAM_{k}'] = str(v)\n"
-            "specs = [RunSpec(**s) for s in raw]\n"
+            "    po = s.pop('param_overrides', None) or {}\n"
+            "    env_override = {f'LLMSEC_PARAM_{k}': str(v) for k, v in po.items()} or None\n"
+            "    specs.append(RunSpec(env_override=env_override, **s))\n"
             "result = orchestrate(specs, max_workers=max_workers, compare_after=compare_after)\n"
             "print(json.dumps(result, ensure_ascii=False, default=str))\n"
         )

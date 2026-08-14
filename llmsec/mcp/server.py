@@ -36,6 +36,7 @@ def create_server() -> Any:
 def main() -> None:
     """命令行入口：解析参数并启动 server。"""
     import argparse
+    import os
 
     parser = argparse.ArgumentParser(
         prog="llmsec-mcp",
@@ -63,6 +64,21 @@ def main() -> None:
     mcp = create_server()
 
     if args.transport == "stdio":
+        # 防僵尸进程：注册 atexit + SIGBREAK/SIGINT 处理器确保进程退出时干净释放。
+        # Windows 上 Ctrl+Break (SIGBREAK) 比 Ctrl+C 更可靠地被捕获。
+        # FastMCP 的 stdio transport 在正常情况下会自行检测 stdin EOF 并退出，
+        # 这里是兜底——防止异常路径（如子线程阻塞）导致进程残留锁住 exe 文件。
+        import atexit
+        import signal
+
+        def _clean_exit(signum=None, frame=None):
+            os._exit(0 if signum is None else 128 + signum)
+
+        atexit.register(_clean_exit)
+        signal.signal(signal.SIGINT, _clean_exit)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, _clean_exit)
+
         mcp.run()
     else:
         mcp.run(transport="http", host=args.host, port=args.port)

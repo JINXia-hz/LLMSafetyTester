@@ -101,6 +101,7 @@ def fork_and_run(
     seed: int | None = None,
     note: str = "",
     timeout: float | None = None,
+    env_override: dict[str, str] | None = None,
 ) -> dict:
     """fork 后立即在该工作区起一个 llmsec run（隔离）。
 
@@ -113,6 +114,7 @@ def fork_and_run(
     res = run_runner(
         ws_dir, target=target, input_file=input_file,
         max_rounds=max_rounds, seed=seed, timeout=timeout, log_file=log_file,
+        env_override=env_override,
     )
     return {
         "workspace": info,
@@ -172,6 +174,74 @@ def delete_workspace(name: str) -> dict:
         return info
     info = _store.update(_delete)
     return {"deleted": name, "info": info}
+
+
+def gc_merged_workspaces(older_than_days: int = 7) -> dict:
+    """清理已 merge 且超期的 workspace 目录，释放空间。
+
+    延迟 GC 设计（非 merge 后立即删）：
+      orchestrator 的 compare_after、discover_workspace_runs、gazette 历史记录在
+      merge 之后仍可能引用 ws 目录（compare.py:120 直接 iterdir 不读索引的 merged 标记），
+      立即删会造成悬空引用。故 mark_merged 只标记，物理清理由此入口按 merged_at 超期延迟执行。
+
+    审计链保留：被 GC 的 workspace 信息（含 merged_to）记入 _index.json 的 "gc_log"，
+    供事后追溯，不因物理删除而丢失合并去向。
+
+    Args:
+        older_than_days: merged_at 距今超过该天数的 workspace 才清理。默认 7 天。
+
+    Returns:
+        {cleaned: [...], skipped_fresh: N, gc_log_size: N}
+    """
+    from datetime import datetime, timedelta
+
+    cutoff = datetime.now() - timedelta(days=older_than_days)
+
+    def _gc(idx):
+        ws_map = idx.get("workspaces", {})
+        gc_log = idx.setdefault("gc_log", [])
+        cleaned = []
+        skipped_fresh = 0
+        for name, info in list(ws_map.items()):
+            if not info.get("merged"):
+                continue
+            merged_at_str = info.get("merged_at")
+            if not merged_at_str:
+                continue
+            try:
+                merged_at = datetime.fromisoformat(merged_at_str)
+            except (ValueError, TypeError):
+                continue
+            if merged_at > cutoff:
+                skipped_fresh += 1
+                continue
+            # 超期：物理删除目录
+            ws_dir = WORKSPACES_DIR / name
+            size = _dir_size(ws_dir) if ws_dir.exists() else 0
+            if ws_dir.exists():
+                shutil.rmtree(ws_dir, ignore_errors=True)
+            # 审计：保留精简记录（含 merged_to 合并去向），从主索引移除
+            gc_log.append({
+                "name": name,
+                "merged_at": merged_at_str,
+                "merged_to": info.get("merged_to"),
+                "source": info.get("source"),
+                "gc_at": _store.now(),
+                "size": size,
+            })
+            del ws_map[name]
+            cleaned.append({"name": name, "size": size})
+        if cleaned:
+            _store.save(idx)
+        return cleaned, skipped_fresh, len(gc_log)
+
+    cleaned, skipped_fresh, gc_log_size = _store.update(_gc)
+    return {
+        "cleaned": cleaned,
+        "skipped_fresh": skipped_fresh,
+        "gc_log_size": gc_log_size,
+        "older_than_days": older_than_days,
+    }
 
 
 def _dir_size(path: Path) -> int:

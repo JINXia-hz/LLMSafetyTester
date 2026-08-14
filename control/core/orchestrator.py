@@ -30,6 +30,7 @@ class RunSpec:
     seed: int | None = None
     note: str = ""
     extra_argv: list[str] = field(default_factory=list)
+    env_override: dict[str, str] | None = None  # 注入 runner 子进程的环境变量（如 LLMSEC_PARAM_*）
 
 
 def orchestrate(
@@ -59,6 +60,7 @@ def orchestrate(
                 spec.name, source=spec.source, target=spec.target,
                 input_file=spec.input_file, max_rounds=spec.max_rounds,
                 seed=spec.seed, note=spec.note or spec.name, timeout=timeout,
+                env_override=spec.env_override,
             )
             r["spec"] = asdict(spec)
             r["status"] = "success" if r["run"]["ok"] else "failed"
