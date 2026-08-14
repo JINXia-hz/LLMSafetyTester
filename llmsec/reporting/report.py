@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-from llmsec.core.logging import get_logger
-
 """
 层级报告生成器 — 树形分解 + LLM叙事润色
 
@@ -42,7 +40,7 @@ from llmsec.core.config import (
 )
 from llmsec.core.io import iter_jsonl, read_json, read_jsonl, write_json
 from llmsec.core.llm import chat_with_retry, create_openai_client, extract_message_text
-from llmsec.core.logging import setup_console
+from llmsec.core.logging import get_logger, setup_console
 from llmsec.evaluation.elo import ELOTracker
 from llmsec.params import (
     ALLERGY_FPR_SAFE,
@@ -87,7 +85,8 @@ def _report_config() -> GeneratorConfig:
 def load_all_results(output_dir) -> list[dict]:
     """
     加载所有评估结果。两个数据来源互斥（避免同一批记录被重复计数、ASR 失真）：
-    1. output/runs/*/attack_results.jsonl（runner.py 生成）——存在即优先，取最新一次
+    1. output/runs/*/*/attack_results.jsonl（runner.py 生成，新并发布局
+       runs/<ts>/<target>/）——存在即优先，取最新一次
     2. output/*_结果.jsonl（evaluator.py 生成）——仅在没有 run 数据时回退
     """
     output_dir = Path(output_dir)
@@ -95,17 +94,18 @@ def load_all_results(output_dir) -> list[dict]:
     # runner 结果优先（按修改时间从新到旧，取第一个含 attack_results.jsonl 的 run）
     runs_dir = output_dir / "runs"
     if runs_dir.exists():
-        run_dirs = sorted(
-            [d for d in runs_dir.iterdir() if d.is_dir()],
+        batch_dirs = sorted(
+            (d for d in runs_dir.iterdir() if d.is_dir()),
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
-        for run_dir in run_dirs:
-            attack_file = run_dir / "attack_results.jsonl"
-            if attack_file.exists():
-                results = read_jsonl(attack_file)
-                logger.info(f"   数据来源: runner（{attack_file}）")
-                return results
+        for batch in batch_dirs:
+            for target_dir in sorted(batch.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                attack_file = target_dir / "attack_results.jsonl"
+                if target_dir.is_dir() and attack_file.exists():
+                    results = read_jsonl(attack_file)
+                    logger.info(f"   数据来源: runner（{attack_file}）")
+                    return results
 
     # evaluator 结果（无 run 数据时的回退）
     all_results = []
@@ -117,7 +117,7 @@ def load_all_results(output_dir) -> list[dict]:
     return all_results
 
 
-def load_elo(output_dir, model: str | None = None) -> dict:
+def load_elo(model: str | None = None) -> dict:
     """
     加载 ELO 攻击方评分（method → elo）。
 
@@ -161,15 +161,17 @@ def load_allergy(output_dir) -> dict:
         if data:
             return data
 
-    # 回退：最新 run 的 allergy.json（runner 产物）
+    # 回退：最新 run 的 allergy.json（runner 产物，新布局在 runs/<ts>/<target>/ 下）
     runs_dir = output_dir / "runs"
     if runs_dir.exists():
         for d in sorted((d for d in runs_dir.iterdir() if d.is_dir()),
                         key=lambda p: p.stat().st_mtime, reverse=True):
-            af = d / "allergy.json"
-            data = read_json(af)
-            if data:
-                return data
+            for t in sorted(d.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                if not t.is_dir():
+                    continue
+                data = read_json(t / "allergy.json")
+                if data:
+                    return data
     return {}
 
 
@@ -292,7 +294,7 @@ def build_method_stats(results: list[dict], elo_ratings: dict,
     return method_stats
 
 
-def _load_elo_tracker(output_dir=None) -> ELOTracker | None:
+def _load_elo_tracker() -> ELOTracker | None:
     """加载完整 ELO 状态（攻击方+防御方），无数据返回 None。
 
     F4 修复：始终从 R 矩阵派生（唯一真相）。原实现优先读 state.json 快照（不经指纹
@@ -347,7 +349,7 @@ def build_tree(method_stats: dict[str, dict], allergy_data: dict,
     #   属无效死代码——即使能跑，没有防御方评分也算不出边界）
     boundary = {}
     surprises = {"weakness": [], "strength": []}
-    tracker = _load_elo_tracker(output_dir)
+    tracker = _load_elo_tracker()
     if tracker is not None and (tracker.attacker_ratings or tracker.defender_ratings):
         boundary = tracker.compute_security_boundary()
         surprises = tracker.find_surprises(min_elo_gap=0)
@@ -372,11 +374,16 @@ def build_tree(method_stats: dict[str, dict], allergy_data: dict,
         # surprise_score：低 ELO 攻击成功带来的意外分差，越大越可能是防御短板
         m["surprise_score"] = m["max_weakness_gap"]
 
-    # 过敏数据
-    allergy_summary = allergy_data.get("summary", {})
+    # 过敏数据。allergy_data 有两种合法形态：
+    #   1) 落盘 allergy.json（{"results":..., "summary": {"false_positive_rate": ...}}）
+    #   2) run_allergy_phase 的内存返回值（扁平 {"fpr": ...}，final_report 直接透传）
+    # 归一后统一取 fpr——此前只认形态 1，形态 2 恒取 None，等级永不出 allergic/broken。
+    allergy_summary = allergy_data.get("summary") or allergy_data
     # fpr 可能为 None（过敏检测无有效样本时 allergy_phase 显式存 None，见 S6 修复）。
     # .get(key, 0) 在键存在但值为 None 时返回 None，下游比较会崩，归一化为 None 后统一处理。
     fpr = allergy_summary.get("false_positive_rate")
+    if fpr is None:
+        fpr = allergy_summary.get("fpr")
 
     # 整体画像
     # H-4 修复：引用 params.PORTRAIT_* 全四阈值，补 inconclusive 分支（数据不足时不给确定结论）。
@@ -648,7 +655,7 @@ REPORT_PROMPT = """请根据以下安全测试数据，生成一份完整的安�
 请直接输出Markdown，不要有"以下是报告"之类的元说明。"""
 
 
-def generate_narrative(tree: dict, output_dir) -> str:
+def generate_narrative(tree: dict) -> str:
     """
     调用LLM将树形数据转为人类可读Markdown报告。
     """
@@ -828,7 +835,7 @@ def main():
 
     logger.info("📊 加载评估数据...")
     results = load_all_results(output_dir)
-    elo_ratings = load_elo(output_dir)
+    elo_ratings = load_elo()
     allergy_data = load_allergy(output_dir)
     metadata = load_prompt_metadata()
 
@@ -860,7 +867,7 @@ def main():
     logger.info(f"📁 方法注册表: {registry_path}")
 
     # 生成叙事报告
-    markdown = generate_narrative(tree, output_dir)
+    markdown = generate_narrative(tree)
 
     report_path = Path(output_dir) / "security_report.md"
     Path(report_path).parent.mkdir(parents=True, exist_ok=True)

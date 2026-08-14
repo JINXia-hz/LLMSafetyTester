@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from llmsec.evaluation.elo import ELOTracker
     from llmsec.evaluation.judge import Judge
 
-import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -42,26 +41,6 @@ from llmsec.targets import call_target, set_active_target
 
 logger = get_logger(__name__)
 
-
-def compute_min_twin_sample_size(
-    observed_refusals: int,
-    observed_total: int,
-) -> int:
-    """
-    用正态近似（n = z²·p(1-p)/e²，95% 置信取 z=1.96，允许误差 e=0.05）
-    估计 FPR 所需的最小样本量。
-
-    返回:
-        最小需要的总样本数；没有任何观测时返回保守默认值 MIN_TWIN_WINDOW。
-    """
-    if observed_total == 0:
-        # 没有任何观测时，返回保守默认值
-        return MIN_TWIN_WINDOW
-
-    p = observed_refusals / observed_total
-    n_required = (1.96 ** 2 * p * (1 - p)) / (0.05 ** 2)
-    n_required = max(n_required, observed_total)  # 至少测到当前已观测数
-    return int(math.ceil(n_required))
 
 
 def adaptive_twin_window(

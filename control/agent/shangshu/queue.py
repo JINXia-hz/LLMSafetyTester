@@ -38,8 +38,11 @@ class PlanQueue:
             if plan_id == self._running or plan_id in self._queue:
                 return "duplicate"
             self._queue.append(plan_id)
+            # _ensure_worker 必须在锁内调用：锁外的读-判-写在两个并发 submit
+            # 同时发现 worker 已死时会各启一个线程 → 双 worker 并发执行两个 Plan，
+            # 违反"同一时间只跑一个 Plan"的核心不变量
+            self._ensure_worker()
             self._cond.notify()
-        self._ensure_worker()
         return "queued"
 
     def status(self) -> dict:
@@ -59,7 +62,7 @@ class PlanQueue:
             return False
 
     def _ensure_worker(self) -> None:
-        """确保 worker 线程在跑。"""
+        """确保 worker 线程在跑。调用方必须已持 self._lock。"""
         if self._worker is not None and self._worker.is_alive():
             return
         self._worker = Thread(target=self._run_loop, daemon=True, name="plan-queue-worker")
@@ -74,10 +77,12 @@ class PlanQueue:
                 while not self._queue and self._running is None:
                     self._cond.wait(timeout=1.0)
                     if not self._queue:
-                        # 队列空且无任务，退出线程（下次 submit 会重新启动）
+                        # 队列空且无任务，退出线程（下次 submit 会重新启动）。
+                        # 先在锁内摘牌（_worker=None）再退出：否则线程消亡前
+                        # is_alive() 仍为 True，此刻 submit 追加的任务 notify 无人
+                        # 等待、_ensure_worker 又判定"活着"不新建 → 任务永久搁浅
+                        self._worker = None
                         return
-                if not self._queue:
-                    return
                 plan_id = self._queue.popleft()
                 self._running = plan_id
 
@@ -91,15 +96,17 @@ class PlanQueue:
                     self._running = None
 
 
-# 模块级单例
+# 模块级单例（锁内惰性创建：两线程首次并发 get_queue 不各建一个实例）
 _QUEUE: PlanQueue | None = None
+_QUEUE_LOCK = Lock()
 
 
 def get_queue() -> PlanQueue:
     """获取全局 Plan 队列单例。"""
     global _QUEUE
-    if _QUEUE is None:
-        _QUEUE = PlanQueue()
+    with _QUEUE_LOCK:
+        if _QUEUE is None:
+            _QUEUE = PlanQueue()
     return _QUEUE
 
 

@@ -323,19 +323,18 @@ def _export_matrix(labels: dict[str, int], features: dict, meta: dict):
         ("cross_model", cross_model_names),
     ]
 
-    col_names = ["method", "cluster"]
-    for _, names in metric_blocks + extra_blocks:
-        col_names += list(names)
-
-    with open(CLUSTER_MATRIX_FILE, "w", encoding="utf-8") as f:
-        f.write(",".join(f'"{c}"' for c in col_names) + "\n")
-        for method in methods:
-            row = [f'"{method}"', str(labels.get(method, -1))]
-            feat = features.get(method, {})
-            for block, names in metric_blocks + extra_blocks:
-                vec = np.atleast_1d(feat.get(block, np.zeros(len(names))))
-                for i in range(len(names)):
-                    v = float(vec[i]) if i < len(vec) else 0.0
-                    # technique 等多标签块按整数写，其余保留 6 位小数
-                    row.append(str(int(v)) if block == "technique" else str(round(v, 6)))
-            f.write(",".join(row) + "\n")
+    # 统一走 io.write_csv（csv.DictWriter 按需加引号——此前手写拼接只给表头加引号、
+    # 方法名列不加，方法名含逗号时会破格式）。列序 = method, cluster + 各块顺序
+    from llmsec.core.io import write_csv
+    rows = []
+    for method in methods:
+        row = {"method": method, "cluster": labels.get(method, -1)}
+        feat = features.get(method, {})
+        for block, names in metric_blocks + extra_blocks:
+            vec = np.atleast_1d(feat.get(block, np.zeros(len(names))))
+            for i, name in enumerate(names):
+                v = float(vec[i]) if i < len(vec) else 0.0
+                # technique 等多标签块按整数写，其余保留 6 位小数
+                row[name] = int(v) if block == "technique" else round(v, 6)
+        rows.append(row)
+    write_csv(CLUSTER_MATRIX_FILE, rows)

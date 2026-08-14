@@ -17,7 +17,7 @@ fastapi>=0.100,<1
 uvicorn>=0.20,<1
 pydantic>=2,<3
 jinja2>=3,<4
-pandas>=2,<4
+pyyaml>=6,<7
 python-multipart>=0.0.6  # 文件上传（攻击集拖拽导入）
 
 # ELO/评估数学（核心管线必需——SVD-Ridge 预测、收敛判据）
@@ -27,3 +27,6 @@ scipy>=1.10
 
 # 实验框架
 optuna>=3,<4
+
+# 控制层（control/）跨进程文件锁——workspace/env_snapshot/gazette 的索引 RMW
+filelock>=3,<4

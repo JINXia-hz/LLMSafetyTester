@@ -1,7 +1,15 @@
 """Combined tests: Dashboard API (smoke + P1 fixes)."""
 
 # ===== from test_dashboard_api.py =====
-import timefrom fastapi.testclient import TestClientfrom llmsec.server.dashboard_api import appfrom llmsec.server.routers.tasks import TASKS, _start_taskclient = TestClient(app)
+import time
+
+from fastapi.testclient import TestClient
+
+from llmsec.server import task_manager
+from llmsec.server.dashboard_api import app
+from llmsec.server.task_manager import TASKS
+
+client = TestClient(app)
 
 def test_index_and_data_apis():
     r = client.get('/')
@@ -44,9 +52,9 @@ def test_evaluate_validation():
     print('✅ 评估参数校验通过')
 
 def test_task_lifecycle():
-    view = _start_task('smoke', ['-c', "print('smoke-ok')"])
+    view = task_manager.start_task('smoke', ['-c', "print('smoke-ok')"])
     task_id = view['id']
-    assert not task_id not in TASKS, '❌ 任务未注册'
+    assert task_id in TASKS, '❌ 任务未注册'
     deadline = time.time() + 30
     status = view['status']
     while time.time() < deadline:
@@ -57,9 +65,9 @@ def test_task_lifecycle():
         time.sleep(0.3)
     assert not status != 'success', f'❌ 任务未成功结束: {status}'
     r = client.get(f'/api/tasks/{task_id}')
-    assert not 'smoke-ok' not in r.json().get('log_tail', ''), '❌ 日志尾缺少子进程输出'
+    assert 'smoke-ok' in r.json().get('log_tail', ''), '❌ 日志尾缺少子进程输出'
     r = client.get('/api/tasks/nonexistent')
-    assert not r.status_code != 404, '❌ 不存在任务应 404'
+    assert r.status_code == 404, '❌ 不存在任务应 404'
     print('✅ 任务生命周期通过')
 
 def test_cluster_projection():
@@ -107,7 +115,9 @@ def test_run_endpoints_post_only():
         r = client.get(ep)
         assert r.status_code == 405, f'GET {ep} 应 405，实际 {r.status_code}'
 def test_state_snapshot_priority(monkeypatch, tmp_path):
-    import json    import llmsec.server.dashboard_api as api
+    import json
+
+    import llmsec.server.dashboard_api as api
     fake_runs = tmp_path / "runs"
     fake_runs.mkdir()
     monkeypatch.setattr(api, "RUNS_DIR", fake_runs)
@@ -137,7 +147,16 @@ def test_state_snapshot_priority(monkeypatch, tmp_path):
     assert r.json().get('validation', {}).get('silhouette') == 0.9999, '快照 validation 内容生效'
 
 # ===== from test_p1_dashboard.py =====
-import tempfilefrom pathlib import Pathfrom llmsec.params import ADAPTIVE_BATCH_MAXfrom llmsec.server.routers.cluster_viz import _CACHE_MAX_SIZE, _cache_putfrom llmsec.server.routers.tasks import (    EvaluateRequest,    _refresh_task_status,)class _StubProc:
+import tempfile
+from pathlib import Path
+
+from llmsec.params import ADAPTIVE_BATCH_MAX
+from llmsec.server.routers.cluster_viz import _CACHE_MAX_SIZE, _cache_put
+from llmsec.server.routers.tasks import EvaluateRequest
+from llmsec.server.task_manager import _refresh_task_status
+
+
+class _StubProc:
     """假子进程：poll() 直接返回预设退出码。"""
 
     def __init__(self, rc: int | None):
@@ -173,7 +192,7 @@ def test_start_task_refreshes_before_409():
     TASKS['stale-evaluate'] = stale
     view = None
     try:
-        view = _start_task('evaluate', ['-c', "print('p1-ok')"])
+        view = task_manager.start_task('evaluate', ['-c', "print('p1-ok')"])
         assert view['kind'] == 'evaluate', 'H6: _start_task 刷新后不再被假死任务 409 误拒'
         assert stale['status'] == 'failed' and stale['log_file'] is None, 'H6: _start_task 顺带刷新假死任务并关闭其 log_file'
     finally:
@@ -195,9 +214,10 @@ def test_cache_eviction():
     assert cache.get(('k', _CACHE_MAX_SIZE + 9)) == _CACHE_MAX_SIZE + 9, 'M8: 最新条目保留'
 
 def test_batch_limit_matches_params():
-    from annotated_types import Le    from pydantic import ValidationError
+    from pydantic import ValidationError
     field = EvaluateRequest.model_fields['batch_size']
-    le_values = [m.le for m in field.metadata if isinstance(m, Le)]
+    # 不直接 import annotated_types（pydantic 的传递依赖）——按属性特征识别 Le 约束
+    le_values = [m.le for m in field.metadata if hasattr(m, 'le')]
     assert le_values == [ADAPTIVE_BATCH_MAX], f'M18: batch_size le 上限 == ADAPTIVE_BATCH_MAX({ADAPTIVE_BATCH_MAX})'
     try:
         EvaluateRequest(batch_size=ADAPTIVE_BATCH_MAX)
@@ -252,7 +272,7 @@ def test_task_progress_endpoint():
     import json
 
     from llmsec.core.config import TASK_LOG_DIR
-    from llmsec.server.routers.tasks import TASKS, _progress_path
+    from llmsec.server.task_manager import TASKS, _progress_path
 
     # evaluate：双目标，各有进度
     tid = 'evaluate-ut-' + str(int(time.time() * 1000))
@@ -317,17 +337,16 @@ def test_task_progress_endpoint():
 
 def test_evaluate_concurrency_argv(monkeypatch):
     """多目标评估：argv 必须含 --targets 与 --target-concurrency（默认=目标数，全并发）。"""
-    import llmsec.server.routers.tasks as tasks_mod
 
     captured = {}
 
     def fake_start(kind, argv):
         captured['argv'] = list(argv)
         return {"id": "fake-eval", "kind": kind, "cmd": " ".join(argv), "argv": list(argv),
-                "status": "queued", "returncode": None, "log_path": tasks_mod.TASK_LOG_DIR / "fake.log",
+                "status": "queued", "returncode": None, "log_path": task_manager.TASK_LOG_DIR / "fake.log",
                 "log_file": None, "started_at": "2026-01-01T00:00:00", "error": None, "proc": None}
 
-    monkeypatch.setattr(tasks_mod, "_start_task", fake_start)
+    monkeypatch.setattr(task_manager, "start_task", fake_start)
 
     # 默认：多目标 → 全并发（target_concurrency = 目标数）
     r = client.post('/api/run/evaluate', json={
@@ -351,7 +370,6 @@ def test_evaluate_concurrency_argv(monkeypatch):
 
 def test_spawn_injects_task_id_env(monkeypatch, tmp_path):
     """_spawn 必须把 LLMSEC_TASK_ID 注入子进程 env（进度落盘的钥匙）。"""
-    import llmsec.server.routers.tasks as tasks_mod
 
     captured = {}
 
@@ -374,13 +392,13 @@ def test_spawn_injects_task_id_env(monkeypatch, tmp_path):
         captured['env'] = kwargs.get('env')
         return FakeProc()
 
-    monkeypatch.setattr(tasks_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(task_manager.subprocess, "Popen", fake_popen)
 
     t = {"kind": "smoke", "argv": ["-c", "pass"], "cmd": "pass",
          "log_path": tmp_path / "t.log", "log_file": None,
          "status": "queued", "started_at": "2026-01-01T00:00:00", "proc": None}
     try:
-        tasks_mod._spawn("tid-inject", t)
+        task_manager._spawn("tid-inject", t)
     finally:
         if t.get("log_file"):
             t["log_file"].close()
@@ -395,19 +413,18 @@ def test_task_stream_progress_events(monkeypatch):
     """SSE /stream：回放射已有 progress 行（event:progress）+ 结束发 event:done。"""
     import json
 
-    import llmsec.server.routers.tasks as tasks_mod
 
     tid = "stream-ut"
-    pp = tasks_mod._progress_path(tid)
-    tasks_mod.TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    pp = task_manager._progress_path(tid)
+    task_manager.TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
     pp.write_text(
         json.dumps({"ts": "t1", "phase": "attack", "target": "a", "round": 1, "elo": 1500.0}) + "\n"
         + json.dumps({"ts": "t2", "phase": "attack", "target": "a", "round": 2, "elo": 1505.0}) + "\n",
         encoding="utf-8")
     # 终态：生成器首次 while 即发 done 返回（不挂起）
-    tasks_mod.TASKS[tid] = {
+    task_manager.TASKS[tid] = {
         "kind": "evaluate", "argv": ["--targets", "a"], "cmd": "", "status": "success",
-        "returncode": 0, "log_path": tasks_mod.TASK_LOG_DIR / f"{tid}.log", "log_file": None,
+        "returncode": 0, "log_path": task_manager.TASK_LOG_DIR / f"{tid}.log", "log_file": None,
         "started_at": "2026-01-01T00:00:00", "proc": None}
     try:
         r = client.get(f"/api/tasks/{tid}/stream")
@@ -417,7 +434,7 @@ def test_task_stream_progress_events(monkeypatch):
         assert "event: done" in body, "任务终态应发 done 事件"
         assert '"round": 2' in body, "应包含最新进度行（round 2）"
     finally:
-        tasks_mod.TASKS.pop(tid, None)
+        task_manager.TASKS.pop(tid, None)
         if pp.exists():
             pp.unlink()
 
@@ -430,7 +447,7 @@ def test_runs_active_marking(monkeypatch, tmp_path):
 
     import llmsec.server.dashboard_api as api
     from llmsec.server.routers import data_query as dq
-    from llmsec.server.routers.tasks import TASKS
+    from llmsec.server.task_manager import TASKS
 
     # 构造两个批次：旧批次（任务开始前）与新批次（任务进行中）
     for ts, tgt in [("2026-08-10_100000", "modelA"), ("2026-08-11_150000", "modelB")]:

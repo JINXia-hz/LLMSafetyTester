@@ -227,18 +227,7 @@ def emit_alert(
         return False
 
 
-def shutdown() -> None:
-    """关闭 webhook 线程池（进程退出时调用，通常无需手动调）。"""
-    global _executor
-    with _executor_lock:
-        if _executor is not None:
-            _executor.shutdown(wait=False)
-            _executor = None
 
-
-# ============================================================
-# 便捷封装
-# ============================================================
 def alert_task_failed(task_id: str, kind: str, cmd: str, log_path: str, returncode: int) -> None:
     """任务终态=failed 时的标准告警（task_manager 调用）。"""
     emit_alert(

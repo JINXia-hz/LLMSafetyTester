@@ -71,7 +71,10 @@ def _render_compare(report: dict) -> str:
     rows = report.get("runs", [])
     if not rows:
         return "（无可用 run 对比）"
-    cols = ["run", "target", "asr", "fpr", "elo", "conv_rounds", "level"]
+    # 列名必须与 compare.run_metrics 的行字段一致（run/target_model/asr/fpr/
+    # boundary_elo/conv_rounds/security_level）。旧版用 target/elo/level，
+    # 与字段名不符的三列恒渲染成 "-"。
+    cols = ["run", "target_model", "asr", "fpr", "boundary_elo", "conv_rounds", "security_level"]
     # 动态列宽：按该列实际内容最长 + 表头
     def _cell(r, c):
         v = r.get(c)
@@ -137,8 +140,9 @@ def _parse_intent(text: str) -> tuple[str, dict] | None:
     low = text.lower()
 
     # list runs（中文「列」后无 word boundary，不用 \b）
-    # 用子串判断替代 (list|列|show).*(run) 正则——避免交替+.* 的 ReDoS 启发式告警，
-    # 语义等价：含 list/列/show 之一且含 run。
+    # 用子串判断替代 (list|列|show).*(run) 正则——避免交替+.* 的 ReDoS 启发式告警。
+    # 注意语义有放宽：原正则要求 list 类词在前、run 在后；子串判断不限词序
+    # （如「run 列表」也会命中）。对启发式意图解析而言可接受。
     if (any(k in low for k in ("list", "列", "show")) and "run" in low) or low in ("runs", "run", "历史"):
         args: dict = {}
         m = re.search(r"(?:target|目标)[=\s]+(\S+)", text)
@@ -160,17 +164,16 @@ def _parse_intent(text: str) -> tuple[str, dict] | None:
             if m:
                 return ("delete_workspace", {"name": m.group(1)})
 
-    # compare
-    if re.search(r"\b(compare|对比|比较)", low) or "对比" in text or "比较" in text:
+    # compare（中文词两侧均属 \w，\b 不产生边界，正则只保留英文；中文走子串判断）
+    if "compare" in low or "对比" in text or "比较" in text:
         # 提取 run 名（支持空格/顿号/逗号分隔，带斜杠的 ts/target）
         runs = re.findall(r"[\w.-]+/[\w.-]+|\d{4}-\d{2}-\d{2}_\d{6}", text)
-        runs = [r for r in runs if r not in ("compare", "对比", "比较")]
         if len(runs) >= 2:
             return ("compare_runs", {"runs": runs})
         return None
 
-    # fork
-    if re.search(r"\b(fork)", low) or "fork" in text or "建环境" in text or "新环境" in text:
+    # fork（\b(fork) 能匹配时 "fork" in low 必为 True，正则冗余已删）
+    if "fork" in low or "建环境" in text or "新环境" in text:
         # 名字：fork NAME 或 叫 NAME 的
         m = re.search(r"fork\s+(\S+)", text) or re.search(r"叫\s*(\S+?)\s*(?:的|环境)", text)
         if not m:
@@ -205,12 +208,18 @@ def chat_one(text: str) -> str:
         return ""
     # JSON 直调
     if text.startswith("{"):
+        tool_name = "?"  # try 前绑定：异常分支不隐式依赖"解析已成功"的分支顺序
         try:
             req = json.loads(text)
+            tool_name = req.get("tool") or "?"
             result = call_tool(req["tool"], req.get("args", {}))
             return _render(result)
         except (json.JSONDecodeError, KeyError) as e:
             return f"❌ JSON 调用失败: {e}"
+        except Exception as e:
+            # call_tool 执行期异常（fork 重名 / require_ok 失败等）也不能上抛——
+            # 此函数同时服务 CLI 与 dialogue 规则分支，上抛会让 API 直接 500
+            return f"❌ 执行 {tool_name} 失败: {type(e).__name__}: {e}"
     # 意图解析
     parsed = _parse_intent(text)
     if parsed is None:

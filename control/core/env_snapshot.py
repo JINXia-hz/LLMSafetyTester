@@ -17,6 +17,7 @@ merge 回全局 = 把快照里的 key 写回全局 .env（critical 级，门下�
 from __future__ import annotations
 
 import shutil
+import time
 
 from control.config import LLMSEC_REPO
 from control.core.paths import safe_component
@@ -31,19 +32,15 @@ _store = AtomicIndexStore(lambda: ENV_SNAPSHOTS_DIR, "snapshots")
 
 # .env 里受管理的 key 前缀（编辑/merge 时校验合法性，防乱写）
 _ALLOWED_KEY_PREFIXES = (
-    "TARGETS", "TARGET_",          # 目标模型配置
-    "JUDGE_", "JUDGE_API_KEY",     # Judge 配置
+    "TARGETS", "TARGET_",          # 目标模型配置（TARGETS 裸 key 也被 TARGET_ 前缀放行）
+    "JUDGE_",                      # Judge 配置（含 JUDGE_API_KEY）
     "GENERATOR_",                  # 生成器配置
     "CONTROL_",                    # 控制层配置
     "LLMSEC_PARAM_",               # params.py 运行时覆写
 )
-# 允许的裸 key（非前缀）
-_ALLOWED_BARE_KEYS = {"TARGETS"}
 
 
 def _is_allowed_key(key: str) -> bool:
-    if key in _ALLOWED_BARE_KEYS:
-        return True
     return any(key.startswith(p) for p in _ALLOWED_KEY_PREFIXES)
 
 
@@ -136,7 +133,6 @@ def create(name: str, *, source: str = "global", note: str = "") -> dict:
     }
     def _record(idx):
         idx["snapshots"][name] = info
-        _store.save(idx)
     _store.update(_record)
     return info
 
@@ -148,10 +144,6 @@ def list_snapshots() -> list[dict]:
     snaps.sort(key=lambda x: x.get("created", ""), reverse=True)
     return snaps
 
-
-def get_snapshot(name: str) -> dict | None:
-    idx = _store.load()
-    return idx.get("snapshots", {}).get(name)
 
 
 def edit_key(name: str, key: str, value: str) -> dict:
@@ -175,11 +167,10 @@ def edit_key(name: str, key: str, value: str) -> dict:
     keys[key] = value
     env_file.write_text(_serialize_env(keys), encoding="utf-8")
 
-    # 更新索引的 keys 列表
+    # 更新索引的 keys 列表（update 统一写回）
     def _upd(idx):
         if name in idx.get("snapshots", {}):
             idx["snapshots"][name]["keys"] = sorted(keys.keys())
-            _store.save(idx)
     _store.update(_upd)
     return {"name": name, "key": key, "value": value, "keys": sorted(keys.keys())}
 
@@ -193,9 +184,7 @@ def delete(name: str) -> dict:
         snap_dir = safe_component(ENV_SNAPSHOTS_DIR, name)
         if snap_dir.exists():
             shutil.rmtree(snap_dir)
-        info = idx["snapshots"].pop(name)
-        _store.save(idx)
-        return info
+        return idx["snapshots"].pop(name)
     info = _store.update(_delete)
     return {"deleted": name, "info": info}
 
@@ -213,31 +202,35 @@ def merge_to_global(name: str) -> dict:
     """把快照的 key 写回全局 .env（critical 级操作）。
 
     语义：快照里有的 key 覆盖全局同名 key；快照里没有的不动。
-    全局 .env 会先备份到 .env.bak.<ts>。
+    全局 .env 会先备份到 .env.bak.<ts>.<rand>。
     """
     snap_keys = load_env_dict(name)
-    global_keys = _read_global_env()
 
-    # 备份
-    if _GLOBAL_ENV.exists():
-        import time
-        bak = _GLOBAL_ENV.with_name(f".env.bak.{int(time.time())}")
-        shutil.copy2(_GLOBAL_ENV, bak)
+    # 读改写全程持跨进程文件锁：dashboard 与 CLI/MCP 进程并发 merge 时，
+    # 无锁的 read→merge→write 会互相覆盖丢 key
+    from control.core.locks import cross_process_lock
+    with cross_process_lock(_GLOBAL_ENV, timeout=10.0, strict=True):
+        global_keys = _read_global_env()
 
-    # 合并（快照覆盖全局）
-    changed = []
-    for k, v in snap_keys.items():
-        if global_keys.get(k) != v:
-            changed.append(k)
-        global_keys[k] = v
+        # 备份（名带随机后缀：同秒并发 merge 的秒级时间戳备份会互相冲掉）
+        if _GLOBAL_ENV.exists():
+            import uuid
+            bak = _GLOBAL_ENV.with_name(f".env.bak.{int(time.time())}.{uuid.uuid4().hex[:6]}")
+            shutil.copy2(_GLOBAL_ENV, bak)
 
-    _GLOBAL_ENV.write_text(_serialize_env(global_keys), encoding="utf-8")
+        # 合并（快照覆盖全局）
+        changed = []
+        for k, v in snap_keys.items():
+            if global_keys.get(k) != v:
+                changed.append(k)
+            global_keys[k] = v
 
-    # 更新索引
+        _GLOBAL_ENV.write_text(_serialize_env(global_keys), encoding="utf-8")
+
+    # 更新索引（update 统一写回，mutator 内不再自行 save）
     def _upd(idx):
         if name in idx.get("snapshots", {}):
             idx["snapshots"][name]["merged_to_global"] = _store.now()
-            _store.save(idx)
     _store.update(_upd)
 
     return {

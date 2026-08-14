@@ -403,6 +403,8 @@ def load_or_fit_blend_predictor(
     bp = BlendPredictor().fit(results, features, method_catalog=catalog)
     try:
         bp.save(cache_path)
-    except Exception:
-        pass  # 缓存写失败不影响功能
+    except Exception as e:
+        # 缓存写失败不影响功能（下次重 fit），但不可完全静默——
+        # 持续失败意味着每次评估都在白付训练成本，须可排查
+        logger.warning("BlendPredictor 缓存写失败（下次将重 fit）: %s", e)
     return bp

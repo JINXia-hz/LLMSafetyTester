@@ -499,6 +499,16 @@ def run_attack_phase(records: list[dict],
     if len(tracker.ground_truth_methods) == 0 and n_units > 0:
         from llmsec.clustering import log_growth_k0
 
+        # 种子批发给正确的目标：ambient 是 threading.local，本线程若不设置，
+        # call_target 会回退全局默认客户端（--target X 时种子全打给错误模型）。
+        # 与主循环 _eval_one 的补设逻辑同一模式；无 defender 时不设（M7：避免
+        # 把 ambient 置 None 的无意义调用）。
+        if defender_name:
+            try:
+                set_active_target(defender_name)
+            except Exception as e:
+                logger.warning(f"     ⚠ 设置活动目标失败（种子路由可能回退默认目标）: {e}")
+
         n_seeds = max(SEED_MIN_COUNT, log_growth_k0(n_units))
         seed_units = tracker.predictor.select_d_optimal_seeds(unit_proxies, n_seeds)
         logger.info(f"\n  🌱 D-optimal 种子: {len(seed_units)} 个单位"
@@ -582,9 +592,9 @@ def run_attack_phase(records: list[dict],
     base_batch = batch_size  # 用户 --batch-size（nominal，自适应缩放的基准）
     current_batch_size = batch_size
     prev_ci_half: float | None = None  # 上一轮收敛 CI（首轮 None→用 base）
-    # 兜底：max_rounds<=0 时循环不执行，下方 summary/进度落盘仍引用 round_idx 与 conv
     round_idx = 0
     conv: dict = {}
+    # argparse _positive_int 保证 max_rounds>=1，循环至少执行一轮
     for round_idx in range(1, max_rounds + 1):
         # 候选 = 记录池未耗尽的单位（已测单位仍可被选——同簇换 prompt 复测，
         # 这正是簇粒度评级的统计强度来源）
@@ -882,6 +892,14 @@ def _quick_precluster(tracker: ELOTracker, all_methods: list[str]) -> dict[str, 
         logger.warning("⚠️ hdbscan 未安装，预聚类回退 KMeans")
     except Exception as e:
         logger.warning(f"⚠️ 预聚类(HDBSCAN/Ward)失败（{e}），回退 KMeans")
+    return _kmeans_fallback(features, methods)
+
+
+def _kmeans_fallback(features: dict, methods: list[str]) -> dict[str, int] | None:
+    """白化空间 KMeans 兜底（预聚类核心失败/不可用时）。
+
+    _quick_precluster 的兜底与 _emergency_cluster 原为两份逐行重复实现，统一于此。
+    """
     try:
         from sklearn.cluster import KMeans
 
@@ -890,14 +908,14 @@ def _quick_precluster(tracker: ELOTracker, all_methods: list[str]) -> dict[str, 
 
         space = build_whitened_space(features, methods)
         coords = space["coords"]
-        # 簇数用 log_growth_k0（与正式聚类同口径），而非硬编码 8——
-        # n=10498 时 k≈14，而非 8（否则每簇 ~1312 method，粒度严重退化）
+        # 簇数用 log_growth_k0（与正式聚类同口径），而非硬编码——
+        # n=10498 时 k≈14（否则每簇 ~1312 method，粒度严重退化）
         k = log_growth_k0(len(methods))
         km = KMeans(n_clusters=k, n_init=3, random_state=get_global_seed())
         raw = km.fit_predict(coords)
         return {m: int(c) for m, c in zip(methods, raw)}
     except Exception as e:
-        logger.warning(f"⚠️ 预聚类失败（sampler 将退化为全局模式）: {e}")
+        logger.warning(f"⚠️ KMeans 兜底失败: {e}")
         return None
 
 
@@ -916,19 +934,5 @@ def _emergency_cluster(method_records: dict[str, dict], artifacts: dict | None) 
     methods = sorted(m for m in method_records if m in features)
     if len(methods) < 4:
         return None
-    try:
-        from sklearn.cluster import KMeans
-
-        from llmsec.clustering import log_growth_k0
-        from llmsec.clustering.space import build_whitened_space
-
-        space = build_whitened_space(features, methods)
-        coords = space["coords"]
-        k = log_growth_k0(len(methods))
-        km = KMeans(n_clusters=k, n_init=3, random_state=get_global_seed())
-        raw = km.fit_predict(coords)
-        return {m: int(c) for m, c in zip(methods, raw)}
-    except Exception as e:
-        logger.warning(f"⚠️ 紧急 KMeans 兜底也失败: {e}")
-        return None
+    return _kmeans_fallback(features, methods)
 

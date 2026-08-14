@@ -103,21 +103,26 @@ class BayesianSearch(SearchEngine):
         return params
 
     def tell(self, params: dict, value: float) -> None:
-        q = self._pending.get(self._key(params))
+        key = self._key(params)
+        q = self._pending.get(key)
         if not q:
             # 无匹配在飞 trial（续跑灌入的历史 / 重复 tell）——静默跳过
             return
         trial_obj = q.popleft()
-        if not q:
-            del self._pending[self._key(params)]
         try:
             self._study.tell(trial_obj, float(value))
         except (ValueError, TypeError) as e:
-            # tell 失败 = 花了 API 钱的 trial 结果被丢弃，不可静默
+            # tell 失败 = 花了 API 钱的 trial 结果被丢弃，不可静默。
+            # 归还在飞 trial：此前先弹后 tell，tell 抛错时该 trial 已从队列
+            # 消失，异常路径会连带丢失队列状态、无法重试
+            from collections import deque
+            self._pending.setdefault(key, deque()).appendleft(trial_obj)
             import logging
             logging.getLogger("llmsec.experiments.search").error(
                 "Optuna study.tell 失败（trial 结果未记录）: %s", e, exc_info=True)
             raise
+        if not q:
+            del self._pending[key]
 
 
 def build_search(config: StudyConfig, completed: list[dict] | None = None,

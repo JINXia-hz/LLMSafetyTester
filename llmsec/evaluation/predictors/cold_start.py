@@ -767,9 +767,8 @@ class ColdStartPredictor:
         technique_names = meta.get("technique_label_names", [])
         defense_names = meta.get("defense_feature_names", DEFENSE_FEATURE_NAMES)
 
-        method_to_idx = {m: i for i, m in enumerate(methods)}
         method_prompts = {m: [method_records[m].get("prompt", "")] for m in methods}
-        intent_feats = extract_intent_features(methods, method_prompts, embeddings, method_to_idx)
+        intent_feats = extract_intent_features(methods, method_prompts)
 
         result = {}
         for i, m in enumerate(methods):

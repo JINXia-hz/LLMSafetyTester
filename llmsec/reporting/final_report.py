@@ -167,7 +167,7 @@ def generate_reports(
             logger.info("  ℹ️ 本轮无新测试，跳过 LLM 叙事，直接使用 fallback 报告")
             markdown = generate_fallback_report(tree)
         else:
-            markdown = generate_narrative(tree, OUTPUT_DIR)
+            markdown = generate_narrative(tree)
         (run_dir / "security_report.md").write_text(markdown, encoding="utf-8")
     except Exception as e:
         logger.warning(f"  报告生成（tree/md）失败（runner_report.json 已写入）: {e}")

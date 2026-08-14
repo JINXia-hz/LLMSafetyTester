@@ -226,7 +226,8 @@ class TestEnvSnapshot:
         env_snapshot.create("s", source="blank")
         result = env_snapshot.delete("s")
         assert result["deleted"] == "s"
-        assert env_snapshot.get_snapshot("s") is None
+        # get_snapshot 已删（生产零调用）——用索引直查确认条目已移除
+        assert "s" not in env_snapshot._store.load().get("snapshots", {})
 
     def test_merge_to_global(self, tmp_path, monkeypatch):
         env_snapshot = self._setup(monkeypatch, tmp_path)

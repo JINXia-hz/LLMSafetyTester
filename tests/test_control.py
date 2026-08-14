@@ -12,16 +12,12 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-# 确保 control 包可 import（它在仓库根，与 llmsec 并列）
-_ROOT = Path(__file__).resolve().parent.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+# （路径注入由 tests/conftest.py 统一完成——control 与 llmsec 并列于仓库根）
 
 
 # ============================================================
@@ -174,7 +170,8 @@ class TestWorkspaceObservability:
         """_resolve_run_dir 识别 ws:<name> 前缀，定位 <ws>/<target>/。"""
         from control import config
         from control.core import compare as cmp
-        runs = tmp_path / "runs"; runs.mkdir()
+        runs = tmp_path / "runs"
+        runs.mkdir()
         ws = tmp_path / "workspaces" / "ab1"
         monkeypatch.setattr(config, "RUNS_DIR", runs)
         monkeypatch.setattr(config, "WORKSPACES_DIR", tmp_path / "workspaces")
@@ -196,7 +193,8 @@ class TestWorkspaceObservability:
         """run_metrics 经 ws: 前缀读 workspace 报告。"""
         from control import config
         from control.core import compare as cmp
-        runs = tmp_path / "runs"; runs.mkdir()
+        runs = tmp_path / "runs"
+        runs.mkdir()
         ws = tmp_path / "workspaces" / "ab1"
         monkeypatch.setattr(config, "RUNS_DIR", runs)
         monkeypatch.setattr(config, "WORKSPACES_DIR", tmp_path / "workspaces")
@@ -214,7 +212,8 @@ class TestWorkspaceObservability:
         """compare 可混合对比历史 run 与 workspace run。"""
         from control import config
         from control.core import compare as cmp
-        runs = tmp_path / "runs"; runs.mkdir()
+        runs = tmp_path / "runs"
+        runs.mkdir()
         ws = tmp_path / "workspaces" / "ab1"
         monkeypatch.setattr(config, "RUNS_DIR", runs)
         monkeypatch.setattr(config, "WORKSPACES_DIR", tmp_path / "workspaces")
@@ -260,14 +259,17 @@ class TestWorkspaceObservability:
         from control.agent.zhongshu import tools
         from control.core import compare as cmp
         ws_root = tmp_path / "workspaces"
-        runs_dir = tmp_path / "runs"; runs_dir.mkdir()
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir()
         monkeypatch.setattr(config, "WORKSPACES_DIR", ws_root)
         monkeypatch.setattr(config, "RUNS_DIR", runs_dir)
         monkeypatch.setattr(cmp, "WORKSPACES_DIR", ws_root)
         self._make_ws_run(ws_root / "ab1", "minimax", asr=0.3)
 
         # mock list_runs（历史 run）返回空，只验证 workspace 部分
-        monkeypatch.setattr(tools, "list_runs", lambda **kw: [])
+        #（实现已下沉到 compare.list_all_runs → invoker.list_runs，注入点随之迁移）
+        from control.core import invoker
+        monkeypatch.setattr(invoker, "list_runs", lambda **kw: [])
         tools.reset_registry()
         result = tools.call_tool("list_runs", {})
         assert any(r["name"] == "ws:ab1/minimax" for r in result)
@@ -585,11 +587,13 @@ class TestReview:
         from control import config
         from control.agent.menxia import review
         from control.core import compare as cmp
-        runs = tmp_path / "runs"; runs.mkdir()
-        d = runs / "2026-08-11_120000" / "modelA"; d.mkdir(parents=True)
+        runs = tmp_path / "runs"
+        runs.mkdir()
+        d = runs / "2026-08-11_120000" / "modelA"
+        d.mkdir(parents=True)
         report = self._make_report(asr=0.6, level="vulnerable")
-        import json as _json
-        (d / "runner_report.json").write_text(_json.dumps(report), encoding="utf-8")
+        import json
+        (d / "runner_report.json").write_text(json.dumps(report), encoding="utf-8")
         monkeypatch.setattr(config, "RUNS_DIR", runs)
         monkeypatch.setattr(cmp, "RUNS_DIR", runs)
         review._THRESHOLDS_CACHE = None

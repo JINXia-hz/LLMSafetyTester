@@ -151,9 +151,8 @@ def _R_from_run(run_name: str) -> ResultsMatrix:
     state = read_json(state_path) or {}
     history = state.get("history", [])
     R = ResultsMatrix()
-    model = state.get("defender_name") or (
-        read_json(run_dir / "runner_report.json", {}).get("target_model") if run_dir.exists() else None
-    )
+    # ELOTracker.save 不写 defender_name 键，模型名恒从 runner_report 取
+    model = read_json(run_dir / "runner_report.json", {}).get("target_model") if run_dir.exists() else None
     for h in history:
         rec = h.get("record")
         def_ = h.get("defender") or model

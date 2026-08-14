@@ -19,6 +19,12 @@ function loadMenxiaSection() {
   if (!_mxPollTimer) _mxPollTimer = setInterval(pollMenxiaBus, 2000);
 }
 
+// 离开宣政殿时停止轮询（core.js 的 loadSection 调用）——
+// 此前 setInterval 永不清除，2s 轮询持续到关页
+function unloadMenxiaSection() {
+  if (_mxPollTimer) { clearInterval(_mxPollTimer); _mxPollTimer = null; }
+}
+
 function bindMenxia() {
   _mxBound = true;
   const refresh = $('mx-refresh');

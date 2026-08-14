@@ -53,9 +53,14 @@ def fork(
 
     # 1. 导出快照（控制层调 llmsec-manage，不碰 R 内部）
     snap = export_snapshot(source=source)
-    # snap["snapshot"] 是相对 OUTPUT_DIR 的路径（llmsec-manage 用 relative_to(OUTPUT_DIR) 存）
+    # snap["snapshot"] 是相对 OUTPUT_DIR 的路径（llmsec-manage 用 relative_to(OUTPUT_DIR) 存）。
+    # CLI 输出异常时 json 为空 dict——用 .get 兜底，裸下标会把真实错误（非空输出）
+    # 换成无上下文的 KeyError
     from control.config import OUTPUT_DIR
-    snap_path = OUTPUT_DIR / snap["snapshot"]
+    snap_rel = snap.get("snapshot")
+    if not snap_rel:
+        raise RuntimeError(f"快照导出未返回 snapshot 路径（source={source}）: {snap}")
+    snap_path = OUTPUT_DIR / snap_rel
     results_src = snap_path / "results.json"
     if not results_src.exists():
         raise FileNotFoundError(f"快照缺 results.json: {results_src}")
@@ -87,7 +92,6 @@ def fork(
     # 4. 记入索引（加锁防并发 fork 丢更新）
     def _record(idx):
         idx["workspaces"][name] = info
-        _store.save(idx)
     _store.update(_record)
     return info
 
@@ -137,8 +141,8 @@ def list_workspaces() -> list[dict]:
     ws = list(idx.get("workspaces", {}).values())
     # 补 size
     for w in ws:
-        d = LLMSEC_REPO / w["path"]
-        w["size"] = _dir_size(d) if d.exists() else 0
+        d = LLMSEC_REPO / w.get("path", "")
+        w["size"] = _dir_size(d) if w.get("path") and d.exists() else 0
     ws.sort(key=lambda x: x.get("created", ""), reverse=True)
     return ws
 
@@ -155,7 +159,6 @@ def mark_merged(name: str, target: str) -> bool:
                 idx["workspaces"][name]["merged"] = True
                 idx["workspaces"][name]["merged_at"] = _store.now()
                 idx["workspaces"][name]["merged_to"] = target
-                _store.save(idx)
         _store.update(_mark)
         return True
     except Exception:
@@ -170,9 +173,7 @@ def delete_workspace(name: str) -> dict:
         ws_dir = safe_component(WORKSPACES_DIR, name)
         if ws_dir.exists():
             shutil.rmtree(ws_dir)
-        info = idx["workspaces"].pop(name)
-        _store.save(idx)
-        return info
+        return idx["workspaces"].pop(name)
     info = _store.update(_delete)
     return {"deleted": name, "info": info}
 
@@ -235,8 +236,6 @@ def gc_merged_workspaces(older_than_days: int = 7) -> dict:
             })
             del ws_map[name]
             cleaned.append({"name": name, "size": size})
-        if cleaned:
-            _store.save(idx)
         return cleaned, skipped_fresh, len(gc_log)
 
     cleaned, skipped_fresh, gc_log_size = _store.update(_gc)

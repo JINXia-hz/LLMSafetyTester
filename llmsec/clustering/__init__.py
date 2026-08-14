@@ -45,7 +45,6 @@ from llmsec.clustering.tree import (
     sweep_candidates,
 )
 from llmsec.core.config import (
-    CLUSTER_FEATURES_FILE,
     CLUSTER_MATRIX_FILE,
     CLUSTER_REPORT_FILE,
     CLUSTER_RESULT_FILE,
@@ -86,6 +85,6 @@ __all__ = [
     # 簇 ID 解析
     "parse_cluster_id",
     # 路径常量
-    "CLUSTER_REPORT_FILE", "CLUSTER_MATRIX_FILE", "CLUSTER_FEATURES_FILE",
+    "CLUSTER_REPORT_FILE", "CLUSTER_MATRIX_FILE",
     "FEATURE_CACHE_FILE", "CLUSTER_RESULT_FILE",
 ]

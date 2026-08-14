@@ -83,6 +83,11 @@ def _gazette_path(plan_id: str) -> Path:
     return safe_component(_GAZETTE_DIR, f"{plan_id}.jsonl")
 
 
+def index_path() -> Path:
+    """索引文件路径（公开访问器——dialogue 的缓存签名此前直接摸 _store.path 私有属性）。"""
+    return _store.path
+
+
 # ============================================================
 # 公共 API
 # ============================================================
@@ -116,32 +121,37 @@ def append_event(
         # append 事件
         with open(_gazette_path(plan_id), "a", encoding="utf-8") as f:
             f.write(line)
-        # 更新索引
-        idx = _store.load()
-        entry = idx["plans"].setdefault(plan_id, {
-            "plan_id": plan_id,
-            "intent": intent or "",
-            "session_id": session_id,
-            "created": event.ts,
-            "status": "active",
-            "last_event": kind,
-            "last_ts": event.ts,
-        })
-        # 首次记录时补 intent/session
-        if intent and not entry.get("intent"):
-            entry["intent"] = intent
-        if session_id and not entry.get("session_id"):
-            entry["session_id"] = session_id
-        entry["last_event"] = kind
-        entry["last_ts"] = event.ts
-        # 根据 kind 更新 status
-        if kind == EV_PLAN_FINISHED:
-            entry["status"] = "finished"
-            entry["finished"] = event.ts
-        elif kind == EV_PLAN_REJECTED:
-            entry["status"] = "rejected"
-            entry["finished"] = event.ts
-        _store.save(idx)
+
+        # 更新索引：走 _store.update（线程锁 + 跨进程文件锁的 RMW）。
+        # 此前手工 load/save 绕过了跨进程锁——dashboard 与 MCP 进程并发写
+        # gazette 时两个进程各 load 同一旧索引、后写覆盖先写，丢更新。
+        def _update_index(idx: dict) -> None:
+            plans = idx.setdefault("plans", {})  # 索引半写/缺键时兜底，与 read_plan_context 同一防御
+            entry = plans.setdefault(plan_id, {
+                "plan_id": plan_id,
+                "intent": intent or "",
+                "session_id": session_id,
+                "created": event.ts,
+                "status": "active",
+                "last_event": kind,
+                "last_ts": event.ts,
+            })
+            # 首次记录时补 intent/session
+            if intent and not entry.get("intent"):
+                entry["intent"] = intent
+            if session_id and not entry.get("session_id"):
+                entry["session_id"] = session_id
+            entry["last_event"] = kind
+            entry["last_ts"] = event.ts
+            # 根据 kind 更新 status
+            if kind == EV_PLAN_FINISHED:
+                entry["status"] = "finished"
+                entry["finished"] = event.ts
+            elif kind == EV_PLAN_REJECTED:
+                entry["status"] = "rejected"
+                entry["finished"] = event.ts
+
+        _store.update(_update_index)
 
 
 def read_events(plan_id: str) -> list[GazetteEvent]:
@@ -216,12 +226,16 @@ def read_plan_context(plan_id: str) -> dict | None:
             elif ev.kind == EV_STEP_BLOCKED:
                 step_info["status"] = "blocked"
                 step_info["block_count"] += 1
+                step_info["unblocked"] = False  # 新封驳令覆盖旧放行标记
                 ctx["blocks"].append({
                     "step_id": sid, "ticket": ev.detail.get("ticket"),
                     "ts": ev.ts,
                 })
             elif ev.kind == EV_STEP_UNBLOCKED:
                 step_info["status"] = "pending"  # 放行后待重试
+                # 显式放行标记：豁免判定不能用 status——重试时 executor 会先写
+                # EV_STEP_STARTED 把 status 翻成 running，"pending" 判据必失效
+                step_info["unblocked"] = True
             elif ev.kind == EV_STEP_FAILED:
                 step_info["status"] = "failed"
                 step_info["error"] = ev.detail.get("error", "")

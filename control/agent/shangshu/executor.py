@@ -91,7 +91,16 @@ def execute_plan(
             with ThreadPoolExecutor(max_workers=min(max_workers, len(to_run))) as pool:
                 futures = {pool.submit(_execute_step, s, plan, on_progress): s for s in to_run}
                 for fut in as_completed(futures):
-                    fut.result()
+                    try:
+                        fut.result()
+                    except Exception as e:
+                        # worker 线程内 gazette 落盘等基础设施异常（非 handler 异常——
+                        # 那些已在 _execute_step 内消化）。吞掉并记录，保证后续层照常
+                        # 执行、Plan 能推进到终态；上抛会让 execute_plan 中断且无人恢复，
+                        # Plan 永久卡在 executing。
+                        import sys
+                        print(f"[executor] 步骤 {futures[fut].id} 线程异常: "
+                              f"{type(e).__name__}: {e}", file=sys.stderr)
 
         _propagate_blockage(plan)
         plan_mod.save_plan(plan)
@@ -133,19 +142,24 @@ def _execute_step(step: Step, plan: Plan, on_progress: ProgressCallback | None) 
                step_id=step.id, capability=step.capability, error=step.error)
         return
 
-    # 1. 文牍记 + 总线通知 step_start
+    # 1. 文牍记 + 总线通知 step_start（collect_replies：门下省在同步派发中
+    #    直接返回封驳裁决——放行返回 None，封驳返回 ticket dict）
     step.started = time.time()
     gazette.append_event(plan.id, gazette.EV_STEP_STARTED, SHANGSHU,
                          step_id=step.id, session_id=plan.session_id, intent=plan.intent,
                          detail={"capability": step.capability, "description": step.description,
                                  "args": step.args})
-    notify(KIND_STEP_START, from_dept=SHANGSHU, plan_id=plan.id,
-           intent=plan.intent, session_id=plan.session_id,
-           step_id=step.id, capability=step.capability, args=step.args,
-           risk_level=cap.risk_level, description=step.description)
+    replies = notify(KIND_STEP_START, from_dept=SHANGSHU, plan_id=plan.id,
+                     intent=plan.intent, session_id=plan.session_id,
+                     step_id=step.id, capability=step.capability, args=step.args,
+                     risk_level=cap.risk_level, description=step.description,
+                     collect_replies=True)
 
-    # 2. 门下省审查（总线同步派发，门下省回调可能发 block）
-    block_msg = _check_block_for_step(plan.id, step.id)
+    # 2. 门下省裁决直收（按 plan/step 双重匹配，防其他订阅者的无关返回值混入）
+    block_msg = next(
+        (r for r in (replies or [])
+         if isinstance(r, dict) and r.get("plan_id") == plan.id and r.get("step_id") == step.id),
+        None)
     if block_msg is not None:
         step.status = S_BLOCKED
         step.ticket = block_msg
@@ -167,7 +181,7 @@ def _execute_step(step: Step, plan: Plan, on_progress: ProgressCallback | None) 
         step.status = S_DONE
         step.result = _sanitize_result(result)
         step.finished = time.time()
-        duration = round(step.finished - (step.started or step.finished), 1)
+        duration = round(step.finished - step.started, 1)
         gazette.append_event(plan.id, gazette.EV_STEP_SUCCEEDED, SHANGSHU,
                              step_id=step.id, session_id=plan.session_id, intent=plan.intent,
                              detail={"capability": step.capability,
@@ -186,19 +200,6 @@ def _execute_step(step: Step, plan: Plan, on_progress: ProgressCallback | None) 
         notify(KIND_STEP_FAILED, from_dept=SHANGSHU, plan_id=plan.id,
                intent=plan.intent, session_id=plan.session_id,
                step_id=step.id, capability=step.capability, error=step.error)
-
-
-def _check_block_for_step(plan_id: str, step_id: str) -> dict | None:
-    """检查门下省是否对此步发了封驳（查总线 recent）。"""
-    from control.agent.bus import get_bus
-    bus = get_bus()
-    recent = bus.recent(since_ts=time.time() - 5.0)
-    for m in reversed(recent):
-        if (m.kind == "block"
-                and m.plan_id == plan_id
-                and m.payload.get("step_id") == step_id):
-            return m.payload.get("ticket")
-    return None
 
 
 def _propagate_blockage(plan: Plan) -> None:

@@ -16,7 +16,6 @@ from typing import Any
 
 from control.core import compare as compare_mod
 from control.core import workspace as ws_mod
-from control.core.invoker import list_runs
 
 
 # ============================================================
@@ -73,20 +72,14 @@ def _tool_list_runs():
 
 
 def _do_list_runs(args: dict) -> list[dict]:
-    """列出历史 run +（可选）workspace 分支内的 run。"""
-    runs = list_runs(
+    """列出历史 run +（可选）workspace 分支内的 run（统一走 compare.list_all_runs）。"""
+    from control.core.compare import list_all_runs
+    return list_all_runs(
         target=args.get("target"),
         since=args.get("since"),
         junk_only=args.get("junk_only", False),
+        include_workspaces=args.get("include_workspaces", True),
     )
-    if args.get("include_workspaces", True):
-        from control.core.compare import discover_workspace_runs
-        ws_runs = discover_workspace_runs()
-        if args.get("target"):
-            ws_runs = [r for r in ws_runs if r.get("target") == args["target"]
-                       or r.get("target_model") == args["target"]]
-        runs = runs + ws_runs
-    return runs
 
 
 def _tool_compare_runs():

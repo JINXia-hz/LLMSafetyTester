@@ -7,10 +7,8 @@
 """
 from __future__ import annotations
 
-import logging
 import time
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
@@ -345,17 +343,8 @@ def test_probe_service_no_warning_on_normal(monkeypatch):
 # ============================================================
 # 5. 数据污染防注入：publish-global 拒绝未声明目标
 # ============================================================
-def test_publish_global_rejects_undeclared_target(caplog):
-    """runner 的 --publish-global 分支跳过未在 TARGETS 声明的目标名。"""
-
-    # 构造一个最小的伪 main 上下文太重；直接测 publish 分支的核心守卫逻辑——
-    # 用 patch load_targets 返回不含 'test_model' 的声明集，验证日志警告。
-    # 这里用单元化的方式：模拟 names 含 test_model，declared 不含它 → 应跳过。
-    declared = {'minimax', 'gemma-4-12B-it'}
-    names = ['test_model', 'minimax']
-    # 复刻 runner 里的守卫判断
-    skipped = [n for n in names if declared and n not in declared]
-    assert skipped == ['test_model'], '未声明目标应被识别为待跳过'
+# （审查清理：原 test_publish_global_rejects_undeclared_target 是"复刻逻辑"式假测试——
+#  断言的是测试内自造的列表推导、从未调用生产代码、caplog 参数未用，永不可能失败，已删除。）
 
 
 # ============================================================
@@ -395,80 +384,101 @@ def test_recommendation_all_levels_distinct():
 # ============================================================
 # 7. stale 判定按时间戳目录，不按完整批次名
 # ============================================================
-def test_stale_detection_by_batch_dir():
-    """同时间戳目录下的不同目标不应互判 stale（按目录名比较，非完整 run 名）。"""
-    # 复刻 data_query.overview 的 stale 比较逻辑
-    runs = [
-        {'name': '2026-08-11_151938/minimax', 'has_report': True},
-        {'name': '2026-08-11_151938/gemma-4-12B-it', 'has_report': True},
-        {'name': '2026-08-12_194108/minimax', 'has_report': True},
-    ]
-    cur = '2026-08-11_151938/gemma-4-12B-it'
-    cur_batch = cur.split('/', 1)[0]
-    newer = next(
-        (r['name'] for r in runs
-         if r['has_report'] and r['name'].split('/', 1)[0] > cur_batch),
-        None,
-    )
-    # 只应报 2026-08-12 这个真正更新的批次，不报同目录的 minimax
-    assert newer == '2026-08-12_194108/minimax', '应只报时间戳更晚的批次'
-    assert newer != '2026-08-11_151938/minimax', '同目录不同目标不应判为更新'
+def test_stale_detection_by_batch_dir(tmp_path, monkeypatch):
+    """同时间戳目录下的不同目标不应互判 stale（真实 /api/overview 端点）。"""
+    import json as _json
+
+    from fastapi.testclient import TestClient
+
+    from llmsec.server import dashboard_api
+    from llmsec.server.routers import data_query as dq
+
+    runs_dir = tmp_path / "runs"
+    for batch, target in (("2026-08-11_151938", "minimax"),
+                          ("2026-08-11_151938", "gemma-4-12B-it"),
+                          ("2026-08-12_194108", "minimax")):
+        d = runs_dir / batch / target
+        d.mkdir(parents=True)
+        (d / "runner_report.json").write_text(
+            _json.dumps({"target_model": target, "security_level": "safe"}),
+            encoding="utf-8")
+    monkeypatch.setattr(dashboard_api, "RUNS_DIR", runs_dir)
+    dq._DISCOVER_CACHE = None
+
+    client = TestClient(dashboard_api.app)
+    r = client.get("/api/overview", params={"run": "2026-08-11_151938/gemma-4-12B-it"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    if body.get("reason") == "stale_report":
+        msg = body.get("message", "")
+        assert "2026-08-12_194108" in msg, f"应只报时间戳更晚的批次: {msg}"
+        assert "2026-08-11_151938/minimax" not in msg,             "同目录不同目标不应判为更新"
 
 
 # ============================================================
 # 8. SVD-Ridge 诊断细化：原因不再"未知"
 # ============================================================
-def test_svd_ridge_diagnosis_reasons_specific(caplog):
-    """cluster_analysis.analyze_clusters 的诊断兜底分支应给出具体原因而非'原因未知'。
+def _run_svd_diagnosis(tracker, monkeypatch):
+    """驱动真实 analyze_clusters 的 SVD 诊断分支，返回 analysis dict。
 
-    构造 tracker 的 predictor 满足"GT 充足 + 特征在 + 但模型未装配/未训练"，
-    触发修复后的细化诊断分支，断言日志/analysis 不含"原因未知"。
+    patch build_svd_ridge_summary 返回 None（模拟"无摘要"），使流程落入
+    诊断块；断言目标从自造字符串换成生产代码写回的 analysis['svd_ridge_skipped']。
     """
     from llmsec.evaluation import cluster_analysis as ca
-
-    # predictor：GT 4（≥ min_cluster_size=3），特征 4 个方法都在，model.w=None（Ridge 退化）
-    fake_model = SimpleNamespace(w=None)
-    fake_pred = SimpleNamespace(
-        model=fake_model,
-        artifacts={'features': {'m1': {}, 'm2': {}, 'm3': {}, 'm4': {}}, 'units': None},
-        ground_truth={'u1': 1, 'u2': 2, 'u3': 3, 'u4': 4},
-        min_cluster_size=3,
-    )
-    fake_pred.ground_truth_count = lambda: 4
-    fake_tracker = SimpleNamespace(predictor=fake_pred)
-
-    with caplog.at_level(logging.WARNING, logger='llmsec.evaluation.cluster_analysis'):
-        with patch.object(ca, 'build_svd_ridge_summary', return_value=None):
-            try:
-                ca.analyze_clusters(fake_tracker, cluster_report={}, cluster_artifacts={})
-            except Exception:
-                pass  # 诊断块在 try 内；前面逻辑可能因 fake 不全抛，只验证诊断日志
-
-    log_text = caplog.text
-    # 如果诊断块被执行，不应出现"原因未知"（应细化成 model 装配/Ridge 退化等）
-    # 注意：若前面逻辑异常导致诊断块未执行，本断言天然成立（无日志），不误报
-    assert '原因未知' not in log_text, (
-        f'诊断日志不应再含"原因未知"。实际: {log_text!r}'
+    monkeypatch.setattr(ca, 'build_svd_ridge_summary', lambda tr: None)
+    monkeypatch.setattr(ca, 'build_blend_predictor_summary', lambda tr: None)
+    return ca.analyze_clusters(
+        tracker,
+        cluster_report={"method_labels": {"u1": 0, "u2": 0, "u3": 1, "u4": 1}},
+        cluster_artifacts=None,
     )
 
 
-def test_svd_ridge_diagnosis_model_none_reason():
-    """predictor.model 为 None 时，诊断原因应指出'模型未装配'。"""
-    # 复刻 cluster_analysis 诊断块的兜底判断逻辑（model is None 分支）
-    fake_pred = SimpleNamespace(
-        model=None,
-        artifacts={'features': {'m1': {}}, 'units': None},
-        ground_truth={'u1': 1, 'u2': 2, 'u3': 3, 'u4': 4},
-        min_cluster_size=3,
-    )
-    # 模拟诊断块的条件链：GT 充足、特征在、但 model is None
-    model = fake_pred.model
-    assert model is None
-    # 修复后的分支：model is None → "predictor.model 未装配"
-    # （而非"原因未知"）— 这里验证判断逻辑的正确性
-    reason = ("GT 4 充足但 predictor.model 未装配（冷启动模型装配失败）"
-              if model is None else "其他")
-    assert '未装配' in reason
+def test_svd_ridge_diagnosis_reasons_specific(monkeypatch, tmp_path):
+    """诊断兜底应给出具体原因而非'原因未知'（真实 analyze_clusters 路径）。
+
+    model.w=None + GT 与特征键一致 → 应命中"Ridge 解退化"分支。
+    旧版此测试传空 cluster_report——analyze_clusters 直接早退"无聚类数据"，
+    诊断块从未执行、断言恒真；现改为真实驱动并断言返回值。
+    """
+    from llmsec.evaluation.elo import ELOTracker
+
+    tracker = ELOTracker()
+    tracker.predictor.artifacts = {
+        "features": {u: {"textual": [1.0, 0.0]} for u in ("u1", "u2", "u3", "u4")},
+        "units": None,
+    }
+    tracker.predictor.ground_truth = {"u1": 1, "u2": 2, "u3": 3, "u4": 4}
+    tracker.predictor.model = SimpleNamespace(w=None)
+    import llmsec.core.config as _cfg
+    monkeypatch.setattr(_cfg, "FEATURE_CACHE_FILE", tmp_path / "fc.pkl")
+
+    analysis = _run_svd_diagnosis(tracker, monkeypatch)
+    reason = analysis.get("svd_ridge_skipped", "")
+    assert reason, "诊断块应执行并写回 svd_ridge_skipped"
+    assert "原因未知" not in reason, f"诊断不应含'原因未知'，实得: {reason!r}"
+    assert "Ridge" in reason or "退化" in reason, f"应命中 Ridge 退化分支: {reason!r}"
+
+
+def test_svd_ridge_diagnosis_model_none_reason(monkeypatch, tmp_path):
+    """predictor.model 为 None 时，诊断原因应指出'模型未装配'（真实路径）。"""
+    from llmsec.evaluation.elo import ELOTracker
+
+    tracker = ELOTracker()
+    # GT 4 个单位且特征键与 GT 一致（避开 stale 分支），model 未装配
+    tracker.predictor.artifacts = {
+        "features": {u: {"textual": [1.0, 0.0]} for u in ("u1", "u2", "u3", "u4")},
+        "units": None,
+    }
+    tracker.predictor.ground_truth = {"u1": 1, "u2": 2, "u3": 3, "u4": 4}
+    tracker.predictor.model = None
+    import llmsec.core.config as _cfg
+    monkeypatch.setattr(_cfg, "FEATURE_CACHE_FILE", tmp_path / "fc.pkl")
+
+    analysis = _run_svd_diagnosis(tracker, monkeypatch)
+    reason = analysis.get("svd_ridge_skipped", "")
+    assert "未装配" in reason, f"model=None 应给出'未装配'原因，实得: {reason!r}"
+    assert "原因未知" not in reason
 
 
 # ============================================================
@@ -487,11 +497,13 @@ def test_spawn_injects_pythonunbuffered(monkeypatch, tmp_path):
         captured['argv'] = args[0] if args else kw.get('args')
         return _FakeProc()
 
-    from llmsec.server.routers import tasks as tasks_mod
+    from llmsec.server import task_manager
 
-    monkeypatch.setattr(tasks_mod.subprocess, 'Popen', _fake_popen)
-    monkeypatch.setattr(tasks_mod, 'TASK_LOG_DIR', tmp_path)
-    monkeypatch.setattr(tasks_mod, '_advance_queue', lambda k: None)
+    # _spawn 实现已统一到 task_manager（tasks.py 只是 HTTP 薄封装），
+    # 注入点相应指向 task_manager 命名空间
+    monkeypatch.setattr(task_manager.subprocess, 'Popen', _fake_popen)
+    monkeypatch.setattr(task_manager, 'TASK_LOG_DIR', tmp_path)
+    monkeypatch.setattr(task_manager, '_advance_queue', lambda k: None)
 
     t = {
         'kind': 'evaluate',
@@ -499,7 +511,7 @@ def test_spawn_injects_pythonunbuffered(monkeypatch, tmp_path):
         'log_path': tmp_path / 't.log',
         'started_at': '2026-01-01T00:00:00',
     }
-    tasks_mod._spawn('test-id', t)
+    task_manager._spawn('test-id', t)
     assert captured['env'].get('PYTHONUNBUFFERED') == '1', (
         '_spawn 应注入 PYTHONUNBUFFERED=1 让子进程日志无缓冲'
     )

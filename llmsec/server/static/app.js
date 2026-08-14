@@ -248,10 +248,14 @@ window.addEventListener('scroll', () => {
   const cmpRun = q.get('cmp');
   if (cmpRun && start === 'overview') {
     const t = setInterval(() => {
+      // 面板元素可能不存在（模板变更/加载失败）：停止轮询避免
+      // 每 200ms 抛 TypeError
+      const btn = $('cmpBtn'), sel = $('cmpSelect');
+      if (!btn || !sel) { clearInterval(t); return; }
       if (!lastOverview) return;
       clearInterval(t);
-      if (!cmpActive) $('cmpBtn').click();
-      $('cmpSelect').value = cmpRun;
+      if (!cmpActive) btn.click();
+      sel.value = cmpRun;
       renderCompare();
     }, 200);
     setTimeout(() => clearInterval(t), 10000);

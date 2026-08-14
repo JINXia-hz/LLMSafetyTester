@@ -418,15 +418,6 @@ class ResultsMatrix:
         return mat
 
     # ---------- 诊断 ----------
-    def summary(self) -> dict:
-        models = self.all_models()
-        return {
-            "units_total": len(self.all_units()),
-            "models": models,
-            "coverage": {m: self.n_for_model(m) for m in models},
-            "results_total": sum(len(col) for col in self._r.values()),
-        }
-
 
 def _coarse_status(score: float) -> str:
     """从 eval_score 派生粗粒度 status（旧 history 无该字段时的兜底）。

@@ -44,9 +44,18 @@ def load_json(path: Path | None) -> dict:
 
 
 def _validate_run(run: str) -> str:
-    """run 可以是 'YYYY-MM-DD_HHMMSS'（旧格式）或 'YYYY-MM-DD_HHMMSS/target'（新格式）。"""
-    parts = run.split("/", 1)
-    if not RUN_NAME_RE.match(parts[0]):
+    """run 可以是 'YYYY-MM-DD_HHMMSS'（旧格式）或 'YYYY-MM-DD_HHMMSS/target'（新格式）。
+
+    逐段校验防路径穿越——此前只校验首段，'2026-01-01_000000/../../x'
+    可通过后拼出越界路径（对齐 management/runs.py 的 safe_subpath 做法）。
+    """
+    parts = run.split("/")
+    if not parts or not RUN_NAME_RE.match(parts[0]):
+        raise HTTPException(status_code=400, detail=f"非法 run 参数: {run!r}")
+    from llmsec.core.paths import safe_subpath
+    try:
+        safe_subpath(_runs_dir(), *parts)
+    except ValueError:
         raise HTTPException(status_code=400, detail=f"非法 run 参数: {run!r}")
     return run
 
@@ -176,42 +185,54 @@ _RUN_META_CACHE: dict[str, tuple[tuple[float, int] | None, dict]] = {}
 # _discover_runs 结果的进程内缓存。
 # 修复前：dashboard 首屏 _discover_runs 被调 4 次（/api/runs、/api/overview 的 _run_dir、
 # /api/overview 的 stale 检测、/api/trend），每次全量扫目录树 + 读每个 run 的报告。
-# 缓存签名用 (runs_dir mtime, batch 目录数)：runs_dir mtime 在 batch 目录增删时更新
-# （新建/删除 batch 目录才改目录条目），这个层面安全——target 内文件 resume 覆写不影响
-# runs_dir 的 mtime，但那种覆写只改报告内容（由 _RUN_META_CACHE 的文件级签名兜底），
-# 不改目录结构（新增 run 必然新增 target 子目录 → 更新 batch_dir mtime → 更新 runs_dir mtime）。
-_DISCOVER_CACHE: tuple[tuple[float, int], list[dict]] | None = None
+# 缓存签名 = (runs_dir mtime, 各 batch 目录的 (name, mtime) 全集)：
+#   - 新建/删除 batch 目录 → runs_dir mtime 与全集都变；
+#   - batch 目录**内部**新增 target 子目录 → 只改该 batch_dir 的 mtime——只看顶层
+#     会漏掉多目标 run 中靠后完成的目标（/api/runs 长期看不到新报告），故必须逐 batch stat。
+# 逐 batch stat 的开销远小于全量重扫（后者还要读每个 run 的报告）。
+_DISCOVER_CACHE: tuple[tuple, list[dict]] | None = None
+
+
+
+def _dir_sig(path: Path) -> tuple[float, tuple] | None:
+    """目录签名：(自身 mtime, 子目录 (name, mtime) 全集)。
+
+    mtime 族缓存（本文件 _discover_runs_cached/_run_meta 与 control 侧文牍文本
+    缓存）统一用同构指纹；子目录粒度是必须的——batch 内新增 target 只改 batch
+    的 mtime，不改父目录。已知局限：粗粒度 mtime 文件系统（FAT 2s）有窗口。
+    """
+    try:
+        st = path.stat()
+        subs = tuple(sorted(
+            (d.name, d.stat().st_mtime) for d in path.iterdir() if d.is_dir()
+        ))
+        return (st.st_mtime, subs)
+    except OSError:
+        return None
+
+
+def _file_sig(path: Path) -> tuple[float, int] | None:
+    """单文件签名 (mtime, size)；不可 stat 返回 None。"""
+    try:
+        st = path.stat()
+        return (st.st_mtime, st.st_size)
+    except OSError:
+        return None
 
 
 def _discover_runs_cached() -> list[dict]:
     """_discover_runs 的进程内缓存版。签名失效才重扫，首屏 4 次调用共享同一结果。"""
     global _DISCOVER_CACHE
     runs_dir = _runs_dir()
-    try:
-        st = runs_dir.stat()
-        sig = (st.st_mtime, len([d for d in runs_dir.iterdir() if d.is_dir()]))
-    except OSError:
-        return _discover_runs()  # runs_dir 不存在或 stat 失败，直接扫（返回空）
+    sig = _dir_sig(runs_dir)
+    if sig is None:
+        return _discover_runs()  # runs_dir 不存在/迭代中被删，直接扫（返回空）
     if _DISCOVER_CACHE and _DISCOVER_CACHE[0] == sig:
         # 缓存命中：返回副本，避免调用方 mutate 污染缓存（/api/runs 会 r.update(...)）
         return [dict(r) for r in _DISCOVER_CACHE[1]]
     runs = _discover_runs()
     _DISCOVER_CACHE = (sig, runs)
     return [dict(r) for r in runs]
-
-
-def _paginate(items: list, limit: int | None = None, offset: int = 0) -> dict:
-    """通用分页 helper。limit=None 表示全量（向后兼容，不截断）。
-
-    Returns:
-        {items: [...], total: N, limit: limit|None, offset: offset}
-    """
-    total = len(items)
-    if limit is not None:
-        page = items[offset: offset + limit] if limit > 0 else []
-    else:
-        page = items[offset:] if offset else list(items)
-    return {"items": page, "total": total, "limit": limit, "offset": offset}
 
 
 def _run_meta(run_dir: Path) -> dict:
@@ -222,11 +243,7 @@ def _run_meta(run_dir: Path) -> dict:
     except ValueError:
         name = run_dir.name
     report_path = run_dir / "runner_report.json"
-    try:
-        st = report_path.stat()
-        sig: tuple[float, int] | None = (st.st_mtime, st.st_size)
-    except OSError:
-        sig = None
+    sig = _file_sig(report_path)
     cached = _RUN_META_CACHE.get(name)
     if cached and cached[0] == sig:
         return cached[1]
@@ -338,12 +355,12 @@ def _load_tree_artifacts() -> dict | None:
 # 数据 API
 # ============================================================
 @router.get("/api/runs")
-async def api_runs(limit: int | None = None, offset: int = 0):
+async def api_runs():
     runs_dir = _runs_dir()
     runs = _discover_runs_cached()
     # 进行中标注：有 evaluate 任务在跑时，批次 ts ≥ 任务 started_at 的 run 标 active，
     # 前端据此渲染 ⏳（多目标运行时先完成的目标报告已落盘，需与"已完成"区分）
-    from llmsec.server.routers.tasks import TASKS
+    from llmsec.server.task_manager import TASKS
     active_since: str | None = None
     for t in TASKS.values():
         if t.get("kind") == "evaluate" and t.get("status") in ("running", "queued"):
@@ -357,13 +374,7 @@ async def api_runs(limit: int | None = None, offset: int = 0):
         # 供批次下拉渲染成"带等级印章的列表"（安/警/伤小方印排在批次名前）
         if r.get("has_report"):
             r.update(_run_meta(runs_dir / r["name"]))
-    # 分页（可选）：limit=None 全量返回（默认，向后兼容前端全量渲染下拉）。
-    # 显式传 limit 时切片并附 total，供前端"加载更多/分页器"使用。
-    if limit is None:
-        return {"runs": runs, "total": len(runs)}
-    page = _paginate(runs, limit=limit, offset=offset)
-    return {"runs": page["items"], "total": page["total"],
-            "limit": page["limit"], "offset": page["offset"]}
+    return {"runs": runs, "total": len(runs)}
 
 
 @router.get("/api/trend")
@@ -642,7 +653,7 @@ async def api_report_md(run: str | None = None):
 
 
 @router.get("/api/report/download")
-async def api_report_download(run: str | None = None, format: str = "md"):
+async def api_report_download(run: str | None = None):
     """报告下载：带 Content-Disposition 的 .md 附件。
 
     PDF 暂不支持服务端渲染（避免引入重依赖），前端用浏览器打印对话框存 PDF。
@@ -653,8 +664,6 @@ async def api_report_download(run: str | None = None, format: str = "md"):
     md_path = run_dir / "security_report.md"
     if not md_path.exists():
         raise HTTPException(status_code=404, detail=f"批次 {_run_name(run_dir, run)} 无 security_report.md")
-    if format.lower() != "md":
-        raise HTTPException(status_code=400, detail="当前仅支持 format=md（PDF 请用浏览器打印）")
     content = md_path.read_text(encoding="utf-8")
     fname = 'security_report_' + _run_name(run_dir, run).replace('/', '_') + '.md'
     return PlainTextResponse(
@@ -856,8 +865,9 @@ async def api_targets_add(req: AddTargetRequest):
     ]
     lines.extend(block)
 
-    # 原子写
-    tmp = env_path.with_suffix(".env.tmp")
+    # 原子写。注意 .env 是点文件（suffix 为空串），with_suffix 会生成 ".env.env.tmp"，
+    # 必须用 with_name 拼接（与 _update_env_vars 的写法一致）。
+    tmp = env_path.with_name(env_path.name + ".tmp")
     try:
         tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
         tmp.replace(env_path)
@@ -1005,15 +1015,12 @@ async def api_targets_probe(name: str | None = None):
     返回 {targets: [...], services: [...]}，条目 {name, model, reachable, latency_ms, error, warning}。
     api_key / base_url 绝不出后端。
     """
-    import time
 
     from llmsec.core.config import (
         GeneratorConfig,
         JudgeConfig,
         load_targets,
-        target_backend,
     )
-    from llmsec.core.llm import create_openai_client
 
     try:
         targets_cfg = load_targets()
@@ -1023,161 +1030,31 @@ async def api_targets_probe(name: str | None = None):
     if name:
         targets_cfg = {k: v for k, v in targets_cfg.items() if k == name}
 
-    def _model_warning(model_ids: list[str] | None, model: str) -> str | None:
-        """models.list 非空且配置模型不在其中 → warning（不判不可达）。"""
-        if model_ids and model and model not in model_ids:
-            return f"模型 {model} 不在端点列表"
-        return None
+    # 探活逻辑统一走 llmsec.core.probe（与 MCP probe_targets 同一实现）；
+    # 此处只做 async 包装（阻塞 IO 放线程池）
+    from llmsec.core.probe import probe_service as _probe_service_sync
+    from llmsec.core.probe import probe_target as _probe_target_sync
 
     async def _probe_one(name, cfg):
-        backend = target_backend(name)
-
-        def _do():
-            t0 = time.time()
-            ids = None
-            if backend == "pcap_judge":
-                # pcap judge 不是 OpenAI 兼容 API，用 HTTP GET 探通
-                import requests
-                import urllib3
-                urllib3.disable_warnings()
-                r = requests.get(cfg.base_url, timeout=5, verify=False)
-                r.raise_for_status()
-            else:
-                # OpenAI 兼容：models.list() 是最轻量 GET，不消耗 token
-                client = create_openai_client(cfg.api_key, cfg.base_url, timeout=5.0)
-                ids = [m.id for m in client.models.list()]
-            return round((time.time() - t0) * 1000), ids
-
-        try:
-            latency, ids = await asyncio.to_thread(_do)
-        except Exception as e:
-            return {"name": name, "model": cfg.model, "reachable": False,
-                    "latency_ms": None, "error": str(e)[:120], "warning": None}
-
-        # 第二段：chat smoke（只对 OpenAI 兼容目标）。
-        # models.list 对很多网关不校验 chat 权限，鉴权失效（401/403）要到真正发 chat 才暴露。
-        # 历史教训：探活亮绿灯、运行全线 401 → ASR=0 假阴性 + 报告崩溃。
-        # 这里发一条 max_tokens=64 的最小 chat：鉴权类错误（401/403）判不可达（注定全线阵亡），
-        # 其他 chat 异常（截断/空 content/偶发抖动）保持 warning 不阻塞（models.list 已通）。
-        warnings = []
-        w = _model_warning(ids, cfg.model)
-        if w:
-            warnings.append(w)
-        if backend != "pcap_judge":
-            try:
-                def _chat():
-                    client = create_openai_client(cfg.api_key, cfg.base_url, timeout=12.0)
-                    resp = client.chat.completions.create(
-                        model=cfg.model,
-                        messages=[{"role": "user", "content": "ping"}],
-                        max_tokens=64,
-                    )
-                    msg = resp.choices[0].message
-                    return (getattr(msg, "content", None),
-                            getattr(msg, "reasoning_content", None),
-                            resp.choices[0].finish_reason)
-                content, reasoning, finish = await asyncio.to_thread(_chat)
-                if content is None and reasoning:
-                    warnings.append("推理模型：content 为空但 reasoning_content 有内容（已自动回退读取）")
-                elif content is None and finish == "length":
-                    warnings.append("chat 探活预算不足被截断（content 为空），真实业务请求不受影响")
-                elif content is None:
-                    warnings.append("chat 返回空 content 且无 reasoning_content（疑似配置问题，需确认）")
-            except Exception as e:
-                status = getattr(e, "status_code", None)
-                msg_text = str(e)[:120]
-                if status in (401, 403):
-                    # 鉴权失败：chat 一定全线阵亡，判不可达让前端拦截，防白跑
-                    return {"name": name, "model": cfg.model, "reachable": False,
-                            "latency_ms": latency, "error": f"chat 鉴权失败({status}): {msg_text}",
-                            "warning": None}
-                # 非 401/403（限流/5xx/超时等）：models.list 已通，不阻塞，仅 warning
-                warnings.append(f"chat 探测失败（不阻塞）: {msg_text}")
-        return {"name": name, "model": cfg.model, "reachable": True,
-                "latency_ms": latency, "error": None,
-                "warning": "；".join(warnings) or None}
+        return await asyncio.to_thread(_probe_target_sync, name, cfg)
 
     async def _probe_service(svc_name: str, cfg, shared: dict):
-        """generator / judge 探活。
-
-        两段式：
-        1) models.list —— 校验端点连通 + 模型名在册（与目标探活同口径，结果跨 service 复用）。
-        2) chat smoke —— 这两个服务实际靠 chat/completions 工作，models.list 通不代表 chat 能用。
-           发一条 max_tokens=64 的最小 chat，检查 message.content / reasoning_content / finish_reason。
-           三种 content 为空的情况分别处理：
-           (a) reasoning_content 有内容 → 推理模型，下游 extract_message_text 自动回退读取，良性；
-           (b) finish_reason=length → 探活预算不足被截断（真实业务请求 max_tokens 更大，不受影响），良性；
-           (c) 两者都不是 → 真·空响应，疑似配置/鉴权问题，需确认。
-           均不判不可达（models.list 已通），仅作 warning 暴露给用户。
-        """
+        """generator / judge 探活（第一段结果跨 service 复用：judge 常与
+        generator 同端点同 key，重复 models.list 纯属浪费）。"""
         key = (cfg.base_url or "", cfg.api_key or "")
         if key in shared:
-            latency, ids, err = shared[key]
+            models_result = shared[key]
         else:
             def _do():
-                t0 = time.time()
-                client = create_openai_client(cfg.api_key, cfg.base_url, timeout=5.0)
-                ids = [m.id for m in client.models.list()]
-                return round((time.time() - t0) * 1000), ids
-            try:
-                latency, ids = await asyncio.to_thread(_do)
-                err = None
-            except Exception as e:
-                latency, ids, err = None, None, str(e)[:120]
-            shared[key] = (latency, ids, err)
-        if err is not None:
-            return {"name": svc_name, "model": cfg.model, "reachable": False,
-                    "latency_ms": None, "error": err, "warning": None}
-
-        # 第二段：chat smoke（只对 generator/judge，目标模型探活走 _probe_one）。
-        # timeout 略宽于 models.list：首 token 可能要 1-3s。
-        # max_tokens=64：实测部分模型（如 minimax）需 ~64 tokens 才开始输出 content，
-        # 预算太小（8/16/32）会因 finish_reason=length 被截断成 content=None，
-        # 制造假警报。64 足够让普通模型吐出至少一个 token，同时保持探活廉价。
-        content_none = False
-        reasoning_present = False
-        truncated = False
-        chat_err = None
-        try:
-            def _chat():
-                client = create_openai_client(cfg.api_key, cfg.base_url, timeout=12.0)
-                resp = client.chat.completions.create(
-                    model=cfg.model,
-                    messages=[{"role": "user", "content": "ping"}],
-                    max_tokens=64,
-                )
-                msg = resp.choices[0].message
-                finish = resp.choices[0].finish_reason
-                return (getattr(msg, "content", None),
-                        getattr(msg, "reasoning_content", None),
-                        finish)
-            content, reasoning, finish = await asyncio.to_thread(_chat)
-            content_none = content is None
-            reasoning_present = bool(reasoning)
-            truncated = finish == "length"
-        except Exception as e:
-            chat_err = str(e)[:120]
-
-        # chat 错误不判不可达（models.list 已通，chat 偶发抖动不应阻塞启动），
-        # 但作为 warning 暴露给用户。
-        warnings = []
-        w = _model_warning(ids, cfg.model)
-        if w:
-            warnings.append(w)
-        if content_none and reasoning_present:
-            # 推理模型：下游 extract_message_text 已自动回退读 reasoning_content，评估正常
-            warnings.append("推理模型：content 为空但 reasoning_content 有内容（已自动回退读取，评估正常）")
-        elif content_none and truncated:
-            # finish_reason=length 且 content 空：探活预算仍不足（极少见，64 通常够）。
-            # 不算模型故障，降级提示而非"配置/鉴权问题"。
-            warnings.append("chat 探活预算不足被截断（content 为空），真实业务请求不受影响")
-        elif content_none:
-            warnings.append("chat 返回空 content 且无 reasoning_content（疑似配置/鉴权问题，需确认）")
-        if chat_err:
-            warnings.append(f"chat 探测失败：{chat_err}")
-        return {"name": svc_name, "model": cfg.model, "reachable": True,
-                "latency_ms": latency, "error": None,
-                "warning": "；".join(warnings) or None}
+                from llmsec.core.probe import ModelsProbeResult, models_list
+                try:
+                    latency, ids = models_list(cfg.api_key, cfg.base_url, timeout=5.0)
+                    return ModelsProbeResult(latency, ids, None)
+                except Exception as e:
+                    return ModelsProbeResult(None, None, str(e)[:120])
+            models_result = await asyncio.to_thread(_do)
+            shared[key] = models_result
+        return await asyncio.to_thread(_probe_service_sync, svc_name, cfg, models_result)
 
     results = await asyncio.gather(*[_probe_one(n, c) for n, c in targets_cfg.items()])
     services: list[dict] = []

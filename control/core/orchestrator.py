@@ -13,7 +13,7 @@ spec = {name, source, target, max_rounds, seed, ...} 的列表。
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
 
 from control.core.workspace import fork_and_run
@@ -29,7 +29,6 @@ class RunSpec:
     max_rounds: int = 5
     seed: int | None = None
     note: str = ""
-    extra_argv: list[str] = field(default_factory=list)
     env_override: dict[str, str] | None = None  # 注入 runner 子进程的环境变量（如 LLMSEC_PARAM_*）
 
 

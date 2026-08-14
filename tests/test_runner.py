@@ -59,7 +59,6 @@ def test_attack_phase_incremental_persistence(tmp_path, monkeypatch):
     tracker = ELOTracker()
     tracker.predictor.fit_features(records)
     attack_file = tmp_path / "attack.jsonl"
-    {r["method"]: r for r in records}
 
     attack_writes = []
     orig_write = ap.write_jsonl
@@ -141,8 +140,7 @@ def test_per_target_reports(tmp_path, monkeypatch):
     runs_dir.mkdir(parents=True)
 
     # 直接调 main 的编排逻辑（通过内部函数验证）
-    rn.main.__wrapped__ if hasattr(rn.main, '__wrapped__') else None
-    # 模拟 main 的核心：直接验证 runner_report 产出逻辑
+    # 直接验证 runner_report 产出逻辑（不经 main 编排）
     from llmsec.core.results import ResultsMatrix
     R = ResultsMatrix()
     R.set_unit_catalog(list(method_records.keys()))

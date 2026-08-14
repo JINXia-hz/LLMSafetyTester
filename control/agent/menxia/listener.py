@@ -121,12 +121,14 @@ def _on_plan_drafted(msg: BusMessage) -> None:
         findings.append(f"计划含 {len(plan.steps)} 步，过于复杂，建议拆分为多个小计划")
 
     # 统计风险等级
+    from collections import Counter
+
     from control.agent.shangshu.capabilities import capability_by_name
-    risk_counts = {"critical": 0, "high": 0, "medium": 0}
-    for s in plan.steps:
-        cap = capability_by_name(s.capability)
-        if cap:
-            risk_counts[cap.risk_level] = risk_counts.get(cap.risk_level, 0) + 1
+    risk_counts = Counter(
+        cap.risk_level
+        for s in plan.steps
+        if (cap := capability_by_name(s.capability)) is not None
+    )
 
     if risk_counts["critical"] > 0:
         findings.append(f"含 {risk_counts['critical']} 个不可逆操作（critical），请陛下细看每步说明")
@@ -179,8 +181,13 @@ def _on_plan_approved(msg: BusMessage) -> None:
            type="approval_review", high_risk_count=high_risk, report=report)
 
 
-def _on_step_start(msg: BusMessage) -> None:
+def _on_step_start(msg: BusMessage) -> dict | None:
     """步骤开始前审查。dangerous → 发封驳令 + notify(KIND_BLOCK)。
+
+    返回值（请求-应答）：封驳时返回 ticket dict，放行返回 None——
+    executor 经 notify(collect_replies=True) 同步直收裁决，不再事后扫
+    bus.recent 反推（扫描旁路有时间窗/消息挤出/重复命中三类隐患）。
+    KIND_BLOCK 消息照常发布，供前端封驳卡片展示。
 
     放行豁免：如果此步骤在当前 Plan 中曾被封驳且已被用户放行（文牍有
     EV_STEP_UNBLOCKED），跳过封驳——同一 Plan 内同一步骤只封驳一次。
@@ -190,24 +197,26 @@ def _on_step_start(msg: BusMessage) -> None:
     risk_level = payload.get("risk_level", "low")
     plan_id = msg.plan_id or payload.get("plan_id", "")
     step_id = payload.get("step_id", "")
-    args = payload.get("args", {})
 
     from control.agent.shangshu.capabilities import capability_by_name
     cap = capability_by_name(capability_name)
     if cap is None:
-        return
+        return None
 
-    # ★ 放行豁免：查文牍，此步是否曾被封驳且已被用户放行
+    # ★ 放行豁免：查文牍，此步是否曾被封驳且已被用户放行。
+    # 用显式 unblocked 标记而非 status：重试时 executor 先写 EV_STEP_STARTED
+    # 把 status 翻成 running，"pending" 判据会被覆盖而恒失效
     from control.agent import gazette
     ctx = gazette.read_plan_context(plan_id)
     if ctx and step_id in ctx.get("steps", {}):
         step_info = ctx["steps"][step_id]
-        if step_info.get("block_count", 0) > 0 and step_info["status"] == "pending":
-            return  # 用户已放行过，不再封驳
+        if step_info.get("block_count", 0) > 0 and step_info.get("unblocked"):
+            return None  # 用户已放行过，不再封驳
 
+    args = payload.get("args", {})
     assessment = assess_step(cap, args)
     if assessment is None:
-        return  # 放行
+        return None  # 放行
 
     # 已有封驳令且未被清除 → 保持封驳
     existing = get_block(plan_id, step_id)
@@ -215,12 +224,13 @@ def _on_step_start(msg: BusMessage) -> None:
         notify(KIND_BLOCK, from_dept=MENXIA, plan_id=plan_id,
                intent=msg.intent, session_id=msg.session_id,
                step_id=step_id, ticket=existing.to_dict())
-        return
+        return existing.to_dict()
 
     ticket = issue_block(plan_id, step_id, capability_name, risk_level, assessment)
     notify(KIND_BLOCK, from_dept=MENXIA, plan_id=plan_id,
            intent=msg.intent, session_id=msg.session_id,
            step_id=step_id, ticket=ticket.to_dict())
+    return ticket.to_dict()
 
 
 def _on_plan_done(msg: BusMessage) -> None:
@@ -262,11 +272,15 @@ def _on_plan_done(msg: BusMessage) -> None:
 
 
 def _try_review(run_name: str) -> dict | None:
-    """尝试审查一个 run。失败静默返回 None。"""
+    """尝试审查一个 run。失败记 stderr 后返回 None（简报缺失须可排查）。"""
     try:
         from control.agent.menxia.review import review_run
         return review_run(run_name)
-    except Exception:
+    except Exception as e:
+        import sys
+        import traceback
+        print(f"[门下省] plan_done 自动审查失败 (run={run_name}): "
+              f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}", file=sys.stderr)
         return None
 
 

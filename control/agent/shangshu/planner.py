@@ -181,7 +181,9 @@ def _annotate_auto_execute(plan: plan_mod.Plan, session_id: str | None) -> None:
                 events = gazette.read_events(g["plan_id"])
                 # 找该 Plan 的事件中：step_succeeded 的 capability（说明曾执行过=曾准奏过）
                 for ev in events:
-                    if ev.kind in (gazette.EV_STEP_SUCCEEDED, gazette.EV_PLAN_APPROVED):
+                    # 只认 EV_STEP_SUCCEEDED：EV_PLAN_APPROVED 的 detail 只有 approved_at，
+                    # 从无 capability 字段（曾列入枚举属无效逻辑）
+                    if ev.kind == gazette.EV_STEP_SUCCEEDED:
                         cap = ev.detail.get("capability", "")
                         if cap:
                             prior_caps.add(cap)

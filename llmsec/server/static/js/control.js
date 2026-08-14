@@ -42,6 +42,12 @@ async function loadControlSection() {
   if (window.loadMenxiaSection) loadMenxiaSection();
 }
 
+// 离开宣政殿时停止三省轮询（core.js 的 loadSection 调用）
+function unloadControlSection() {
+  if (window.unloadShangshuSection) unloadShangshuSection();
+  if (window.unloadMenxiaSection) unloadMenxiaSection();
+}
+
 function bindControl() {
   _ctrlBound = true;
   const input = $('ctrl-chat-input');
@@ -172,9 +178,10 @@ function renderPlanPendingCard(pp) {
   const log = $('ctrl-chat-log');
   const div = document.createElement('div');
   div.className = 'chat-msg chat-plan';
-  // 步骤摘要
+  // 步骤摘要（deps 来自 LLM 规划产物，与 description 同样须转义——
+  // shangshu.js 渲染同字段时已转义，两处口径须一致）
   const stepsHtml = (pp.steps || []).map((s, i) => {
-    const deps = s.depends_on && s.depends_on.length ? ` ← 依赖 ${s.depends_on.join(',')}` : '';
+    const deps = s.depends_on && s.depends_on.length ? ` ← 依赖 ${esc(s.depends_on.join(','))}` : '';
     return `<div style="padding:2px 0; font-size:0.8rem;">${i+1}. ${esc(s.description || s.capability)}${deps}</div>`;
   }).join('');
   div.innerHTML = `
@@ -236,11 +243,11 @@ async function approvePlan(planId, cardDiv) {
     }
     const data = await res.json();
     if (data.queue_status === 'queued') {
-      appendChat('assistant', '陛下已准奏。尚书省领旨，已排入执行队列——进度见**尚书省**面板。');
+      appendChat('assistant', mdSafe('陛下已准奏。尚书省领旨，已排入执行队列——进度见**尚书省**面板。'));
     } else if (data.queue_status === 'duplicate') {
       appendChat('assistant', '此计划已在执行队列中，无需重复提交。');
     } else {
-      appendChat('assistant', '陛下已准奏，尚书省正在执行——进度见**尚书省**面板。');
+      appendChat('assistant', mdSafe('陛下已准奏，尚书省正在执行——进度见**尚书省**面板。'));
     }
     setStatus('已提交执行队列');
   } catch (e) {

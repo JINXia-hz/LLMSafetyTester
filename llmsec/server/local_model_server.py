@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-from llmsec.core.logging import get_logger
-
 """
 本地模拟小模型服务器（OpenAI 兼容 API，原根目录 local_model_server.py）
 用于在没有真实 LLM 的情况下测试安全评估框架。
@@ -25,7 +23,7 @@ import random
 import re
 import time
 
-from llmsec.core.logging import setup_console
+from llmsec.core.logging import get_logger, setup_console
 from llmsec.params import SIM_MATH_ACCURACY, SIM_REFUSAL_RATE
 
 setup_console()

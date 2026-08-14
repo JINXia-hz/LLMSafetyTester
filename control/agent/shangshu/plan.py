@@ -197,10 +197,20 @@ def make_plan_from_llm(intent: str, steps_raw: list[dict]) -> Plan:
 
     steps_raw: [{id, capability, args, depends_on, description}, ...]
     自动补全缺失的 id / depends_on。
+
+    Raises:
+        ValueError: 步骤 id 重复，或 depends_on 引用了不存在的步骤 id。
+            此前两类问题都被静默吞掉（重复 id 被 topological_layers 的字典推导
+            覆盖 → 步骤凭空消失；悬空依赖被 `d not in remaining` 恒真 → 缺前置
+            数据也照跑），拟案期显式报错让 planner 重试，优于执行期静默出错。
     """
     steps: list[Step] = []
+    seen_ids: set[str] = set()
     for i, sr in enumerate(steps_raw):
         sid = sr.get("id") or f"s{i + 1}"
+        if sid in seen_ids:
+            raise ValueError(f"步骤 id 重复: {sid}（LLM 拟案产出了重复 id）")
+        seen_ids.add(sid)
         steps.append(Step(
             id=sid,
             capability=sr["capability"],
@@ -208,4 +218,10 @@ def make_plan_from_llm(intent: str, steps_raw: list[dict]) -> Plan:
             depends_on=sr.get("depends_on", []),
             description=sr.get("description", ""),
         ))
+    all_ids = {s.id for s in steps}
+    for s in steps:
+        dangling = [d for d in s.depends_on if d not in all_ids]
+        if dangling:
+            raise ValueError(
+                f"步骤 {s.id} 依赖了不存在的步骤: {dangling}（可用 id: {sorted(all_ids)}）")
     return Plan(intent=intent, steps=steps)

@@ -18,7 +18,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -56,17 +58,28 @@ def _run(
     cwd: Path = LLMSEC_REPO,
     timeout: float | None = None,
     env: dict[str, str] | None = None,
-    capture: bool = True,
+    log_file: Path | None = None,
 ) -> InvokeResult:
-    """执行 argv，返回 InvokeResult。capture=False 时不抓 stdout（后台任务用）。"""
-    import time
+    """执行 argv，返回 InvokeResult。
+
+    log_file 指定时 stdout/stderr 重定向到该文件（后台/批量任务用），不抓回内存；
+    此前 run_runner 的 log_file 分支单独实现了一份 env 合并/超时/计时逻辑，
+    现统一收口到本函数（原 capture 参数无人传 False，已移除）。
+    """
     started = time.time()
-    full_env = dict(__import__("os").environ)
+    full_env = dict(os.environ)
     if env:
         full_env.update(env)
     res = InvokeResult(argv=argv, returncode=-1)
     try:
-        if capture:
+        if log_file is not None:
+            with open(log_file, "w", encoding="utf-8") as f:
+                proc = subprocess.run(
+                    argv, cwd=str(cwd), env=full_env, timeout=timeout,
+                    stdout=f, stderr=subprocess.STDOUT,
+                )
+            res.returncode = proc.returncode
+        else:
             proc = subprocess.run(
                 argv, cwd=str(cwd), env=full_env, timeout=timeout,
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -81,9 +94,6 @@ def _run(
                     res.json = json.loads(stripped)
                 except json.JSONDecodeError:
                     pass  # 混了日志行，不解析
-        else:
-            proc = subprocess.run(argv, cwd=str(cwd), env=full_env, timeout=timeout)
-            res.returncode = proc.returncode
     except subprocess.TimeoutExpired:
         res.returncode = -1
         res.stderr = f"超时（>{timeout}s）"
@@ -109,7 +119,9 @@ def list_runs(*, target: str | None = None, since: str | None = None,
         sub += ["--since", since]
     if junk_only:
         sub += ["--junk-only"]
-    res = _run(_manage_argv(sub)).require_ok()
+    # 超时保护：本函数会在门下省总线同步派发的回调里被调用，
+    # 无超时的挂起子进程会卡死正在执行的整个 Plan 步骤与队列 worker
+    res = _run(_manage_argv(sub), timeout=120).require_ok()
     data = res.json or {}
     return data.get("runs", []) if isinstance(data, dict) else data
 
@@ -119,7 +131,7 @@ def export_snapshot(source: str = "global", *, out: str | None = None) -> dict:
     sub = ["snapshot", "export", "--source", source, "--json"]
     if out:
         sub += ["--out", out]
-    res = _run(_manage_argv(sub)).require_ok()
+    res = _run(_manage_argv(sub), timeout=600).require_ok()
     return res.json or {}
 
 
@@ -128,14 +140,14 @@ def delete_runs(names: list[str], *, delete_r: bool = False) -> dict:
     sub = ["runs", "delete", *names, "--yes", "--json"]
     if delete_r:
         sub.append("--delete-r")
-    res = _run(_manage_argv(sub)).require_ok()
+    res = _run(_manage_argv(sub), timeout=600).require_ok()
     return res.json or {}
 
 
 def clean_caches(categories: list[str]) -> dict:
     """清理缓存（经 llmsec-manage cache clean，已过门下省确认，强制 --yes）。"""
     sub = ["cache", "clean", *categories, "--yes", "--json"]
-    res = _run(_manage_argv(sub)).require_ok()
+    res = _run(_manage_argv(sub), timeout=600).require_ok()
     return res.json or {}
 
 
@@ -148,7 +160,6 @@ def run_runner(
     max_rounds: int = 5,
     phase: str = "all",
     seed: int | None = None,
-    extra_argv: list[str] | None = None,
     env_override: dict[str, str] | None = None,
     timeout: float | None = None,
     log_file: Path | None = None,
@@ -173,8 +184,6 @@ def run_runner(
         argv += ["--targets", ",".join(targets)]
     if seed is not None:
         argv += ["--seed", str(seed)]
-    if extra_argv:
-        argv += extra_argv
 
     env = {"PYTHONUNBUFFERED": "1"}
     if env_override:
@@ -182,19 +191,4 @@ def run_runner(
 
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        import time
-        started = time.time()
-        with open(log_file, "w", encoding="utf-8") as f:
-            full_env = dict(__import__("os").environ)
-            full_env.update(env)
-            try:
-                proc = subprocess.run(
-                    argv, cwd=str(LLMSEC_REPO), env=full_env, timeout=timeout,
-                    stdout=f, stderr=subprocess.STDOUT,
-                )
-                return InvokeResult(argv=argv, returncode=proc.returncode,
-                                    elapsed_s=round(time.time() - started, 2))
-            except subprocess.TimeoutExpired:
-                return InvokeResult(argv=argv, returncode=-1, elapsed_s=round(time.time() - started, 2),
-                                    stderr=f"超时（>{timeout}s）")
-    return _run(argv, timeout=timeout, env=env)
+    return _run(argv, timeout=timeout, env=env, log_file=log_file)

@@ -124,14 +124,16 @@ class TestPlanQueue:
 
         get_queue().submit(plan1.id)
         time.sleep(0.2)  # 等 plan1 开始执行
-        get_queue().submit(plan2.id)  # plan2 排队
+        try:
+            get_queue().submit(plan2.id)  # plan2 排队
 
-        # 取消排队的 plan2
-        assert get_queue().cancel(plan2.id) is True
-        # 再次取消 → False（已不在队列）
-        assert get_queue().cancel(plan2.id) is False
-
-        blocker["wait"] = False  # 放行 plan1
+            # 取消排队的 plan2
+            assert get_queue().cancel(plan2.id) is True
+            # 再次取消 → False（已不在队列）
+            assert get_queue().cancel(plan2.id) is False
+        finally:
+            # 断言失败也必须放行，否则 worker 线程在 blocking_execute 里永久自旋
+            blocker["wait"] = False
         time.sleep(0.3)
 
 

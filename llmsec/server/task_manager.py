@@ -225,8 +225,14 @@ def task_view(task_id: str) -> dict | None:
     log_tail = ""
     log_path: Path = t["log_path"]
     if log_path.exists():
+        # 只 seek 读尾部 4KB：此前整读完整日志再截 4KB，
+        # 长任务日志（可几十 MB）在每次轮询下是反复的全量 IO
         try:
-            log_tail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+            with open(log_path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - 4096))
+                log_tail = f.read().decode("utf-8", errors="replace")[-4000:]
         except OSError:
             pass
     return {

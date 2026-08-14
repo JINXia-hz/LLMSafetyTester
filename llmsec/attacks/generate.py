@@ -337,6 +337,22 @@ def build_entries(method, records, harm_types):
     return entries
 
 
+def _filter_methods(all_methods: list[dict], *, only: str | None,
+                    start_from: str | None) -> list[dict]:
+    """按 --only / --start-from 筛选方法清单。
+
+    start_from 用数值序比较（evaluator._id_tuple 同一坑）：字典序会让
+    '1.10.1' < '1.3.1'（'1'<'3'），编号 ≥10 的方法被错误跳过。
+    """
+    if only:
+        return [m for m in all_methods if m["id"] == only]
+    if start_from:
+        from llmsec.evaluation.evaluator import _id_tuple
+        return [m for m in all_methods
+                if _id_tuple(m["id"]) >= _id_tuple(start_from)]
+    return list(all_methods)
+
+
 def main():
     parser = argparse.ArgumentParser(description="生成L1级LLM攻击集")
     parser.add_argument(
@@ -385,17 +401,14 @@ def main():
         return
 
     # ---- 筛选 ----
+    methods = _filter_methods(all_methods, only=args.only, start_from=args.start_from)
     if args.only:
-        methods = [m for m in all_methods if m["id"] == args.only]
         if not methods:
             logger.error(f"❌ 未找到方法 {args.only}")
             sys.exit(1)
         logger.info(f"🎯 仅生成: {args.only}")
     elif args.start_from:
-        methods = [m for m in all_methods if m["id"] >= args.start_from]
         logger.info(f"⏩ 从 {args.start_from} 开始，跳过前 {len(all_methods) - len(methods)} 个方法")
-    else:
-        methods = all_methods
 
     # ---- 加载已有记录 (断点续传) ----
     done_ids = set()

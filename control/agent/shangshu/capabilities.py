@@ -63,7 +63,8 @@ def _h_run_evaluation(args: dict) -> dict:
             raise FileNotFoundError(f"工作区不存在: {ws}")
     else:
         import time
-        wname = args.get("work_dir_name") or f"eval_{int(time.time())}"
+        import uuid
+        wname = args.get("work_dir_name") or f"eval_{int(time.time())}.{uuid.uuid4().hex[:6]}"
         work_dir = OUTPUT_DIR / "eval_runs" / wname
         work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,7 +93,10 @@ def _h_run_evaluation(args: dict) -> dict:
         "returncode": res.returncode,
         "ok": res.ok,
         "elapsed_s": res.elapsed_s,
-        "work_dir": str(work_dir.relative_to(OUTPUT_DIR)).replace("\\", "/") if str(work_dir).startswith(str(OUTPUT_DIR)) else str(work_dir),
+        # 用 is_relative_to 判路径归属：字符串 startswith 会把 output2/output_backup
+        # 误判为 OUTPUT_DIR 内（随后 relative_to 抛 ValueError）
+        "work_dir": (str(work_dir.relative_to(OUTPUT_DIR)).replace("\\", "/")
+                     if work_dir.is_relative_to(OUTPUT_DIR) else str(work_dir)),
         "stdout_tail": (res.stdout or "")[-800:] if res.stdout else "",
         "stderr_tail": (res.stderr or "")[-800:] if res.stderr else "",
     }
@@ -123,7 +127,7 @@ def _h_merge_results(args: dict) -> dict:
         sub += ["--models", *args["models"]]
     if args.get("confirm"):
         sub.append("--yes")
-    res = _run(_manage_argv(sub))
+    res = _run(_manage_argv(sub), timeout=600)
     res.require_ok()
     result = res.json or {}
     if args.get("confirm") and result.get("dry_run") is False:
@@ -145,13 +149,12 @@ def _h_clean_cache(args: dict) -> dict:
 
 
 def _h_list_runs(args: dict) -> list[dict]:
-    from control.core.invoker import list_runs as inv_list_runs
-    runs = inv_list_runs(target=args.get("target"), since=args.get("since"),
-                        junk_only=args.get("junk_only", False))
-    if args.get("include_workspaces", True):
-        from control.core.compare import discover_workspace_runs
-        runs = runs + discover_workspace_runs()
-    return runs
+    from control.core.compare import list_all_runs
+    return list_all_runs(
+        target=args.get("target"), since=args.get("since"),
+        junk_only=args.get("junk_only", False),
+        include_workspaces=args.get("include_workspaces", True),
+    )
 
 
 def _h_compare_runs(args: dict) -> dict:

@@ -20,7 +20,8 @@ from llmsec.core.results import ResultsMatrix
 def iso_output(monkeypatch, tmp_path):
     """重定向全局 output 到 tmp_path（隔离真实数据）。"""
     out = tmp_path / "output"
-    state = out / "state"; state.mkdir(parents=True)
+    state = out / "state"
+    state.mkdir(parents=True)
     (out / "runs").mkdir()
     (out / "predictors").mkdir()
     (out / "workspaces").mkdir()
@@ -109,7 +110,8 @@ class TestMerge:
         global_R = cfg.RESULTS_FILE
         ws1 = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
         ws2 = cfg.OUTPUT_DIR / "workspaces" / "ws2" / "results.json"
-        ws1.parent.mkdir(parents=True); ws2.parent.mkdir(parents=True)
+        ws1.parent.mkdir(parents=True)
+        ws2.parent.mkdir(parents=True)
         _save_R(global_R, {})
         _save_R(ws1, {"mA": [("r1", 1.0)]})
         _save_R(ws2, {"mA": [("r2", 0.5)], "mB": [("r3", 0.0)]})
@@ -124,7 +126,8 @@ class TestMerge:
         from llmsec.management import merge
         ws1 = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
         ws2 = cfg.OUTPUT_DIR / "workspaces" / "ws2" / "results.json"
-        ws1.parent.mkdir(parents=True); ws2.parent.mkdir(parents=True)
+        ws1.parent.mkdir(parents=True)
+        ws2.parent.mkdir(parents=True)
         _save_R(ws1, {"mA": [("r1", 1.0)]})
         _save_R(ws2, {"mB": [("r2", 0.5)]})
 

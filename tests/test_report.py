@@ -36,26 +36,26 @@ def test_h9_mutual_exclusion():
         assert all(r['method'].startswith('eval_') for r in got), 'H9(a)：记录来自 evaluator 文件'
     with tempfile.TemporaryDirectory() as td:
         out = Path(td)
-        _write_jsonl(out / 'runs' / '20260801_120000' / 'attack_results.jsonl', _eval_records(5, 'run'))
+        _write_jsonl(out / 'runs' / '20260801_120000' / 't1' / 'attack_results.jsonl', _eval_records(5, 'run'))
         got = report.load_all_results(out)
         assert len(got) == 5, 'H9(b)：仅 run 目录时读 attack_results.jsonl（5 条）'
         assert all(r['method'].startswith('run_') for r in got), 'H9(b)：记录来自最新 run'
     with tempfile.TemporaryDirectory() as td:
         out = Path(td)
         _write_jsonl(out / 'run1_结果.jsonl', _eval_records(3, 'eval'))
-        _write_jsonl(out / 'runs' / '20260801_120000' / 'attack_results.jsonl', _eval_records(5, 'run'))
+        _write_jsonl(out / 'runs' / '20260801_120000' / 't1' / 'attack_results.jsonl', _eval_records(5, 'run'))
         got = report.load_all_results(out)
         assert len(got) == 5, 'H9(c)：两来源并存时记录数不翻倍（5 条而非 8 条）'
         assert all(r['method'].startswith('run_') for r in got), 'H9(c)：优先选择 runner 来源'
     with tempfile.TemporaryDirectory() as td:
         out = Path(td)
-        _write_jsonl(out / 'runs' / '20260801_120000' / 'attack_results.jsonl', _eval_records(4, 'run'))
-        newer = out / 'runs' / '20260802_120000'
+        _write_jsonl(out / 'runs' / '20260801_120000' / 't1' / 'attack_results.jsonl', _eval_records(4, 'run'))
+        newer = out / 'runs' / '20260802_120000' / 'empty_target'
         newer.mkdir(parents=True)
         import os
         import time
         future = time.time() + 10
-        os.utime(newer, (future, future))
+        os.utime(newer.parent, (future, future))
         got = report.load_all_results(out)
         assert len(got) == 4, 'H9：最新 run 缺 attack_results.jsonl 时取次新 run'
 
@@ -68,7 +68,7 @@ def test_f4_elo_tracker_from_R_not_state():
         # 写一个 state.json 但 _load_elo_tracker 不应读它
         with open(state_dir / 'state.json', 'w', encoding='utf-8') as f:
             json.dump({'attacker_ratings': {'custom_probe_method': 1888.0}, 'defender_ratings': {'custom_target': 1666.0}, 'history': []}, f, ensure_ascii=False)
-        tracker = report._load_elo_tracker(out)
+        tracker = report._load_elo_tracker()
         # 不管全局 R 是否有数据，tracker 都不应包含 state.json 的 custom_probe_method
         if tracker is not None:
             assert tracker.attacker_ratings.get('custom_probe_method') != 1888.0, \
@@ -100,7 +100,7 @@ def test_m9_timeout_passthrough():
         report.chat_with_retry = lambda client, **kw: _FakeResponse()
         report._report_config = lambda: report.GeneratorConfig(api_key='k', base_url='http://x', model='m', timeout=123.0)
         tree = {'overall': {'asr': 0.1, 'fpr': 0.0, 'elo_boundary': 1500, 'elo_confidence': 0, 'security_level': 'safe', 'total_methods': 1, 'total_tests': 2, 'jailbreak_tax_mean': None, 'jailbreak_tax': None}, 'dimensions': {}, 'top_threats': [], 'strong_defenses': [], 'upsets': {'weakness': [], 'strength': []}}
-        md = report.generate_narrative(tree, ROOT / 'output')
+        md = report.generate_narrative(tree)
         assert captured.get('timeout') == 123.0, 'M9：create_openai_client 收到 timeout=cfg.timeout（123.0）'
         assert isinstance(md, str) and md.startswith('# 报告'), 'M9：mock 链路下叙事报告正常返回'
     finally:

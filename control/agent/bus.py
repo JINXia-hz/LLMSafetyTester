@@ -88,8 +88,13 @@ class MessageBus:
         with self._lock:
             self._subs.append((dept, kinds, callback))
 
-    def publish(self, msg: BusMessage) -> None:
-        """发布消息。同步派发给所有匹配订阅者（回调内异常不中断后续派发）。"""
+    def publish(self, msg: BusMessage, *, collect_replies: bool = False) -> list | None:
+        """发布消息。同步派发给所有匹配订阅者（回调内异常不中断后续派发）。
+
+        collect_replies=True 时收集各订阅者的非 None 返回值并返回（请求-应答式
+        派发：尚书省 step_start → 门下省同步返回封驳裁决，避免"事后扫 recent
+        反推裁决"的旁路——时间窗/消息挤出/消费去重等一整类问题随之消失）。
+        """
         with self._lock:
             self._recent.append(msg)
             if len(self._recent) > _BUS_MAX_RECENT:
@@ -99,13 +104,18 @@ class MessageBus:
                 cb for (dept, kinds, cb) in self._subs
                 if (msg.to_dept in (dept, ALL)) and (not kinds or msg.kind in kinds)
             ]
+        replies: list = []
         for cb in targets:
             try:
-                cb(msg)
+                r = cb(msg)
             except Exception:
                 # 订阅者异常不阻断总线（记录到 stderr 但不抛）
                 import sys
                 print(f"[bus] 订阅者回调异常 (kind={msg.kind}): {sys.exc_info()[1]}", file=sys.stderr)
+                continue
+            if collect_replies and r is not None:
+                replies.append(r)
+        return replies if collect_replies else None
 
     def recent(self, since_ts: float = 0.0, dept: str | None = None,
               kinds: list[str] | None = None) -> list[BusMessage]:
@@ -129,15 +139,19 @@ class MessageBus:
             self._recent.clear()
 
 
-# 模块级单例
+# 模块级单例（锁内惰性创建：两线程首次并发 get_bus 不各建一个——
+# 各建的总线订阅者只挂在其中一个上，消息丢失）
 _BUS: MessageBus | None = None
+_BUS_LOCK = Lock()
 
 
 def get_bus() -> MessageBus:
     """获取全局总线单例（惰性创建）。"""
     global _BUS
     if _BUS is None:
-        _BUS = MessageBus()
+        with _BUS_LOCK:
+            if _BUS is None:
+                _BUS = MessageBus()
     return _BUS
 
 
@@ -155,17 +169,21 @@ def notify(
     plan_id: str | None = None,
     intent: str | None = None,
     session_id: str | None = None,
+    collect_replies: bool = False,
     **payload,
-) -> None:
+) -> list | None:
     """构造带公共信封的 BusMessage 并发布。三省统一用这个发消息。
 
     payload 的 key-value 直接成为消息体，无需手动包 dict。
     例：notify(KIND_STEP_START, from_dept=SHANGSHU, plan_id=p.id, intent=p.intent,
               step_id=s.id, capability=s.capability)
+
+    collect_replies=True：返回匹配订阅者的非 None 返回值列表（请求-应答式派发，
+    供 executor 直收门下省的封驳裁决）；默认 None。
     """
     msg = BusMessage(
         from_dept=from_dept, to_dept=to_dept, kind=kind,
         payload=dict(payload),
         plan_id=plan_id, intent=intent, session_id=session_id,
     )
-    get_bus().publish(msg)
+    return get_bus().publish(msg, collect_replies=collect_replies)

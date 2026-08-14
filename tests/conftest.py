@@ -46,6 +46,9 @@ _NETWORK_ENV_KEYS = (
 def _isolate_network_env(request):
     """每个测试期间清空网络相关环境变量，结束后恢复，避免 .env 内网地址泄漏进测试。
 
+    恢复用完整快照 diff（新增键也一并清除）——此前只恢复被 pop 的键，
+    测试期间新注入的同名前缀键会残留给同 worker 的后续测试。
+
     标了 real_api / e2e marker 的用例**不清**——它们需要 .env 注入的真实网络凭证
     去打外部 API，清掉会让代码走"未配置→早退"分支而失去测试意义。
     """
@@ -54,8 +57,12 @@ def _isolate_network_env(request):
         yield
         return
     saved = {k: os.environ.pop(k) for k in _NETWORK_ENV_KEYS if k in os.environ}
+    before_keys = set(os.environ)
     yield
     os.environ.update(saved)
+    # 清掉测试期间新增的键（含同名前缀的新注入），还原到进入前的键集
+    for k in set(os.environ) - before_keys:
+        os.environ.pop(k, None)
 
 
 # ============================================================

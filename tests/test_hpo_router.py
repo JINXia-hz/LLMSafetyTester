@@ -64,7 +64,7 @@ def test_run_hpo_starts_task(monkeypatch, tmp_path):
                 "status": "queued", "returncode": None, "log_path": tmp_path / "h.log",
                 "log_file": None, "started_at": "2026-01-01T00:00:00", "error": None, "proc": None}
 
-    monkeypatch.setattr(hpo_mod, "_start_task", fake_start)
+    monkeypatch.setattr(hpo_mod.task_manager, "start_task", fake_start)
 
     r = client.post("/api/run/hpo", json={"name": "utstudy", "strategy": "bayesian", "max_trials": 5,
                                           "targets": ["modelA"]})
@@ -88,7 +88,7 @@ def test_run_hpo_fixed_target_ok(monkeypatch, tmp_path):
     import llmsec.server.routers.hpo as hpo_mod
 
     monkeypatch.setattr(hpo_mod, "OUTPUT_DIR", tmp_path)
-    monkeypatch.setattr(hpo_mod, "_start_task",
+    monkeypatch.setattr(hpo_mod.task_manager, "start_task",
                         lambda kind, argv: {"id": "fake", "kind": kind, "cmd": "", "argv": argv,
                                             "status": "queued", "returncode": None,
                                             "log_path": tmp_path / "h.log", "log_file": None,

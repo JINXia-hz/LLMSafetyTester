@@ -42,7 +42,9 @@ jobs:
           pip install -r llmsec/requirements.txt
           pip install pytest pytest-xdist pytest-cov pip-audit
       - name: Run tests
-        run: python -m pytest tests/ -q -n auto --tb=short --cov=llmsec --cov-report=term-missing
+        # -n 4（与 pyproject addopts 同值）：-n auto(=12 核)下 worker 冷启动开销
+        # 远超并行收益（pyproject 注释有实测数据：130s vs 37s）
+        run: python -m pytest tests/ -q -n 4 --tb=short --cov=llmsec --cov-report=term-missing
         env:
           PYTHONIOENCODING: utf-8
       - name: Dependency audit

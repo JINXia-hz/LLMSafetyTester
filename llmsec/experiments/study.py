@@ -10,6 +10,7 @@ study 目录：output/experiments/<name>/
 from __future__ import annotations
 
 import json
+import math
 import statistics
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -261,7 +262,12 @@ def run_study(config: StudyConfig) -> dict:
                 obj = float("inf") if config.objective.direction == "minimize" else float("-inf")
             else:
                 obj = aggregate(vals, config.objective.aggregate)
-            engine.tell(search_params, obj)
+            # optuna 对非有限目标值敏感（部分采样器拒收 inf）：用有界大数哨兵
+            # 保持"最差"排序语义，避免 tell 抛错中断整个 study
+            tell_obj = obj
+            if not math.isfinite(tell_obj):
+                tell_obj = 1e18 if tell_obj > 0 else -1e18
+            engine.tell(search_params, tell_obj)
             logger.info(f"   ⇒ {config.objective.metric}={obj:.3f} (跨 {len(vals)} 单元)")
             # 更新最佳目标值（仅在有有效单元时；inf/-inf 兜底不计入）
             if vals:

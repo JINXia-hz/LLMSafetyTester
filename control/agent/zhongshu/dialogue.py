@@ -64,6 +64,7 @@ def _search_history_schema() -> dict:
 # 数据天然小（每 plan ~60 字符），缓存让"多次搜索"零 I/O 成本；未来文牍增长到数百时
 # 叠加 2-gram 倒排索引进一步加速（当前规模缓存已足够，索引暂不引入）。
 _GAZETTE_TEXT_CACHE: tuple[float, dict[str, dict]] | None = None
+_GAZETTE_CACHE_LOCK = __import__("threading").Lock()
 
 
 def _load_gazette_texts() -> dict[str, dict]:
@@ -74,54 +75,54 @@ def _load_gazette_texts() -> dict[str, dict]:
     """
     global _GAZETTE_TEXT_CACHE
     from control.agent import gazette
+    from control.core.fsig import file_sig
 
-    idx_path = gazette._store.path
-    try:
-        sig = idx_path.stat().st_mtime
-    except OSError:
-        sig = 0.0
-    if _GAZETTE_TEXT_CACHE and _GAZETTE_TEXT_CACHE[0] == sig:
-        return _GAZETTE_TEXT_CACHE[1]
+    with _GAZETTE_CACHE_LOCK:  # 多线程（executor 线程池回调）并发搜索时不重复重建/互踩
+        sig = file_sig(gazette.index_path())
+        if sig is None:
+            sig = 0.0
+        if _GAZETTE_TEXT_CACHE and _GAZETTE_TEXT_CACHE[0] == sig:
+            return _GAZETTE_TEXT_CACHE[1]
 
-    texts: dict[str, dict] = {}
-    for g in gazette.list_gazettes(recent=500):
-        pid = g.get("plan_id", "")
-        events = gazette.read_events(pid)
-        if not events:
-            continue
-        intent_text = (g.get("intent", "") or "").lower()
-        user_text = ""
-        steps_text = ""
-        steps_desc = []
-        stats = {}
-        for ev in events:
-            if ev.kind == gazette.EV_COMMISSION:
-                user_text = (ev.detail.get("user_text", "") or "").lower()
-            elif ev.kind == gazette.EV_PLAN_DRAFTED:
-                ut = (ev.detail.get("user_text", "") or "").lower()
-                if ut:
-                    user_text = ut
-                for s in ev.detail.get("steps_summary", []):
-                    desc = s.get("description", "")
-                    steps_desc.append(desc)
-                    steps_text += " " + desc.lower()
-            elif ev.kind == gazette.EV_STEP_STARTED:
-                desc = ev.detail.get("description", "")
-                if desc:
-                    steps_text += " " + desc.lower()
-            elif ev.kind == gazette.EV_PLAN_FINISHED:
-                stats = ev.detail.get("step_stats", {})
-        texts[pid] = {
-            "intent": g.get("intent", "")[:100],
-            "status": g.get("status", "?"),
-            "_intent_lc": intent_text,
-            "_user_text_lc": user_text,
-            "_steps_text_lc": steps_text,
-            "steps_desc": steps_desc[:5],
-            "step_stats": stats,
-        }
-    _GAZETTE_TEXT_CACHE = (sig, texts)
-    return texts
+        texts: dict[str, dict] = {}
+        for g in gazette.list_gazettes(recent=500):
+            pid = g.get("plan_id", "")
+            events = gazette.read_events(pid)
+            if not events:
+                continue
+            intent_text = (g.get("intent", "") or "").lower()
+            user_text = ""
+            steps_text = ""
+            steps_desc = []
+            stats = {}
+            for ev in events:
+                if ev.kind == gazette.EV_COMMISSION:
+                    user_text = (ev.detail.get("user_text", "") or "").lower()
+                elif ev.kind == gazette.EV_PLAN_DRAFTED:
+                    ut = (ev.detail.get("user_text", "") or "").lower()
+                    if ut:
+                        user_text = ut
+                    for s in ev.detail.get("steps_summary", []):
+                        desc = s.get("description", "")
+                        steps_desc.append(desc)
+                        steps_text += " " + desc.lower()
+                elif ev.kind == gazette.EV_STEP_STARTED:
+                    desc = ev.detail.get("description", "")
+                    if desc:
+                        steps_text += " " + desc.lower()
+                elif ev.kind == gazette.EV_PLAN_FINISHED:
+                    stats = ev.detail.get("step_stats", {})
+            texts[pid] = {
+                "intent": g.get("intent", "")[:100],
+                "status": g.get("status", "?"),
+                "_intent_lc": intent_text,
+                "_user_text_lc": user_text,
+                "_steps_text_lc": steps_text,
+                "steps_desc": steps_desc[:5],
+                "step_stats": stats,
+            }
+        _GAZETTE_TEXT_CACHE = (sig, texts)
+        return texts
 
 
 def _do_search_history(args: dict) -> str:
@@ -238,22 +239,47 @@ def handle_message(
     """中书省主入口。处理用户消息，返回结构化结果。"""
     session_id, messages = sess.get_or_create(session_id)
 
-    if not is_llm_configured():
-        reply = _rule_chat_one(user_text)
-        sess.append(session_id, "user", user_text)
-        sess.append(session_id, "assistant", reply)
-        return {"mode": "rule", "reply": reply, "session_id": session_id}
+    # 服务端按 session 串行化（此前仅靠前端 _chatBusy：并发调用会让两条对话
+    # 的 tool 消息交错、上下文互相污染）。含 LLM 往返全程持有，后来者排队。
+    with sess.conversation_lock(session_id):
+        if not is_llm_configured():
+            reply = _rule_chat_one(user_text)
+            sess.append(session_id, "user", user_text)
+            sess.append(session_id, "assistant", reply)
+            return {"mode": "rule", "reply": reply, "session_id": session_id}
 
-    messages.append({"role": "user", "content": user_text})
+        # 经 session 的持锁入口追加（messages 是 session 的原始 list 引用，
+        # 直接无锁 append 与 sess.append 的持锁写不一致）
+        sess.append_message(session_id, {"role": "user", "content": user_text})
 
-    try:
-        turn = _react_loop(user_text, messages, session_id)
-        return turn.to_dict() | {"session_id": session_id}
-    except Exception as e:
-        reply = _rule_chat_one(user_text)
-        sess.append(session_id, "assistant", reply)
-        return {"mode": "fallback", "reply": reply, "session_id": session_id,
-                "llm_error": f"{type(e).__name__}: {e}"}
+        try:
+            turn = _react_loop(user_text, messages, session_id)
+            return turn.to_dict() | {"session_id": session_id}
+        except Exception as e:
+            # LLM 回路中断时 history 里可能残留未应答完的 tool_calls——
+            # OpenAI 要求 tool 消息必须紧跟对应 assistant，不补齐会让该 session
+            # 的后续请求整体报废。为悬空的 tool_call_id 补一条中断应答。
+            _patch_dangling_tool_calls(session_id, messages)
+            reply = _rule_chat_one(user_text)
+            sess.append(session_id, "assistant", reply)
+            return {"mode": "fallback", "reply": reply, "session_id": session_id,
+                    "llm_error": f"{type(e).__name__}: {e}"}
+
+
+def _patch_dangling_tool_calls(session_id: str, messages: list[dict]) -> None:
+    """为 history 末尾悬空的 tool_call_id 补一条中断应答（修复配对不变量）。"""
+    pending: list[str] = []
+    for m in messages:
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            pending = [tc.get("id") for tc in m["tool_calls"]]
+        elif m.get("role") == "tool" and m.get("tool_call_id") in pending:
+            pending.remove(m["tool_call_id"])
+    for tid in pending:
+        if tid:
+            sess.append_message(session_id, {
+                "role": "tool", "tool_call_id": tid,
+                "content": "（工具执行中断，无结果）",
+            })
 
 
 def _react_loop(user_text: str, messages: list[dict], session_id: str,
@@ -268,11 +294,11 @@ def _react_loop(user_text: str, messages: list[dict], session_id: str,
 
         if not msg.tool_calls:
             turn.reply = msg.content or "(臣无以作答)"
-            messages.append({"role": "assistant", "content": turn.reply})
+            sess.append_message(session_id, {"role": "assistant", "content": turn.reply})
             sess.append(session_id, "assistant", turn.reply)
             return turn
 
-        messages.append({
+        sess.append_message(session_id, {
             "role": "assistant",
             "content": msg.content,
             "tool_calls": rebuild_tool_calls(msg),
@@ -285,11 +311,11 @@ def _react_loop(user_text: str, messages: list[dict], session_id: str,
             if name == "request_shangshu_plan":
                 intent = args.get("intent", user_text)
                 reference = args.get("reference", "")
-                plan_dict = _hand_to_shangshu(intent, messages, session_id, reference=reference)
+                plan_dict, plan_err = _hand_to_shangshu(intent, session_id, reference=reference)
                 if plan_dict:
                     turn.plan_pending = plan_dict
                     turn.reply = plan_dict.get("rendered_plan", "尚书省已拟案，请陛下过目。")
-                    messages.append({
+                    sess.append_message(session_id, {
                         "role": "tool", "tool_call_id": tc.id,
                         "content": json.dumps({"plan_id": plan_dict["plan_id"],
                                               "steps_count": len(plan_dict.get("steps", []))},
@@ -298,16 +324,18 @@ def _react_loop(user_text: str, messages: list[dict], session_id: str,
                     sess.append(session_id, "assistant", turn.reply)
                     return turn
                 else:
-                    messages.append({
+                    sess.append_message(session_id, {
                         "role": "tool", "tool_call_id": tc.id,
-                        "content": "尚书省拟案失败，请简化指令或稍后再试。",
+                        # 带上真实失败原因，让 LLM/用户能看到（此前只写"请稍后再试"，
+                        # 拟案失败的根因在用户侧不可见、无法排查）
+                        "content": f"尚书省拟案失败: {plan_err or '未知原因'}。请简化指令或稍后再试。",
                     })
                 continue
 
             if name == "search_history":
                 result_str = _do_search_history(args)
                 turn.tool_calls.append({"name": name, "args": args, "result": result_str[:500]})
-                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_str})
+                sess.append_message(session_id, {"role": "tool", "tool_call_id": tc.id, "content": result_str})
                 continue
 
             if name in {"list_runs", "compare_runs", "review_run", "list_workspaces"}:
@@ -315,34 +343,40 @@ def _react_loop(user_text: str, messages: list[dict], session_id: str,
                     result = call_tool(name, args)
                     result_str = _summarize_result(result)
                     turn.tool_calls.append({"name": name, "args": args, "result": result_str[:500]})
-                    messages.append({
+                    sess.append_message(session_id, {
                         "role": "tool", "tool_call_id": tc.id, "content": result_str,
                     })
                 except Exception as e:
                     err = f"{type(e).__name__}: {e}"
-                    messages.append({
+                    sess.append_message(session_id, {
                         "role": "tool", "tool_call_id": tc.id, "content": f"工具失败: {err}",
                     })
             else:
-                messages.append({
+                sess.append_message(session_id, {
                     "role": "tool", "tool_call_id": tc.id,
                     "content": f"中书省不直接执行 {name}——请转交尚书省拟案。",
                 })
 
-    messages.append({"role": "user", "content": "请基于已有信息总结回复。"})
-    resp = chat_with_tools(messages, tools=None)
+    # 收尾总结：合成提示只用于本次调用，不写入 session 历史——
+    # 内部指令一旦入库会永久污染后续所有对话上下文（用户不可见也无法清除）
+    final_messages = messages + [{"role": "user", "content": "请基于已有信息总结回复。"}]
+    resp = chat_with_tools(final_messages, tools=None)
     turn.reply = resp.choices[0].message.content or "(臣无以作答)"
-    messages.append({"role": "assistant", "content": turn.reply})
+    sess.append_message(session_id, {"role": "assistant", "content": turn.reply})
     sess.append(session_id, "assistant", turn.reply)
     return turn
 
 
-def _hand_to_shangshu(intent: str, messages: list[dict], session_id: str,
-                      reference: str = "") -> dict | None:
+def _hand_to_shangshu(intent: str, session_id: str,
+                      reference: str = "") -> tuple[dict | None, str | None]:
     """转交尚书省拟案，再润色成给用户看的方案。
 
     文牍流程：拟案 → 记录拟案完成（含用户原始指令）。
     reference 是中书省搜到的历史参考，附加到 intent 帮尚书省拟更精准的方案。
+
+    Returns:
+        (plan_dict, None) 成功；(None, err) 失败——err 是给 LLM/用户看的失败原因，
+        不再静默吞掉（LLM 未配置/额度耗尽/拟案异常此前都只进 stderr）。
     """
     try:
         from control.agent import gazette
@@ -383,17 +417,19 @@ def _hand_to_shangshu(intent: str, messages: list[dict], session_id: str,
                 "steps": [_step_dict(s) for s in plan.steps],
                 "rendered_plan": rendered,
                 "auto_executed": True,  # ★ 前端据此不展示准奏卡片
-            }
+            }, None
 
         return {
             "plan_id": plan.id,
             "steps": [_step_dict(s) for s in plan.steps],
             "rendered_plan": rendered,
-        }
+        }, None
     except Exception as e:
         import sys
-        print(f"[中书省] 转交尚书省失败: {e}", file=sys.stderr)
-        return None
+        import traceback
+        print(f"[中书省] 转交尚书省失败: {type(e).__name__}: {e}\n"
+              f"{traceback.format_exc(limit=3)}", file=sys.stderr)
+        return None, f"{type(e).__name__}: {e}"
 
 
 def _step_dict(s) -> dict:

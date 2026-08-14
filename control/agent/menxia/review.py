@@ -27,22 +27,33 @@ _SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2, "good": 3}
 # 阈值获取：经 invoker 调 llmsec-manage thresholds
 # ============================================================
 _THRESHOLDS_CACHE: dict | None = None
+_THRESHOLDS_CACHED_AT: float = 0.0
+_THRESHOLDS_TTL = 300.0  # 秒：llmsec 侧改阈值后本进程最多滞后 5 分钟（此前永不过期）
 
 
 def get_thresholds() -> dict:
-    """从 llmsec 经 CLI 获取审查阈值（首次调 subprocess，之后缓存）。"""
-    global _THRESHOLDS_CACHE
-    if _THRESHOLDS_CACHE is not None:
+    """从 llmsec 经 CLI 获取审查阈值（带 TTL 缓存；失败降级 fallback 并告警）。"""
+    global _THRESHOLDS_CACHE, _THRESHOLDS_CACHED_AT
+    import sys
+    import time
+
+    if _THRESHOLDS_CACHE is not None and (time.time() - _THRESHOLDS_CACHED_AT) < _THRESHOLDS_TTL:
         return _THRESHOLDS_CACHE
     try:
         from control.core.invoker import _manage_argv, _run
-        res = _run(_manage_argv(["thresholds", "--json"]))
+        # 超时保护：本函数在门下省总线同步派发回调内首次触发，挂起会卡死 Plan 步骤
+        res = _run(_manage_argv(["thresholds", "--json"]), timeout=30)
         if res.ok and res.json:
             _THRESHOLDS_CACHE = res.json
+            _THRESHOLDS_CACHED_AT = time.time()
             return _THRESHOLDS_CACHE
-    except Exception:
-        pass
+        print(f"[门下省] 阈值获取失败 (rc={res.returncode})，降级 fallback: "
+              f"{res.stderr[-200:]}", file=sys.stderr)
+    except Exception as e:
+        print(f"[门下省] 阈值获取异常，降级 fallback: {type(e).__name__}: {e}",
+              file=sys.stderr)
     _THRESHOLDS_CACHE = dict(_FALLBACK_THRESHOLDS)
+    _THRESHOLDS_CACHED_AT = time.time()
     return _THRESHOLDS_CACHE
 
 

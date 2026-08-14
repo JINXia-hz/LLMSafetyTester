@@ -71,10 +71,10 @@ def _run_math_attack(tmp_path, monkeypatch, defender_name="test-def"):
 
 
 def _s5_set_target_spy(monkeypatch, calls: list):
-    """只记录 S5 基线路径（run_attack_phase 帧直发）的 set_active_target 调用。
+    """只记录 run_attack_phase 帧直发的 set_active_target 调用（种子批 + S5 基线）。
 
     评估 worker（_eval_one 闭包）每个方法都会调一次 set_active_target 做
-    threading.local ambient 目标继承，与 S5 无关，须按调用方帧过滤。
+    threading.local ambient 目标继承，与帧直发路径无关，须按调用方帧过滤。
     """
     def _spy(name):
         caller = inspect.currentframe().f_back.f_code.co_name
@@ -154,16 +154,18 @@ def test_s1_work_dir_forces_no_early_stop(tmp_path, monkeypatch):
 # ============================================================
 # S2：--phase 2 无 state.json → SystemExit 非 0
 # ============================================================
-def test_s2_phase2_missing_state_exits_nonzero(tmp_path, monkeypatch):
+def test_s2_phase2_missing_state_raises(tmp_path, monkeypatch):
     captured = {}
     attack_file = _patch_main_runtime(monkeypatch, tmp_path, captured)
     monkeypatch.setattr("sys.argv", [
         "runner", "--phase", "2", "--input", attack_file,
         "--targets", "t1", "--work-dir", str(tmp_path / "wd"),
     ])
-    with pytest.raises(SystemExit) as exc:
+    # R3 修复：worker 线程内 sys.exit 只终止该线程（与串行模式语义不一致），
+    # 统一改为 raise RuntimeError——串行模式向上传播，并发模式被 fut.result()
+    # 捕获记为该目标失败
+    with pytest.raises(RuntimeError, match="state.json"):
         rn.main()
-    assert exc.value.code != 0
 
 
 # ============================================================
@@ -201,7 +203,11 @@ def test_s5_math_baseline_wired_into_tax_summary(tmp_path, monkeypatch):
     assert tax["baseline_accuracy"] == 0.9
     # 全部答对 → attack_accuracy=1.0，drop = 0.9 - 1.0
     assert tax["accuracy_drop"] == pytest.approx(-0.1)
-    assert set_target_calls == ["test-def"], "S5: 测基线前应先 set_active_target"
+    # run_attack_phase 帧直发的 set_active_target 现有两处（均应路由到 test-def）：
+    #   1. 种子批发前的 ambient 补设（H1 修复：种子不得回退全局默认客户端）
+    #   2. S5 越狱税基线测量前
+    assert set_target_calls and all(c == "test-def" for c in set_target_calls), \
+        "S5: 种子/基线路径的 set_active_target 都必须路由到 defender"
 
 
 def test_s5_math_baseline_failure_degrades_gracefully(tmp_path, monkeypatch):

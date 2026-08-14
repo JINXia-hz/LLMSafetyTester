@@ -190,6 +190,9 @@ document.querySelectorAll('#nav .nav-item').forEach(el => {
 });
 
 function loadSection(name) {
+  // 离开宣政殿时停止三省轮询（此前 setInterval 永不清除：两路 2s 定时器
+  // 重复轮询同一 bus feed 直到关页）
+  if (name !== 'control' && typeof unloadControlSection === 'function') unloadControlSection();
   // 宣政殿不走缓存：工作区/对话状态易变，每次切入都刷新
   if (name !== 'control' && loaded[name] === currentRun) return;
   loaded[name] = currentRun;

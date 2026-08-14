@@ -114,6 +114,23 @@ def _allocate_runs_dir(base_dir: Path, name: str) -> Path:
     return candidate
 
 
+def partition_publish_names(names: list[str], declared: set[str]) -> tuple[list[str], list[str]]:
+    """--publish-global 的目标过滤守卫（纯函数，可单测）。
+
+    全局 R 防注入：只接受 .env TARGETS 声明的目标。历史上测试用 test_model/t1/t2
+    跑评估时误 publish 进全局 R，污染 BlendPredictor（samples_per_model 出现假目标）。
+    declared 为空集（load_targets 失败/未配置）时不校验，全部放行。
+
+    Returns:
+        (allowed, skipped)：允许写全局 R 的目标 / 被拒绝的目标。
+    """
+    if not declared:
+        return list(names), []
+    allowed = [n for n in names if n in declared]
+    skipped = [n for n in names if n not in declared]
+    return allowed, skipped
+
+
 def main():
     parser = argparse.ArgumentParser(description="统一编排器 — 自适应安全评估流水线")
     parser.add_argument("--phase", type=str, default="all",
@@ -367,9 +384,13 @@ def main():
         else:
             state_path = run_dir / "state.json"
             if not state_path.exists():
-                logger.error(f"❌ {name}: --phase 2 需要 Phase 1 的 state.json（{state_path} 不存在）"
-                             "——请先运行 --phase all 或 --phase 1")
-                sys.exit(2)
+                # 不能 sys.exit：并发模式下本函数跑在 worker 线程里，SystemExit
+                # 只终止该线程被 fut.result() 吞掉，与串行模式的"杀整个进程"
+                # 语义不一致。统一 raise：并发模式记为该目标失败、其余照跑；
+                # 串行模式向上传播终止进程。
+                raise RuntimeError(
+                    f"{name}: --phase 2 需要 Phase 1 的 state.json（{state_path} 不存在）"
+                    "——请先运行 --phase all 或 --phase 1")
             tracker.load(str(state_path))
 
         conv = tracker.check_convergence(
@@ -500,24 +521,24 @@ def main():
                 logger.error(f"  ❌ {name} 写入 R 失败: {e}")
     elif args.publish_global:
         logger.info(f"\n{'='*60}\n  💾 写入全局 R（--publish-global）\n{'='*60}")
-        # 全局 R 防注入：只接受 .env TARGETS 声明的目标。历史上测试用 test_model/t1/t2
-        # 跑评估时误 publish 进全局 R，污染 BlendPredictor（samples_per_model 出现假目标）。
-        # work-dir 模式不受此限（隔离实验可任意命名）。load_targets 失败时不校验（放行交由
-        # 既有逻辑），仅在能读到声明名单时拒绝未声明目标。
+        # 全局 R 防注入：只接受 .env TARGETS 声明的目标（守卫逻辑见
+        # partition_publish_names——此前内联在编排流程里不可单测）。
+        # work-dir 模式不受此限（隔离实验可任意命名）。load_targets 失败时
+        # 不校验（放行交由既有逻辑）。
         try:
             from llmsec.core.config import load_targets as _load_targets
             declared = set(_load_targets().keys())
         except Exception:
             declared = set()
-        for name in names:
+        allowed, skipped = partition_publish_names(names, declared)
+        for name in skipped:
+            logger.warning(
+                f"  ⏭️ {name}: 未在 .env TARGETS 中声明，跳过全局 R 写入（防测试目标污染生产数据）。"
+                f" 如需隔离测试，请用 --work-dir。"
+            )
+        for name in allowed:
             tracker = trackers.get(name)
             if tracker is None:
-                continue
-            if declared and name not in declared:
-                logger.warning(
-                    f"  ⏭️ {name}: 未在 .env TARGETS 中声明，跳过全局 R 写入（防测试目标污染生产数据）。"
-                    f" 如需隔离测试，请用 --work-dir。"
-                )
                 continue
             try:
                 publish_tracker(tracker, name)

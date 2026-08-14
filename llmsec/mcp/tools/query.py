@@ -358,7 +358,6 @@ def probe_targets(name: str | None = None) -> dict[str, Any]:
         {targets: [{name, model, reachable, latency_ms, error, warning}],
          services: [{name, model, reachable, latency_ms, error, warning}]}
     """
-    import time
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def _do() -> dict[str, Any]:
@@ -366,9 +365,7 @@ def probe_targets(name: str | None = None) -> dict[str, Any]:
             GeneratorConfig,
             JudgeConfig,
             load_targets,
-            target_backend,
         )
-        from llmsec.core.llm import create_openai_client
 
         try:
             targets_cfg = load_targets()
@@ -378,108 +375,15 @@ def probe_targets(name: str | None = None) -> dict[str, Any]:
         if name:
             targets_cfg = {k: v for k, v in targets_cfg.items() if k == name}
 
-        def _model_warning(model_ids: list[str] | None, model: str) -> str | None:
-            if model_ids and model and model not in model_ids:
-                return f"模型 {model} 不在端点列表"
-            return None
-
         def _probe_one(n: str, cfg) -> dict[str, Any]:
-            """探测单个目标模型（同步版）。"""
-            backend = target_backend(n)
-            t0 = time.time()
-            ids = None
-            try:
-                if backend == "pcap_judge":
-                    import requests
-                    import urllib3
-                    urllib3.disable_warnings()
-                    r = requests.get(cfg.base_url, timeout=5, verify=False)
-                    r.raise_for_status()
-                else:
-                    client = create_openai_client(cfg.api_key, cfg.base_url, timeout=5.0)
-                    ids = [m.id for m in client.models.list()]
-                latency = round((time.time() - t0) * 1000)
-            except Exception as e:
-                return {"name": n, "model": cfg.model, "reachable": False,
-                        "latency_ms": None, "error": str(e)[:120], "warning": None}
-
-            # 第二段：chat smoke（只对 OpenAI 兼容目标）
-            warnings = []
-            w = _model_warning(ids, cfg.model)
-            if w:
-                warnings.append(w)
-            if backend != "pcap_judge":
-                try:
-                    client = create_openai_client(cfg.api_key, cfg.base_url, timeout=12.0)
-                    resp = client.chat.completions.create(
-                        model=cfg.model,
-                        messages=[{"role": "user", "content": "ping"}],
-                        max_tokens=64,
-                    )
-                    msg = resp.choices[0].message
-                    content = getattr(msg, "content", None)
-                    reasoning = getattr(msg, "reasoning_content", None)
-                    finish = resp.choices[0].finish_reason
-                    if content is None and reasoning:
-                        warnings.append("推理模型：content 为空但 reasoning_content 有内容")
-                    elif content is None and finish == "length":
-                        warnings.append("chat 探活预算不足被截断（真实请求不受影响）")
-                    elif content is None:
-                        warnings.append("chat 返回空 content（疑似配置问题）")
-                except Exception as e:
-                    status = getattr(e, "status_code", None)
-                    if status in (401, 403):
-                        return {"name": n, "model": cfg.model, "reachable": False,
-                                "latency_ms": latency, "error": f"chat 鉴权失败({status}): {str(e)[:80]}",
-                                "warning": None}
-                    warnings.append(f"chat 探测失败（不阻塞）: {str(e)[:80]}")
-            return {"name": n, "model": cfg.model, "reachable": True,
-                    "latency_ms": latency, "error": None,
-                    "warning": "；".join(warnings) or None}
+            """探测单个目标模型（统一走 llmsec.core.probe，与 dashboard 同一实现）。"""
+            from llmsec.core.probe import probe_target
+            return probe_target(n, cfg)
 
         def _probe_service(svc_name: str, cfg) -> dict[str, Any]:
-            """探测 generator/judge 服务（同步版）。"""
-            t0 = time.time()
-            try:
-                client = create_openai_client(cfg.api_key, cfg.base_url, timeout=5.0)
-                ids = [m.id for m in client.models.list()]
-                latency = round((time.time() - t0) * 1000)
-            except Exception as e:
-                return {"name": svc_name, "model": cfg.model, "reachable": False,
-                        "latency_ms": None, "error": str(e)[:120], "warning": None}
-
-            warnings = []
-            w = _model_warning(ids, cfg.model)
-            if w:
-                warnings.append(w)
-            # chat smoke
-            try:
-                client = create_openai_client(cfg.api_key, cfg.base_url, timeout=12.0)
-                resp = client.chat.completions.create(
-                    model=cfg.model,
-                    messages=[{"role": "user", "content": "ping"}],
-                    max_tokens=64,
-                )
-                msg = resp.choices[0].message
-                content = getattr(msg, "content", None)
-                reasoning = getattr(msg, "reasoning_content", None)
-                finish = resp.choices[0].finish_reason
-                if content is None and reasoning:
-                    warnings.append("推理模型：content 为空但 reasoning_content 有内容")
-                elif content is None and finish == "length":
-                    warnings.append("chat 探活预算不足被截断")
-                elif content is None:
-                    warnings.append("chat 返回空 content（疑似配置问题）")
-            except Exception as e:
-                status = getattr(e, "status_code", None)
-                if status in (401, 403):
-                    return {"name": svc_name, "model": cfg.model, "reachable": False,
-                            "latency_ms": latency, "error": f"chat 鉴权失败({status}): {str(e)[:80]}",
-                            "warning": None}
-                warnings.append(f"chat 探测失败: {str(e)[:80]}")
-            return {"name": svc_name, "model": cfg.model, "reachable": True,
-                    "latency_ms": latency, "error": None,
-                    "warning": "；".join(warnings) or None}
+            """探测 generator/judge 服务（统一走 llmsec.core.probe）。"""
+            from llmsec.core.probe import probe_service
+            return probe_service(svc_name, cfg)
 
         # 并行探测所有目标
         target_results: list[dict[str, Any]] = []

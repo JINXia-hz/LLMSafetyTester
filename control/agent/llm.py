@@ -23,20 +23,23 @@ from openai import OpenAI
 load_dotenv()
 
 _client: OpenAI | None = None
+_CLIENT_LOCK = __import__("threading").Lock()
 
 
 def _get_client() -> OpenAI:
-    """惰性构造单例 client。读 GENERATOR_* 环境变量。"""
+    """惰性构造单例 client。读 GENERATOR_* 环境变量（锁内创建，防并发双建）。"""
     global _client
     if _client is None:
-        api_key = os.getenv("GENERATOR_API_KEY") or os.getenv("CONTROL_API_KEY")
-        base_url = os.getenv("GENERATOR_BASE_URL") or os.getenv("CONTROL_BASE_URL")
-        if not api_key or not base_url:
-            raise RuntimeError(
-                "控制层 LLM 未配置：缺少 GENERATOR_API_KEY/GENERATOR_BASE_URL "
-                "（或 CONTROL_API_KEY/CONTROL_BASE_URL）。请在 .env 配置。"
-            )
-        _client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
+        with _CLIENT_LOCK:
+            if _client is None:
+                api_key = os.getenv("GENERATOR_API_KEY") or os.getenv("CONTROL_API_KEY")
+                base_url = os.getenv("GENERATOR_BASE_URL") or os.getenv("CONTROL_BASE_URL")
+                if not api_key or not base_url:
+                    raise RuntimeError(
+                        "控制层 LLM 未配置：缺少 GENERATOR_API_KEY/GENERATOR_BASE_URL "
+                        "（或 CONTROL_API_KEY/CONTROL_BASE_URL）。请在 .env 配置。"
+                    )
+                _client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
     return _client
 
 
@@ -75,8 +78,10 @@ def chat_with_tools(
             return client.chat.completions.create(**kwargs)
         except Exception as e:
             last_err = e
-            # 4xx（认证/参数错）不重试
-            if hasattr(e, "status_code") and 400 <= e.status_code < 500:
+            # 4xx（认证/参数错）不重试。status_code 可能存在但为 None
+            # （个别异常类型），裸比较 400 <= None 会抛 TypeError 进错误的重试路径
+            sc = getattr(e, "status_code", None)
+            if sc is not None and 400 <= sc < 500:
                 raise
             if attempt < max_retries:
                 import time

@@ -62,10 +62,7 @@ ATTACK_SET_L1_FILE = ATTACKS_DIR / "l1.jsonl"
 # 过敏检测产物（规范存储，按模型隔离见 W4）
 TWIN_RESULT_FILE = OUTPUT_DIR / "allergy_results.jsonl"
 
-# 报告产物（reporting 写、dashboard 读）
-TREE_FILE = OUTPUT_DIR / "security_tree.json"
-REPORT_FILE = OUTPUT_DIR / "security_report.md"
-METHOD_REGISTRY_FILE = OUTPUT_DIR / "method_registry.json"
+# 报告产物（reporting 写、dashboard 读；具体文件名在 report.py 内以字面量使用）
 CLUSTER_SECURITY_ANALYSIS_FILE = OUTPUT_DIR / "cluster_security_analysis.json"
 
 # 后台任务日志目录（dashboard 子进程任务）
@@ -84,7 +81,6 @@ DATA_DIR = PROJECT_ROOT / "data"
 # 聚类产物（按 clustering.py 现行约定：直接落在 output/ 下）
 CLUSTER_REPORT_FILE = OUTPUT_DIR / "cluster_report.json"
 CLUSTER_MATRIX_FILE = OUTPUT_DIR / "cluster_matrix.csv"
-CLUSTER_FEATURES_FILE = OUTPUT_DIR / "cluster_features.json"
 # 聚类 artifacts 已按写者拆分为两个文件（原 cluster_artifacts.pkl 由两个写者混写不同
 # schema，后写覆盖会导致下游 KeyError）：
 #   - feature_cache.pkl：先验特征缓存，仅 predictors/cold_start.py fit_features 写

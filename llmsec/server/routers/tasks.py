@@ -1,52 +1,39 @@
-"""任务管理路由：图形化触发生成 / 评估 / 聚类分析（子进程任务 + 状态轮询 / SSE 流）。"""
+"""任务管理路由：图形化触发生成 / 评估 / 聚类分析（子进程任务 + 状态轮询 / SSE 流）。
+
+任务状态机/子进程管理统一在 llmsec.server.task_manager（与 MCP server 共用同一份
+TASKS 注册表）——本文件只是 HTTP 薄封装。测试/调用方一律直接引用 task_manager
+命名空间（不再保留本模块的兼容别名层）。
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
-import subprocess
-import sys
-import uuid
-from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from llmsec.core.config import ATTACKS_DIR, TASK_LOG_DIR
+from llmsec.core.config import ATTACKS_DIR
 from llmsec.params import ADAPTIVE_BATCH_MAX, DEFAULT_BATCH_SIZE, DEFAULT_MAX_ROUNDS, MAX_ROUNDS_LIMIT
+from llmsec.server import task_manager
+from llmsec.server.task_manager import (
+    TASKS,
+    _progress_path,
+    _refresh_task_status,
+    task_view,
+)
 
 router = APIRouter()
 
-# ============================================================
-# 操作 API（子进程任务）
-# ============================================================
-# 子进程 cwd = 仓库根（dashboard_api 同级约定的 WORKSPACE_ROOT）。
-# tasks.py 位于 llmsec/server/routers/，parents[3] 即仓库根。
-WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 
-TASKS: dict[str, dict] = {}
-
-# TASKS 上限：新任务入列时淘汰最旧的终态任务（running 不淘汰），防长期运行内存/句柄堆积
-_TASKS_MAX = 64
-_TERMINAL_STATUSES = ("success", "failed", "cancelled")
-
-
-def _evict_tasks() -> None:
-    """TASKS 超 _TASKS_MAX 时按插入序淘汰最旧的终态任务，并确保其日志句柄关闭。"""
-    while len(TASKS) > _TASKS_MAX:
-        victim = next(
-            (tid for tid, t in TASKS.items() if t["status"] in _TERMINAL_STATUSES),
-            None,
-        )
-        if victim is None:
-            break  # 全是 running，不淘汰
-        t = TASKS.pop(victim)
-        log_file = t.get("log_file")
-        if log_file is not None:
-            log_file.close()
+def _require_task(task_id: str) -> dict:
+    """按 id 取任务，不存在则抛 404。"""
+    t = TASKS.get(task_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    return t
 
 
 class EvaluateRequest(BaseModel):
@@ -64,122 +51,6 @@ class EvaluateRequest(BaseModel):
     targets: str | None = None      # 多目标子集（逗号分隔，前端探活后只传可达的）
     # 多目标并发数：None + 多目标 → 默认全并发（每个目标是独立端点，无共享限速）
     target_concurrency: int | None = Field(default=None, ge=1, le=32)
-
-
-def _refresh_task_status(t: dict) -> None:
-    """刷新任务状态：子进程已结束但 status 仍为 running 时更新为 success/failed，
-    并关闭 log_file 句柄（置 None）。
-
-    子进程可能崩溃且无人轮询，若不在每次 _task_view 里更新状态，TASKS 会残留永久
-    running 的任务（阻塞同 kind 队列推进、log_file 句柄常驻泄漏）。
-    """
-    if t["status"] != "running":
-        return
-    proc: subprocess.Popen = t["proc"]
-    rc = proc.poll()
-    if rc is None:
-        return
-    t["status"] = "success" if rc == 0 else "failed"
-    t["returncode"] = rc
-    log_file = t.get("log_file")
-    if log_file is not None:
-        log_file.close()
-        t["log_file"] = None
-    _advance_queue(t["kind"])   # running→终态，推进该 kind 的队列
-
-
-def _task_view(task_id: str, t: dict) -> dict:
-    _refresh_task_status(t)
-    status = t["status"]
-    rc = t.get("returncode")
-    log_tail = ""
-    log_path: Path = t["log_path"]
-    if log_path.exists():
-        try:
-            log_tail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
-        except OSError:
-            pass
-    return {
-        "id": task_id,
-        "kind": t["kind"],
-        "cmd": t["cmd"],
-        "status": status,
-        "returncode": rc,
-        "started_at": t["started_at"],
-        "log_tail": log_tail,
-        "error": t.get("error"),
-    }
-
-
-def _require_task(task_id: str) -> dict:
-    """按 id 取任务，不存在则抛 404。统一原 5 处重复的 HTTPException。"""
-    t = TASKS.get(task_id)
-    if t is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
-    return t
-
-
-def _spawn(task_id: str, t: dict) -> None:
-    """启动已入队任务的子进程（打开日志、Popen、置 running）。Popen 失败置 failed。"""
-    TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_file = open(t["log_path"], "w", encoding="utf-8")
-    try:
-        # 注入 LLMSEC_TASK_ID：子进程（runner/attack_phase、experiments/study）据此
-        # 把逐轮/逐 trial 进度落到 output/tasks/<task_id>.progress.jsonl，供看板消费。
-        env = os.environ.copy()
-        env["LLMSEC_TASK_ID"] = task_id
-        # 强制子进程 stdout/stderr 无缓冲：logging 的 StreamHandler 在非 TTY（重定向到文件）
-        # 下走块缓冲，任务长时间运行时看板读到的 log_tail 滞后数分钟，用户误判任务卡死。
-        # PYTHONUNBUFFERED=1 让 print/logging 每行即落盘，代价可忽略（日志量小）。
-        env["PYTHONUNBUFFERED"] = "1"
-        proc = subprocess.Popen(
-            [sys.executable, *t["argv"]],
-            cwd=WORKSPACE_ROOT,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            env=env,
-        )
-    except OSError as e:
-        log_file.close()
-        t["status"] = "failed"
-        t["returncode"] = -1
-        t["error"] = f"任务启动失败: {e}"
-        return
-    t["proc"] = proc
-    t["log_file"] = log_file
-    t["status"] = "running"
-
-
-def _advance_queue(kind: str) -> None:
-    """该 kind 无 running 任务时，启动最早的 queued 任务（FIFO）。"""
-    if any(t["kind"] == kind and t["status"] == "running" for t in TASKS.values()):
-        return
-    for tid, t in TASKS.items():  # dict 保序，最早入队在前
-        if t["kind"] == kind and t["status"] == "queued":
-            _spawn(tid, t)
-            return
-
-
-def _start_task(kind: str, argv: list[str]) -> dict:
-    # 先刷新所有 running 任务的真实状态，避免子进程崩溃后无人轮询
-    # 导致 status 永久 running（阻塞同 kind 队列推进）与 log_file 句柄泄漏
-    for t in TASKS.values():
-        _refresh_task_status(t)
-
-    task_id = f"{kind}-{datetime.now().strftime('%H%M%S')}-{uuid.uuid4().hex[:6]}"
-    TASKS[task_id] = {
-        "kind": kind,
-        "cmd": " ".join(argv),
-        "argv": argv,
-        "proc": None,
-        "log_path": TASK_LOG_DIR / f"{task_id}.log",
-        "log_file": None,
-        "status": "queued",          # 同 kind 有 running 时排队；由 _advance_queue 在前一个结束后启动
-        "started_at": datetime.now().isoformat(),
-    }
-    _evict_tasks()
-    _advance_queue(kind)             # 无 running 时立即启动本任务；否则保持 queued
-    return _task_view(task_id, TASKS[task_id])
 
 
 @router.post("/api/run/evaluate")
@@ -242,20 +113,23 @@ async def api_run_evaluate(req: EvaluateRequest):
     # 看板评估默认走全局模式且 publish 到全局 R（保留旧行为；runner 已改为默认不 publish）。
     # 用户若要隔离评估，用 control 层的 fork。
     argv += ["--publish-global"]
-    view = _start_task("evaluate", argv)
+    view = task_manager.start_task("evaluate", argv)
     view["has_tax_probe"] = has_tax_probe
     return view
 
 
 @router.get("/api/tasks")
 async def api_tasks():
-    return {"tasks": [_task_view(tid, t) for tid, t in sorted(TASKS.items(), reverse=True)]}
+    return {"tasks": task_manager.list_tasks()}
 
 
 @router.get("/api/tasks/{task_id}")
 async def api_task(task_id: str):
-    t = _require_task(task_id)
-    return _task_view(task_id, t)
+    _require_task(task_id)
+    view = task_view(task_id)
+    if view is None:  # 竞态：刚被淘汰出 TASKS
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    return view
 
 
 @router.get("/api/tasks/{task_id}/log")
@@ -264,14 +138,8 @@ async def api_task_log(task_id: str, download: bool = False):
 
     ?download=1 时以 text/plain + Content-Disposition 返回，便于直接下载 .log。
     """
-    t = _require_task(task_id)
-    log_path: Path = t["log_path"]
-    text = ""
-    if log_path.exists():
-        try:
-            text = log_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            text = ""
+    _require_task(task_id)
+    text = task_manager.read_full_log(task_id)
     if download:
         return PlainTextResponse(
             text,
@@ -284,28 +152,6 @@ async def api_task_log(task_id: str, download: bool = False):
 # ============================================================
 # 任务进度（看板实时简略信息）
 # ============================================================
-def _progress_path(task_id: str) -> Path:
-    """<task_id>.progress.jsonl 路径（与 .log 同目录）。可能不存在（任务刚启动/无 env）。"""
-    return TASK_LOG_DIR / f"{task_id}.progress.jsonl"
-
-
-def _read_progress(task_id: str) -> list[dict]:
-    """读取 progress.jsonl 全部记录（坏行跳过）。文件不存在返回 []。"""
-    p = _progress_path(task_id)
-    if not p.exists():
-        return []
-    out: list[dict] = []
-    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return out
-
-
 def _parse_eval_argv(argv: list[str]) -> tuple[list[str], int | None]:
     """从 runner argv 解析目标列表（--targets/--target）与 max_rounds。
 
@@ -343,7 +189,7 @@ async def api_task_progress(task_id: str):
     _refresh_task_status(t)
     kind = t["kind"]
     status = t["status"]
-    records = _read_progress(task_id)
+    records = task_manager.read_progress(task_id)
 
     if kind == "hpo":
         return {
@@ -380,28 +226,12 @@ async def api_task_cancel(task_id: str):
     runner 每场攻击实时 upsert 进 R，故取消后已观测的结果保留在结果矩阵中。
     已结束的任务返回 409。
     """
-    t = _require_task(task_id)
-    _refresh_task_status(t)
-    if t["status"] not in ("running", "queued"):
-        raise HTTPException(status_code=409, detail=f"任务已结束（{t['status']}），无法取消")
-    if t["status"] == "queued":
-        t["status"] = "cancelled"
-        return _task_view(task_id, t)
-    proc: subprocess.Popen = t["proc"]
-    proc.terminate()
-    try:
-        await asyncio.to_thread(proc.wait, timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        await asyncio.to_thread(proc.wait)
-    t["status"] = "cancelled"
-    t["returncode"] = proc.returncode
-    log_file = t.get("log_file")
-    if log_file is not None:
-        log_file.close()
-        t["log_file"] = None
-    _advance_queue(t["kind"])   # 取消 running 后，启动该 kind 队列里的下一个
-    return _task_view(task_id, t)
+    _require_task(task_id)
+    # cancel 内含 proc.wait(5)，阻塞等待放线程池，不卡事件循环
+    view = await asyncio.to_thread(task_manager.cancel_task, task_id)
+    if view is None:
+        raise HTTPException(status_code=409, detail="任务已结束，无法取消")
+    return view
 
 
 @router.get("/api/tasks/{task_id}/stream")
@@ -451,7 +281,9 @@ async def api_task_stream(task_id: str):
                     # 文件被截断/轮转，重置偏移跟随新内容
                     offset = size
             _refresh_task_status(t)
-            if t["status"] != "running":
+            # queued 也是活跃态（排队中尚未 spawn）：只有终态才发 done 关流。
+            # 旧版 `!= "running"` 会让排队任务一连流就收到 done。
+            if t["status"] not in ("running", "queued"):
                 yield (
                     "event: done\ndata: "
                     + json.dumps(

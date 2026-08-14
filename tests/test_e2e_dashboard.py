@@ -16,24 +16,28 @@
 特性：
   - 产生真实 API 费用（最小攻击集 + batch=2 + rounds=1，约 2~4 次目标调用 + 2~4 次 Judge）。
   - 凭证复用 .env；缺失时 require_real_api fixture skip。
-  - 全局 R 零污染：patch tasks._start_task 把 --publish-global 改写为 --work-dir <tmp>。
+  - 全局 R 零污染：patch task_manager.start_task 把 --publish-global 改写为 --work-dir <tmp>。
   - 建议串行跑（`-n 0`，覆盖 addopts 的 `-n 4`），子进程轮询不适合 xdist worker。
 """
 
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-
-# 模块级 marker：本文件所有用例默认标 e2e
-pytestmark = [pytest.mark.e2e]
 
 # ============================================================
 # 参数：用最小代价跑完整链路（控费用/时间）
 # ============================================================
 E2E_INPUT = "_unit_smoke.jsonl"   # attacks/ 下最小攻击集（200 条，batch=2 只取 2 条）
+# 该攻击集未入库（attacks/ 除 example.jsonl 外均 gitignore）：fresh clone 上
+# 手动跑 -m e2e 时优雅跳过，而非启动子进程后才 404
+_INPUT_PATH = Path(__file__).resolve().parents[1] / "output" / "attacks" / E2E_INPUT
+pytestmark = [pytest.mark.e2e,
+              pytest.mark.skipif(not _INPUT_PATH.exists(),
+                                 reason=f"攻击集 {E2E_INPUT} 未入库（本地生成后可跑）")]
 E2E_BATCH = 2                     # 每轮 2 条攻击
 E2E_ROUNDS = 1                    # 单轮（不收敛、不自适应）
 E2E_TIMEOUT = 300                 # 任务终态轮询超时（秒）
@@ -69,15 +73,15 @@ def isolated_tasks(monkeypatch, tmp_path):
     """把看板评估的 --publish-global 改写为 --work-dir <tmp>，全局 R 零污染。
 
     tasks.api_run_evaluate 在 argv 末尾硬加 --publish-global（L232）。
-    我们 patch tasks._start_task：spawn 前扫描 argv，把 --publish-global 替换为
+    我们 patch task_manager.start_task：spawn 前扫描 argv，把 --publish-global 替换为
     --work-dir <tmp>/wd，让 runner 的 rebind_to_workdir 把全部产物重绑到 tmp。
     这样 e2e 测试不会往全局 output/state/results.json 写任何东西。
     """
-    from llmsec.server.routers import tasks
+    from llmsec.server import task_manager
 
     work_dir = tmp_path / "wd"
     work_dir.mkdir()
-    orig_start_task = tasks._start_task
+    orig_start_task = task_manager.start_task
 
     def _patched_start_task(kind: str, argv: list[str]) -> dict:
         # 改写 argv：去 --publish-global，加 --work-dir（隔离模式）
@@ -85,7 +89,7 @@ def isolated_tasks(monkeypatch, tmp_path):
         cleaned += ["--work-dir", str(work_dir)]
         return orig_start_task(kind, cleaned)
 
-    monkeypatch.setattr(tasks, "_start_task", _patched_start_task)
+    monkeypatch.setattr(task_manager, "start_task", _patched_start_task)
     return work_dir
 
 
@@ -109,7 +113,7 @@ class TestDashboardEvaluateFlow:
             "max_rounds": E2E_ROUNDS,
             "sampler": "gap",
         })
-        assert not (r.status_code != 200), f"❌ 触发评估失败: HTTP {r.status_code} {r.text}"
+        assert r.status_code == 200, f"❌ 触发评估失败: HTTP {r.status_code} {r.text}"
 
         task = r.json()
         task_id = task["id"]

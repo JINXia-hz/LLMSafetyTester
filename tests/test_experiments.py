@@ -31,10 +31,8 @@ def test_schema_and_resolve():
     assert not (cfg.space["sampler"].choices != ["hybrid", "gap"]), "❌ categorical 解析错误"
     # resolve：CLI 因子进 argv，params 因子进 env
     argv, env = resolve_trial({"sampler": "gap", "K_FACTOR": 48, "target": "minimax", "max_rounds": 5})
-    if "--sampler" not in argv or "gap" not in argv:
-        print("❌ CLI 因子未进 argv:", argv); return 1
-    if env.get("LLMSEC_PARAM_K_FACTOR") != "48":
-        print("❌ params 因子未进 env:", env); return 1
+    assert "--sampler" in argv and "gap" in argv, f"CLI 因子未进 argv: {argv}"
+    assert env.get("LLMSEC_PARAM_K_FACTOR") == "48", f"params 因子未进 env: {env}"
     assert not ("target" not in " ".join(argv)), "❌ target 未进 argv"
 
 
@@ -54,8 +52,7 @@ def test_grid_exhausts():
         if p is None:
             break
         combos.append(p)
-    if len(combos) != 4:  # 2 × 2
-        print(f"❌ grid 应产出 4 组，实际 {len(combos)}: {combos}"); return 1
+    assert len(combos) == 4, f"grid 应产出 4 组（2×2），实际 {len(combos)}: {combos}"
 
 
 def test_random_in_range():
@@ -70,10 +67,8 @@ def test_random_in_range():
     r = build_search(cfg)
     for _ in range(5):
         p = r.ask()
-        if not (16 <= p["K_FACTOR"] <= 64):
-            print("❌ random int 越界:", p); return 1
-        if not (0.5 <= p["SCORE_PERF_TAU"] <= 4.0):
-            print("❌ random log-float 越界:", p); return 1
+        assert 16 <= p["K_FACTOR"] <= 64, f"random int 越界: {p}"
+        assert 0.5 <= p["SCORE_PERF_TAU"] <= 4.0, f"random log-float 越界: {p}"
 
 
 def test_bayesian_ask_tell():
@@ -87,8 +82,7 @@ def test_bayesian_ask_tell():
     vals = []
     for i in range(3):
         p = b.ask()
-        if p is None or "K_FACTOR" not in p:
-            print("❌ bayesian ask 失败:", p); return 1
+        assert p is not None and "K_FACTOR" in p, f"bayesian ask 失败: {p}"
         v = 10.0 + (p["K_FACTOR"] - 40) ** 2 / 100  # 假目标：K=40 附近最优
         b.tell(p, v)
         vals.append(v)
@@ -112,8 +106,7 @@ def test_metrics_from_report():
             "allergy": {"fpr": 0.2},
         }), encoding="utf-8")
         m = extract_metrics(wd, max_rounds=8)
-    if m.get("conv_rounds") != 6 or m.get("defender_elo") != 1620.0:
-        print("❌ 指标提取错误:", m); return 1
+    assert m.get("conv_rounds") == 6 and m.get("defender_elo") == 1620.0,         f"指标提取错误: {m}"
 
 
 def test_orchestration_mock():
@@ -152,12 +145,14 @@ def test_orchestration_mock():
 
     orig = study_mod.run_trial
     study_mod.run_trial = fake_run_trial
+    orig_studies_dir = study_mod.STUDIES_DIR
     first_count = second_count = -1
+    summary = {}
     try:
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             study_mod.STUDIES_DIR = Path(d)
-            summary = study_mod.run_study(cfg)
+            summary = study_mod.run_study(cfg) or {}
             first_count = call_count["n"]
 
             # 断点续跑：同一 study 目录再跑一次应 0 新调用（4 个 config 已完成）
@@ -166,14 +161,17 @@ def test_orchestration_mock():
             second_count = call_count["n"]
     finally:
         study_mod.run_trial = orig
+        # STUDIES_DIR 必须恢复：此前指向已删除的临时目录且不还原，
+        # 同 worker 的后续测试会继承悬空路径
+        study_mod.STUDIES_DIR = orig_studies_dir
 
-    assert not (first_count != 4), f"❌ 应跑 4 个 trial，实际 {first_count}"
+    assert first_count == 4, f"❌ 应跑 4 个 trial，实际 {first_count}"
     best = summary.get("best")
-    assert not (not best or best["params"].get("K_FACTOR") != 16 or best["params"].get("sampler") != "hybrid"), f"❌ 最佳 config 应为 K=16/hybrid，实际: {best and best['params']}"
+    assert best and best["params"].get("K_FACTOR") == 16 and best["params"].get("sampler") == "hybrid",         f"❌ 最佳 config 应为 K=16/hybrid，实际: {best and best['params']}"
     cr = best.get("conv_rounds_mean")
-    assert not (cr is None or abs(cr - 3.0) > 1e-6), f"❌ 最佳 conv_rounds 应为 3.0，实际 {cr}"
+    assert cr is not None and abs(cr - 3.0) <= 1e-6, f"❌ 最佳 conv_rounds 应为 3.0，实际 {cr}"
     # 断点续跑：第二次 run_study 应 0 新 trial
-    assert not (second_count != 0), f"❌ 断点续跑应 0 新 trial，实际 {second_count}"
+    assert second_count == 0, f"❌ 断点续跑应 0 新 trial，实际 {second_count}"
 
 
 def test_run_trial_strips_task_id_env(monkeypatch, tmp_path):

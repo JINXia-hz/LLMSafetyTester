@@ -53,17 +53,33 @@ class AtomicIndexStore:
         return self.base_dir
 
     def load(self) -> dict:
-        """读索引；不存在返回 {top_key: {}}。"""
+        """读索引；不存在返回 {top_key: {}}。
+
+        索引半写/损坏（JSONDecodeError）时把坏文件改名 .corrupt.<ts> 保存现场，
+        返回空索引自愈——load 无防御会让 gazette/workspace/snapshot 全部连环
+        瘫痪（save 有重试防御，load 此前却没有，不对称）。
+        """
         p = self.path
         if not p.exists():
             return {self.top_key: {}}
-        return json.loads(p.read_text(encoding="utf-8"))
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            import sys
+            bak = p.with_name(f"{p.name}.corrupt.{int(time.time())}")
+            try:
+                p.replace(bak)
+                print(f"[store] 索引损坏已隔离（{e}），重建空索引: {bak}", file=sys.stderr)
+            except OSError:
+                print(f"[store] 索引损坏且隔离失败，重建空索引: {e}", file=sys.stderr)
+            return {self.top_key: {}}
 
     def save(self, idx: dict) -> None:
         """原子写索引（调用方持 self._lock 或走 update()）。
 
-        Windows 下 os.replace 偶有锁竞争（杀软/编辑器占用），重试 3 次。
-        最后一次仍失败则忽略——索引是缓存，丢了下次 append 会重建。
+        Windows 下 os.replace 偶有锁竞争（杀软/编辑器占用）：
+        重试 3 次，最后再强制一次；全部失败则记 stderr（索引是缓存，
+        丢了下次 append 会重建，但残留 tmp 与静默丢更新须可排查）。
         """
         self.ensure_dir()
         p = self.path
@@ -75,11 +91,13 @@ class AtomicIndexStore:
                 return
             except PermissionError:
                 time.sleep(0.05)
-        # 最后一次仍失败则强制写
+        # 第 4 次强制写
         try:
             os.replace(str(tmp), str(p))
         except PermissionError:
-            pass
+            import sys
+            print(f"[store] 索引写入失败（4 次尝试后放弃），本次更新丢失: {p}",
+                  file=sys.stderr)
 
     def now(self) -> str:
         """ISO 时间戳（秒精度）。"""
@@ -89,6 +107,8 @@ class AtomicIndexStore:
         """加锁 RMW：读索引 → mutator(idx) 改写 → 原子写回。返回 mutator 的返回值。
 
         mutator 接收 idx dict，可直接修改并返回结果。
+        注意：写回由本方法负责——此前实现只 load+mutate 忘了 save，
+        依赖各调用方在 mutator 里自行 save 兜底（易踩坑，现统一收口）。
 
         跨进程保护（中期档修复）：self._lock 只护进程内线程，dashboard 进程与 MCP 进程
         并发操作同一 _index.json（如 workspace fork/env_snapshot create）时 RMW 会被打破
@@ -101,4 +121,6 @@ class AtomicIndexStore:
         with self._lock:
             with cross_process_lock(self.path, timeout=5.0, strict=True):
                 idx = self.load()
-                return mutator(idx)
+                result = mutator(idx)
+                self.save(idx)
+                return result

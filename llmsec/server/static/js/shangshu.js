@@ -19,6 +19,12 @@ function loadShangshuSection() {
   if (!_pollTimer) _pollTimer = setInterval(pollBus, 2000);
 }
 
+// 离开宣政殿时停止轮询（core.js 的 loadSection 调用）——
+// 此前 setInterval 永不清除，2s 轮询持续到关页
+function unloadShangshuSection() {
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+}
+
 function bindShangshu() {
   _ssBound = true;
   const refresh = $('ss-refresh');

@@ -1,18 +1,18 @@
-"""control router — 把控制层（control/）能力暴露给看板 UI。
+"""control.api — 控制层（control/）的 FastAPI router，把三省能力暴露给看板 UI。
 
-薄封装 control.agent.* / control.core.* 为 FastAPI 端点。
-control 内部仍守隔离边界（不 import llmsec 内部），本 router 只是 control 的一个 caller。
+薄封装 control.agent.* / control.core.* 为端点。本模块属于 control 包，
+守隔离边界（不 import llmsec 内部，日志用标准库 logging）；由 llmsec 的
+dashboard_api 作为**组合根**唯一一处 import 挂载——llmsec→control 的依赖
+收口到这一行，不再是散落在 routers/ 里的隐性倒置。
 
 端点：
   GET    /api/control/workspaces          列出 fork 工作区
   POST   /api/control/fork                fork 新工作区
-  POST   /api/control/fork-and-run        fork 并异步起 runner（复用 tasks 机制）
   DELETE /api/control/workspaces/{name}   删除工作区
   POST   /api/control/compare             对比 run
   POST   /api/control/merge               合并 R 矩阵
   POST   /api/control/chat                中书省对话（复杂指令→尚书省拟案）
   POST   /api/control/chat/reset          清空 session
-  POST   /api/control/review              门下省审查某 run
   GET    /api/control/llm-status          LLM 是否已配置
   GET    /api/control/tools               列出中书省工具 schema
   GET    /api/control/capabilities        列出尚书省能力清单
@@ -21,17 +21,16 @@ control 内部仍守隔离边界（不 import llmsec 内部），本 router 只�
   POST   /api/control/plan/reject         用户驳回 Plan
   POST   /api/control/plan/block/approve  用户准奏某步封驳（放行该步）
   GET    /api/control/plan/{id}/status    查 Plan 执行状态
-  GET    /api/control/plans               列出最近 Plan
   --- 总线 feed（三省面板轮询）---
   GET    /api/control/bus/feed            总线消息流
-  GET    /api/control/blocks              当前待确认封驳列表
-  --- .env 快照 ---
-  GET    /api/control/env-snapshots       列出 .env 快照
-  POST   /api/control/env-snapshots       创建快照
-  DELETE /api/control/env-snapshots/{name} 删除快照
+
+（审查清理：fork-and-run / review / plan/queue / plans / blocks /
+env-snapshots×3 共 8 个端点经全仓 grep 确认无任何调用方，已删除。）
 """
 
 from __future__ import annotations
+
+import logging
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -43,15 +42,12 @@ from control.agent.shangshu import capabilities as caps_mod
 from control.agent.zhongshu import handle_message as zhongshu_handle
 from control.agent.zhongshu import session as sess
 from control.agent.zhongshu import tools as zs_tools
-from control.config import WORKSPACES_DIR
 from control.core import compare as compare_mod
 from control.core import workspace as ws_mod
-from control.core.paths import safe_component
-from llmsec.core.logging import get_logger
 
 router = APIRouter()
 
-logger = get_logger(__name__)
+logger = logging.getLogger("control.api")
 
 # 门下省在 router 加载时初始化（订阅总线）
 menxia.init_menxia()
@@ -64,16 +60,6 @@ class ForkRequest(BaseModel):
     name: str
     source: str = "global"
     note: str = ""
-
-
-class ForkRunRequest(BaseModel):
-    name: str
-    source: str = "global"
-    note: str = ""
-    target: str | None = None
-    input_file: str = "attacks/l1.jsonl"
-    max_rounds: int = 5
-    seed: int | None = None
 
 
 class CompareRequest(BaseModel):
@@ -90,11 +76,6 @@ class MergeRequest(BaseModel):
 class ChatRequest(BaseModel):
     text: str
     session_id: str | None = None
-
-
-class ReviewRequest(BaseModel):
-    run: str
-    use_llm: bool = True
 
 
 class ResetRequest(BaseModel):
@@ -115,12 +96,6 @@ class BlockApproveRequest(BaseModel):
     step_id: str
 
 
-class EnvSnapshotCreateRequest(BaseModel):
-    name: str
-    source: str = "global"
-    note: str = ""
-
-
 # ============================================================
 # 工作区管理
 # ============================================================
@@ -128,8 +103,10 @@ class EnvSnapshotCreateRequest(BaseModel):
 def api_list_workspaces():
     try:
         return {"workspaces": ws_mod.list_workspaces()}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        # 不把内部异常文本回传客户端（可能含路径等敏感信息），与 api_chat 同策略
+        logger.exception("处理失败")
+        raise HTTPException(status_code=500, detail="处理失败，请查看服务端日志")
 
 
 @router.post("/api/control/fork")
@@ -138,28 +115,10 @@ def api_fork(req: ForkRequest):
         return ws_mod.fork(req.name, source=req.source, note=req.note)
     except (FileExistsError, FileNotFoundError, ValueError) as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/api/control/fork-and-run")
-def api_fork_and_run(req: ForkRunRequest):
-    """fork 后异步起 runner（复用 tasks 子系统的任务跟踪 + SSE）。"""
-    try:
-        info = ws_mod.fork(req.name, source=req.source, note=req.note)
-    except (FileExistsError, FileNotFoundError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    from llmsec.server.routers.tasks import _start_task
-    ws_dir = safe_component(WORKSPACES_DIR, req.name)
-    argv = ["-m", "llmsec.pipeline.runner", "--work-dir", str(ws_dir),
-            "--input", req.input_file, "--max-rounds", str(req.max_rounds),
-            "--phase", "all", "--no-early-stop"]
-    if req.target:
-        argv += ["--target", req.target]
-    if req.seed is not None:
-        argv += ["--seed", str(req.seed)]
-    task = _start_task("control-run", argv)
-    return {"workspace": info, "task": task}
+    except Exception:
+        # 不把内部异常文本回传客户端（可能含路径等敏感信息），与 api_chat 同策略
+        logger.exception("处理失败")
+        raise HTTPException(status_code=500, detail="处理失败，请查看服务端日志")
 
 
 @router.delete("/api/control/workspaces/{name}")
@@ -171,8 +130,10 @@ def api_delete_workspace(name: str):
     except ValueError as e:
         # 名称非法（路径穿越）
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        # 不把内部异常文本回传客户端（可能含路径等敏感信息），与 api_chat 同策略
+        logger.exception("处理失败")
+        raise HTTPException(status_code=500, detail="处理失败，请查看服务端日志")
 
 
 # ============================================================
@@ -184,8 +145,10 @@ def api_compare(req: CompareRequest):
         raise HTTPException(status_code=400, detail="至少需要 2 个 run")
     try:
         return compare_mod.compare(req.runs)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        # 不把内部异常文本回传客户端（可能含路径等敏感信息），与 api_chat 同策略
+        logger.exception("处理失败")
+        raise HTTPException(status_code=500, detail="处理失败，请查看服务端日志")
 
 
 @router.post("/api/control/merge")
@@ -197,8 +160,10 @@ def api_merge(req: MergeRequest):
             "models": req.models, "confirm": req.confirm,
         })
         return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        # 不把内部异常文本回传客户端（可能含路径等敏感信息），与 api_chat 同策略
+        logger.exception("处理失败")
+        raise HTTPException(status_code=500, detail="处理失败，请查看服务端日志")
 
 
 # ============================================================
@@ -245,21 +210,6 @@ def api_chat_reset(req: ResetRequest):
     return {"session_id": req.session_id, "reset": True}
 
 
-@router.post("/api/control/review")
-def api_review(req: ReviewRequest):
-    """门下省审查：读 run 报告，识别异常，呈递摘要。"""
-    from control.agent.menxia import review_run
-    try:
-        result = review_run(req.run, use_llm=req.use_llm)
-        if "error" in result:
-            raise HTTPException(status_code=404, detail=result["error"])
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 # ============================================================
 # Plan 管理（尚书省执行）
 # ============================================================
@@ -278,8 +228,10 @@ def api_plan_approve(req: PlanApproveRequest):
         return {"plan_id": req.plan_id, "queue_status": queue_status}
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        # 不把内部异常文本回传客户端（可能含路径等敏感信息），与 api_chat 同策略
+        logger.exception("处理失败")
+        raise HTTPException(status_code=500, detail="处理失败，请查看服务端日志")
 
 
 @router.post("/api/control/plan/reject")
@@ -293,8 +245,10 @@ def api_plan_reject(req: PlanRejectRequest):
         return plan.to_dict()
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Plan 不存在: {req.plan_id}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        # 不把内部异常文本回传客户端（可能含路径等敏感信息），与 api_chat 同策略
+        logger.exception("处理失败")
+        raise HTTPException(status_code=500, detail="处理失败，请查看服务端日志")
 
 
 @router.post("/api/control/plan/block/approve")
@@ -349,13 +303,6 @@ def api_block_approve(req: BlockApproveRequest):
             "requeued": requeued}
 
 
-@router.get("/api/control/plan/queue")
-def api_plan_queue():
-    """查 Plan 执行队列状态（正在执行 + 排队中）。"""
-    from control.agent.shangshu import get_queue
-    return get_queue().status()
-
-
 @router.get("/api/control/plan/{plan_id}/status")
 def api_plan_status(plan_id: str):
     """查 Plan 执行状态。"""
@@ -364,13 +311,6 @@ def api_plan_status(plan_id: str):
     if plan is None:
         raise HTTPException(status_code=404, detail=f"Plan 不存在: {plan_id}")
     return plan.to_dict()
-
-
-@router.get("/api/control/plans")
-def api_plans():
-    """列出最近 Plan。"""
-    from control.agent.shangshu import list_plans
-    return {"plans": list_plans()}
 
 
 # ============================================================
@@ -383,43 +323,3 @@ def api_bus_feed(since: float = 0.0, dept: str | None = None):
     kinds = None  # 返回所有 kind（前端按需过滤）
     msgs = bus.recent(since_ts=since, dept=dept, kinds=kinds)
     return {"messages": [m.to_dict() for m in msgs], "latest_ts": msgs[-1].ts if msgs else since}
-
-
-@router.get("/api/control/blocks")
-def api_blocks():
-    """当前待确认封驳列表。"""
-    return {"blocks": menxia.list_pending_blocks()}
-
-
-# ============================================================
-# .env 快照
-# ============================================================
-@router.get("/api/control/env-snapshots")
-def api_env_snapshots_list():
-    from control.core import env_snapshot
-    return {"snapshots": env_snapshot.list_snapshots()}
-
-
-@router.post("/api/control/env-snapshots")
-def api_env_snapshots_create(req: EnvSnapshotCreateRequest):
-    from control.core import env_snapshot
-    try:
-        return env_snapshot.create(req.name, source=req.source, note=req.note)
-    except (FileExistsError, FileNotFoundError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.delete("/api/control/env-snapshots/{name}")
-def api_env_snapshots_delete(name: str):
-    from control.core import env_snapshot
-    try:
-        return env_snapshot.delete(name)
-    except (KeyError, ValueError) as e:
-        # KeyError=不存在；ValueError=名称非法（路径穿越）
-        if isinstance(e, KeyError):
-            raise HTTPException(status_code=404, detail=f"快照不存在: {name}")
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))

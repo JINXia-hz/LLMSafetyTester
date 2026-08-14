@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from llmsec import params as P
 from llmsec.core.config import OUTPUT_DIR
 from llmsec.core.logging import get_logger
-from llmsec.server.routers.tasks import _start_task
+from llmsec.server import task_manager
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -119,6 +119,12 @@ async def api_run_hpo(req: HpoRequest):
         raise HTTPException(400, "study 名不能为空")
     if not req.targets and not req.fixed.get("target"):
         raise HTTPException(400, "未选择目标模型（targets 为空且 fixed 无 target）——study 无目标可跑")
+    # name 进文件路径前须做安全组件校验（"../../evil" 可把 yaml 写到 experiments 之外）
+    from llmsec.core.paths import safe_component
+    try:
+        safe_name = safe_component(OUTPUT_DIR / "experiments", req.name.strip()).name
+    except ValueError as e:
+        raise HTTPException(400, f"study 名非法: {e}")
     # 构造 StudyConfig 兼容的 dict（schema.StudyConfig.from_dict 解析）
     cfg_dict = {
         "name": req.name.strip(),
@@ -136,10 +142,10 @@ async def api_run_hpo(req: HpoRequest):
     }
     studies_dir = OUTPUT_DIR / "experiments"
     studies_dir.mkdir(parents=True, exist_ok=True)
-    yaml_path = studies_dir / f"_dashboard_{req.name.strip()}.yaml"
+    yaml_path = studies_dir / f"_dashboard_{safe_name}.yaml"
     try:
         yaml_path.write_text(yaml.safe_dump(cfg_dict, allow_unicode=True, sort_keys=False), encoding="utf-8")
     except Exception as e:
         raise HTTPException(500, f"study.yaml 写入失败: {e}")
     # 备份配置副本到 study 目录（run_study 也会拷贝；此处冗余无妨）
-    return _start_task("hpo", ["-m", "llmsec.experiments", "run", str(yaml_path)])
+    return task_manager.start_task("hpo", ["-m", "llmsec.experiments", "run", str(yaml_path)])

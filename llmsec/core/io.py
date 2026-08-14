@@ -7,7 +7,7 @@ core.io — 统一文件 I/O 工具层
   - JSONL：read_jsonl / iter_jsonl / write_jsonl / append_jsonl / load_done_ids
   - JSON （单对象）：read_json / write_json
   - 二进制 artifacts（joblib/pickle）：load_artifact / save_artifact
-  - CSV：read_csv / write_csv
+  - CSV：write_csv
 
 所有文本操作统一 utf-8 编码；写操作自动创建父目录。
 
@@ -71,19 +71,29 @@ def iter_jsonl(path) -> Iterator[dict]:
 def write_jsonl(path, rows) -> None:
     """整体覆写 JSONL 文件（自动创建父目录）。
 
-    原子写（仿 write_json）：写 <path>.tmp → flush+fsync → os.replace，
-    中断不会留下截断的 JSONL。
+    原子写（仿 write_json）：写 <path>.tmp.<pid>.<tid> → flush+fsync → os.replace，
+    中断不会留下截断的 JSONL。tmp 名带 pid/tid 后缀：同进程两线程并发覆写同一
+    文件时固定名会互踩（save_artifact 的 P9 同类修复）。
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}")
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             for row in rows:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        # Windows 上并发 replace 同一目标会瞬时 PermissionError（WinError 5），
+        # 短重试即可（save_artifact 的 P9 同款处理）
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05)
     except OSError:
         # 清理残留 tmp（os.replace 失败时）
         try:
@@ -268,15 +278,6 @@ def save_artifact(path, obj, *, atomic: bool = True, backup: bool = False) -> No
 # ============================================================
 # CSV
 # ============================================================
-def read_csv(path) -> list[dict]:
-    """读取整个 CSV 为 dict 行列表（utf-8）。文件不存在返回空列表。"""
-    path = Path(path)
-    if not path.exists():
-        return []
-    with open(path, encoding="utf-8", newline="") as f:
-        return list(csv.DictReader(f))
-
-
 def write_csv(path, rows: list[dict]) -> None:
     """写入 CSV（首行取字段名，自动创建父目录）。空 rows 不写表头以外的内容。"""
     path = Path(path)

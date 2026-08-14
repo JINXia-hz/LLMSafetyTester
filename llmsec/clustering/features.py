@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-from llmsec.core.logging import get_logger
-
 """
 攻击特征提取模块
 
@@ -35,6 +33,7 @@ from llmsec.core import (
     read_jsonl,
     strip_math_tax,
 )
+from llmsec.core.logging import get_logger
 from llmsec.core.seed import get_global_seed as _global_seed
 from llmsec.params import EMBEDDING_PCA_DIM, TFIDF_FALLBACK_FEATURES
 
@@ -240,18 +239,22 @@ def _get_embedding_model():
     return None
 
 
-def _embedding_cache_key() -> str:
+def _embedding_cache_key(model=None) -> str:
     """构造 embedding 缓存键（与 cold_start.current_feature_config_hash 同口径）。
 
     内联计算以避免 cold_start ↔ features 循环导入。
     内容 = (embedding 来源/模型, EMBEDDING_PCA_DIM, 特征提取代码版本)。
+    model：实际编码模型对象——类名并入键。env 同名但实例不同（如测试注入
+    stub、或换了维度不同的模型）时维度混入同一 bucket 会在组装期崩
+    （(10,) 广播进 (384,)），必须隔离开。
     """
     source = _embedding_source  # None=尚未提取（或 TF-IDF 兜底）
     if source == "api":
-        model = os.environ.get("EMBEDDING_API_MODEL", "")
+        env_model = os.environ.get("EMBEDDING_API_MODEL", "")
     else:
-        model = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-    content = f"{source or 'tfidf'}:{model}|pca_dim={EMBEDDING_PCA_DIM}|v1"
+        env_model = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+    cls = "" if model is None or isinstance(model, str) else type(model).__name__
+    content = f"{source or 'tfidf'}:{env_model}|pca_dim={EMBEDDING_PCA_DIM}|cls={cls}|v1"
     return hashlib.md5(content.encode("utf-8")).hexdigest()[:8]
 
 
@@ -290,7 +293,7 @@ def _cached_encode(prompts: list[str], model) -> np.ndarray:
     if not prompts:
         return np.array([], dtype=np.float64).reshape(0, 0)
 
-    cache_key = _embedding_cache_key()
+    cache_key = _embedding_cache_key(model)
     cache = _load_embedding_cache()
     bucket = cache.get(cache_key, {})
 
@@ -503,8 +506,6 @@ def extract_technique_labels(records: list[dict]) -> tuple[dict[str, np.ndarray]
 def extract_intent_features(
     methods: list[str],
     method_prompts: dict[str, list[str]],
-    text_embeddings: np.ndarray,
-    method_to_idx: dict[str, int],
 ) -> dict[str, np.ndarray]:
     """
     提取意图与对抗强度特征。
@@ -519,16 +520,11 @@ def extract_intent_features(
         prompts = method_prompts.get(method, [""])
         feats = []
 
-        # 语义漂移量：优先用 embedding pairwise cosine 距离；无 embedding 退化为长度方差
+        # 语义漂移量：text_embeddings 是聚合后的 method 级向量（每 method 一行），
+        # 而非逐 prompt 的——多 prompt 方法统一退化为长度方差代理
+        #（此前 if/elif 两分支代码逐行相同，参数条件无意义，已合并）
         drift = 0.0
-        if len(prompts) > 1 and text_embeddings is not None and method in method_to_idx:
-            # text_embeddings 是聚合后的 method 级向量（每 method 一行），
-            # 而非逐 prompt 的——故多 prompt 方法退化为长度方差代理
-            cleaned = [strip_math_tax(p) for p in prompts]
-            lengths = [len(c) for c in cleaned]
-            if max(lengths) > 0:
-                drift = float(np.std(lengths)) / max(lengths)
-        elif len(prompts) > 1:
+        if len(prompts) > 1:
             cleaned = [strip_math_tax(p) for p in prompts]
             lengths = [len(c) for c in cleaned]
             if max(lengths) > 0:
@@ -813,7 +809,7 @@ def extract_all_features(
 
     # ---- 维 3: 意图与对抗强度 ----
     logger.info("  维3: 意图与对抗强度 ...")
-    intent_feats = extract_intent_features(methods, method_prompts_raw, text_embeddings, method_to_idx)
+    intent_feats = extract_intent_features(methods, method_prompts_raw)
 
     # ---- 维 4: 防御交互 ----
     logger.info("  维4: 防御交互 ...")
@@ -898,14 +894,21 @@ def load_and_extract(
         if not result_path.is_absolute():
             result_path = OUTPUT_DIR / result_file
     else:
-        # 自动查找最新一次 runner 评估结果（runs/<ts>/attack_results.jsonl）
+        # 自动查找最新一次 runner 评估结果。产物在 runs/<ts>/<target>/attack_results.jsonl
+        #（新并发布局：batch 目录下按 target 分目录——batch 直下不再有该文件，
+        #  旧的单层查找恒落空）
         candidates = []
         runs_dir = OUTPUT_DIR / "runs"
         if runs_dir.exists():
             for d in sorted(runs_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-                af = d / "attack_results.jsonl"
-                if af.exists():
-                    candidates.append(af)
+                if not d.is_dir():
+                    continue
+                for t in sorted(d.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                    af = t / "attack_results.jsonl"
+                    if t.is_dir() and af.exists():
+                        candidates.append(af)
+                        break
+                if candidates:
                     break
         result_path = None
         for c in candidates:

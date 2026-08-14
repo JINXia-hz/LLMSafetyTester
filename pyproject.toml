@@ -17,12 +17,14 @@ dependencies = [
     "uvicorn>=0.20,<1",
     "pydantic>=2,<3",
     "jinja2>=3,<4",
-    "pandas>=2,<4",
     "python-multipart>=0.0.6",
     "numpy>=1.24",
     "scikit-learn>=1.3",
     "scipy>=1.10",
     "optuna>=3,<4",
+    "pyyaml>=6,<7",
+    # 控制层（control/）跨进程文件锁——workspace/env_snapshot/gazette 的索引 RMW
+    "filelock>=3,<4",
 ]
 
 [project.optional-dependencies]
@@ -52,7 +54,9 @@ llmsec-manage = "llmsec.management.__main__:main"
 llmsec-mcp = "llmsec.mcp.server:main"
 
 [tool.setuptools.packages.find]
-include = ["llmsec*"]
+# control 必须入包：llmsec.server.dashboard_api 模块级 import 并注册 control.router，
+# 缺了它非可编辑安装（pip install llmsec）的 dashboard 直接 ImportError
+include = ["llmsec*", "control*"]
 
 [tool.ruff]
 target-version = "py311"
@@ -90,7 +94,6 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = [
     "E402",   # 测试中 mock 后再 import
-    "E702",   # print+return 单行（旧式测试 helper）
     "E741",   # 模糊变量名 l（list comprehension 中常用）
     "B007",   # 未使用循环变量 i（enumerate 常见）
     "B011",   # assert False（测试中故意触发失败）

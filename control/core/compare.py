@@ -162,6 +162,25 @@ def discover_workspace_runs() -> list[dict]:
     return out
 
 
+def list_all_runs(*, target: str | None = None, since: str | None = None,
+                  junk_only: bool = False, include_workspaces: bool = True) -> list[dict]:
+    """列出历史 run +（可选）workspace 分支内的 run。
+
+    中书省 tools._do_list_runs 与尚书省 capabilities._h_list_runs 的统一口径
+    （此前两份实现行为分叉：一版对 workspace runs 按 target 过滤、一版不过滤，
+    同名能力经两省执行结果不一致）。
+    """
+    from control.core.invoker import list_runs as inv_list_runs
+    runs = inv_list_runs(target=target, since=since, junk_only=junk_only)
+    if include_workspaces:
+        ws_runs = discover_workspace_runs()
+        if target:
+            ws_runs = [r for r in ws_runs if r.get("target") == target
+                       or r.get("target_model") == target]
+        runs = runs + ws_runs
+    return runs
+
+
 # ============================================================
 # 多 run 对比
 # ============================================================
