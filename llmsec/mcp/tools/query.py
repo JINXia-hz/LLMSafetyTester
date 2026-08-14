@@ -321,8 +321,167 @@ def list_targets() -> list[dict[str, Any]]:
 
 
 # ============================================================
-# Elo 进阶：下一轮配对建议
+# 目标模型探活
 # ============================================================
+def probe_targets(name: str | None = None) -> dict[str, Any]:
+    """探测目标模型和服务的 API 连通性（快速健康检查）。
+
+    对每个目标模型发送最轻量请求（models.list + chat smoke），返回是否可达、
+    延迟、错误信息。全量模式下还探测 generator 和 judge 服务。
+
+    **强烈建议在 run_evaluation 前先探测**——如果某模型不可达（鉴权失败/网络不通），
+    跑完整评估只会得到全 ASR=0 的假阴性结果，浪费 API 额度。
+
+    两阶段探测：
+      1. models.list（GET）—— 校验端点连通，不消耗 token
+      2. chat smoke（max_tokens=64）—— 校验鉴权（401/403 判不可达）
+
+    Args:
+        name: 只探测指定目标模型（不探 services）。None 探测全部目标 + generator + judge。
+
+    Returns:
+        {targets: [{name, model, reachable, latency_ms, error, warning}],
+         services: [{name, model, reachable, latency_ms, error, warning}]}
+    """
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _do() -> dict[str, Any]:
+        from llmsec.core.config import (
+            GeneratorConfig,
+            JudgeConfig,
+            load_targets,
+            target_backend,
+        )
+        from llmsec.core.llm import create_openai_client
+
+        try:
+            targets_cfg = load_targets()
+        except Exception:
+            return {"targets": [], "services": [], "error": "load_targets 失败，检查 .env"}
+
+        if name:
+            targets_cfg = {k: v for k, v in targets_cfg.items() if k == name}
+
+        def _model_warning(model_ids: list[str] | None, model: str) -> str | None:
+            if model_ids and model and model not in model_ids:
+                return f"模型 {model} 不在端点列表"
+            return None
+
+        def _probe_one(n: str, cfg) -> dict[str, Any]:
+            """探测单个目标模型（同步版）。"""
+            backend = target_backend(n)
+            t0 = time.time()
+            ids = None
+            try:
+                if backend == "pcap_judge":
+                    import requests
+                    import urllib3
+                    urllib3.disable_warnings()
+                    r = requests.get(cfg.base_url, timeout=5, verify=False)
+                    r.raise_for_status()
+                else:
+                    client = create_openai_client(cfg.api_key, cfg.base_url, timeout=5.0)
+                    ids = [m.id for m in client.models.list()]
+                latency = round((time.time() - t0) * 1000)
+            except Exception as e:
+                return {"name": n, "model": cfg.model, "reachable": False,
+                        "latency_ms": None, "error": str(e)[:120], "warning": None}
+
+            # 第二段：chat smoke（只对 OpenAI 兼容目标）
+            warnings = []
+            w = _model_warning(ids, cfg.model)
+            if w:
+                warnings.append(w)
+            if backend != "pcap_judge":
+                try:
+                    client = create_openai_client(cfg.api_key, cfg.base_url, timeout=12.0)
+                    resp = client.chat.completions.create(
+                        model=cfg.model,
+                        messages=[{"role": "user", "content": "ping"}],
+                        max_tokens=64,
+                    )
+                    msg = resp.choices[0].message
+                    content = getattr(msg, "content", None)
+                    reasoning = getattr(msg, "reasoning_content", None)
+                    finish = resp.choices[0].finish_reason
+                    if content is None and reasoning:
+                        warnings.append("推理模型：content 为空但 reasoning_content 有内容")
+                    elif content is None and finish == "length":
+                        warnings.append("chat 探活预算不足被截断（真实请求不受影响）")
+                    elif content is None:
+                        warnings.append("chat 返回空 content（疑似配置问题）")
+                except Exception as e:
+                    status = getattr(e, "status_code", None)
+                    if status in (401, 403):
+                        return {"name": n, "model": cfg.model, "reachable": False,
+                                "latency_ms": latency, "error": f"chat 鉴权失败({status}): {str(e)[:80]}",
+                                "warning": None}
+                    warnings.append(f"chat 探测失败（不阻塞）: {str(e)[:80]}")
+            return {"name": n, "model": cfg.model, "reachable": True,
+                    "latency_ms": latency, "error": None,
+                    "warning": "；".join(warnings) or None}
+
+        def _probe_service(svc_name: str, cfg) -> dict[str, Any]:
+            """探测 generator/judge 服务（同步版）。"""
+            t0 = time.time()
+            try:
+                client = create_openai_client(cfg.api_key, cfg.base_url, timeout=5.0)
+                ids = [m.id for m in client.models.list()]
+                latency = round((time.time() - t0) * 1000)
+            except Exception as e:
+                return {"name": svc_name, "model": cfg.model, "reachable": False,
+                        "latency_ms": None, "error": str(e)[:120], "warning": None}
+
+            warnings = []
+            w = _model_warning(ids, cfg.model)
+            if w:
+                warnings.append(w)
+            # chat smoke
+            try:
+                client = create_openai_client(cfg.api_key, cfg.base_url, timeout=12.0)
+                resp = client.chat.completions.create(
+                    model=cfg.model,
+                    messages=[{"role": "user", "content": "ping"}],
+                    max_tokens=64,
+                )
+                msg = resp.choices[0].message
+                content = getattr(msg, "content", None)
+                reasoning = getattr(msg, "reasoning_content", None)
+                finish = resp.choices[0].finish_reason
+                if content is None and reasoning:
+                    warnings.append("推理模型：content 为空但 reasoning_content 有内容")
+                elif content is None and finish == "length":
+                    warnings.append("chat 探活预算不足被截断")
+                elif content is None:
+                    warnings.append("chat 返回空 content（疑似配置问题）")
+            except Exception as e:
+                status = getattr(e, "status_code", None)
+                if status in (401, 403):
+                    return {"name": svc_name, "model": cfg.model, "reachable": False,
+                            "latency_ms": latency, "error": f"chat 鉴权失败({status}): {str(e)[:80]}",
+                            "warning": None}
+                warnings.append(f"chat 探测失败: {str(e)[:80]}")
+            return {"name": svc_name, "model": cfg.model, "reachable": True,
+                    "latency_ms": latency, "error": None,
+                    "warning": "；".join(warnings) or None}
+
+        # 并行探测所有目标
+        target_results: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=min(8, len(targets_cfg) or 1)) as pool:
+            futures = {pool.submit(_probe_one, n, c): n for n, c in targets_cfg.items()}
+            for fut in as_completed(futures):
+                target_results.append(fut.result())
+        target_results.sort(key=lambda x: list(targets_cfg.keys()).index(x["name"]))
+
+        services: list[dict[str, Any]] = []
+        if not name:
+            services.append(_probe_service("generator", GeneratorConfig.from_env()))
+            services.append(_probe_service("judge", JudgeConfig.from_env()))
+
+        return {"targets": target_results, "services": services}
+
+    return _try(_do, error_hint="探活失败，检查 .env 连接配置是否正确")
 def elo_suggest_next_pairing(
     model: str,
     n: int = 5,
@@ -584,6 +743,7 @@ def register(mcp: Any) -> None:
     mcp.tool(elo_suggest_next_pairing)
     mcp.tool(get_allergy_report)
     mcp.tool(list_targets)
+    mcp.tool(probe_targets)
     mcp.tool(list_workspaces)
     mcp.tool(list_workspace_runs)
     mcp.tool(get_cluster_report)
