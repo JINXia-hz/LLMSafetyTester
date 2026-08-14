@@ -36,6 +36,9 @@ TASKS: dict[str, dict] = {}
 _TASKS_MAX = 64
 _TERMINAL_STATUSES = ("success", "failed", "cancelled")
 
+# 僵尸任务检测：running 超 N 分钟无 progress 产出则告警（不自动杀，避免误杀慢任务）
+_ZOMBIE_MINUTES = float(os.getenv("LLMSEC_ZOMBIE_MINUTES", "60") or "60")
+
 
 # ============================================================
 # 内部
@@ -60,12 +63,18 @@ def _refresh_task_status(t: dict) -> None:
 
     子进程可能崩溃且无人轮询，若不在每次 _task_view 里更新状态，TASKS 会残留
     永久 running 的任务（阻塞同 kind 队列推进、log_file 句柄泄漏）。
+
+    告警：
+      - 终态=failed → emit_alert（监控设施 try/except 兜底，绝不影响状态刷新）
+      - running 超 _ZOMBIE_MINUTES 无产出 → 僵尸告警（告警但不自动杀）
     """
     if t["status"] != "running":
         return
     proc: subprocess.Popen = t["proc"]
     rc = proc.poll()
     if rc is None:
+        # 进程仍活着：检查僵尸态（超时无产出）
+        _check_zombie(t)
         return
     t["status"] = "success" if rc == 0 else "failed"
     t["returncode"] = rc
@@ -73,7 +82,52 @@ def _refresh_task_status(t: dict) -> None:
     if log_file is not None:
         log_file.close()
         t["log_file"] = None
+    # 失败告警（监控设施故障不影响状态机）
+    if t["status"] == "failed":
+        try:
+            from llmsec.core.monitoring import alert_task_failed
+
+            alert_task_failed(
+                task_id=t.get("_task_id", "?"),
+                kind=t["kind"],
+                cmd=t.get("cmd", ""),
+                log_path=str(t["log_path"]),
+                returncode=rc,
+            )
+        except Exception:
+            pass
     _advance_queue(t["kind"])
+
+
+def _check_zombie(t: dict) -> None:
+    """僵尸任务检测：running 超 _ZOMBIE_MINUTES 且 progress.jsonl 无新写入则告警。
+
+    告警但不自动杀（避免误杀慢任务）。每个任务只告警一次（靠 monitoring 去抖）。
+    """
+    try:
+        spawned = t.get("spawned_at")
+        if spawned is None:
+            return
+        running_minutes = (datetime.now() - spawned).total_seconds() / 60.0
+        if running_minutes < _ZOMBIE_MINUTES:
+            return
+        # progress.jsonl 最近修改时间（无文件或无更新视为僵尸）
+        prog_path = _progress_path(t.get("_task_id", ""))
+        if prog_path.exists():
+            mtime = datetime.fromtimestamp(prog_path.stat().st_mtime)
+            idle_minutes = (datetime.now() - mtime).total_seconds() / 60.0
+            if idle_minutes < _ZOMBIE_MINUTES:
+                return  # progress 近期有更新，不是僵尸
+        from llmsec.core.monitoring import alert_zombie_task
+
+        alert_zombie_task(
+            task_id=t.get("_task_id", "?"),
+            kind=t["kind"],
+            cmd=t.get("cmd", ""),
+            running_minutes=running_minutes,
+        )
+    except Exception:
+        pass
 
 
 def _spawn(task_id: str, t: dict) -> None:
@@ -104,6 +158,7 @@ def _spawn(task_id: str, t: dict) -> None:
     t["proc"] = proc
     t["log_file"] = log_file
     t["status"] = "running"
+    t["spawned_at"] = datetime.now()
 
 
 def _advance_queue(kind: str) -> None:
@@ -152,6 +207,7 @@ def start_task(kind: str, argv: list[str], *, env_override: dict[str, str] | Non
         "log_file": None,
         "status": "queued",
         "started_at": datetime.now().isoformat(),
+        "_task_id": task_id,  # 供告警/僵尸检测引用
     }
     _evict_tasks()
     _advance_queue(kind)

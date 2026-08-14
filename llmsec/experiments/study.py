@@ -224,6 +224,17 @@ def run_study(config: StudyConfig) -> dict:
                     })
                     if consecutive_failures >= _FAIL_ABORT:
                         logger.warning(f"⚠ 连续 {consecutive_failures} 个 trial 失败/超时，中止 study（疑似系统性故障）")
+                        # 告警（监控设施故障不影响 study 中止逻辑）
+                        try:
+                            from llmsec.core.monitoring import alert_study_aborted
+
+                            alert_study_aborted(
+                                study_name=config.name,
+                                consecutive_failures=consecutive_failures,
+                                detail=f"连续 {consecutive_failures} 个 trial 失败/超时，study '{config.name}' 已中止（疑似系统性故障）。",
+                            )
+                        except Exception:
+                            pass
                         abort_study = True
                     # wall-clock 检查（repeat 单元内部）：原仅在 config 边界检查，
                     # max_concurrent=1 顺序 repeats 时可能在下一个边界检查前已超时仍空转烧 API

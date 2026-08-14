@@ -71,6 +71,13 @@ CLUSTER_SECURITY_ANALYSIS_FILE = OUTPUT_DIR / "cluster_security_analysis.json"
 # 后台任务日志目录（dashboard 子进程任务）
 TASK_LOG_DIR = OUTPUT_DIR / "tasks"
 
+# 持久化日志目录（RotatingFileHandler 落盘，monitoring 监控设施）
+LOG_DIR = OUTPUT_DIR / "logs"
+LOG_FILE = LOG_DIR / "llmsec.log"
+
+# 告警事件文件（append-only JSONL，webhook + 事件文件双通道）
+ALERTS_FILE = OUTPUT_DIR / "alerts.jsonl"
+
 # 内置静态数据目录（HarmBench 行为库 + 越狱模板，出处见 data/Explication.md）
 DATA_DIR = PROJECT_ROOT / "data"
 

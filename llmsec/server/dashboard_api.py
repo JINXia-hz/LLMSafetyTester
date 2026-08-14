@@ -16,15 +16,17 @@ LLMSEC 安全评估 Web 面板（FastAPI + 原生 HTML/JS）
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from llmsec.core.config import RUNS_DIR
+from llmsec.core.config import RESULTS_FILE, RUNS_DIR
 from llmsec.core.logging import get_logger
+from llmsec.server import task_manager
 from llmsec.server.routers import cluster_viz, control, data_query, hpo, tasks
 
 logger = get_logger(__name__)
@@ -62,6 +64,46 @@ if STATIC_DIR.exists():
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse(request, "index.html", {})
+
+
+# ============================================================
+# 健康检查（容器编排探针用，轻量无副作用）
+# ============================================================
+@app.get("/health")
+@app.get("/healthz")
+async def health():
+    """liveness/readiness 探针：返回进程存活 + 任务队列概要。
+
+    供 docker-compose healthcheck / K8s 探针 / 外部监控调用。
+    /health 与 /healthz 双路径（后者是 K8s 惯例）。
+    """
+    try:
+        all_tasks = task_manager.list_tasks()
+        running = sum(1 for t in all_tasks if t.get("status") == "running")
+        queued = sum(1 for t in all_tasks if t.get("status") == "queued")
+    except Exception:
+        running, queued = 0, 0
+    return JSONResponse({
+        "status": "ok",
+        "ts": datetime.now().isoformat(),
+        "tasks_running": running,
+        "tasks_queued": queued,
+    })
+
+
+@app.get("/ready")
+async def ready():
+    """readiness 探针：检查 R 矩阵（唯一真相）可读。
+
+    R 矩阵不存在时返回 503（首次部署/数据未初始化时看板尚未就绪）。
+    """
+    if RESULTS_FILE.exists():
+        try:
+            RESULTS_FILE.read_text(encoding="utf-8")
+            return JSONResponse({"status": "ready", "results_file": str(RESULTS_FILE)})
+        except OSError:
+            pass
+    return JSONResponse({"status": "not_ready", "results_file": str(RESULTS_FILE)}, status_code=503)
 
 
 # ============================================================

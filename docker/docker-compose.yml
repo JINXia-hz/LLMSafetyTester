@@ -26,3 +26,10 @@ services:
     environment:
       - PYTHONIOENCODING=utf-8
     restart: unless-stopped
+    healthcheck:
+      # 看板健康检查（/health 返回进程存活 + 任务队列概要）
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
