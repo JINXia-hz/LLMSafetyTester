@@ -127,8 +127,8 @@ def execute_merge(
 ) -> Plan:
     """执行合并。target R 经 _file_lock + save(backup=True) 原子写。"""
     target_path = _resolve_results_path(target)
-    # load target（在锁内 RMW）
-    with _file_lock(target_path):
+    # load target（在锁内 RMW）。B1：merge 是权威写，锁超时即失败（strict=True）
+    with _file_lock(target_path, strict=True):
         target_R = _load_R(target_path)
         merged_counts: dict[str, int] = {}
         for src in sources:

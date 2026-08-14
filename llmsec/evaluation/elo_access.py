@@ -102,6 +102,40 @@ def attacker_ratings_for(model: str) -> dict:
     return elo_state_for(model).get("attacker_ratings", {})
 
 
+# 进程内 tracker memoize：按 (model, R 列指纹) 缓存 derive_elo 的完整 ELOTracker。
+# 同一进程内多次派生同模型（典型：MCP agent 连续调 ranking + boundary + surprises）
+# 只全量 derive 一次，后续命中直接返回缓存的 tracker 对象。
+#
+# 设计取舍：不用 elo_cache（磁盘序列化 dict）重建 tracker——elo_cache 不存 history
+# 等 find_surprises 依赖的字段，重建易缺字段出错。这里缓存的是完整 tracker 对象，
+# 三个方法（get_attacker_ranking/compute_security_boundary/find_surprises）都能服务。
+#
+# 失效：R 中该模型列变动 → 指纹变 → 自动重 derive。进程重启即失效（与
+# _RUN_META_CACHE 同性质，可接受；磁盘 elo_cache 仍由 elo_state_for 维护）。
+_TRACKER_CACHE: dict[str, tuple[str | None, ELOTracker]] = {}
+
+
+def elo_tracker_for(model: str) -> ELOTracker | None:
+    """返回某模型的派生 ELOTracker（进程内缓存，按列指纹失效）。
+
+    与 elo_state_for 的关系：elo_state_for 返回扁平 dict（供 report/dashboard），
+    本函数返回完整 tracker 对象（供需要调 tracker 方法的场景，如 MCP 的
+    elo_ranking/elo_security_boundary/elo_find_surprises）。
+
+    该模型在 R 中无结果时返回 None。
+    """
+    R = ResultsMatrix.load()
+    fp = _model_fingerprint(R, model)
+    if fp is None:
+        return None
+    cached = _TRACKER_CACHE.get(model)
+    if cached and cached[0] == fp:
+        return cached[1]
+    tracker = derive_elo(R, model)
+    _TRACKER_CACHE[model] = (fp, tracker)
+    return tracker
+
+
 def active_model() -> str | None:
     """R 中最新活跃的模型（按其结果最大 ts）。R 空→None。"""
     R = ResultsMatrix.load()
@@ -146,7 +180,10 @@ def publish_tracker(tracker: ELOTracker, model: str) -> None:
     # H5/H6 修复：整段 load→modify→save 纳入文件锁，防并发 publish 丢更新（TOCTOU）。
     # 原 save() 内部锁只护字节级写、不护 RMW 临界区——两个并发 publish 各自 load 同一旧 R、
     # 各自 upsert 自己的子集、各自 save → 后写者覆盖先写者。
-    with _file_lock(config.RESULTS_FILE):
+    # B1：publish_tracker 维持 strict=False（放行）——评估观测在内存 tracker 里，
+    # 锁超时抛异常会中断评估主循环、永久丢失整场评估观测，比罕见并发损坏代价更大。
+    # 注：save(_locked=True) 复用此锁，不会因 strict=True 二次失败。
+    with _file_lock(config.RESULTS_FILE, strict=False):
         R = ResultsMatrix.load()
         # 镜像 history → R（按 defender 归属，防跨模型错记）。
         # 行键 = 实测记录 id（h["record"]，原始观测粒度）；评级单位（簇）写进 extra.unit，

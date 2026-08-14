@@ -56,6 +56,11 @@ def main() -> int:
     p_wsd.add_argument("name")
     p_wsd.add_argument("--json", action="store_true")
 
+    p_wsgc = ws_sub.add_parser("gc", help="清理已 merge 且超期的工作区（延迟 GC，释放空间）")
+    p_wsgc.add_argument("--older-than-days", type=int, default=7,
+                        help="merged_at 超过该天数才清理（默认 7）")
+    p_wsgc.add_argument("--json", action="store_true")
+
     # ---- compare ----
     p_cmp = sub.add_parser("compare", help="对比多个 run")
     p_cmp.add_argument("runs", nargs="+")
@@ -97,6 +102,10 @@ def main() -> int:
         if args.ws_cmd == "delete":
             r = ws_mod.delete_workspace(args.name)
             _print(r, json_mode=args.json, title="delete workspace")
+            return 0
+        if args.ws_cmd == "gc":
+            r = ws_mod.gc_merged_workspaces(older_than_days=args.older_than_days)
+            _print(r, json_mode=args.json, title="gc merged workspaces")
             return 0
 
     if args.cmd == "compare":

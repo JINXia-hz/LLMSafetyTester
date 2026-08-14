@@ -80,12 +80,27 @@ def extract_report_metrics(report: dict) -> dict:
     }
 
 
+class LockTimeout(OSError):
+    """文件锁获取超时（strict 模式下抛出）。
+
+    区分于默认的放行策略：权威存储（save/merge）用 strict=True 超时即失败，
+    避免静默交替写损坏唯一真相；评估期写入（publish_tracker）维持放行不中断评估。
+    """
+
+
 @contextmanager
-def _file_lock(filepath: Path, timeout: float = 10.0):
+def _file_lock(filepath: Path, timeout: float = 10.0, *, strict: bool = False):
     """跨进程文件锁（Windows msvcrt / Unix fcntl），保护 results.json 并发写。
 
     dashboard 与实验框架可能并发写全局 R，此锁串行化 save()，防交替写损坏。
-    锁文件 = filepath + '.lock'；超时获取不到则放行（best-effort，不阻塞评估）。
+    锁文件 = filepath + '.lock'。
+
+    超时策略（B1 修复）：
+      - strict=False（默认）：超时放行 + 记 ERROR（best-effort，不阻塞评估）。
+        用于 publish_tracker——评估观测在内存 tracker 里，中断会永久丢失整场评估。
+      - strict=True：超时抛 LockTimeout。用于 save/merge/runs 删除——这些是显式
+        权威写操作，静默放行导致 RMW 临界区被打破（H5/H6 场景），后写覆盖先写静默丢观测，
+        失败显式报错比静默损坏安全。
     """
     import time
     lock_path = Path(str(filepath) + ".lock")
@@ -110,7 +125,12 @@ def _file_lock(filepath: Path, timeout: float = 10.0):
                 time.sleep(0.05)
         if not acquired:
             # #15：超时放行时必须留痕——对"唯一真相"存储，静默交替写会损坏且无信号。
-            # 保持放行策略（不阻塞评估：评估成本高于罕见损坏），但记 ERROR 供排查并发写来源
+            if strict:
+                # B1：权威写（save/merge）超时即失败，避免 RMW 临界区被打破后静默丢观测
+                raise LockTimeout(
+                    f"文件锁获取超时({timeout:.0f}s)，拒绝写入（strict 模式，防并发损坏）: {filepath}"
+                )
+            # 非 strict：保持放行策略（不阻塞评估：评估成本高于罕见损坏），但记 ERROR 供排查
             logger.error(
                 "results.json 文件锁获取超时(%.0fs)，放行写入（罕见并发竞争下可能损坏；"
                 "若反复出现请排查 dashboard/实验框架并发写）: %s", timeout, filepath,
@@ -329,7 +349,8 @@ class ResultsMatrix:
         if _locked:
             write_json(filepath, data, backup=True, allow_nan=False)
         else:
-            with _file_lock(filepath):
+            # B1：save 是权威写，锁超时即失败（strict=True），避免静默交替写损坏唯一真相
+            with _file_lock(filepath, strict=True):
                 write_json(filepath, data, backup=True, allow_nan=False)
         return filepath
 

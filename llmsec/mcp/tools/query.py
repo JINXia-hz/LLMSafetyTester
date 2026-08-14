@@ -73,7 +73,9 @@ def list_runs(
     if junk_only:
         from llmsec.management.runs import detect_junk
 
-        junk_names = {j["name"] for j in detect_junk(discover_runs())}
+        # 复用已扫描的 runs（修复前这里重复调 discover_runs() 多扫一次目录树）。
+        # detect_junk 是纯内存过滤（[r for r in runs if not r["has_report"]]），无需重扫。
+        junk_names = {j["name"] for j in detect_junk(runs)}
         runs = [r for r in runs if r["name"] in junk_names]
     return runs
 
@@ -168,7 +170,9 @@ def get_results_summary() -> dict[str, Any]:
 def elo_ranking(model: str) -> list[dict[str, Any]]:
     """从 R 矩阵派生指定模型的攻击方 Elo 排名（降序：高 Elo = 强攻击）。
 
-    Elo 从 R 矩阵纯函数回放派生（R 是唯一真相，可随时重算），不依赖缓存。
+    Elo 从 R 矩阵纯函数回放派生（R 是唯一真相，可随时重算）。进程内按列指纹
+    缓存派生的 tracker（elo_access.elo_tracker_for），同一 MCP 会话连续调用不重复
+    全量 derive_elo。
 
     Args:
         model: 目标模型名（R 矩阵中的一列）。
@@ -212,16 +216,27 @@ def elo_find_surprises(model: str, min_elo_gap: float = 0.0) -> dict[str, list[d
 
 
 def _elo_derive(model: str, extract_fn) -> Any:
-    """公共：加载 R → derive_elo → 提取结果。"""
+    """公共：取派生 tracker（进程内缓存）→ 提取结果。
+
+    经 elo_access.elo_tracker_for 获取按列指纹缓存的 ELOTracker，避免每次工具调用
+    都全量 ResultsMatrix.load() + derive_elo。回退保证：缓存层异常时回退到直接派生。
+    """
     from llmsec.core.config import RESULTS_FILE
-    from llmsec.core.results import ResultsMatrix
-    from llmsec.evaluation.elo import derive_elo
 
     def _do() -> Any:
         if not RESULTS_FILE.exists():
             return {"error": "results.json 不存在，尚无评估数据", "model": model}
-        R = ResultsMatrix.load()
-        tracker = derive_elo(R, model)
+        tracker = None
+        try:
+            from llmsec.evaluation.elo_access import elo_tracker_for
+            tracker = elo_tracker_for(model)
+        except Exception:
+            tracker = None  # 缓存层异常则回退到直接派生
+        if tracker is None:
+            from llmsec.core.results import ResultsMatrix
+            from llmsec.evaluation.elo import derive_elo
+            R = ResultsMatrix.load()
+            tracker = derive_elo(R, model)
         return extract_fn(tracker)
 
     return _try(_do, error_hint=f"模型 '{model}' 可能不在 R 矩阵中。用 get_results_summary 查可用模型。")

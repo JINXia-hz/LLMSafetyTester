@@ -483,6 +483,29 @@ def delete_workspace(name: str) -> dict[str, Any]:
 
 
 # ============================================================
+# gc_merged_workspaces — 低风险，直接执行
+# ============================================================
+def gc_merged_workspaces(older_than_days: int = 7) -> dict[str, Any]:
+    """清理已 merge 且超期的工作区目录，释放空间（延迟 GC）。
+
+    merge 后的工作区不会立即删除（orchestrator 的对比、历史记录仍可能引用其目录），
+    而是按 merged_at 时间戳延迟清理。被清理的工作区合并去向记入审计日志，不丢失。
+
+    Args:
+        older_than_days: merged_at 距今超过该天数才清理（默认 7 天）。
+
+    Returns:
+        {cleaned: [{name, size}], skipped_fresh: N, gc_log_size: N}。
+    """
+    from control.core.workspace import gc_merged_workspaces as _gc
+
+    return _try(
+        lambda: _gc(older_than_days=older_than_days),
+        error_hint="工作区索引读取失败",
+    )
+
+
+# ============================================================
 # 注册
 # ============================================================
 def register(mcp: Any) -> None:
@@ -503,3 +526,4 @@ def register(mcp: Any) -> None:
     mcp.tool(merge_env_snapshot_to_global_preview)
     mcp.tool(merge_env_snapshot_to_global_confirm)
     mcp.tool(delete_workspace)
+    mcp.tool(gc_merged_workspaces)

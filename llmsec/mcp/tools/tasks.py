@@ -302,6 +302,7 @@ def orchestrate_runs(
     specs: list[dict[str, Any]],
     max_workers: int = 2,
     compare_after: bool = True,
+    env_snapshot: str | None = None,
 ) -> dict[str, Any]:
     """提交批量并行评估任务（A/B 对比 / 参数扫描）。
 
@@ -320,6 +321,9 @@ def orchestrate_runs(
             - param_overrides: 覆写 params.py 参数（如 {"K_FACTOR": 32}）
         max_workers:    并行度（同时跑多少个 runner 子进程，默认 2）。
         compare_after:  全部完成后是否自动跑 compare。
+        env_snapshot:   批次共享的连接配置快照名（隔离 .env，整个批次的 runner 都用这套配置）。
+                        与每个 spec 的 param_overrides 叠加：snapshot 先装入，param_overrides
+                        后写入覆盖同名键（语义与 run_evaluation 一致）。
 
     Returns:
         task_view dict（含 id/status）。用 get_task_status 轮询进度。
@@ -335,28 +339,46 @@ def orchestrate_runs(
             if not s.get("name"):
                 return {"error": f"specs[{i}] 缺少 name 字段"}
 
+        # 加载 env_snapshot（如果指定）——整个批次共享的连接配置。
+        # C 修复：与 run_evaluation 语义统一，经 env_override 通道注入（不再各自内联 os.environ）。
+        base_env = None
+        if env_snapshot:
+            try:
+                from control.core.env_snapshot import load_env_dict
+
+                base_env = load_env_dict(env_snapshot)
+            except FileNotFoundError:
+                return {"error": f"env 快照不存在: {env_snapshot}", "hint": "用 list_env_snapshots 查可用快照"}
+            except Exception as e:
+                return {"error": f"读取 env 快照失败: {e}"}
+
         # 构造一个 python -c 脚本，让 task_manager 子进程执行 orchestrate
         # 每个 spec 的 param_overrides → env_override（LLMSEC_PARAM_<NAME>），
         # 由 RunSpec.env_override 承载，经 fork_and_run → run_runner 注入各自的 runner 子进程。
-        # 不用 os.environ 全局注入——多 spec 不同参数时全局环境变量会互相覆盖。
+        # base_env（env_snapshot）合并进每个 spec：snapshot 先装入，param_overrides 后写覆盖。
         script = (
             "from control.core.orchestrator import orchestrate, RunSpec\n"
             "import json, sys\n"
             f"specs_data = {repr(_json.dumps(specs))}\n"
+            f"base_env = {repr(_json.dumps(base_env)) if base_env else 'None'}\n"
             f"max_workers = {max_workers}\n"
             f"compare_after = {compare_after}\n"
             "raw = json.loads(specs_data)\n"
+            "base = json.loads(base_env) if base_env else {}\n"
             "specs = []\n"
             "for s in raw:\n"
             "    po = s.pop('param_overrides', None) or {}\n"
-            "    env_override = {f'LLMSEC_PARAM_{k}': str(v) for k, v in po.items()} or None\n"
-            "    specs.append(RunSpec(env_override=env_override, **s))\n"
+            "    env_override = dict(base)\n"
+            "    env_override.update({f'LLMSEC_PARAM_{k}': str(v) for k, v in po.items()})\n"
+            "    specs.append(RunSpec(env_override=env_override or None, **s))\n"
             "result = orchestrate(specs, max_workers=max_workers, compare_after=compare_after)\n"
             "print(json.dumps(result, ensure_ascii=False, default=str))\n"
         )
         argv = ["-c", script]
         view = start_task("orchestrate", argv)
         view["next_step"] = "用 get_task_status(task_id) 轮询进度"
+        if env_snapshot:
+            view["env_snapshot"] = env_snapshot
         return view
 
     return _try(_do, error_hint="检查 specs 格式（每条须含 name 字段）")

@@ -265,10 +265,11 @@ def execute_delete(plan: Plan, *, delete_r: bool = False) -> Plan:
                      detail=f"已移到 {dest}" if dest else "失败")
         else:
             done.add(src, size=0, kind="missing", detail="已不存在")
-    # 删 R 列（一次性 load→remove→save，经 _file_lock）
+    # 删 R 列（一次性 load→remove→save，经 _file_lock）。B1：权威写 strict=True，
+    # 锁超时抛 LockTimeout 被 except 捕获进 r_error（不静默损坏）
     if delete_r and plan.extra.get("r_models_affected"):
         try:
-            with _file_lock(RESULTS_FILE):
+            with _file_lock(RESULTS_FILE, strict=True):
                 R = ResultsMatrix.load()
                 total = 0
                 for model in plan.extra["r_models_affected"]:

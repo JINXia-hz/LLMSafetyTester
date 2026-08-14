@@ -89,7 +89,16 @@ class AtomicIndexStore:
         """加锁 RMW：读索引 → mutator(idx) 改写 → 原子写回。返回 mutator 的返回值。
 
         mutator 接收 idx dict，可直接修改并返回结果。
+
+        跨进程保护（中期档修复）：self._lock 只护进程内线程，dashboard 进程与 MCP 进程
+        并发操作同一 _index.json（如 workspace fork/env_snapshot create）时 RMW 会被打破
+        （两个进程各自 load 同一旧索引 → 各自 mutate → 后写覆盖先写 → 丢更新）。
+        在线程锁内再套跨进程文件锁（cross_process_lock），锁住 _index.json 的 RMW 临界区。
+        锁顺序：线程锁（self._lock）在外，文件锁在内——所有线程/进程按相同顺序获取，不死锁。
         """
+        from control.core.locks import cross_process_lock
+
         with self._lock:
-            idx = self.load()
-            return mutator(idx)
+            with cross_process_lock(self.path, timeout=5.0, strict=True):
+                idx = self.load()
+                return mutator(idx)

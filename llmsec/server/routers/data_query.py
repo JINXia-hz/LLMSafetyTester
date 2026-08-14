@@ -58,7 +58,7 @@ def _run_dir(run: str | None) -> Path | None:
         _validate_run(run)
         d = runs_dir / run
         return d if d.is_dir() else None
-    runs = _discover_runs()
+    runs = _discover_runs_cached()
     for r in runs:
         if r["has_report"]:
             return runs_dir / r["name"]
@@ -171,6 +171,47 @@ def _run_summary(run_dir: Path) -> dict | None:
 # /api/runs 富化缓存：按 (run 名, 报告文件 mtime+size) 失效，避免每次下拉都重解析报告。
 # 注意不能用目录 mtime：resume 续跑覆写已有 runner_report.json 时目录 mtime 不变，会吃旧缓存。
 _RUN_META_CACHE: dict[str, tuple[tuple[float, int] | None, dict]] = {}
+
+
+# _discover_runs 结果的进程内缓存。
+# 修复前：dashboard 首屏 _discover_runs 被调 4 次（/api/runs、/api/overview 的 _run_dir、
+# /api/overview 的 stale 检测、/api/trend），每次全量扫目录树 + 读每个 run 的报告。
+# 缓存签名用 (runs_dir mtime, batch 目录数)：runs_dir mtime 在 batch 目录增删时更新
+# （新建/删除 batch 目录才改目录条目），这个层面安全——target 内文件 resume 覆写不影响
+# runs_dir 的 mtime，但那种覆写只改报告内容（由 _RUN_META_CACHE 的文件级签名兜底），
+# 不改目录结构（新增 run 必然新增 target 子目录 → 更新 batch_dir mtime → 更新 runs_dir mtime）。
+_DISCOVER_CACHE: tuple[tuple[float, int], list[dict]] | None = None
+
+
+def _discover_runs_cached() -> list[dict]:
+    """_discover_runs 的进程内缓存版。签名失效才重扫，首屏 4 次调用共享同一结果。"""
+    global _DISCOVER_CACHE
+    runs_dir = _runs_dir()
+    try:
+        st = runs_dir.stat()
+        sig = (st.st_mtime, len([d for d in runs_dir.iterdir() if d.is_dir()]))
+    except OSError:
+        return _discover_runs()  # runs_dir 不存在或 stat 失败，直接扫（返回空）
+    if _DISCOVER_CACHE and _DISCOVER_CACHE[0] == sig:
+        # 缓存命中：返回副本，避免调用方 mutate 污染缓存（/api/runs 会 r.update(...)）
+        return [dict(r) for r in _DISCOVER_CACHE[1]]
+    runs = _discover_runs()
+    _DISCOVER_CACHE = (sig, runs)
+    return [dict(r) for r in runs]
+
+
+def _paginate(items: list, limit: int | None = None, offset: int = 0) -> dict:
+    """通用分页 helper。limit=None 表示全量（向后兼容，不截断）。
+
+    Returns:
+        {items: [...], total: N, limit: limit|None, offset: offset}
+    """
+    total = len(items)
+    if limit is not None:
+        page = items[offset: offset + limit] if limit > 0 else []
+    else:
+        page = items[offset:] if offset else list(items)
+    return {"items": page, "total": total, "limit": limit, "offset": offset}
 
 
 def _run_meta(run_dir: Path) -> dict:
@@ -297,9 +338,9 @@ def _load_tree_artifacts() -> dict | None:
 # 数据 API
 # ============================================================
 @router.get("/api/runs")
-async def api_runs():
+async def api_runs(limit: int | None = None, offset: int = 0):
     runs_dir = _runs_dir()
-    runs = _discover_runs()
+    runs = _discover_runs_cached()
     # 进行中标注：有 evaluate 任务在跑时，批次 ts ≥ 任务 started_at 的 run 标 active，
     # 前端据此渲染 ⏳（多目标运行时先完成的目标报告已落盘，需与"已完成"区分）
     from llmsec.server.routers.tasks import TASKS
@@ -316,7 +357,13 @@ async def api_runs():
         # 供批次下拉渲染成"带等级印章的列表"（安/警/伤小方印排在批次名前）
         if r.get("has_report"):
             r.update(_run_meta(runs_dir / r["name"]))
-    return {"runs": runs}
+    # 分页（可选）：limit=None 全量返回（默认，向后兼容前端全量渲染下拉）。
+    # 显式传 limit 时切片并附 total，供前端"加载更多/分页器"使用。
+    if limit is None:
+        return {"runs": runs, "total": len(runs)}
+    page = _paginate(runs, limit=limit, offset=offset)
+    return {"runs": page["items"], "total": page["total"],
+            "limit": page["limit"], "offset": page["offset"]}
 
 
 @router.get("/api/trend")
@@ -333,7 +380,7 @@ async def api_trend(target: str | None = None):
     _LOCAL_SIM_RE = re.compile(r"local.*sim", re.I)
     points: list[dict] = []
     targets_seen: list[str] = []
-    for r in _discover_runs():
+    for r in _discover_runs_cached():
         if not r.get("has_report"):
             continue
         summ = _run_summary(runs_dir / r["name"])
@@ -432,7 +479,7 @@ async def api_overview(run: str | None = None):
     cur_name = _run_name(run_dir, run)
     cur_batch = cur_name.split("/", 1)[0]
     newer = next(
-        (r["name"] for r in _discover_runs()
+        (r["name"] for r in _discover_runs_cached()
          if r["has_report"] and r["name"].split("/", 1)[0] > cur_batch),
         None,
     )
@@ -683,6 +730,34 @@ async def api_model(run: str | None = None):
             "svd_ridge": svd, "blend_predictor": blend}
 
 
+# /api/attack-sets 行数缓存：按 (文件名, mtime+size) 失效。
+# 攻击集是用户上传的静态文件（读多写少），逐行计数开销大（实测 attacks/ 共 37MB），
+# 文件不变时复用上次计数。模式同 _RUN_META_CACHE。
+_ATTACK_SET_CACHE: dict[str, tuple[tuple[float, int], int]] = {}
+
+
+def _attack_set_records(p: Path) -> int:
+    """攻击集非空行数，按文件 (mtime, size) 签名缓存。"""
+    try:
+        st = p.stat()
+        sig = (st.st_mtime, st.st_size)
+    except OSError:
+        return 0
+    cached = _ATTACK_SET_CACHE.get(p.name)
+    if cached and cached[0] == sig:
+        return cached[1]
+    n_records = 0
+    try:
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    n_records += 1
+    except OSError:
+        pass
+    _ATTACK_SET_CACHE[p.name] = (sig, n_records)
+    return n_records
+
+
 @router.get("/api/attack-sets")
 async def api_attack_sets():
     """列出可用攻击集，含元信息（大小、修改时间、记录数）。"""
@@ -693,15 +768,7 @@ async def api_attack_sets():
     for p in sorted(ATTACKS_DIR.glob("*.jsonl"), key=lambda x: x.name):
         size_kb = round(p.stat().st_size / 1024, 1)
         mtime = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-        # 快速计行数（只数非空行，不 parse JSON）
-        n_records = 0
-        try:
-            with open(p, encoding="utf-8") as f:
-                for line in f:
-                    if line.strip():
-                        n_records += 1
-        except OSError:
-            pass
+        n_records = _attack_set_records(p)
         result.append({"name": p.name, "size_kb": size_kb, "mtime": mtime, "n_records": n_records})
     return {"files": result}
 

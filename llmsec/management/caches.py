@@ -3,10 +3,12 @@
 缓存按「可删可重建」性质分类，clean 前展示各类占用与可重建性，避免误删权威存储。
 
 类别：
-  elo_cache       output/state/elo_cache.json        删了自动重建（elo_access 从 R 重算）
-  predictors      output/predictors/*.pkl            删了自动重建（load_or_fit 重训）
-  feature_cluster output/feature_cache.pkl + cluster_result.pkl   feature 可重建 / cluster 需重跑
-  task_logs       output/tasks/*.log + *.progress.jsonl            终态任务日志
+  elo_cache         output/state/elo_cache.json        删了自动重建（elo_access 从 R 重算）
+  predictors        output/predictors/*.pkl            删了自动重建（load_or_fit 重训）
+  predictors_legacy output/predictors/blend_*.pkl（无 v2）  版本迁移遗留死缓存，现行代码永不命中
+  feature_cluster   output/feature_cache.pkl + cluster_result.pkl + embedding_cache.pkl
+                                                       feature/embedding 可重建 / cluster 需重跑
+  task_logs         output/tasks/*.log + *.progress.jsonl            终态任务日志
 
 绝不清：results.json（R 矩阵，唯一真相）。
 """
@@ -18,6 +20,7 @@ from pathlib import Path
 from llmsec.core.config import (
     CLUSTER_RESULT_FILE,
     ELO_CACHE_FILE,
+    EMBEDDING_CACHE_FILE,
     FEATURE_CACHE_FILE,
     OUTPUT_DIR,
     PREDICTORS_DIR,
@@ -35,6 +38,21 @@ from llmsec.management.common import (
 
 logger = get_logger(__name__)
 
+# 现行 cache_key 的版本前缀（见 blend.py:cache_key）。升版本时同步更新此处，
+# 否则 predictors_legacy 的"死缓存"判据会漏判新遗留。
+# 历史前缀：blend_（无版本盐，v1）→ blend_v2_（现行）。
+_LIVE_PREDICTOR_PREFIXES = ("blend_v2_",)
+
+
+def _is_legacy_predictor(name: str) -> bool:
+    """判断 predictor 文件名是否为版本迁移遗留的死缓存。
+
+    死缓存 = 不以任何现行版本前缀开头。现行代码（blend.py:cache_key）只生成
+    _LIVE_PREDICTOR_PREFIXES 里的键，旧前缀文件永不命中 load_or_fit，可安全删除。
+    """
+    return not name.startswith(_LIVE_PREDICTOR_PREFIXES)
+
+
 # 类别元数据：name → (paths 生成器, 可重建性, 描述)
 # paths 生成器返回 list[(path, is_dir, detail)]
 CACHE_CATEGORIES: dict[str, dict] = {
@@ -48,11 +66,17 @@ CACHE_CATEGORIES: dict[str, dict] = {
         "desc": "混合预测器 pkl，删了由 load_or_fit 重训",
         "paths": lambda: _predictor_paths(),
     },
+    "predictors_legacy": {
+        "rebuildable": "disposable",
+        "desc": "版本迁移遗留死缓存（旧 cache_key 前缀，现行代码永不命中）",
+        "paths": lambda: _predictor_paths(legacy_only=True),
+    },
     "feature_cluster": {
-        "rebuildable": "feature 自动重建 / cluster 需重跑",
-        "desc": "特征缓存 + 聚类产物",
+        "rebuildable": "feature/embedding 自动重建 / cluster 需重跑",
+        "desc": "特征缓存 + embedding 缓存 + 聚类产物",
         "paths": lambda: [
             (FEATURE_CACHE_FILE, False, "feature_cache.pkl"),
+            (EMBEDDING_CACHE_FILE, False, "embedding_cache.pkl"),
             (CLUSTER_RESULT_FILE, False, "cluster_result.pkl"),
         ],
     },
@@ -64,10 +88,15 @@ CACHE_CATEGORIES: dict[str, dict] = {
 }
 
 
-def _predictor_paths() -> list[tuple[Path, bool, str]]:
+def _predictor_paths(*, legacy_only: bool = False) -> list[tuple[Path, bool, str]]:
     if not PREDICTORS_DIR.exists():
         return []
-    return [(p, False, p.name) for p in PREDICTORS_DIR.glob("*.pkl")]
+    out = []
+    for p in PREDICTORS_DIR.glob("*.pkl"):
+        if legacy_only and not _is_legacy_predictor(p.name):
+            continue
+        out.append((p, False, p.name))
+    return out
 
 
 def _task_log_paths() -> list[tuple[Path, bool, str]]:

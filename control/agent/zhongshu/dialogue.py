@@ -34,7 +34,8 @@ def _search_history_schema() -> dict:
             "description": (
                 "按关键词搜索历史执行记录（文牍），了解过去做过什么、怎么做的。"
                 "用于：用户说「上次」「之前」「按照以前的」等引用历史的指令时查找参考。"
-                "返回匹配的 Plan 摘要（意图、步骤、执行结果）。"
+                "多个关键词为 AND 语义（须同时命中），返回匹配的 Plan 摘要（意图、步骤、执行结果），"
+                "按相关性排序。"
             ),
             "parameters": {
                 "type": "object",
@@ -42,7 +43,7 @@ def _search_history_schema() -> dict:
                     "keywords": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "搜索关键词，如 ['minimax', '评估'] 或 ['judge', '改']",
+                        "description": "搜索关键词（AND 语义——须全部命中），如 ['minimax', '评估'] 或 ['judge', '改']",
                     },
                     "recent": {
                         "type": "integer",
@@ -56,48 +57,125 @@ def _search_history_schema() -> dict:
     }
 
 
+# 文牍可搜索文本的进程内缓存。
+# 缓存每个 plan 的分层文本（intent/user_text/steps_text/steps_desc/stats），
+# 按 _index.json 的 mtime 失效——append_event 写索引时 mtime 更新，缓存自动重建。
+# 阶段 2 优化：消除每次 search_history 重复读 jsonl 全文 + 逐行 json.loads 的开销。
+# 数据天然小（每 plan ~60 字符），缓存让"多次搜索"零 I/O 成本；未来文牍增长到数百时
+# 叠加 2-gram 倒排索引进一步加速（当前规模缓存已足够，索引暂不引入）。
+_GAZETTE_TEXT_CACHE: tuple[float, dict[str, dict]] | None = None
+
+
+def _load_gazette_texts() -> dict[str, dict]:
+    """加载所有文牍的可搜索文本（进程内缓存，按 _index.json mtime 失效）。
+
+    Returns:
+        {plan_id: {intent, user_text, steps_text, steps_desc, stats, status, idx_entry}}
+    """
+    global _GAZETTE_TEXT_CACHE
+    from control.agent import gazette
+
+    idx_path = gazette._store.path
+    try:
+        sig = idx_path.stat().st_mtime
+    except OSError:
+        sig = 0.0
+    if _GAZETTE_TEXT_CACHE and _GAZETTE_TEXT_CACHE[0] == sig:
+        return _GAZETTE_TEXT_CACHE[1]
+
+    texts: dict[str, dict] = {}
+    for g in gazette.list_gazettes(recent=500):
+        pid = g.get("plan_id", "")
+        events = gazette.read_events(pid)
+        if not events:
+            continue
+        intent_text = (g.get("intent", "") or "").lower()
+        user_text = ""
+        steps_text = ""
+        steps_desc = []
+        stats = {}
+        for ev in events:
+            if ev.kind == gazette.EV_COMMISSION:
+                user_text = (ev.detail.get("user_text", "") or "").lower()
+            elif ev.kind == gazette.EV_PLAN_DRAFTED:
+                ut = (ev.detail.get("user_text", "") or "").lower()
+                if ut:
+                    user_text = ut
+                for s in ev.detail.get("steps_summary", []):
+                    desc = s.get("description", "")
+                    steps_desc.append(desc)
+                    steps_text += " " + desc.lower()
+            elif ev.kind == gazette.EV_STEP_STARTED:
+                desc = ev.detail.get("description", "")
+                if desc:
+                    steps_text += " " + desc.lower()
+            elif ev.kind == gazette.EV_PLAN_FINISHED:
+                stats = ev.detail.get("step_stats", {})
+        texts[pid] = {
+            "intent": g.get("intent", "")[:100],
+            "status": g.get("status", "?"),
+            "_intent_lc": intent_text,
+            "_user_text_lc": user_text,
+            "_steps_text_lc": steps_text,
+            "steps_desc": steps_desc[:5],
+            "step_stats": stats,
+        }
+    _GAZETTE_TEXT_CACHE = (sig, texts)
+    return texts
+
+
 def _do_search_history(args: dict) -> str:
-    """执行历史搜索：在文牍 intent/user_text/steps 里匹配关键词。"""
+    """执行历史搜索：在文牍的多层文本里 AND 匹配关键词，按相关性排序。
+
+    召回质量优化（调研发现：原 OR 语义 + 高同质数据 = 无区分度）：
+      - AND 语义：所有关键词都须命中才收录，精确查找"同时涉及多个方面的 Plan"
+      - 文本源补全：intent（索引层）+ commission.user_text（用户原话）
+        + plan_drafted.steps_summary + step_started.description（更丰富的步骤描述）
+      - 相关性排序：intent 命中权重最高(×3)，user_text 次之(×2)，步骤描述最低(×1)
+      - 全量搜索：数据天然小（每 plan 平均 ~60 字符可搜索文本），无 recent 上限
+    """
     keywords = [k.lower() for k in args.get("keywords", [])]
     recent = args.get("recent", 5)
     if not keywords:
         return "（未提供关键词）"
 
-    from control.agent import gazette
-    results = []
-    for g in gazette.list_gazettes(recent=50):
-        events = gazette.read_events(g.get("plan_id", ""))
-        if not events:
+    texts = _load_gazette_texts()
+    matches = []
+    for pid, t in texts.items():
+        intent_lc = t["_intent_lc"]
+        user_lc = t["_user_text_lc"]
+        steps_lc = t["_steps_text_lc"]
+
+        # AND 语义：所有关键词都须命中（在任一文本层）
+        all_texts = [intent_lc, user_lc, steps_lc]
+        if not all(any(kw in txt for txt in all_texts) for kw in keywords):
             continue
-        # 拼接可搜索文本：intent + user_text + steps descriptions
-        searchable = (g.get("intent", "") or "").lower()
-        steps_desc = []
-        for ev in events:
-            if ev.kind == gazette.EV_PLAN_DRAFTED:
-                searchable += " " + (ev.detail.get("user_text", "") or "").lower()
-                for s in ev.detail.get("steps_summary", []):
-                    desc = s.get("description", "")
-                    steps_desc.append(desc)
-                    searchable += " " + desc.lower()
-        # 任一关键词命中即收录
-        if any(kw in searchable for kw in keywords):
-            # 统计执行结果
-            stats = {}
-            for ev in events:
-                if ev.kind == gazette.EV_PLAN_FINISHED:
-                    stats = ev.detail.get("step_stats", {})
-            results.append({
-                "plan_id": g.get("plan_id", "")[:12],
-                "intent": g.get("intent", "")[:100],
-                "status": g.get("status", "?"),
-                "steps": steps_desc[:5],
-                "step_stats": stats,
-            })
-        if len(results) >= recent:
-            break
+
+        # 相关性评分：intent 命中权重最高，user_text 次之，步骤描述最低
+        score = 0
+        for kw in keywords:
+            if kw in intent_lc:
+                score += 3
+            if kw in user_lc:
+                score += 2
+            if kw in steps_lc:
+                score += 1
+
+        matches.append({
+            "plan_id": pid[:12],
+            "intent": t["intent"],
+            "status": t["status"],
+            "steps": t["steps_desc"],
+            "step_stats": t["step_stats"],
+            "_score": score,  # 排序用，不回传给 LLM
+        })
+
+    # 按相关性降序（同分按 plan_id 保持稳定）
+    matches.sort(key=lambda m: (-m["_score"], m["plan_id"]))
+    results = [{k: v for k, v in m.items() if k != "_score"} for m in matches[:recent]]
 
     if not results:
-        return f"未找到匹配「{', '.join(keywords)}」的历史记录。"
+        return f"未找到匹配「{', '.join(keywords)}」的历史记录（AND 语义，所有关键词须同时命中）。"
     return json.dumps(results, ensure_ascii=False, default=str)
 
 

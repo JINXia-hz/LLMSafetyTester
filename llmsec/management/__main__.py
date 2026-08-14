@@ -60,7 +60,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_clean = cache_sub.add_parser("clean", help="清理缓存（软删除）")
     p_clean.add_argument("categories", nargs="+",
-                         help="类别: elo_cache predictors feature_cluster task_logs")
+                         help="类别: elo_cache predictors predictors_legacy feature_cluster task_logs")
     p_clean.add_argument("--yes", action="store_true", help="确认执行（默认 dry-run）")
     p_clean.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
