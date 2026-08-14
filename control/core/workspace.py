@@ -14,45 +14,16 @@ workspaces 由控制层独立管理（output/workspaces/），维护 _index.json
 
 from __future__ import annotations
 
-import json
-import os
 import shutil
-import threading
-from datetime import datetime
 from pathlib import Path
 
 from control.config import LLMSEC_REPO, WORKSPACES_DIR, ensure_workspaces_dir
 from control.core.invoker import export_snapshot, run_runner
+from control.core.store import AtomicIndexStore
 
-# 保护 _index.json 的 RMW（orchestrator 多线程 fork 会并发写索引）
-_INDEX_LOCK = threading.Lock()
-
-
-# ============================================================
-# workspace 索引
-# ============================================================
-def _index_path() -> Path:
-    return WORKSPACES_DIR / "_index.json"
-
-
-def _load_index() -> dict:
-    p = _index_path()
-    if not p.exists():
-        return {"workspaces": {}}
-    return json.loads(p.read_text(encoding="utf-8"))
-
-
-def _save_index(idx: dict) -> None:
-    """原子写：先写 .tmp 再 os.replace（防写中途崩溃导致 JSON 损坏）。"""
-    ensure_workspaces_dir()
-    p = _index_path()
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(str(tmp), str(p))
-
-
-def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+# workspace 索引存储（原子读写 + Windows PermissionError 重试 + 并发锁）
+# base_dir 传 lambda：测试期 monkeypatch WORKSPACES_DIR 后能动态生效
+_store = AtomicIndexStore(lambda: WORKSPACES_DIR, "workspaces")
 
 
 # ============================================================
@@ -104,7 +75,7 @@ def fork(
         "path": str(ws_dir.relative_to(LLMSEC_REPO)).replace("\\", "/"),
         "source": source,
         "note": note,
-        "created": _now(),
+        "created": _store.now(),
         "models": snap.get("models", []),
         "records": snap.get("records", 0),
         "merged": False,            # 是否已 merge 回全局/其他目标（merge 后置 True）
@@ -113,10 +84,10 @@ def fork(
     }
 
     # 4. 记入索引（加锁防并发 fork 丢更新）
-    with _INDEX_LOCK:
-        idx = _load_index()
+    def _record(idx):
         idx["workspaces"][name] = info
-        _save_index(idx)
+        _store.save(idx)
+    _store.update(_record)
     return info
 
 
@@ -159,7 +130,7 @@ def fork_and_run(
 # ============================================================
 def list_workspaces() -> list[dict]:
     """列出所有工作区（按创建时间倒序）。"""
-    idx = _load_index()
+    idx = _store.load()
     ws = list(idx.get("workspaces", {}).values())
     # 补 size
     for w in ws:
@@ -176,13 +147,13 @@ def mark_merged(name: str, target: str) -> bool:
     返回 True=成功更新索引，False=更新失败（调用方可提示用户但 merge 已生效）。
     """
     try:
-        with _INDEX_LOCK:
-            idx = _load_index()
+        def _mark(idx):
             if name in idx.get("workspaces", {}):
                 idx["workspaces"][name]["merged"] = True
-                idx["workspaces"][name]["merged_at"] = _now()
+                idx["workspaces"][name]["merged_at"] = _store.now()
                 idx["workspaces"][name]["merged_to"] = target
-                _save_index(idx)
+                _store.save(idx)
+        _store.update(_mark)
         return True
     except Exception:
         return False
@@ -190,15 +161,16 @@ def mark_merged(name: str, target: str) -> bool:
 
 def delete_workspace(name: str) -> dict:
     """删除工作区（目录 + 索引项）。不碰全局 R（工作区本就是隔离副本）。"""
-    with _INDEX_LOCK:
-        idx = _load_index()
+    def _delete(idx):
         if name not in idx.get("workspaces", {}):
             raise KeyError(f"工作区不存在: {name}")
         ws_dir = WORKSPACES_DIR / name
         if ws_dir.exists():
             shutil.rmtree(ws_dir)
         info = idx["workspaces"].pop(name)
-        _save_index(idx)
+        _store.save(idx)
+        return info
+    info = _store.update(_delete)
     return {"deleted": name, "info": info}
 
 

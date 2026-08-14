@@ -52,7 +52,7 @@ def _render_list(items: list, max_rows: int) -> str:
                 size = it.get("size", 0)
                 size_s = f"{size / 1024:.0f}KB" if size else "-"
                 out.append(f"  {i}. {it['name']}  target={it.get('target_model','-')}  "
-                           f"level={it.get('security_level','-')[:8]}  asr={asr_s}  elo={elo_s}  size={size_s}")
+                           f"level={(it.get('security_level') or '-')[:8]}  asr={asr_s}  elo={elo_s}  size={size_s}")
             elif "name" in it and "source" in it:
                 # workspace 列表
                 out.append(f"  {i}. {it['name']}  source={it.get('source')}  "
@@ -162,7 +162,7 @@ def _parse_intent(text: str) -> tuple[str, dict] | None:
                 return ("delete_workspace", {"name": m.group(1)})
 
     # compare
-    if re.search(r"\b(compare|对比|比较)", low) or "对比" in text:
+    if re.search(r"\b(compare|对比|比较)", low) or "对比" in text or "比较" in text:
         # 提取 run 名（支持空格/顿号/逗号分隔，带斜杠的 ts/target）
         runs = re.findall(r"[\w.-]+/[\w.-]+|\d{4}-\d{2}-\d{2}_\d{6}", text)
         runs = [r for r in runs if r not in ("compare", "对比", "比较")]

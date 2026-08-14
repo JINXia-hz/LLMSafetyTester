@@ -18,7 +18,7 @@ from pathlib import Path
 from llmsec.core.config import RUNS_DIR
 from llmsec.core.io import read_json
 from llmsec.core.logging import get_logger
-from llmsec.core.results import RESULTS_FILE, ResultsMatrix, _file_lock
+from llmsec.core.results import RESULTS_FILE, ResultsMatrix, _file_lock, extract_report_metrics
 from llmsec.management.common import (
     Plan,
     dir_size,
@@ -90,16 +90,15 @@ def _run_entry(run_dir: Path, batch: str, target: str, report: dict) -> dict:
     """构造单条 run 元数据。"""
     size = dir_size(run_dir)
     mtime = datetime.fromtimestamp(run_dir.stat().st_mtime).isoformat()
-    attack = report.get("attack_phase", {}) or {}
-    elo = report.get("elo", {}) or {}
+    m = extract_report_metrics(report)
     return {
         "name": f"{batch}/{target}" if batch != target else batch,
         "batch": batch,
         "target": target,
         "target_model": report.get("target_model", target),
         "security_level": report.get("security_level", "inconclusive"),
-        "asr": attack.get("asr"),
-        "boundary_elo": elo.get("boundary_elo"),
+        "asr": m["asr"],
+        "boundary_elo": m["boundary_elo"],
         "has_report": (run_dir / "runner_report.json").exists(),
         "has_md": (run_dir / "security_report.md").exists(),
         "mtime": mtime,
@@ -193,7 +192,7 @@ def cmd_list(
             rows.append([
                 r["name"],
                 r["target_model"],
-                r["security_level"][:8],
+                (r.get("security_level") or "inconclusive")[:8],
                 asr_s,
                 elo_s,
                 fmt_size(r["size"]),

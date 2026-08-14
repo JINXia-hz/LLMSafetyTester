@@ -92,8 +92,3 @@ def obfuscate(prompt: str, method: str) -> str:
     if method not in OBFUSCATORS:
         raise ValueError(f"未知混淆方法: {method}，可用: {list(OBFUSCATORS.keys())}")
     return OBFUSCATORS[method](prompt)
-
-
-def list_obfuscations() -> list[str]:
-    """返回所有可用的混淆方法名。"""
-    return list(OBFUSCATORS.keys())

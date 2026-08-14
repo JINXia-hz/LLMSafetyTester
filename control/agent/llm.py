@@ -91,3 +91,32 @@ def is_llm_configured() -> bool:
         and (os.getenv("GENERATOR_BASE_URL") or os.getenv("CONTROL_BASE_URL"))
         and (os.getenv("GENERATOR_MODEL") or os.getenv("CONTROL_MODEL"))
     )
+
+
+# ============================================================
+# OpenAI tool_call 消息处理助手（zhongshu/shangshu ReAct 循环共用）
+# ============================================================
+def rebuild_tool_calls(msg) -> list[dict]:
+    """把 OpenAI 响应 message 的 tool_calls 重建为可回灌的 dict 列表。
+
+    OpenAI SDK 的 tool_call 对象不能直接塞回 messages（需序列化为 dict），
+    zhongshu._react_loop 与 shangshu.draft_plan 原各自内联这份推导式。
+    """
+    return [
+        {"id": tc.id, "type": "function",
+         "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+        for tc in msg.tool_calls
+    ]
+
+
+def parse_tool_args(tc) -> dict:
+    """解析单个 tool_call 的 function.arguments（JSON 字符串）为 dict。
+
+    arguments 为空或解析失败返回 {}。zhongshu/shangshu 原各自内联此 try/except。
+    """
+    import json
+    try:
+        return json.loads(tc.function.arguments) if tc.function.arguments else {}
+    except json.JSONDecodeError:
+        return {}
+

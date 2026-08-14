@@ -19,7 +19,6 @@ core.io — 统一文件 I/O 工具层
 
 import csv
 import json
-import logging
 import os
 import shutil
 import threading
@@ -27,7 +26,9 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from llmsec.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class CorruptedFileError(Exception):

@@ -28,7 +28,6 @@ schema v2（簇粒度）：
 
 from __future__ import annotations
 
-import logging
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -36,9 +35,49 @@ from pathlib import Path
 
 from llmsec.core.config import RESULTS_FILE
 from llmsec.core.io import CorruptedFileError, read_json, write_json
+from llmsec.core.logging import get_logger
 
-_logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 _SCHEMA_VERSION = 2
+
+
+# runner_report.json 三段式结构的标准字段路径。
+# runs.py / experiments/metrics.py / server/data_query.py 原本各自内联这份提取，
+# 统一到此处避免字段名/默认值漂移。
+_REPORT_SECTION_KEYS = ("attack_phase", "elo", "allergy")
+
+
+def extract_report_metrics(report: dict) -> dict:
+    """从 runner_report.json 抽取 Elo / 攻击 / 过敏的核心度量字段。
+
+    统一原 management/runs、experiments/metrics、server/data_query 的重复提取。
+    report 为空 dict 或某段缺失时，对应字段返回 None。
+
+    Returns:
+        {
+          "asr", "rounds", "total_tested",            # attack_phase
+          "boundary_elo", "boundary_confidence",      # elo
+          "ci_half", "drift", "converged",
+          "coverage", "conv_rounds",
+          "fpr",                                       # allergy
+        }
+    """
+    attack = (report.get("attack_phase") or {}) if report else {}
+    elo = (report.get("elo") or {}) if report else {}
+    allergy = (report.get("allergy") or {}) if report else {}
+    return {
+        "asr": attack.get("asr"),
+        "rounds": attack.get("rounds"),
+        "total_tested": attack.get("total_tested"),
+        "boundary_elo": elo.get("boundary_elo"),
+        "boundary_confidence": elo.get("boundary_confidence"),
+        "ci_half": elo.get("ci_half"),
+        "drift": elo.get("drift"),
+        "converged": elo.get("converged"),
+        "coverage": elo.get("coverage"),
+        "conv_rounds": elo.get("conv_rounds"),
+        "fpr": allergy.get("fpr"),
+    }
 
 
 @contextmanager
@@ -72,7 +111,7 @@ def _file_lock(filepath: Path, timeout: float = 10.0):
         if not acquired:
             # #15：超时放行时必须留痕——对"唯一真相"存储，静默交替写会损坏且无信号。
             # 保持放行策略（不阻塞评估：评估成本高于罕见损坏），但记 ERROR 供排查并发写来源
-            _logger.error(
+            logger.error(
                 "results.json 文件锁获取超时(%.0fs)，放行写入（罕见并发竞争下可能损坏；"
                 "若反复出现请排查 dashboard/实验框架并发写）: %s", timeout, filepath,
             )
@@ -303,7 +342,7 @@ class ResultsMatrix:
         try:
             data = read_json(filepath, strict=True)
         except CorruptedFileError as e:
-            _logger.error("results.json 损坏: %s。原因: %s", filepath, e.cause)
+            logger.error("results.json 损坏: %s。原因: %s", filepath, e.cause)
             # 备份残文件供取证
             try:
                 import shutil
@@ -315,11 +354,11 @@ class ResultsMatrix:
             if bak.exists():
                 try:
                     data = read_json(bak, strict=True)
-                    _logger.warning("已从备份 %s 恢复 results.json", bak)
+                    logger.warning("已从备份 %s 恢复 results.json", bak)
                 except CorruptedFileError:
                     pass
             if data is None:
-                _logger.critical(
+                logger.critical(
                     "results.json 及备份均损坏，无法恢复。拒绝返回空矩阵以防永久数据丢失。"
                 )
                 raise
@@ -332,7 +371,7 @@ class ResultsMatrix:
                 import shutil
                 bak = filepath.with_name("results.method-era.bak")
                 shutil.copy2(filepath, bak)
-                _logger.warning(
+                logger.warning(
                     "results.json 为旧 schema（method 键 v%s），已归档为 %s 并按 v2 重建",
                     data.get("version"), bak,
                 )
@@ -345,7 +384,7 @@ class ResultsMatrix:
                 try:
                     res = MatchResult.from_store(record, model, d)
                 except ValueError as e:
-                    _logger.warning("跳过损坏记录: %s", e)
+                    logger.warning("跳过损坏记录: %s", e)
                     continue
                 mat._r.setdefault(record, {})[model] = res
                 # 还原插入序兜底（取已见 ts 的上界）

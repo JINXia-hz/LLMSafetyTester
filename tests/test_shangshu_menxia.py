@@ -240,6 +240,18 @@ class TestEnvSnapshot:
         assert d["TARGETS"] == "X,Y,Z"
         assert d["KEEP"] == "this"
 
+    def test_merge_to_global_backs_up_env(self, tmp_path, monkeypatch):
+        """merge_to_global 备份全局 .env 到 .env.bak.<ts>（修正后），而非 .env.env.bak.<ts>。"""
+        env_snapshot = self._setup(monkeypatch, tmp_path)
+        global_env = tmp_path / ".env"
+        global_env.write_text("TARGETS=A\n", encoding="utf-8")
+        env_snapshot.create("s", source="blank")
+        env_snapshot.edit_key("s", "TARGETS", "X,Y")
+        env_snapshot.merge_to_global("s")
+        baks = list(tmp_path.glob(".env.bak.*"))
+        assert len(baks) == 1                              # 正确名：.env.bak.<ts>
+        assert not list(tmp_path.glob(".env.env.bak.*"))   # 旧的错误双前缀名不应出现
+
 
 # ============================================================
 # 门下省封驳判据

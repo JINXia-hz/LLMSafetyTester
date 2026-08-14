@@ -287,10 +287,10 @@ SIM_MATH_ACCURACY = 0.55       # 模拟模型数学题基础正确率（随 harm
 # 会在消费方 `from llmsec.params import NAME` 绑定时即生效——构成 HPO 的参数注入点。
 # 支持类型推断：bool/int/float/str；非法值忽略并警告。
 def _apply_env_overrides() -> None:
-    import logging
     import os
 
-    logger = logging.getLogger(__name__)
+    from llmsec.core.logging import get_logger
+    logger = get_logger(__name__)
     prefix = "LLMSEC_PARAM_"
     g = globals()
     for key, raw in os.environ.items():

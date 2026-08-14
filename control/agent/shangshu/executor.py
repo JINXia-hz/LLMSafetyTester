@@ -77,12 +77,9 @@ def execute_plan(
     # 拓扑分层执行
     layers = plan.topological_layers()
     for layer in layers:
-        runnable = [s for s in layer if s.status in (S_PENDING, S_BLOCKED)]
-        for s in runnable:
-            if s.status == S_BLOCKED and s.ticket is not None:
-                s.status = S_BLOCKED  # 仍被挡
-            elif s.status == S_BLOCKED and s.ticket is None:
-                s.status = S_PENDING  # 已放行，重试
+        for s in layer:
+            if s.status == S_BLOCKED and s.ticket is None:
+                s.status = S_PENDING  # 门下省已放行，重试
         to_run = [s for s in layer if s.status == S_PENDING]
 
         if not to_run:

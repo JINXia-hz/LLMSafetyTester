@@ -69,9 +69,9 @@ def append(session_id: str, role: str, content: str, **extra) -> None:
         msg.update(extra)
         s["messages"].append(msg)
         s["last_active"] = time.time()
-        # 滑窗：超出上限时丢弃最旧的非 system 消息
-        while len(s["messages"]) > _HISTORY_MAX and s["messages"][0]["role"] != "system":
-            s["messages"].pop(0)
+        # 滑窗：超出上限时丢弃最旧的非 system 消息（system 固定在 index 0）
+        while len(s["messages"]) > _HISTORY_MAX and len(s["messages"]) > 1:
+            s["messages"].pop(1)
 
 
 def reset(session_id: str) -> None:

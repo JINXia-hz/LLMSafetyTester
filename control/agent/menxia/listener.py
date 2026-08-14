@@ -89,6 +89,18 @@ def reinit_menxia() -> None:
     init_menxia()
 
 
+def _load_plan_from_msg(msg: BusMessage):
+    """从总线消息取 plan_id 并加载 Plan。
+
+    返回 (plan_id, plan)；plan_id 为空或 Plan 不存在时 plan 为 None。
+    """
+    plan_id = msg.plan_id or ""
+    if not plan_id:
+        return "", None
+    from control.agent.shangshu.plan import load_plan
+    return plan_id, load_plan(plan_id)
+
+
 def _on_plan_drafted(msg: BusMessage) -> None:
     """拟案阶段：整体合理性审查（报告，非封驳）。
 
@@ -98,12 +110,7 @@ def _on_plan_drafted(msg: BusMessage) -> None:
     - 引用不存在的资源 → 报告
     发现问题经总线发 KIND_REVIEW 报告给中书省面板。
     """
-    plan_id = msg.plan_id or ""
-    if not plan_id:
-        return
-
-    from control.agent.shangshu.plan import load_plan
-    plan = load_plan(plan_id)
+    plan_id, plan = _load_plan_from_msg(msg)
     if plan is None:
         return
 
@@ -152,12 +159,7 @@ def _on_plan_approved(msg: BusMessage) -> None:
 
     用户准奏后、执行开始前，门下省做最后一道整体检查。
     """
-    plan_id = msg.plan_id or ""
-    if not plan_id:
-        return
-
-    from control.agent.shangshu.plan import load_plan
-    plan = load_plan(plan_id)
+    plan_id, plan = _load_plan_from_msg(msg)
     if plan is None:
         return
 

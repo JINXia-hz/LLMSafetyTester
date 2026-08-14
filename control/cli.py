@@ -109,7 +109,7 @@ def main() -> int:
         from control.core.orchestrator import RunSpec, orchestrate
         specs_data = json.loads(__import__("pathlib").Path(args.specs).read_text(encoding="utf-8"))
         specs = [RunSpec(**s) for s in specs_data]
-        r = orchestrate(specs, max_workers=args.works)
+        r = orchestrate(specs, max_workers=args.workers)
         _print(r, json_mode=args.json, title="orchestrate")
         return 0
 

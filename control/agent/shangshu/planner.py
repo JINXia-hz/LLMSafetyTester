@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 
-from control.agent.llm import chat_with_tools, is_llm_configured
+from control.agent.llm import chat_with_tools, is_llm_configured, parse_tool_args, rebuild_tool_calls
 from control.agent.shangshu import plan as plan_mod
 from control.agent.shangshu.docs import build_system_prompt
 
@@ -118,18 +118,11 @@ def draft_plan(intent: str, *, session_id: str | None = None) -> plan_mod.Plan:
         messages.append({
             "role": "assistant",
             "content": msg.content,
-            "tool_calls": [
-                {"id": tc.id, "type": "function",
-                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                for tc in msg.tool_calls
-            ],
+            "tool_calls": rebuild_tool_calls(msg),
         })
         for tc in msg.tool_calls:
             name = tc.function.name
-            try:
-                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-            except json.JSONDecodeError:
-                args = {}
+            args = parse_tool_args(tc)
             result_str = _run_query_tool(name, args) if name in _QUERY_CAPS else f"未知工具: {name}"
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_str})
 

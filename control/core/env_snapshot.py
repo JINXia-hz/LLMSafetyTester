@@ -16,19 +16,17 @@ merge 回全局 = 把快照里的 key 写回全局 .env（critical 级，门下�
 
 from __future__ import annotations
 
-import json
-import os
 import shutil
-import threading
-from datetime import datetime
-from pathlib import Path
 
 from control.config import LLMSEC_REPO
+from control.core.store import AtomicIndexStore
 
 ENV_SNAPSHOTS_DIR = LLMSEC_REPO / "output" / "env_snapshots"
 _GLOBAL_ENV = LLMSEC_REPO / ".env"
 
-_INDEX_LOCK = threading.Lock()
+# env 快照索引存储（原子读写 + Windows PermissionError 重试 + 并发锁）
+# base_dir 传 lambda：测试期 monkeypatch ENV_SNAPSHOTS_DIR 后能动态生效
+_store = AtomicIndexStore(lambda: ENV_SNAPSHOTS_DIR, "snapshots")
 
 # .env 里受管理的 key 前缀（编辑/merge 时校验合法性，防乱写）
 _ALLOWED_KEY_PREFIXES = (
@@ -48,34 +46,8 @@ def _is_allowed_key(key: str) -> bool:
     return any(key.startswith(p) for p in _ALLOWED_KEY_PREFIXES)
 
 
-# ============================================================
-# 索引
-# ============================================================
-def _index_path() -> Path:
-    return ENV_SNAPSHOTS_DIR / "_index.json"
-
-
-def _load_index() -> dict:
-    p = _index_path()
-    if not p.exists():
-        return {"snapshots": {}}
-    return json.loads(p.read_text(encoding="utf-8"))
-
-
-def _save_index(idx: dict) -> None:
-    ENV_SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
-    p = _index_path()
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(str(tmp), str(p))
-
-
-def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
-
-
 def _ensure_dir() -> None:
-    ENV_SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    _store.ensure_dir()
 
 
 # ============================================================
@@ -158,28 +130,26 @@ def create(name: str, *, source: str = "global", note: str = "") -> dict:
         "path": str(snap_dir.relative_to(LLMSEC_REPO)).replace("\\", "/"),
         "source": source,
         "note": note,
-        "created": _now(),
+        "created": _store.now(),
         "keys": sorted(keys.keys()),
     }
-    with _INDEX_LOCK:
-        idx = _load_index()
+    def _record(idx):
         idx["snapshots"][name] = info
-        _save_index(idx)
+        _store.save(idx)
+    _store.update(_record)
     return info
 
 
 def list_snapshots() -> list[dict]:
     """列出所有 .env 快照（按创建时间倒序）。"""
-    with _INDEX_LOCK:
-        idx = _load_index()
+    idx = _store.load()
     snaps = list(idx.get("snapshots", {}).values())
     snaps.sort(key=lambda x: x.get("created", ""), reverse=True)
     return snaps
 
 
 def get_snapshot(name: str) -> dict | None:
-    with _INDEX_LOCK:
-        idx = _load_index()
+    idx = _store.load()
     return idx.get("snapshots", {}).get(name)
 
 
@@ -205,26 +175,27 @@ def edit_key(name: str, key: str, value: str) -> dict:
     env_file.write_text(_serialize_env(keys), encoding="utf-8")
 
     # 更新索引的 keys 列表
-    with _INDEX_LOCK:
-        idx = _load_index()
+    def _upd(idx):
         if name in idx.get("snapshots", {}):
             idx["snapshots"][name]["keys"] = sorted(keys.keys())
-            _save_index(idx)
+            _store.save(idx)
+    _store.update(_upd)
     return {"name": name, "key": key, "value": value, "keys": sorted(keys.keys())}
 
 
 
 def delete(name: str) -> dict:
     """删除快照（目录 + 索引项）。"""
-    with _INDEX_LOCK:
-        idx = _load_index()
+    def _delete(idx):
         if name not in idx.get("snapshots", {}):
             raise KeyError(f"快照不存在: {name}")
         snap_dir = ENV_SNAPSHOTS_DIR / name
         if snap_dir.exists():
             shutil.rmtree(snap_dir)
         info = idx["snapshots"].pop(name)
-        _save_index(idx)
+        _store.save(idx)
+        return info
+    info = _store.update(_delete)
     return {"deleted": name, "info": info}
 
 
@@ -249,7 +220,7 @@ def merge_to_global(name: str) -> dict:
     # 备份
     if _GLOBAL_ENV.exists():
         import time
-        bak = _GLOBAL_ENV.with_suffix(f".env.bak.{int(time.time())}")
+        bak = _GLOBAL_ENV.with_name(f".env.bak.{int(time.time())}")
         shutil.copy2(_GLOBAL_ENV, bak)
 
     # 合并（快照覆盖全局）
@@ -262,11 +233,11 @@ def merge_to_global(name: str) -> dict:
     _GLOBAL_ENV.write_text(_serialize_env(global_keys), encoding="utf-8")
 
     # 更新索引
-    with _INDEX_LOCK:
-        idx = _load_index()
+    def _upd(idx):
         if name in idx.get("snapshots", {}):
-            idx["snapshots"][name]["merged_to_global"] = _now()
-            _save_index(idx)
+            idx["snapshots"][name]["merged_to_global"] = _store.now()
+            _store.save(idx)
+    _store.update(_upd)
 
     return {
         "merged": name,

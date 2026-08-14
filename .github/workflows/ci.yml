@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install ruff
-      - run: ruff check llmsec/ tests/
+      - run: ruff check llmsec/ tests/ control/
 
   test:
     runs-on: ${{ matrix.os }}

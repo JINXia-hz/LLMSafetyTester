@@ -17,14 +17,12 @@ let _mxPendingBlocks = 0;   // 待圣裁的封驳数
 function loadMenxiaSection() {
   if (!_mxBound) bindMenxia();
   if (!_mxPollTimer) _mxPollTimer = setInterval(pollMenxiaBus, 2000);
-  // 首次加载也拉一次封驳列表
-  refreshBlocks();
 }
 
 function bindMenxia() {
   _mxBound = true;
   const refresh = $('mx-refresh');
-  if (refresh) refresh.onclick = () => { refreshBlocks(); renderMenxiaLog(); };
+  if (refresh) refresh.onclick = () => { renderMenxiaLog(); };
 }
 
 // 流程条职守状态：有待裁封驳时显计数，否则监察中
@@ -97,13 +95,6 @@ function handleBusMessage(m) {
   }
   // 只保留最近 30 条
   if (_mxEntries.length > 30) _mxEntries = _mxEntries.slice(-30);
-}
-
-async function refreshBlocks() {
-  try {
-    const data = await api('/api/control/blocks');
-    // blocks 已通过总线消息展示，这里不重复渲染
-  } catch { /* 静默 */ }
 }
 
 function renderMenxiaLog() {

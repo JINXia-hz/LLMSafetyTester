@@ -7,20 +7,10 @@ experiments.metrics — 从 trial 产物提取科学度量。
 
 from __future__ import annotations
 
-import json
 import math
 from pathlib import Path
 
-
-def load_json(p: Path):
-    if p is None:
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
-        import logging
-        logging.getLogger("llmsec.experiments.metrics").warning("load_json(%s) 失败: %s", p, e)
-        return None
+from llmsec.core.io import read_json
 
 
 def _find_artifact(work_dir: Path, filename: str) -> Path | None:
@@ -44,25 +34,25 @@ def extract_metrics(work_dir: Path, max_rounds: int | None = None) -> dict:
 
     返回（至少含 conv_rounds、defender_elo、asr、ci_half、coverage、fpr、tested）。
     """
-    report = load_json(_find_artifact(work_dir, "runner_report.json"))
+    report_path = _find_artifact(work_dir, "runner_report.json")
+    report = read_json(report_path) if report_path else None
     metrics: dict = {"work_dir": str(work_dir)}
 
     if report:
-        elo = report.get("elo", {}) or {}
-        atk = report.get("attack_phase", {}) or {}
-        alg = report.get("allergy", {}) or {}
+        from llmsec.core.results import extract_report_metrics
+        m = extract_report_metrics(report)
         metrics.update({
-            "defender_elo": elo.get("boundary_elo"),
-            "confidence": elo.get("boundary_confidence"),
-            "ci_half": elo.get("ci_half"),
-            "drift": elo.get("drift"),
-            "converged": elo.get("converged"),
-            "coverage": elo.get("coverage"),
-            "conv_rounds": elo.get("conv_rounds"),
-            "asr": atk.get("asr"),
-            "rounds_run": atk.get("rounds"),
-            "tested": atk.get("total_tested"),
-            "fpr": alg.get("fpr"),
+            "defender_elo": m["boundary_elo"],
+            "confidence": m["boundary_confidence"],
+            "ci_half": m["ci_half"],
+            "drift": m["drift"],
+            "converged": m["converged"],
+            "coverage": m["coverage"],
+            "conv_rounds": m["conv_rounds"],
+            "asr": m["asr"],
+            "rounds_run": m["rounds"],
+            "tested": m["total_tested"],
+            "fpr": m["fpr"],
         })
 
     # conv_rounds 兜底：从 state 回放重算（runner_report 缺失或为 None 时）
@@ -76,7 +66,7 @@ def extract_metrics(work_dir: Path, max_rounds: int | None = None) -> dict:
 def _conv_rounds_from_state(work_dir: Path, max_rounds: int | None) -> int | float | None:
     """从 state.json 轮次轨迹回放 check_convergence，返回首个收敛轮数；未收敛给惩罚值。"""
     state_path = _find_artifact(work_dir, "state.json")
-    state = load_json(state_path)
+    state = read_json(state_path) if state_path else None
     if not state or state_path is None:
         return None
     import sys

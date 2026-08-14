@@ -19,24 +19,26 @@ from pathlib import Path
 from control.config import RUNS_DIR, WORKSPACES_DIR
 
 
-def _load_report(run_dir: Path) -> dict | None:
-    p = run_dir / "runner_report.json"
+def _load_json_named(run_dir: Path, filename: str) -> dict | None:
+    """读 run_dir 下的命名 JSON 产物（runner_report.json / security_tree.json）。
+
+    不存在或解析失败返回 None。_load_report / _load_tree 共用此实现。
+    """
+    p = run_dir / filename
     if not p.exists():
         return None
     try:
         return json.loads(p.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
+
+
+def _load_report(run_dir: Path) -> dict | None:
+    return _load_json_named(run_dir, "runner_report.json")
 
 
 def _load_tree(run_dir: Path) -> dict | None:
-    p = run_dir / "security_tree.json"
-    if not p.exists():
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
+    return _load_json_named(run_dir, "security_tree.json")
 
 
 def _resolve_run_dir(run_name: str) -> Path | None:
@@ -74,6 +76,24 @@ def _resolve_run_dir(run_name: str) -> Path | None:
 # ============================================================
 # 单 run 指标提取
 # ============================================================
+def extract_elo_fields(report: dict) -> dict:
+    """从 runner_report 抽取 Elo/攻击/过敏的核心指标字段（review/compare 共用，去重）。"""
+    attack = report.get("attack_phase", {}) or {}
+    elo = report.get("elo", {}) or {}
+    allergy = report.get("allergy", {}) or {}
+    return {
+        "asr": attack.get("asr"),
+        "fpr": allergy.get("fpr"),
+        "boundary_elo": elo.get("boundary_elo"),
+        "boundary_confidence": elo.get("boundary_confidence"),
+        "coverage": elo.get("coverage"),
+        "converged": elo.get("converged"),
+        "conv_rounds": elo.get("conv_rounds"),
+        "ci_half": elo.get("ci_half"),
+        "total_tested": attack.get("total_tested"),
+    }
+
+
 def run_metrics(run_name: str) -> dict | None:
     """提取单个 run 的对比指标（轻量，只读 runner_report.json）。"""
     run_dir = _resolve_run_dir(run_name)
@@ -84,23 +104,14 @@ def run_metrics(run_name: str) -> dict | None:
         return None
     attack = rep.get("attack_phase", {}) or {}
     elo = rep.get("elo", {}) or {}
-    allergy = rep.get("allergy", {}) or {}
     tax = attack.get("jailbreak_tax", {}) or {}
     return {
         "run": run_name,
         "target_model": rep.get("target_model"),
         "security_level": rep.get("security_level", "inconclusive"),
-        "asr": attack.get("asr"),
-        "fpr": allergy.get("fpr"),
-        "boundary_elo": elo.get("boundary_elo"),
-        "boundary_confidence": elo.get("boundary_confidence"),
-        "coverage": elo.get("coverage"),
-        "conv_rounds": elo.get("conv_rounds"),
-        "converged": elo.get("converged"),
-        "ci_half": elo.get("ci_half"),
+        **extract_elo_fields(rep),
         "total_methods": elo.get("total_methods"),
         "methods_above_boundary": elo.get("methods_above_boundary"),
-        "total_tested": attack.get("total_tested"),
         "rounds": attack.get("rounds"),
         "tax_probed": tax.get("probed"),
     }
@@ -116,7 +127,7 @@ def discover_workspace_runs() -> list[dict]:
     if not WORKSPACES_DIR.exists():
         return out
     for ws_dir in sorted(WORKSPACES_DIR.iterdir()):
-        if not ws_dir.is_dir() or ws_dir.name == "_index.json":
+        if not ws_dir.is_dir():
             continue
         for sub in ws_dir.iterdir():
             if not sub.is_dir() or not (sub / "runner_report.json").exists():

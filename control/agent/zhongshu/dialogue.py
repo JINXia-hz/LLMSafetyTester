@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from control.agent.llm import chat_with_tools, is_llm_configured
+from control.agent.llm import chat_with_tools, is_llm_configured, parse_tool_args, rebuild_tool_calls
 from control.agent.prompts import ZHONGSHU_PROMPT as _SYSTEM_PROMPT
 from control.agent.zhongshu import session as sess
 from control.agent.zhongshu.fallback import chat_one as _rule_chat_one
@@ -98,7 +98,6 @@ def _do_search_history(args: dict) -> str:
 
     if not results:
         return f"未找到匹配「{', '.join(keywords)}」的历史记录。"
-    import json
     return json.dumps(results, ensure_ascii=False, default=str)
 
 
@@ -198,19 +197,12 @@ def _react_loop(user_text: str, messages: list[dict], session_id: str,
         messages.append({
             "role": "assistant",
             "content": msg.content,
-            "tool_calls": [
-                {"id": tc.id, "type": "function",
-                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
-                for tc in msg.tool_calls
-            ],
+            "tool_calls": rebuild_tool_calls(msg),
         })
 
         for tc in msg.tool_calls:
             name = tc.function.name
-            try:
-                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-            except json.JSONDecodeError:
-                args = {}
+            args = parse_tool_args(tc)
 
             if name == "request_shangshu_plan":
                 intent = args.get("intent", user_text)
@@ -284,7 +276,7 @@ def _hand_to_shangshu(intent: str, messages: list[dict], session_id: str,
             full_intent = f"{intent}\n\n[历史参考]\n{reference}"
 
         plan = draft_plan(full_intent, session_id=session_id)
-        rendered = _render_plan_for_user(plan, messages)
+        rendered = _render_plan_for_user(plan)
 
         # 记录拟案完成（user_text 存原始指令，不再用 __pending__ 占位）
         gazette.append_event(plan.id, gazette.EV_PLAN_DRAFTED, "尚书省",
@@ -335,7 +327,7 @@ def _step_dict(s) -> dict:
     }
 
 
-def _render_plan_for_user(plan, messages: list[dict]) -> str:
+def _render_plan_for_user(plan) -> str:
     """LLM 润色：把尚书省的技术 Plan 翻译成给用户看的中文方案。"""
     steps_text = "\n".join(
         f"  {i+1}. [{s.id}] {s.description}（能力：{s.capability}）"

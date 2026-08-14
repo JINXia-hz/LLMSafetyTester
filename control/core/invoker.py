@@ -132,8 +132,8 @@ def delete_runs(names: list[str], *, delete_r: bool = False) -> dict:
     return res.json or {}
 
 
-def clean_caches(categories: list[str], *, yes: bool = True) -> dict:
-    """清理缓存（经 llmsec-manage cache clean）。默认 yes=True 直接执行（已过门下省确认）。"""
+def clean_caches(categories: list[str]) -> dict:
+    """清理缓存（经 llmsec-manage cache clean，已过门下省确认，强制 --yes）。"""
     sub = ["cache", "clean", *categories, "--yes", "--json"]
     res = _run(_manage_argv(sub)).require_ok()
     return res.json or {}

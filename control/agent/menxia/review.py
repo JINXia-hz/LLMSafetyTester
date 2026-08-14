@@ -18,6 +18,7 @@ import json
 
 from control.agent.prompts import MENXIA_PROMPT
 from control.config import _FALLBACK_THRESHOLDS
+from control.core.compare import extract_elo_fields
 
 _SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2, "good": 3}
 
@@ -69,22 +70,24 @@ def assess_findings(report: dict, tree: dict | None) -> list[dict]:
     """用阈值规则判定异常，产出 findings[]。"""
     findings: list[dict] = []
     th = get_thresholds()
-    attack = report.get("attack_phase", {}) or {}
-    elo = report.get("elo", {}) or {}
-    allergy = report.get("allergy", {}) or {}
     level = report.get("security_level", "inconclusive")
     target = report.get("target_model", "?")
-    asr = attack.get("asr")
-    fpr = allergy.get("fpr")
-    tested = attack.get("total_tested", 0)
-    converged = elo.get("converged")
-    coverage = elo.get("coverage")
-    ci_half = elo.get("ci_half")
-    drift = elo.get("drift")
-    confidence = elo.get("boundary_confidence")
+    # 复用 compare.extract_elo_fields 统一提取（与 _build_metrics_digest 同源）
+    f = extract_elo_fields(report)
+    asr = f["asr"]
+    fpr = f["fpr"]
+    tested = f["total_tested"] or 0
+    converged = f["converged"]
+    coverage = f["coverage"]
+    ci_half = f["ci_half"]
+    confidence = f["boundary_confidence"]
+    # drift 不在 extract_elo_fields 标准字段里（仅门下省审查用），单独取
+    drift = (report.get("elo", {}) or {}).get("drift")
 
     def _num(v):
         return v if isinstance(v, (int, float)) else None
+
+    tested_n = _num(tested)
 
     if level == "inconclusive":
         findings.append({
@@ -92,11 +95,11 @@ def assess_findings(report: dict, tree: dict | None) -> list[dict]:
             "value": level, "threshold": "safe/allergic/vulnerable/broken",
             "interpretation": f"{target} 结论为 inconclusive，下列数字需谨慎解读。",
         })
-    if tested and tested < th["PORTRAIT_MIN_TESTED"]:
+    if tested_n is not None and tested_n < th["PORTRAIT_MIN_TESTED"]:
         findings.append({
             "severity": "warning", "metric": "total_tested",
-            "value": tested, "threshold": f">= {th['PORTRAIT_MIN_TESTED']}",
-            "interpretation": f"测试样本仅 {tested} 条，统计结论不可靠。",
+            "value": tested_n, "threshold": f">= {th['PORTRAIT_MIN_TESTED']}",
+            "interpretation": f"测试样本仅 {tested_n} 条，统计结论不可靠。",
         })
 
     asr_n = _num(asr)
@@ -206,22 +209,11 @@ def assess_findings(report: dict, tree: dict | None) -> list[dict]:
 # ============================================================
 def _build_metrics_digest(report: dict, tree: dict | None) -> dict:
     """提取关键数字（给 LLM 润色用）。"""
-    attack = report.get("attack_phase", {}) or {}
-    elo = report.get("elo", {}) or {}
-    allergy = report.get("allergy", {}) or {}
     digest = {
         "target": report.get("target_model", "?"),
         "security_level": report.get("security_level", "?"),
         "verdict": report.get("overall_verdict", ""),
-        "asr": attack.get("asr"),
-        "fpr": allergy.get("fpr"),
-        "boundary_elo": elo.get("boundary_elo"),
-        "boundary_confidence": elo.get("boundary_confidence"),
-        "coverage": elo.get("coverage"),
-        "converged": elo.get("converged"),
-        "conv_rounds": elo.get("conv_rounds"),
-        "ci_half": elo.get("ci_half"),
-        "total_tested": attack.get("total_tested"),
+        **extract_elo_fields(report),
         "recommendation": report.get("recommendation", ""),
     }
     if tree:

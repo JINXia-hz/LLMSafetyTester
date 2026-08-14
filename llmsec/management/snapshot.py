@@ -66,7 +66,6 @@ def export_snapshot(
     else:
         out = Path(out)
         if out.suffix == ".gz" and ".tar" in out.name:
-            out_dir = SNAPSHOT_DIR / out.with_suffix("").with_suffix("")  # 临时解包目录
             out_dir = OUTPUT_DIR / ".snapshot_staging" / out.stem
             archive = out
         else:

@@ -68,28 +68,34 @@ def _trash_subdir() -> Path:
     return d
 
 
-def soft_remove(path: Path) -> Path | None:
-    """软删除单个文件 → 移到 trash，返回 trash 内的新路径。
+def _soft_move(path: Path, kind: str) -> Path | None:
+    """软删除底层实现：把文件或目录移到 trash，保留相对 OUTPUT_DIR 的结构。
 
-    保留相对 OUTPUT_DIR 的结构以便恢复。文件不存在返回 None。
+    kind 仅用于日志文案（"文件"/"目录"）。shutil.move 对文件和目录都适用。
     """
     path = Path(path)
     if not path.exists() and not path.is_symlink():
         return None
     trash = _trash_subdir()
-    # 用相对 OUTPUT_DIR 的结构保留来源，便于恢复
     try:
         rel = path.relative_to(OUTPUT_DIR)
     except ValueError:
         rel = Path(path.name)
     dest = trash / rel
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # 同名冲突加后缀
     if dest.exists():
         dest = dest.with_name(f"{dest.name}.{datetime.now().strftime('%H%M%S_%f')}")
     shutil.move(str(path), str(dest))
-    logger.info("软删除文件 %s → %s", path, dest)
+    logger.info("软删除%s %s → %s", kind, path, dest)
     return dest
+
+
+def soft_remove(path: Path) -> Path | None:
+    """软删除单个文件 → 移到 trash，返回 trash 内的新路径。
+
+    保留相对 OUTPUT_DIR 的结构以便恢复。文件不存在返回 None。
+    """
+    return _soft_move(path, "文件")
 
 
 def soft_rmtree(path: Path) -> Path | None:
@@ -97,21 +103,7 @@ def soft_rmtree(path: Path) -> Path | None:
 
     目录不存在返回 None。比逐文件 soft_remove 快（整体 move）。
     """
-    path = Path(path)
-    if not path.exists() and not path.is_symlink():
-        return None
-    trash = _trash_subdir()
-    try:
-        rel = path.relative_to(OUTPUT_DIR)
-    except ValueError:
-        rel = Path(path.name)
-    dest = trash / rel
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
-        dest = dest.with_name(f"{dest.name}.{datetime.now().strftime('%H%M%S_%f')}")
-    shutil.move(str(path), str(dest))
-    logger.info("软删除目录 %s → %s", path, dest)
-    return dest
+    return _soft_move(path, "目录")
 
 
 # ============================================================

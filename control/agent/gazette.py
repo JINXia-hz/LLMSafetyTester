@@ -18,16 +18,21 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from control.config import OUTPUT_DIR
+from control.core.store import AtomicIndexStore
 
 _GAZETTE_DIR = OUTPUT_DIR / "gazette"
+# append JSONL 事件 + 更新 _index.json 是复合操作，需在同一把锁内
 _LOCK = threading.Lock()
+
+# 文牍索引存储（原子读写 + Windows PermissionError 重试）
+# base_dir 传 lambda：测试期 monkeypatch _GAZETTE_DIR 后能动态生效
+_store = AtomicIndexStore(lambda: _GAZETTE_DIR, "plans")
 
 
 # ============================================================
@@ -71,43 +76,9 @@ class GazetteEvent:
 # ============================================================
 # 存储
 # ============================================================
-def _ensure_dir() -> Path:
-    _GAZETTE_DIR.mkdir(parents=True, exist_ok=True)
-    return _GAZETTE_DIR
-
-
 def _gazette_path(plan_id: str) -> Path:
-    return _ensure_dir() / f"{plan_id}.jsonl"
-
-
-def _index_path() -> Path:
-    return _ensure_dir() / "_index.json"
-
-
-def _load_index() -> dict:
-    p = _index_path()
-    if not p.exists():
-        return {"plans": {}}
-    return json.loads(p.read_text(encoding="utf-8"))
-
-
-def _save_index(idx: dict) -> None:
-    """原子写 index（调用方持 _LOCK）。Windows 下 os.replace 偶有锁竞争，重试。"""
-    p = _index_path()
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
-    for _attempt in range(3):
-        try:
-            os.replace(str(tmp), str(p))
-            return
-        except PermissionError:
-            import time as _t
-            _t.sleep(0.05)
-    # 最后一次仍失败则强制写
-    try:
-        os.replace(str(tmp), str(p))
-    except PermissionError:
-        pass  # index 是缓存，丢了下次 append 会重建
+    _store.ensure_dir()
+    return _GAZETTE_DIR / f"{plan_id}.jsonl"
 
 
 # ============================================================
@@ -144,7 +115,7 @@ def append_event(
         with open(_gazette_path(plan_id), "a", encoding="utf-8") as f:
             f.write(line)
         # 更新索引
-        idx = _load_index()
+        idx = _store.load()
         entry = idx["plans"].setdefault(plan_id, {
             "plan_id": plan_id,
             "intent": intent or "",
@@ -168,7 +139,7 @@ def append_event(
         elif kind == EV_PLAN_REJECTED:
             entry["status"] = "rejected"
             entry["finished"] = event.ts
-        _save_index(idx)
+        _store.save(idx)
 
 
 def read_events(plan_id: str) -> list[GazetteEvent]:
@@ -210,7 +181,7 @@ def read_plan_context(plan_id: str) -> dict | None:
 
     # 先从索引取 intent/session（比从事件流里拼更可靠）
     with _LOCK:
-        idx = _load_index()
+        idx = _store.load()
     idx_entry = idx.get("plans", {}).get(plan_id, {})
 
     ctx = {
@@ -267,7 +238,7 @@ def read_plan_context(plan_id: str) -> dict | None:
 
 def list_gazettes(*, session_id: str | None = None, recent: int = 20) -> list[dict]:
     """列出最近的文牍（_index.json），可按 session 过滤。过滤掉 __pending__。"""
-    idx = _load_index()
+    idx = _store.load()
     plans = [p for p in idx.get("plans", {}).values() if p.get("plan_id") != "__pending__"]
     if session_id:
         plans = [p for p in plans if p.get("session_id") == session_id]

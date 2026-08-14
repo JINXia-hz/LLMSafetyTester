@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from llmsec.core.config import ATTACKS_DIR, CLUSTER_RESULT_FILE, OUTPUT_DIR
 from llmsec.core.io import read_json
 from llmsec.core.logging import get_logger
+from llmsec.core.results import extract_report_metrics
 
 logger = get_logger(__name__)
 
@@ -146,9 +147,8 @@ def _run_summary(run_dir: Path) -> dict | None:
     report = load_json(run_dir / "runner_report.json")
     if not report:
         return None
+    m = extract_report_metrics(report)
     attack = report.get("attack_phase", {}) or {}
-    allergy = report.get("allergy", {}) or {}
-    elo = report.get("elo", {}) or {}
     tax = attack.get("jailbreak_tax") or {}
     # run 名 = 相对 runs_dir 的路径（如 "2026-08-07_120000/minimax"），不用 run_dir.name（只返回末段）
     from llmsec.server.dashboard_api import RUNS_DIR
@@ -160,9 +160,9 @@ def _run_summary(run_dir: Path) -> dict | None:
         "run": run_name,
         "time": _run_time(run_name.split("/")[-1]) or report.get("generated_at"),
         "target": report.get("target_model"),
-        "asr": attack.get("asr"),
-        "fpr": allergy.get("fpr"),
-        "elo": elo.get("boundary_elo"),
+        "asr": m["asr"],
+        "fpr": m["fpr"],
+        "elo": m["boundary_elo"],
         "level": report.get("security_level", "inconclusive"),
         "tax_probed": tax.get("probed"),
     }

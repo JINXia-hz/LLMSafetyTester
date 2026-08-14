@@ -488,6 +488,17 @@ class TestSession:
         _, msgs = sess.get_or_create(sid)
         assert len(msgs) == 1 and msgs[0]["role"] == "system"
 
+    def test_history_window_trims_to_max(self):
+        """超过 _HISTORY_MAX 时滑窗裁剪，system 永远保留在 index 0。"""
+        from control.agent.zhongshu import session as sess
+        sess._SESSIONS.clear()
+        sid, _ = sess.get_or_create(None)
+        for i in range(sess._HISTORY_MAX + 10):
+            sess.append(sid, "user", f"msg-{i}")
+        _, msgs = sess.get_or_create(sid)
+        assert len(msgs) <= sess._HISTORY_MAX
+        assert msgs[0]["role"] == "system"
+
 
 # ============================================================
 # review：门下省事后审查（读报告 → 规则判定 findings）
@@ -540,6 +551,12 @@ class TestReview:
         from control.agent.menxia.review import assess_findings
         findings = assess_findings(self._make_report(converged=False), None)
         assert any(f["metric"] == "converged" for f in findings)
+
+    def test_zero_tested_flagged(self):
+        """tested==0（最不充分）必须触发样本不足告警，不能被真值门短路跳过。"""
+        from control.agent.menxia.review import assess_findings
+        findings = assess_findings(self._make_report(tested=0), None)
+        assert any(f["metric"] == "total_tested" for f in findings)
 
     def test_findings_sorted_by_severity(self):
         from control.agent.menxia.review import assess_findings

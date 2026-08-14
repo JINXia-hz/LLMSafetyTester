@@ -111,6 +111,14 @@ def _task_view(task_id: str, t: dict) -> dict:
     }
 
 
+def _require_task(task_id: str) -> dict:
+    """按 id 取任务，不存在则抛 404。统一原 5 处重复的 HTTPException。"""
+    t = TASKS.get(task_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    return t
+
+
 def _spawn(task_id: str, t: dict) -> None:
     """启动已入队任务的子进程（打开日志、Popen、置 running）。Popen 失败置 failed。"""
     TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -246,9 +254,7 @@ async def api_tasks():
 
 @router.get("/api/tasks/{task_id}")
 async def api_task(task_id: str):
-    t = TASKS.get(task_id)
-    if t is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    t = _require_task(task_id)
     return _task_view(task_id, t)
 
 
@@ -258,9 +264,7 @@ async def api_task_log(task_id: str, download: bool = False):
 
     ?download=1 时以 text/plain + Content-Disposition 返回，便于直接下载 .log。
     """
-    t = TASKS.get(task_id)
-    if t is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    t = _require_task(task_id)
     log_path: Path = t["log_path"]
     text = ""
     if log_path.exists():
@@ -335,9 +339,7 @@ def _parse_eval_argv(argv: list[str]) -> tuple[list[str], int | None]:
 async def api_task_progress(task_id: str):
     """任务进度快照：evaluate 返回每目标最后一条 + 全部声明目标（占位）；
     hpo 返回最后一条汇总。供看板初次渲染与 SSE 不可用时的轮询兜底。"""
-    t = TASKS.get(task_id)
-    if t is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    t = _require_task(task_id)
     _refresh_task_status(t)
     kind = t["kind"]
     status = t["status"]
@@ -378,9 +380,7 @@ async def api_task_cancel(task_id: str):
     runner 每场攻击实时 upsert 进 R，故取消后已观测的结果保留在结果矩阵中。
     已结束的任务返回 409。
     """
-    t = TASKS.get(task_id)
-    if t is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    t = _require_task(task_id)
     _refresh_task_status(t)
     if t["status"] not in ("running", "queued"):
         raise HTTPException(status_code=409, detail=f"任务已结束（{t['status']}），无法取消")
@@ -412,9 +412,7 @@ async def api_task_stream(task_id: str):
     子进程结束时发一个 event:done（携带 status/returncode）再关闭，前端据此刷新数据。
     原始 .log 不再直播（仅 /api/tasks/{id}/log 下载）——运行框改为结构化简略信息。
     """
-    t = TASKS.get(task_id)
-    if t is None:
-        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+    t = _require_task(task_id)
     progress_path = _progress_path(task_id)
 
     async def event_gen():

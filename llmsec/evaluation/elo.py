@@ -115,8 +115,8 @@ class ELOTracker(ConvergenceMixin):
     def get_attacker_elo(self, method_name: str) -> float:
         return self.attacker_ratings.get(method_name, float(self.initial))
 
-    def get_defender_elo(self, model_name: str) -> float:
-        return self.defender_ratings.get(model_name, float(self.initial))
+    def get_defender_elo(self, defender_name: str) -> float:
+        return self.defender_ratings.get(defender_name, float(self.initial))
 
     def update_round(
         self,

@@ -92,14 +92,6 @@ def extract_textual_features(prompt: str) -> dict[str, float]:
     return feats
 
 
-def _batch_textual_to_array(textual_feats: list[dict]) -> np.ndarray:
-    """将多个方法的文本统计特征转为 numpy 数组。"""
-    data = []
-    for feats in textual_feats:
-        data.append([feats.get(k, 0) for k in TEXTUAL_FEATURE_NAMES])
-    return np.array(data)
-
-
 # ============================================================
 # Embedding 缓存与提取
 # ============================================================
