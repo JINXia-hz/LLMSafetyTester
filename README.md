@@ -41,7 +41,7 @@ graph LR
 │ run 清理 · 缓存清理 · 快照导出 · 显式 merge 进全局 R       │
 ├──────────────────────────────────────────────────────────┤
 │ 工作单元核心 (llmsec/) — 评估管线                          │
-│ runner / evaluation / clustering / experiments / server   │
+│ runner / eval / clustering / experiments / server / tui    │
 │ 默认隔离运行（--work-dir），不自动写全局 R                 │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -62,7 +62,8 @@ graph LR
 | L3 | `reporting/` | 报告生成 | `final_report.py`、`report.py` |
 | L4 | `management/` | 自我维护 CLI（run/缓存/快照/merge） | `runs.py`、`caches.py`、`merge.py`、`snapshot.py` |
 | L4 | `experiments/` | HPO 实验框架（trial 经 subprocess 跑 runner） | `study.py`、`executor.py`、`search.py` |
-| L4 | `server/` | Web 看板 + 任务系统 + SSE + 本地模拟模型 | `dashboard_api.py`、`routers/`、`task_manager.py` |
+| L4 | `server/` | Web 看板 + 任务系统 + SSE + 本地模拟模型 | `dashboard_api.py`、`routers/`、`task_manager.py`、`launch.py`（评估/HPO 统一启动层） |
+| L5 | `tui/` | 终端指挥台（Textual，独立进程直连 task_manager） | `app.py`、`task_store.py`、`render.py`、`panels/` |
 | L5 | `mcp/` | MCP 工具库接口（聚合以上所有能力） | `server.py`、`tools/` |
 
 `evaluation/` 是最大的子包，内部再分：
@@ -202,9 +203,11 @@ docker run -p 8080:8080 -v llmsec-data:/app/output jinxiahz/llmsec:slim
 pip install -e .              # 核心（不含聚类，无需下载 torch）
 pip install -e ".[cluster]"   # 完整（含聚类特征提取 + embedding 模型）
 pip install -e ".[dev]"       # 开发（含测试 + lint）
+pip install -e ".[tui]"       # 终端界面 llmsec-tui（textual）
+pip install -e ".[mcp]"       # MCP server（fastmcp）
 ```
 
-Python 3.11。`hdbscan`、`sentence-transformers`、`tiktoken` 为聚类模块的可选依赖（安装 `.[cluster]` 时拉入，会附带 `torch` ~2GB；只做攻击评估不需要）。
+Python 3.11。`hdbscan`、`sentence-transformers`、`tiktoken` 为聚类模块的可选依赖（安装 `.[cluster]` 时拉入，会附带 `torch` ~2GB；只做攻击评估不需要）；`textual`（TUI）与 `fastmcp`（MCP）同为可选 extra。
 
 ### 配置环境
 
@@ -240,7 +243,7 @@ TARGET_TYPE=local_sim TARGET_BASE_URL=http://127.0.0.1:8000/v1 \
 
 ## 使用入口
 
-三个入口共用同一套能力：**Web 面板**（人用）、**CLI**（脚本用）、**MCP 工具库**（外部 agent 用）。
+四个入口共用同一套能力：**Web 面板**（人用）、**TUI 终端**（人用，免开服务）、**CLI**（脚本用）、**MCP 工具库**（外部 agent 用）。
 
 ### Web 面板
 
@@ -251,6 +254,22 @@ python -m uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
 ```
 
 侧边栏板块：**总览**（指标卡/雷达图/趋势）、**威胁看板**（Top 威胁/收敛曲线/盲区）、**报告**（分端渲染 security_report.md）、**聚类分析**（特征空间投影/树切割/簇卡片）、**预测模型**（SVD-Ridge 诊断 + Blend 状态）、**运行控制**（一键启动评估 / HPO 配置台 / 目标与 env 管理 / 任务日志 SSE 直播）、**宣政殿**（三省 Agent 对话面板）。
+
+### TUI 终端指挥台
+
+```bash
+pip install -e ".[tui]"     # textual 是可选依赖（extra），核心安装不含
+llmsec-tui                  # 或 python -m llmsec.tui
+```
+
+Textual 终端界面，**独立进程直连 task_manager 与 MCP 工具层，不需要启动 Web 看板**也能发起评估、看实时进度、翻历史 run。四个面板（数字键 `1-4` 切换，`?` 键位速查）：
+
+- **任务中心**：任务表 + 选中任务的终端进度窗（盲文进度条、OLS 平滑）；`n` 发起评估（目标多选/env 快照隔离/参数覆写全能力面）、`c` 取消（本机 + 跨进程 PID 强杀）、`l` 看完整日志
+- **HPO 直播**：trial 进度 + 目标值 sparkline + trial 流水；`s` 选 yaml 启动 study
+- **Runs 浏览**：`enter` 读报告、`m`+`v` 标记对比、`e` Elo 榜、`b` 安全边界、`p` 意外发现、`n` 下一批测试建议
+- **宣政殿**：中书省规则版对话，自然语言/JSON 指令直接操作控制层（LLM 版在看板，需开服务）
+
+外部任务（看板/MCP 启动的）经落盘 meta 感知真实状态——持有进程崩溃也会判成「已结束」，进度照常增量回放。面板/键位/架构边界详见 [docs/tui.md](docs/tui.md)。
 
 ### CLI 命令参考
 
@@ -375,7 +394,7 @@ pytest tests/test_elo.py    # 单文件
 pytest -n auto              # 并行（CI 默认）
 ```
 
-约 500 个测试按子系统组织（test_elo / test_predictors / test_samplers / test_clustering / test_management / test_mcp / test_dashboard / test_experiments 及回归套件）；`real_api` / `e2e` marker 默认排除，需真实模型时手动触发。完整说明见 [tests/README.md](tests/README.md)。
+约 900 个测试（57 个文件；用例数清单由脚本生成于 [tests/INVENTORY.md](tests/INVENTORY.md)，CI 强制校验一致）按子系统组织（test_elo / test_predictors / test_samplers / test_clustering / test_management / test_mcp / test_dashboard / test_experiments / test_tui_* 及回归套件）；`real_api` / `e2e` marker 默认排除，需真实模型时手动触发。完整说明见 [tests/README.md](tests/README.md)。
 
 ### 推荐读码路径
 
@@ -393,6 +412,8 @@ pytest -n auto              # 并行（CI 默认）
 | [docs/架构与算法详解.md](docs/架构与算法详解.md) | Elo 动力学 / 收敛判据 / 预测器 / 聚类的机制细节 |
 | [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | MCP 54 工具 / HTTP 端点 / CLI 接口参考 |
 | [docs/核心业务时序图.md](docs/核心业务时序图.md) | 评估任务与三省 Plan 执行的时序图 |
+| [docs/tui.md](docs/tui.md) | TUI 终端指挥台：面板、键位与架构边界 |
+| [docs/weekend_hpo_runbook.md](docs/weekend_hpo_runbook.md) | 周末 HPO 挂机跑法：smoke → 三阶段 study 编排（配置见 `experiments/`） |
 | [docs/流程追踪报告.md](docs/流程追踪报告.md) | 一次 runner 从启动到退出的逐阶段追踪 |
 | [docs/实验框架说明.md](docs/实验框架说明.md) | HPO 实验框架 |
 | [docs/攻击特征与聚类深度研究报告.md](docs/攻击特征与聚类深度研究报告.md) | 特征体系与聚类管线调研 |

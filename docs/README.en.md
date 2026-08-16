@@ -66,9 +66,11 @@ Open `http://localhost:8080` in your browser and configure via the dashboard —
 pip install -e .              # Core (no clustering, no torch)
 pip install -e ".[cluster]"   # Full (clustering + embedding model)
 pip install -e ".[dev]"       # Development (tests + lint)
+pip install -e ".[tui]"       # Terminal UI llmsec-tui (textual)
+pip install -e ".[mcp]"       # MCP server (fastmcp)
 ```
 
-Python 3.11 required. `hdbscan`, `sentence-transformers`, `tiktoken` are optional dependencies for clustering (installing `.[cluster]` pulls in `torch` ~2GB; not needed for attack evaluation only).
+Python 3.11 required. `hdbscan`, `sentence-transformers`, `tiktoken` are optional dependencies for clustering (installing `.[cluster]` pulls in `torch` ~2GB; not needed for attack evaluation only); `textual` (TUI) and `fastmcp` (MCP) are optional extras too.
 
 ### Three Steps
 
@@ -114,9 +116,25 @@ Sidebar sections:
 - **Run Control**: Adaptive evaluation (select target / attack set / phase / batch size / rounds / sampler), HPO config, target model management, environment config, real-time task polling + SSE
 - **Grand Secretariat** (Control Layer): Three-province LLM Agent system —
   - **Secretariat** (中书省): Main dialogue entry, understands intent, handles simple queries, delegates complex instructions to the Department of State for planning
-  - **Department of State** (尚书省): Full capability manifest (16 capabilities), decomposes complex instructions into structured Plans (steps + dependencies), executes topologically after user approval
+  - **Department of State** (尚书省): Full capability manifest (17 capabilities), decomposes complex instructions into structured Plans (steps + dependencies), executes topologically after user approval
   - **Chancellery** (门下省): Bus subscriber, constantly monitors, blocks dangerous steps (run evaluation / merge to global / delete R column) for confirmation, auto-reviews and presents briefings after task completion
   - Three provinces collaborate via an in-process message bus, each with its own frontend panel
+
+## TUI Console
+
+```bash
+pip install -e ".[tui]"     # textual is an optional extra
+llmsec-tui                  # or: python -m llmsec.tui
+```
+
+A Textual terminal UI that talks to the task manager and MCP tool layer **in its own process — no web dashboard needed** to launch evaluations, watch live progress, or browse past runs. Four panels (switch with `1`-`4`, `?` for keymap help):
+
+- **Task Center**: task table + per-task terminal progress window (braille progress bars); `n` launch evaluation (multi-target, env-snapshot isolation, param overrides), `c` cancel (local + cross-process via PID), `l` full log
+- **HPO Live**: trial progress + objective sparkline + trial feed; `s` pick a study yaml and start
+- **Runs Browser**: `enter` read report, `m`+`v` mark & compare runs, `e` attacker Elo ranking, `b` security boundary, `p` surprises, `n` next-pairing suggestions
+- **Grand Secretariat**: rule-based dialogue driving the control layer (the LLM version lives in the web dashboard)
+
+External tasks (started by the dashboard/MCP) are tracked via on-disk meta — even if the holder process crashed, status shows as finished and progress replays incrementally. Details in [tui.md](tui.md) (Chinese).
 
 ---
 
