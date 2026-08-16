@@ -1,0 +1,54 @@
+# 自动生成（scripts/weekend_hpo.py stage2），勿手改——重跑命令会覆盖
+name: weekend_stage2
+description: 周末阶段2细化：stage1 top5 收窄空间，repeats=2 风险厌恶
+objective:
+  metric: ci_half
+  direction: minimize
+  aggregate: mean_plus_std
+strategy: bayesian
+budget:
+  max_trials: 25
+  max_wall_minutes: 720
+  trial_timeout_minutes: 75
+repeats: 2
+seed_base: 2000
+space:
+  K_FACTOR:
+    type: int
+    low: 8
+    high: 8
+  K_DEF_DECAY_N0:
+    type: int
+    low: 19
+    high: 24
+  CONV_WINDOW_MIN:
+    type: int
+    low: 5
+    high: 7
+  SCORE_PERF_TAU:
+    type: float
+    low: 1.8667485632056469
+    high: 2.4598226723565637
+  EMBEDDING_PCA_DIM:
+    type: int
+    low: 40
+    high: 64
+    step: 8
+  TREE_K_MIN:
+    type: int
+    low: 4
+    high: 5
+  TREE_K_MAX:
+    type: int
+    low: 16
+    high: 17
+fixed:
+  input: all_merged.jsonl
+  max_rounds: 4
+  batch_size: 10
+  HDBSCAN_MIN_CLUSTER_DIV: 40
+targets:
+- minimax
+- gemma-4-12B-it
+max_concurrent: 2
+config_concurrency: 3

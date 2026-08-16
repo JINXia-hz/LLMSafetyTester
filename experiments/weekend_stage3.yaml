@@ -1,0 +1,33 @@
+# 周末长期实验 · 阶段 3：新参数族扫描（采样器/批量/判分/预测器/聚类粒度）
+# 锁定 stage2 最优的 7 个收敛+聚类参数（fixed），聚焦未覆盖的关键杠杆
+# 目标：固定预算（max_rounds=4）下最小化跨目标 ci_half（mean+std，风险厌恶）
+name: weekend_stage3
+description: "周末阶段3：采样策略×批量×判分折扣×Ridge路径×Blend先验×HDBSCAN粒度 8 维"
+objective: {metric: ci_half, direction: minimize, aggregate: mean_plus_std}
+strategy: bayesian
+budget: {max_trials: 25, max_wall_minutes: 780, trial_timeout_minutes: 75}
+repeats: 2
+seed_base: 3000
+space:
+  sampler: {choices: [gap, infogain, hybrid]}   # coordinate 需逐簇多次实测，4 轮预算下不适用，排除
+  batch_size: {choices: [8, 12, 16]}            # 每轮实测数 → 直接决定 CI 收缩速度
+  ADAPTIVE_BATCH_MAX: {type: int, low: 8, high: 24}
+  SAMPLER_INFOGAIN_BETA: {type: float, low: 0.1, high: 0.8}
+  JUDGE_B_LEVEL_DISCOUNT: {type: float, low: 0.5, high: 0.95}
+  RIDGE_LAMBDA_MAX: {type: int, low: 2, high: 5}
+  BLEND_PRIOR_K: {type: float, low: 5.0, high: 25.0}
+  HDBSCAN_MIN_CLUSTER_DIV: {type: int, low: 20, high: 80}
+fixed:
+  input: all_merged.jsonl
+  max_rounds: 4
+  # —— stage2 调优结果锁定 ——
+  K_FACTOR: 8
+  K_DEF_DECAY_N0: 23
+  CONV_WINDOW_MIN: 7
+  SCORE_PERF_TAU: 2.289410576710754
+  EMBEDDING_PCA_DIM: 40
+  TREE_K_MIN: 5
+  TREE_K_MAX: 17
+targets: [minimax, gemma-4-12B-it]
+max_concurrent: 2
+config_concurrency: 3

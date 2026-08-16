@@ -51,71 +51,61 @@ class EvaluateRequest(BaseModel):
     targets: str | None = None      # 多目标子集（逗号分隔，前端探活后只传可达的）
     # 多目标并发数：None + 多目标 → 默认全并发（每个目标是独立端点，无共享限速）
     target_concurrency: int | None = Field(default=None, ge=1, le=32)
+    no_early_stop: bool = False     # 跑满 max_rounds 不早停（固定预算可比性）
+    # env 隔离（归一新增，能力与 MCP run_evaluation 对齐）：快照覆盖全局 .env / 覆写 params
+    env_snapshot: str | None = None
+    param_overrides: dict | None = None
 
 
 @router.post("/api/run/evaluate")
 async def api_run_evaluate(req: EvaluateRequest):
-    # input 只允许 output/attacks/ 下的 jsonl 文件名，防路径穿越
-    input_name = Path(req.input).name
-    if not input_name.endswith(".jsonl"):
-        raise HTTPException(status_code=400, detail="input 必须是 .jsonl 文件名")
-    attack_file = ATTACKS_DIR / input_name
-    if not attack_file.exists():
-        raise HTTPException(status_code=404, detail=f"攻击集不存在: attacks/{input_name}")
+    # argv 构造/校验/env 注入统一在 llmsec.server.launch（与 MCP/TUI 共用），
+    # 本端点只做 HTTP 协议映射。攻击集先解析一次：越狱税探针预检需要路径。
+    from llmsec.server.launch import (
+        LaunchError,
+        LaunchSpec,
+        attack_has_tax_probe,
+        launch_evaluation,
+        resolve_attack_file,
+    )
 
-    # 越狱税探针预检：读首条记录的 expected_answer（非 0/None 即含数学探针）
-    has_tax_probe = False
     try:
-        with open(attack_file, encoding="utf-8") as f:
-            first_line = f.readline()
-        if first_line.strip():
-            ea = json.loads(first_line).get("expected_answer")
-            has_tax_probe = ea not in (0, None)
-    except Exception:
-        has_tax_probe = False
+        attack_path = resolve_attack_file(req.input)
+    except LaunchError as e:
+        raise HTTPException(status_code=404 if e.reason == "not_found" else 400, detail=str(e)) from None
 
-    argv = [
-        "-m", "llmsec.pipeline.runner",
-        "--phase", req.phase,
-        "--input", f"attacks/{input_name}",
-        "--batch-size", str(req.batch_size),
-        "--max-rounds", str(req.max_rounds),
-        "--sampler", req.sampler,
-    ]
-    if req.sampler_alpha is not None:
-        argv += ["--sampler-alpha", str(req.sampler_alpha)]
-    if req.sampler_beta is not None:
-        argv += ["--sampler-beta", str(req.sampler_beta)]
-    if req.sampler_gamma is not None:
-        argv += ["--sampler-gamma", str(req.sampler_gamma)]
-    if req.coordinate_rounds is not None:
-        argv += ["--coordinate-rounds", str(req.coordinate_rounds)]
-    if req.target:
-        # 目标须在 .env TARGETS 已声明，否则 400（静默丢弃会张冠李戴）；
-        # load_targets 失败/为空时无法校验，放行交由 runner 自身报错
-        from llmsec.core.config import load_targets
-        try:
-            declared = load_targets()
-        except Exception:
-            declared = {}
-        if declared and req.target not in declared:
-            raise HTTPException(status_code=400, detail=f"目标未在 TARGETS 中声明: {req.target!r}")
-        argv += ["--target", req.target]
-    elif req.targets:
-        # 前端探活后只传可达目标的子集（逗号分隔）
-        argv += ["--targets", req.targets]
-        # 多目标并发：未显式指定时默认全并发（每目标独立端点）。runner 内 min(tc, n) 兜底
-        n_targets = len([t for t in req.targets.split(",") if t.strip()])
-        tc = req.target_concurrency or max(1, n_targets)
-        argv += ["--target-concurrency", str(tc)]
-    elif req.target_concurrency:
-        argv += ["--target-concurrency", str(req.target_concurrency)]
-    # 看板评估默认走全局模式且 publish 到全局 R（保留旧行为；runner 已改为默认不 publish）。
-    # 用户若要隔离评估，用 control 层的 fork。
-    argv += ["--publish-global"]
-    view = task_manager.start_task("evaluate", argv)
-    view["has_tax_probe"] = has_tax_probe
+    spec = LaunchSpec(
+        target=req.target,
+        targets=_split_targets(req.targets),
+        input_file=req.input,
+        phase=req.phase,
+        batch_size=req.batch_size,
+        max_rounds=req.max_rounds,
+        sampler=req.sampler,
+        sampler_alpha=req.sampler_alpha,
+        sampler_beta=req.sampler_beta,
+        sampler_gamma=req.sampler_gamma,
+        coordinate_rounds=req.coordinate_rounds,
+        target_concurrency=req.target_concurrency,
+        no_early_stop=req.no_early_stop,
+        env_snapshot=req.env_snapshot,
+        param_overrides=req.param_overrides,
+    )
+    try:
+        view = launch_evaluation(spec)
+    except LaunchError as e:
+        raise HTTPException(status_code=404 if e.reason == "not_found" else 400, detail=str(e)) from None
+    # 越狱税探针预检：该攻击集无数学探针时越狱税将不计算（前端提示用）
+    view["has_tax_probe"] = attack_has_tax_probe(attack_path)
     return view
+
+
+def _split_targets(raw: str | None) -> list[str] | None:
+    """逗号分隔的多目标串 → 列表（空/空白项剔除；None 透传）。"""
+    if raw is None:
+        return None
+    parts = [t.strip() for t in raw.split(",") if t.strip()]
+    return parts or None
 
 
 @router.get("/api/tasks")
@@ -152,35 +142,6 @@ async def api_task_log(task_id: str, download: bool = False):
 # ============================================================
 # 任务进度（看板实时简略信息）
 # ============================================================
-def _parse_eval_argv(argv: list[str]) -> tuple[list[str], int | None]:
-    """从 runner argv 解析目标列表（--targets/--target）与 max_rounds。
-
-    看板需要"全部声明目标"以渲染排队中占位行，而 progress.jsonl 只有已启动目标。
-    """
-    targets: list[str] = []
-    max_rounds: int | None = None
-    i = 0
-    while i < len(argv):
-        a = argv[i]
-        if a == "--targets" and i + 1 < len(argv):
-            targets = [x.strip() for x in argv[i + 1].split(",") if x.strip()]
-            i += 2
-            continue
-        if a == "--target" and i + 1 < len(argv):
-            targets = [argv[i + 1].strip()]
-            i += 2
-            continue
-        if a == "--max-rounds" and i + 1 < len(argv):
-            try:
-                max_rounds = int(argv[i + 1])
-            except ValueError:
-                pass
-            i += 2
-            continue
-        i += 1
-    return targets, max_rounds
-
-
 @router.get("/api/tasks/{task_id}/progress")
 async def api_task_progress(task_id: str):
     """任务进度快照：evaluate 返回每目标最后一条 + 全部声明目标（占位）；
@@ -199,15 +160,18 @@ async def api_task_progress(task_id: str):
             "trials": [r["last"] for r in records if r.get("last")][-30:],
         }
 
-    # evaluate：每目标取最后一条；用 argv 补齐未启动目标的占位
-    targets, max_rounds = _parse_eval_argv(t.get("argv", []))
+    # evaluate：每目标取最后一条；用 launch 层写入的 meta 补齐未启动目标的占位
+    # （原实现对 argv 反向解析——归一后 meta 由 start_task 时一次性结构化写入）
+    meta = t.get("meta") or {}
+    targets: list[str] = meta.get("targets") or []
+    max_rounds = meta.get("max_rounds")
     by_target: dict[str, dict] = {}
     for r in records:
         tg = r.get("target")
         if tg:
             by_target[tg] = r
     progress: dict[str, dict] = {tg: by_target.get(tg, {}) for tg in targets}
-    # 兜底：progress 里出现但 argv 未声明的目标（如单 --target 之外的回退场景）
+    # 兜底：progress 里出现但 meta 未声明的目标（如不传 target 跑全部的回退场景）
     for tg, rec in by_target.items():
         progress.setdefault(tg, rec)
     return {

@@ -47,11 +47,17 @@ dev = [
 mcp = [
     "fastmcp>=2,<4",
 ]
+# 终端界面（llmsec-tui，Textual）
+# 安装：pip install -e ".[tui]"
+tui = [
+    "textual>=1,<4",
+]
 
 [project.scripts]
 llmsec = "llmsec.pipeline.runner:main"
 llmsec-manage = "llmsec.management.__main__:main"
 llmsec-mcp = "llmsec.mcp.server:main"
+llmsec-tui = "llmsec.tui.app:main"
 
 [tool.setuptools.packages.find]
 # control 必须入包：llmsec.server.dashboard_api 模块级 import 并注册 control.router，

@@ -78,3 +78,118 @@ def test_hybrid_alias_conflict_warns():
 def test_coordinate_rounds_default_from_params():
     """M-9：--coordinate-rounds 默认应来自 params 而非硬编码。"""
     assert HybridSampler().explore_rounds == SAMPLER_HYBRID_EXPLORE_ROUNDS
+
+
+# ===== 补充覆盖：CoordinateDescent 选择逻辑 / 边界与空候选 =====
+
+def _tracker_with(attackers: dict[str, float], defender_elo=1500.0):
+    tracker = ELOTracker()
+    tracker.defender_ratings["def"] = defender_elo
+    tracker.attacker_ratings = dict(attackers)
+    return tracker
+
+
+def test_empty_candidates_short_circuit():
+    """空候选列表：所有采样器返回空、不触 tracker。"""
+    from llmsec.evaluation.samplers import CoordinateDescentSampler, GapMinSampler
+
+    tracker = _tracker_with({})
+    assert GapMinSampler().select([], tracker, "def", n=3) == []
+    assert InfoGainSampler().select([], tracker, "def", n=3) == []
+    assert CoordinateDescentSampler().select([], tracker, "def", n=3) == []
+
+
+def test_infogain_tested_method_uses_history_success_rate():
+    """已测方法（n_matches>0）的成功潜力走历史成功率而非期望胜率。"""
+    tracker = _tracker_with({"m_win": 1600.0, "m_lose": 1400.0})
+    # 同 Elo、同簇，仅历史成功率不同：高胜率者 gamma 项更优
+    tracker.attacker_stats = {
+        "m_win": {"n_matches": 4, "wins": 4},
+        "m_lose": {"n_matches": 4, "wins": 0},
+    }
+    labels = {"method_labels": {"m_win": 0, "m_lose": 0}}
+    s = InfoGainSampler(alpha=0.0, beta=0.0, gamma=10.0)
+    s.set_cluster_info(cluster_report=labels)
+    assert s.select(["m_win", "m_lose"], tracker, "def", n=1) == ["m_win"]
+
+
+def test_coordinate_prefers_boundary_within_cluster():
+    """坐标下降：在聚焦簇内优先选离边界最近的方法。"""
+    from llmsec.evaluation.samplers import CoordinateDescentSampler
+
+    tracker = _tracker_with({
+        "c0_near": 1495.0, "c0_far": 1350.0, "c1_only": 1520.0,
+    })
+    labels = {"method_labels": {"c0_near": 0, "c0_far": 0, "c1_only": 1}}
+    s = CoordinateDescentSampler()
+    s.set_cluster_info(cluster_report=labels)
+    chosen = s.select(["c0_far", "c0_near", "c1_only"], tracker, "def", n=1)
+    # 首轮聚焦评分最优簇；同簇内未测方法按 gap 排序
+    assert chosen == ["c0_near"] or chosen == ["c1_only"], \
+        f"应选聚焦簇内最近边界者: {chosen}"
+
+
+def test_coordinate_exhausted_cluster_fills_globally():
+    """聚焦簇耗尽时按全局 gap 补足，不返回缩水批次。"""
+    from llmsec.evaluation.samplers import CoordinateDescentSampler
+
+    tracker = _tracker_with({
+        "c0_a": 1490.0, "c0_b": 1495.0, "c1_x": 1505.0, "c1_y": 1600.0,
+    })
+    labels = {"method_labels": {"c0_a": 0, "c0_b": 0, "c1_x": 1, "c1_y": 1}}
+    s = CoordinateDescentSampler()
+    s.set_cluster_info(cluster_report=labels)
+    chosen = s.select(["c0_a", "c0_b", "c1_x", "c1_y"], tracker, "def", n=3)
+    assert len(chosen) == 3, f"簇耗尽应从全局补足到 n: {chosen}"
+
+
+def test_coordinate_rotates_clusters():
+    """外层簇轮询：连续多轮选择应覆盖多个簇（不扎堆单一簇）。"""
+    from llmsec.evaluation.samplers import CoordinateDescentSampler
+
+    tracker = _tracker_with({
+        "c0_a": 1500.0, "c0_b": 1500.0, "c1_a": 1500.0, "c1_b": 1500.0,
+        "c2_a": 1500.0, "c2_b": 1500.0,
+    })
+    labels = {"method_labels": {m: int(m[1]) for m in tracker.attacker_ratings}}
+    s = CoordinateDescentSampler(min_tests_per_cluster=1)
+    s.set_cluster_info(cluster_report=labels)
+
+    seen_clusters = set()
+    candidates = list(tracker.attacker_ratings)
+    for _ in range(3):
+        chosen = s.select(candidates, tracker, "def", n=1)
+        assert len(chosen) == 1
+        seen_clusters.add(labels["method_labels"][chosen[0]])
+    assert len(seen_clusters) >= 2, f"多轮应轮询不同簇: {seen_clusters}"
+
+
+def test_coordinate_unlabeled_methods_fallback_queue():
+    """无聚类标签（method_labels 空）时簇队列退化为 [-1]，仍可选取。"""
+    from llmsec.evaluation.samplers import CoordinateDescentSampler
+
+    tracker = _tracker_with({"m1": 1500.0, "m2": 1510.0})
+    s = CoordinateDescentSampler()
+    s.set_cluster_info(cluster_report={})
+    assert s._build_cluster_queue(["m1", "m2"]) == [-1]
+    chosen = s.select(["m1", "m2"], tracker, "def", n=2)
+    assert sorted(chosen) == ["m1", "m2"]
+
+
+def test_hybrid_select_switches_sub_sampler():
+    """Hybrid：前 explore_rounds 轮走 infogain，之后切换 coordinate。"""
+    tracker = _tracker_with({"m1": 1500.0, "m2": 1510.0})
+    labels = {"method_labels": {"m1": 0, "m2": 0}}
+    s = HybridSampler(explore_rounds=2)
+    s.set_cluster_info(cluster_report=labels)
+
+    assert s.select(["m1", "m2"], tracker, "def", n=1) and s.last_sub_sampler == "infogain"
+    assert s.select(["m1", "m2"], tracker, "def", n=1) and s.last_sub_sampler == "infogain"
+    assert s.select(["m1", "m2"], tracker, "def", n=1) and s.last_sub_sampler == "coordinate"
+
+
+def test_build_sampler_unknown_name_raises():
+    import pytest
+
+    with pytest.raises(ValueError, match="未知采样器"):
+        build_sampler("nope")

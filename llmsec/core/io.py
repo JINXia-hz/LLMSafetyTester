@@ -28,6 +28,26 @@ from pathlib import Path
 
 from llmsec.core.logging import get_logger
 
+
+def _replace_with_retry(tmp: Path, path: Path, attempts: int = 8) -> None:
+    """os.replace + Windows 瞬时占用重试（write_jsonl / write_json / save_artifact 共用）。
+
+    Windows 上并发 replace 同一目标会抛 PermissionError（WinError 5，目标被另一
+    线程/进程的 replace 或杀软/索引器瞬时占用）。指数退避 20ms→2.5s 共 8 次
+    （总预算 ~5s）——实测高负载并发套件下固定 5×50ms（250ms）仍可能耗尽。
+    非瞬时原因重试耗尽后照常抛出，由调用方清理 tmp。
+    """
+    delay = 0.02
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.64)
+
 logger = get_logger(__name__)
 
 
@@ -84,16 +104,7 @@ def write_jsonl(path, rows) -> None:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
-        # Windows 上并发 replace 同一目标会瞬时 PermissionError（WinError 5），
-        # 短重试即可（save_artifact 的 P9 同款处理）
-        for attempt in range(5):
-            try:
-                os.replace(tmp, path)
-                break
-            except PermissionError:
-                if attempt == 4:
-                    raise
-                time.sleep(0.05)
+        _replace_with_retry(tmp, path)
     except OSError:
         # 清理残留 tmp（os.replace 失败时）
         try:
@@ -199,7 +210,7 @@ def write_json(
                           allow_nan=allow_nan, default=_json_numpy_default)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp, path)
+            _replace_with_retry(tmp, path)
         except Exception:
             # 清理残留 tmp（os.replace 失败或 json.dump 序列化错误时）
             try:
@@ -255,16 +266,7 @@ def save_artifact(path, obj, *, atomic: bool = True, backup: bool = False) -> No
         tmp = Path(f"{path}.tmp.{os.getpid()}.{threading.get_ident()}")
         try:
             joblib.dump(obj, tmp)
-            # P9：Windows 上并发 replace 同一目标文件会抛 PermissionError（WinError 5，
-            # 目标被另一线程的 replace 瞬时占用），短重试即可；非并发原因重试后仍抛
-            for attempt in range(5):
-                try:
-                    os.replace(tmp, path)
-                    break
-                except PermissionError:
-                    if attempt == 4:
-                        raise
-                    time.sleep(0.05)
+            _replace_with_retry(tmp, path)
         except OSError:
             try:
                 tmp.unlink()

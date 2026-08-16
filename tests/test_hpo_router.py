@@ -51,25 +51,31 @@ def test_hpo_preview_no_factors_warns():
 
 
 def test_run_hpo_starts_task(monkeypatch, tmp_path):
-    """/api/run/hpo：写 study.yaml + 以 hpo kind 启动任务（monkeypatch _start_task 防真起子进程）。"""
+    """/api/run/hpo：写 study.yaml + 以 hpo kind 启动任务（monkeypatch start_task 防真起子进程）。"""
+    import llmsec.core.config as config
     import llmsec.server.routers.hpo as hpo_mod
+    import llmsec.server.task_manager as task_manager_mod
 
     monkeypatch.setattr(hpo_mod, "OUTPUT_DIR", tmp_path)
+    # launch 层校验 study 路径在 PROJECT_ROOT 内 + 经 task_manager.start_task 启动
+    monkeypatch.setattr(config, "PROJECT_ROOT", tmp_path)
     captured = {}
 
-    def fake_start(kind, argv):
+    def fake_start(kind, argv, **kwargs):
         captured["kind"] = kind
         captured["argv"] = list(argv)
+        captured["meta"] = kwargs.get("meta")
         return {"id": "fake-hpo", "kind": kind, "cmd": " ".join(argv), "argv": list(argv),
                 "status": "queued", "returncode": None, "log_path": tmp_path / "h.log",
                 "log_file": None, "started_at": "2026-01-01T00:00:00", "error": None, "proc": None}
 
-    monkeypatch.setattr(hpo_mod.task_manager, "start_task", fake_start)
+    monkeypatch.setattr(task_manager_mod, "start_task", fake_start)
 
     r = client.post("/api/run/hpo", json={"name": "utstudy", "strategy": "bayesian", "max_trials": 5,
                                           "targets": ["modelA"]})
     assert r.status_code == 200, r.text
     assert captured["kind"] == "hpo"
+    assert captured["meta"] == {"study": "_dashboard_utstudy.yaml"}, "launch 层应携带 study meta"
     yamls = list((tmp_path / "experiments").glob("_dashboard_utstudy.yaml"))
     assert len(yamls) == 1, "应落盘 study.yaml 供 experiments run 读取"
     print("✅ /api/run/hpo 通过")
@@ -85,11 +91,14 @@ def test_run_hpo_no_targets_rejected():
 
 def test_run_hpo_fixed_target_ok(monkeypatch, tmp_path):
     """fixed.target 兜底：无 targets 列表但 fixed 带 target 时允许启动。"""
+    import llmsec.core.config as config
     import llmsec.server.routers.hpo as hpo_mod
+    import llmsec.server.task_manager as task_manager_mod
 
     monkeypatch.setattr(hpo_mod, "OUTPUT_DIR", tmp_path)
-    monkeypatch.setattr(hpo_mod.task_manager, "start_task",
-                        lambda kind, argv: {"id": "fake", "kind": kind, "cmd": "", "argv": argv,
+    monkeypatch.setattr(config, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(task_manager_mod, "start_task",
+                        lambda kind, argv, **kw: {"id": "fake", "kind": kind, "cmd": "", "argv": argv,
                                             "status": "queued", "returncode": None,
                                             "log_path": tmp_path / "h.log", "log_file": None,
                                             "started_at": "2026-01-01T00:00:00", "error": None, "proc": None})

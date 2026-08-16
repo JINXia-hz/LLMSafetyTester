@@ -323,7 +323,9 @@ async function loadRunSection() {
       const opt = document.createElement('option');
       // f 可能是字符串（旧格式）或对象 {name, size_kb, mtime, n_records}
       const name = typeof f === 'string' ? f : f.name;
-      const label = typeof f === 'string' ? f : `${f.name} (${f.n_records}条 ${f.size_kb}KB)`;
+      // 小文件 size_kb 四舍五入为 0 时显示 <1KB，避免"0KB"像空文件
+      const kb = typeof f === 'string' ? '' : ` ${f.size_kb >= 1 ? f.size_kb + 'KB' : '<1KB'}`;
+      const label = typeof f === 'string' ? f : `${f.name} (${f.n_records}条${kb})`;
       opt.value = name; opt.textContent = label;
       sel.appendChild(opt);
     });
@@ -388,7 +390,7 @@ function setupDropZone() {
     fetch('/api/attack-sets/upload', { method: 'POST', body: fd })
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e)))
       .then(d => {
-        setStatus(`已导入 ${d.name}（${d.n_records}条 ${d.size_kb}KB）`);
+        setStatus(`已导入 ${d.name}（${d.n_records}条 ${d.size_kb >= 1 ? d.size_kb + 'KB' : '<1KB'}）`);
         loadRunSection(); // 刷新下拉
       })
       .catch(e => setStatus(`上传失败: ${e.detail || e.message || e}`));

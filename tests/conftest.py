@@ -65,6 +65,45 @@ def _isolate_network_env(request):
         os.environ.pop(k, None)
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_tasks():
+    """进程级 TASKS 注册表按测试隔离（全 suite autouse）。
+
+    背景：xdist 把多个测试文件分到同一 worker，某文件的真实 start_task 残留任务
+    会被其它文件的读取方（如 TUI 的 TaskStore.refresh）并进视图，造成跨文件污染
+    （曾实际表现为任务表多出无关行）。原先 test_tui_task_store / test_tui_panels
+    各自复制了局部 fixture，现统一收编。
+
+    实现注意：必须 clear/restore **同一 dict 对象**而非替换引用——routers/tasks.py
+    等消费方 `from task_manager import TASKS` 绑定的是原对象，替换引用会造成读写
+    分裂（即审计 H3 修过的 bug 形态）。teardown 直接 terminate 残留子进程而不用
+    cancel_task（避免 _advance_queue 在清理中途再拉起新任务），并关闭日志句柄。
+    """
+    from llmsec.server import task_manager as tm
+
+    saved = dict(tm.TASKS)
+    tm.TASKS.clear()
+    try:
+        yield
+    finally:
+        for tid, t in list(tm.TASKS.items()):
+            proc = t.get("proc")
+            if t.get("status") == "running" and proc is not None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+            log_file = t.get("log_file")
+            if log_file is not None:
+                try:
+                    log_file.close()
+                except Exception:
+                    pass
+        tm.TASKS.clear()
+        tm.TASKS.update(saved)
+
+
 # ============================================================
 # 真实 API / 端到端测试的凭证门控
 # ============================================================

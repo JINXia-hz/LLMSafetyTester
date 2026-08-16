@@ -13,8 +13,16 @@ import numpy as np
 import pytest
 
 # hdbscan 是可选依赖（requirements-cluster.txt），CI 只装 requirements.txt。
-# 这些测试锁定 HDBSCAN 专属行为，无 hdbscan 时整模块跳过（代码侧已有 KMeans 兜底）。
-pytest.importorskip("hdbscan")
+# 只有真正跑到 HDBSCAN 核心的用例需要它；回退/n<2 守卫用例把 hdbscan mock 掉或
+# 在触碰它之前就返回，无 hdbscan 环境也应执行（否则回退路径在 CI 零覆盖）。
+try:
+    import hdbscan  # noqa: F401
+
+    _has_hdbscan = True
+except ImportError:
+    _has_hdbscan = False
+
+requires_hdbscan = pytest.mark.skipif(not _has_hdbscan, reason="hdbscan 未安装（可选依赖）")
 
 from llmsec.pipeline.attack_phase import _quick_precluster  # noqa: E402
 
@@ -38,6 +46,7 @@ def _make_tracker(features: dict | None):
     return SimpleNamespace(predictor=SimpleNamespace(artifacts=artifacts))
 
 
+@requires_hdbscan
 def test_precluster_recovers_blob_structure():
     """3 个明显团簇 → Ward auto-k 恢复的划分应与真实划分近乎一致。"""
     from sklearn.metrics import adjusted_rand_score
@@ -51,6 +60,7 @@ def test_precluster_recovers_blob_structure():
     assert ari >= 0.9, f"簇结构恢复失败: ARI={ari}"
 
 
+@requires_hdbscan
 def test_precluster_deterministic():
     """HDBSCAN/Ward 均无随机性：两次调用标签必须完全一致。"""
     features, _ = _make_blob_features()
@@ -60,6 +70,7 @@ def test_precluster_deterministic():
     assert a == b
 
 
+@requires_hdbscan
 def test_precluster_uses_core_not_full_pipeline(monkeypatch):
     """预聚类只走 compute_cluster_labels 核心——命名/画像（潜在 LLM 调用）不得触发。"""
     import llmsec.clustering.hdb as hdb

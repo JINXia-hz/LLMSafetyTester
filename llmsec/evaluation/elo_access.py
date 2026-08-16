@@ -110,8 +110,12 @@ def attacker_ratings_for(model: str) -> dict:
 # 等 find_surprises 依赖的字段，重建易缺字段出错。这里缓存的是完整 tracker 对象，
 # 三个方法（get_attacker_ranking/compute_security_boundary/find_surprises）都能服务。
 #
-# 失效：R 中该模型列变动 → 指纹变 → 自动重 derive。进程重启即失效（与
-# _RUN_META_CACHE 同性质，可接受；磁盘 elo_cache 仍由 elo_state_for 维护）。
+# 内存量级（实测深尺寸）：一个 tracker ≈ 0.3 KB × 历史 entry 数（5轮×50方法 ≈ 0.3MB，
+# 30轮×800方法 ≈ 18MB）。条目按 model 键替换（指纹变即覆盖）、从不淘汰，占用上界
+# = 查询过的模型数 × 各自规模——消费者仅 MCP 查询工具，模型数天然有限，可接受；
+# 进程重启即清零（与 _RUN_META_CACHE 同性质）。
+#
+# 失效：R 中该模型列变动 → 指纹变 → 自动重 derive。
 _TRACKER_CACHE: dict[str, tuple[str | None, ELOTracker]] = {}
 
 
@@ -150,7 +154,14 @@ def active_model() -> str | None:
 
 
 def _ts_key(ts):
-    """ts 可为 int 或 str，统一转成可比较的 key。"""
+    """ts 可为 int 或 str，统一转成可比较的 key。
+
+    语义说明：字符串 ts 只应来自旧迁移/手工编辑的数据（现行写入方——upsert 自增、
+    publish_tracker/snapshot 的 round、merge 透传——全部产数字）。本函数的 (1, str)
+    分支与 ResultsMatrix.ordered_results 的排序兜底同构，只为混型比较不抛
+    TypeError 的确定性兜底，**不代表"字符串时间戳更新"的时间语义**——存在字符串
+    ts 时 active_model 的"最新"判定本就无真值，两侧保持一致即可。
+    """
     try:
         return (0, float(ts))
     except (TypeError, ValueError):

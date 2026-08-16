@@ -5,7 +5,7 @@
   C2  探活统一走 llmsec.core.probe（dashboard 端点与 MCP 同一实现）
   C3  write_csv 正确处理含逗号字段（_export_matrix 不再手写拼接）
   C4  KMeans 兜底统一为 _kmeans_fallback
-  C5  死符号确已删除（函数/常量/再导出）
+  C5  死符号确已删除（墓碑用例已随清理期结束删除）
   C6  compare.list_all_runs 统一口径（target 过滤 + include_workspaces 开关）
 """
 from __future__ import annotations
@@ -106,43 +106,6 @@ def test_r4_kmeans_fallback_shared():
         {m: {"method": m} for m in features}, {"features": features})
     assert labels is not None and set(labels.values()) <= set(range(6))
     assert len(labels) == 6
-
-
-# ============================================================
-# C5：死符号确已删除
-# ============================================================
-def test_r4_dead_symbols_removed():
-    from control.core import env_snapshot
-    from llmsec.core import io as core_io
-    from llmsec.core import monitoring as core_monitoring
-    from llmsec.core import results as core_results
-    from llmsec.pipeline import allergy_phase
-
-    assert not hasattr(core_results.ResultsMatrix, "summary")
-    assert not hasattr(core_io, "read_csv")
-    assert not hasattr(core_monitoring, "shutdown")
-    assert not hasattr(allergy_phase, "compute_min_twin_sample_size")
-    assert not hasattr(env_snapshot, "get_snapshot")
-
-    import llmsec.core as core
-    import llmsec.core.config as cfg
-    for name in ("TREE_FILE", "REPORT_FILE", "METHOD_REGISTRY_FILE", "CLUSTER_FEATURES_FILE"):
-        assert not hasattr(cfg, name), f"C5: 死常量 {name} 应已删除"
-        assert not hasattr(core, name), f"C5: 再导出 {name} 应已删除"
-
-    # invoker 死参数已移除
-    import inspect
-
-    from control.core import invoker
-    assert "capture" not in inspect.signature(invoker._run).parameters
-    assert "extra_argv" not in inspect.signature(invoker.run_runner).parameters
-    from control.core.orchestrator import RunSpec
-    assert "extra_argv" not in RunSpec.__dataclass_fields__
-
-
-def test_r4_dead_script_removed():
-    assert not (_ROOT / "scripts" / "fix_attack_data.py").exists(), \
-        "C5: 一次性修复脚本（数据已修完、无 CI/lint 覆盖）应已删除"
 
 
 # ============================================================

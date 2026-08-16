@@ -1,0 +1,26 @@
+# 周末长期实验 · 阶段 1：粗扫（bayesian TPE，7 维，收敛动力学 + 聚类/预测器）
+# 目标：固定预算（max_rounds=4, --no-early-stop）下最小化跨目标 ci_half 均值
+# 攻击集：all_merged.jsonl（10498 行）
+name: weekend_stage1
+description: "周末阶段1粗扫：TPE 40 config × 4 本地目标，收敛动力学+聚类参数 7 维"
+objective: {metric: ci_half, direction: minimize, aggregate: mean}
+strategy: bayesian
+budget: {max_trials: 40, max_wall_minutes: 1200, trial_timeout_minutes: 60}
+repeats: 1
+seed_base: 1000
+space:
+  K_FACTOR: {type: int, low: 8, high: 48}
+  K_DEF_DECAY_N0: {type: int, low: 6, high: 24}
+  CONV_WINDOW_MIN: {type: int, low: 4, high: 10}
+  SCORE_PERF_TAU: {type: float, low: 1.0, high: 3.0}
+  EMBEDDING_PCA_DIM: {type: int, low: 24, high: 80, step: 8}
+  TREE_K_MIN: {type: int, low: 3, high: 6}
+  TREE_K_MAX: {type: int, low: 12, high: 24}
+fixed:
+  input: all_merged.jsonl
+  max_rounds: 4
+  batch_size: 10
+  HDBSCAN_MIN_CLUSTER_DIV: 40
+targets: [minimax, gemma-4-12B-it]  # CyberPal(.95:8007 服务未启动) / DeepSeek(.98:8007 key 失效) 探活失败暂排除，修复后可加回重跑（断点续跑仅补缺单元）
+max_concurrent: 4
+config_concurrency: 3

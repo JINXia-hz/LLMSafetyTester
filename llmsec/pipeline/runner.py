@@ -52,6 +52,7 @@ from llmsec.evaluation.elo_access import publish_tracker
 from llmsec.params import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_MAX_ROUNDS,
+    DEFAULT_SAMPLER,
     RIDGE_REFIT_THRESHOLD,
     SAMPLER_COORD_MIN_PER_CLUSTER,
     SAMPLER_HYBRID_EXPLORE_ROUNDS,
@@ -149,9 +150,9 @@ def main():
                              "未达阈值则用现有 λ* 快速 refit")
     parser.add_argument("--refresh-features", action="store_true",
                         help="强制在本次运行开始时重建特征缓存（攻击集/特征未变时本会跳过）")
-    parser.add_argument("--sampler", type=str, default="hybrid",
+    parser.add_argument("--sampler", type=str, default=DEFAULT_SAMPLER,
                         choices=["gap", "infogain", "coordinate", "hybrid"],
-                        help="Phase 1 采样策略（默认 hybrid）")
+                        help=f"Phase 1 采样策略（默认 {DEFAULT_SAMPLER}）")
     parser.add_argument("--sampler-alpha", type=float, default=SAMPLER_INFOGAIN_ALPHA,
                         help=f"InfoGain 不确定性权重（默认 {SAMPLER_INFOGAIN_ALPHA}）")
     parser.add_argument("--sampler-beta", type=float, default=SAMPLER_INFOGAIN_BETA,

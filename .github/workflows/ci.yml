@@ -47,6 +47,12 @@ jobs:
         run: python -m pytest tests/ -q -n 4 --tb=short --cov=llmsec --cov-report=term-missing
         env:
           PYTHONIOENCODING: utf-8
+      - name: Test inventory up-to-date
+        # tests/INVENTORY.md 的用例数表由脚本生成，与实际收集不一致即失败
+        # （防 README/清单里的数字随测试演进腐烂）
+        run: python scripts/gen_test_inventory.py --check
+        env:
+          PYTHONIOENCODING: utf-8
       - name: Dependency audit
         run: pip-audit -r llmsec/requirements.txt
         continue-on-error: true

@@ -5,6 +5,7 @@
   H2  build_tree 只认落盘 allergy.json 形态，内存扁平 summary 恒取 fpr=None
   H3  /health 读 task_manager、任务却登记在 tasks.py 的另一份 TASKS
   H4  _discover_runs 缓存签名感知不到 batch 内新增 target 子目录
+      （回归已并入 test_audit_r6_root.py G4，此处不重复）
   H5  generate --start-from 按字典序过滤（'1.10.1' < '1.3.1'）
   H6  filelock 被 import 但未声明为依赖
   H7  control 不入 wheel（llmsec 模块级 import control）
@@ -22,8 +23,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
-import os
 import re
 import threading
 import time
@@ -191,38 +190,6 @@ def test_h3_health_counts_running_tasks(tmp_path):
             f"H3: /health 应看到 running 任务（实得 {body}）"
     finally:
         task_manager.TASKS.pop(tid, None)
-
-
-# ============================================================
-# H4：run 发现缓存感知 batch 内新增 target 子目录
-# ============================================================
-def test_h4_discover_cache_sees_new_target_subdir(tmp_path, monkeypatch):
-    import llmsec.server.routers.data_query as dq
-    from llmsec.server import dashboard_api
-
-    monkeypatch.setattr(dashboard_api, "RUNS_DIR", tmp_path)
-    dq._DISCOVER_CACHE = None
-    try:
-        batch = tmp_path / "2026-01-01_000000"
-        batch.mkdir()
-        assert dq._discover_runs_cached() == []
-
-        # 多目标 run：靠后的目标在 batch 目录**内部**新增子目录——
-        # 不改 runs_dir 的 mtime/目录数，只改 batch_dir 的 mtime。
-        # 显式 +10s 避开文件系统时间戳粒度（负载下 mkdir 与首次 stat 可能同刻）
-        st = batch.stat()
-        t1 = batch / "gemma"
-        t1.mkdir()
-        (t1 / "runner_report.json").write_text(
-            json.dumps({"target_model": "gemma"}), encoding="utf-8")
-        os.utime(batch, ns=(st.st_mtime_ns + 10_000_000_000,) * 2)
-
-        runs = dq._discover_runs_cached()
-        names = [r["name"] for r in runs]
-        assert "2026-01-01_000000/gemma" in names, \
-            f"H4: batch 内新增 target 应立即可见（实得 {names}）"
-    finally:
-        dq._DISCOVER_CACHE = None
 
 
 # ============================================================

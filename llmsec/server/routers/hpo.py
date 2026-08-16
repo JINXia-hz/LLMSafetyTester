@@ -12,7 +12,6 @@ from pydantic import BaseModel, Field
 from llmsec import params as P
 from llmsec.core.config import OUTPUT_DIR
 from llmsec.core.logging import get_logger
-from llmsec.server import task_manager
 
 router = APIRouter()
 logger = get_logger(__name__)
@@ -114,7 +113,13 @@ async def api_hpo_preview(req: HpoRequest):
 
 @router.post("/api/run/hpo")
 async def api_run_hpo(req: HpoRequest):
-    """写临时 study.yaml 并作为 hpo 任务启动（进任务列表）。"""
+    """写临时 study.yaml 并作为 hpo 任务启动（进任务列表）。
+
+    任务启动统一走 llmsec.server.launch（与 TUI 同链路）；本端点只负责
+    把 HpoRequest 落成 study.yaml。
+    """
+    from llmsec.server.launch import LaunchError, launch_hpo_study
+
     if not req.name.strip():
         raise HTTPException(400, "study 名不能为空")
     if not req.targets and not req.fixed.get("target"):
@@ -147,5 +152,7 @@ async def api_run_hpo(req: HpoRequest):
         yaml_path.write_text(yaml.safe_dump(cfg_dict, allow_unicode=True, sort_keys=False), encoding="utf-8")
     except Exception as e:
         raise HTTPException(500, f"study.yaml 写入失败: {e}")
-    # 备份配置副本到 study 目录（run_study 也会拷贝；此处冗余无妨）
-    return task_manager.start_task("hpo", ["-m", "llmsec.experiments", "run", str(yaml_path)])
+    try:
+        return launch_hpo_study(yaml_path)
+    except LaunchError as e:
+        raise HTTPException(404 if e.reason == "not_found" else 400, str(e)) from None

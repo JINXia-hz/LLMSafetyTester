@@ -82,6 +82,7 @@ def _refresh_task_status(t: dict) -> None:
     if log_file is not None:
         log_file.close()
         t["log_file"] = None
+    _persist_meta(t, t.get("_task_id", ""))  # 终态回写（外部进程可见）
     # 失败告警（监控设施故障不影响状态机）
     if t["status"] == "failed":
         try:
@@ -159,6 +160,7 @@ def _spawn(task_id: str, t: dict) -> None:
     t["log_file"] = log_file
     t["status"] = "running"
     t["spawned_at"] = datetime.now()
+    _persist_meta(t, task_id)  # pid 已知，立即对外可见
 
 
 def _advance_queue(kind: str) -> None:
@@ -176,10 +178,49 @@ def _progress_path(task_id: str) -> Path:
     return TASK_LOG_DIR / f"{task_id}.progress.jsonl"
 
 
+def _meta_path(task_id: str) -> Path:
+    """<task_id>.meta.json 路径——任务元数据（跨进程可见性的钥匙）。
+
+    本进程 TASKS 注册表对外部进程不可见（dashboard / MCP / TUI 三队列隔离），
+    meta.json 让任何进程都能读到任务的 kind/cmd/pid/状态：TUI 据此显示外部
+    任务真实状态并支持跨进程取消。best-effort 落盘，失败只影响外部可见性。
+    """
+    return TASK_LOG_DIR / f"{task_id}.meta.json"
+
+
+def _persist_meta(t: dict, task_id: str, *, pid: int | None = None, status: str | None = None) -> None:
+    """任务元数据写入/覆盖 meta.json（try 吞错——绝不能影响任务本体）。"""
+    import json
+
+    try:
+        proc = t.get("proc")
+        data = {
+            "id": task_id,
+            "kind": t.get("kind"),
+            "cmd": t.get("cmd"),
+            "argv": t.get("argv"),
+            "meta": t.get("meta"),
+            "started_at": t.get("started_at"),
+            "pid": pid if pid is not None else getattr(proc, "pid", None),
+            "status": status or t.get("status"),
+        }
+        TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        _meta_path(task_id).write_text(
+            json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
+    except OSError:
+        pass
+
+
 # ============================================================
 # 公开 API
 # ============================================================
-def start_task(kind: str, argv: list[str], *, env_override: dict[str, str] | None = None) -> dict:
+def start_task(
+    kind: str,
+    argv: list[str],
+    *,
+    env_override: dict[str, str] | None = None,
+    meta: dict | None = None,
+) -> dict:
     """入队一个新任务并返回其 task_view。
 
     同 kind 有 running 任务时排队，否则立即启动。
@@ -188,9 +229,11 @@ def start_task(kind: str, argv: list[str], *, env_override: dict[str, str] | Non
         kind: 任务类型（"evaluate" / "hpo"），用于串行队列分组。
         argv: 子进程参数（不含 python 可执行文件，会自动加 sys.executable）。
         env_override: 注入子进程的环境变量（来自 env_snapshot，覆盖全局 .env 的同名 key）。
+        meta: 任务的结构化摘要（launch 层写入，如 {"targets": [...], "max_rounds": n}）。
+              随 task_view 暴露，消费者不必反向解析 argv。
 
     Returns:
-        task_view dict（id/kind/cmd/status/started_at/log_tail/...）。
+        task_view dict（id/kind/cmd/status/started_at/log_tail/meta/...）。
     """
     # 先刷新所有 running 任务的真实状态
     for t in TASKS.values():
@@ -202,6 +245,7 @@ def start_task(kind: str, argv: list[str], *, env_override: dict[str, str] | Non
         "cmd": " ".join(argv),
         "argv": argv,
         "env_override": env_override,
+        "meta": meta,
         "proc": None,
         "log_path": TASK_LOG_DIR / f"{task_id}.log",
         "log_file": None,
@@ -211,6 +255,7 @@ def start_task(kind: str, argv: list[str], *, env_override: dict[str, str] | Non
     }
     _evict_tasks()
     _advance_queue(kind)
+    _persist_meta(TASKS[task_id], task_id)  # queued 状态先落盘（尚无 pid）
     return task_view(task_id)
 
 
@@ -244,6 +289,7 @@ def task_view(task_id: str) -> dict | None:
         "started_at": t["started_at"],
         "log_tail": log_tail,
         "error": t.get("error"),
+        "meta": t.get("meta"),
     }
 
 
@@ -307,6 +353,7 @@ def cancel_task(task_id: str) -> dict | None:
         return None  # 已结束
     if t["status"] == "queued":
         t["status"] = "cancelled"
+        _persist_meta(t, task_id)
         return task_view(task_id)
     proc: subprocess.Popen = t["proc"]
     proc.terminate()
@@ -321,5 +368,6 @@ def cancel_task(task_id: str) -> dict | None:
     if log_file is not None:
         log_file.close()
         t["log_file"] = None
+    _persist_meta(t, task_id)
     _advance_queue(t["kind"])
     return task_view(task_id)

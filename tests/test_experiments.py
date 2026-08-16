@@ -225,6 +225,144 @@ def test_capture_manifest(tmp_path):
     print('✅ capture_manifest 通过')
 
 
+# ============================================================
+# metrics：产物定位 / 无 report 时 state 回放兜底 / 聚合边界
+# ============================================================
+
+def _mk_state(work_dir: Path, elos: list, **over) -> Path:
+    """构造一份 ELOTracker 格式的 state.json（多余字段经 over 覆写）。"""
+    st = {
+        "attacker_ratings": {"atk1": 1500.0, "atk2": 1510.0, "atk3": 1490.0},
+        "defender_ratings": {"modelA": elos[-1] if elos else 1600.0},
+        "history": [],
+        "round_defender_elos": {"modelA": list(elos)},
+        "defender_match_count": {"modelA": max(1, len(elos)) * 3},
+        "ground_truth": {"atk1": 1500.0, "atk2": 1510.0, "atk3": 1490.0},
+        "attacker_stats": {},
+        "attacker_pred_std": {},
+        "attacker_pred_source": {},
+    }
+    st.update(over)
+    p = work_dir / "state.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(st), encoding="utf-8")
+    return p
+
+
+def test_find_artifact_root_and_glob_layouts(tmp_path):
+    """产物定位：根布局直接命中；隔离布局走 */filename glob；都无则 None。"""
+    from llmsec.experiments.metrics import _find_artifact
+
+    # 1) 普通模式：产物在 work_dir 根
+    (tmp_path / "runner_report.json").write_text("{}", encoding="utf-8")
+    assert _find_artifact(tmp_path, "runner_report.json") == tmp_path / "runner_report.json", \
+        "❌1 根布局应直接命中"
+
+    # 2) work-dir 隔离模式：产物在 work_dir/<target>/ 下（glob 分支）
+    wd = tmp_path / "trial1"
+    sub = wd / "modelA"
+    sub.mkdir(parents=True)
+    (sub / "state.json").write_text("{}", encoding="utf-8")
+    assert _find_artifact(wd, "state.json") == sub / "state.json", "❌2 隔离布局应经 glob 命中"
+
+    # 3) 什么都不存在
+    assert _find_artifact(wd, "runner_report.json") is None, "❌3 无产物应返回 None"
+
+
+def test_extract_metrics_state_replay_converged(tmp_path):
+    """无 runner_report 时从 state.json 回放：常数轨迹恰在 CONV_WINDOW_MIN 轮收敛。"""
+    from llmsec.experiments.metrics import extract_metrics
+    from llmsec.params import CONV_WINDOW_MIN
+
+    wd = tmp_path / "trial"
+    wd.mkdir()
+    _mk_state(wd, [1600.0] * (CONV_WINDOW_MIN + 1))
+    m = extract_metrics(wd, max_rounds=CONV_WINDOW_MIN + 1)
+    assert m.get("conv_rounds") == CONV_WINDOW_MIN, \
+        f"❌1 首个收敛轮应为 {CONV_WINDOW_MIN}，实际 {m.get('conv_rounds')}"
+    assert m.get("work_dir") == str(wd), "❌2 work_dir 应原样带回"
+
+
+def test_extract_metrics_isolated_workdir_layout(tmp_path):
+    """work-dir 隔离布局（wd/<target>/state.json，HPO trial 单目标）同样能回放兜底。"""
+    from llmsec.experiments.metrics import extract_metrics
+    from llmsec.params import CONV_WINDOW_MIN
+
+    wd = tmp_path / "hpo_trial"          # 根下没有 state.json，只有子目录
+    _mk_state(wd / "modelA", [1600.0] * (CONV_WINDOW_MIN + 1))
+    m = extract_metrics(wd, max_rounds=CONV_WINDOW_MIN + 1)
+    assert m.get("conv_rounds") == CONV_WINDOW_MIN, \
+        f"❌1 隔离布局回放失败: {m}"
+
+
+def test_conv_rounds_unconverged_penalty(tmp_path):
+    """未收敛（强漂移轨迹）→ 惩罚值 mr + ci/目标：落在 (mr, mr+1) 且严格大于 mr。"""
+    from llmsec.experiments.metrics import extract_metrics
+
+    wd = tmp_path
+    elos = [1600 + 15 * i + (2.0 if i % 2 else -2.0) for i in range(8)]  # 漂移 15/轮 > 5
+    _mk_state(wd, elos)
+    m = extract_metrics(wd, max_rounds=8)
+    cr = m.get("conv_rounds")
+    assert cr is not None and 8 < cr < 9, \
+        f"❌1 惩罚值应落在 (8, 9)（mr=8 加上不足一个目标的 ci），实际 {cr}"
+
+
+def test_conv_rounds_penalty_ci_missing_uses_target(tmp_path):
+    """轮次不足的常数轨迹：ci_half 缺失（0 视同 None）→ 惩罚 = mr + 目标/目标 = mr + 1。"""
+    from llmsec.experiments.metrics import extract_metrics
+
+    wd = tmp_path
+    _mk_state(wd, [1600.0] * 3)          # 3 轮 < CONV_WINDOW_MIN，永不收敛
+    m = extract_metrics(wd, max_rounds=3)
+    assert m.get("conv_rounds") == 4.0, \
+        f"❌1 ci 缺失时惩罚应为 3 + 20/20 = 4.0，实际 {m.get('conv_rounds')}"
+
+
+def test_conv_rounds_state_without_defender_returns_none(tmp_path):
+    """state 无 defender_ratings → 无法定位防御方，conv_rounds 保持缺失（不抛）。"""
+    from llmsec.experiments.metrics import extract_metrics
+
+    wd = tmp_path
+    _mk_state(wd, [1600.0] * 8, defender_ratings={})
+    m = extract_metrics(wd, max_rounds=8)
+    assert "conv_rounds" not in m, f"❌1 无 defender 时 conv_rounds 应缺失，实际 {m}"
+
+
+def test_conv_rounds_bad_state_returns_none(tmp_path):
+    """损坏/畸形 state.json → 记 error 后返回 None，绝不上抛（trial 评分缺失而非崩溃）。"""
+    from llmsec.experiments.metrics import extract_metrics
+
+    wd = tmp_path
+    # 1) 顶层是 JSON 数组：tracker.load 内 data.get 抛 AttributeError → 吞掉
+    (wd / "state.json").write_text("[1, 2, 3]", encoding="utf-8")
+    m1 = extract_metrics(wd, max_rounds=8)
+    assert "conv_rounds" not in m1, "❌1 数组 state 应被吞掉"
+    # 2) 非法 JSON：read_json 静默返回 None → 兜底直接跳过
+    (wd / "state.json").write_text("{not json", encoding="utf-8")
+    m2 = extract_metrics(wd, max_rounds=8)
+    assert "conv_rounds" not in m2, "❌2 非法 JSON 应静默跳过"
+    # 3) 空目录：无任何产物，只剩 work_dir
+    wd2 = tmp_path / "empty"
+    wd2.mkdir()
+    m3 = extract_metrics(wd2)
+    assert m3.get("conv_rounds") is None and m3["work_dir"] == str(wd2), "❌3 空目录应只带回 work_dir"
+
+
+def test_aggregate_filters_none_inf_and_single_value():
+    """aggregate 边界：None/inf 过滤、空集 inf、单值 std=0。"""
+    import math
+
+    from llmsec.experiments.metrics import aggregate
+
+    assert math.isinf(aggregate([], "mean")), "❌1 空列表应返回 inf"
+    assert math.isinf(aggregate([None, None], "mean")), "❌2 全 None 应返回 inf"
+    assert math.isinf(aggregate([float("inf")], "mean_plus_std")), "❌3 全 inf 应返回 inf"
+    assert aggregate([2.0], "mean_plus_std") == 2.0, "❌4 单值 std=0，应等于自身"
+    assert aggregate([1.0, None, float("inf"), 3.0], "mean") == 2.0, \
+        "❌5 应过滤 None/inf 后取均值"
+
+
 def test_run_study_no_targets_fails_fast(tmp_path):
     """targets 与 fixed.target 均空 → run_study 立即 ValueError，不再空转误报"空间穷尽"。"""
     import pytest

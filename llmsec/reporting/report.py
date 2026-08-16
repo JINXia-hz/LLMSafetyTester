@@ -142,9 +142,11 @@ def load_allergy(output_dir) -> dict:
     """
     output_dir = Path(output_dir)
 
-    # 按模型分文件（safe_twin 现行写法，换模型不互相覆盖）
+    # 按模型分文件（safe_twin 现行写法，换模型不互相覆盖）。
+    # 排序键带 name 次级裁决：同刻 mtime（文件系统时间戳粒度内连续写两个文件）
+    # 平局时的选取否则取决于枚举顺序，结果不确定
     candidates = sorted(output_dir.glob("allergy__*.json"),
-                        key=lambda p: p.stat().st_mtime, reverse=True)
+                        key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
     if candidates:
         chosen = candidates[0]
         try:
@@ -165,10 +167,9 @@ def load_allergy(output_dir) -> dict:
     runs_dir = output_dir / "runs"
     if runs_dir.exists():
         for d in sorted((d for d in runs_dir.iterdir() if d.is_dir()),
-                        key=lambda p: p.stat().st_mtime, reverse=True):
-            for t in sorted(d.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-                if not t.is_dir():
-                    continue
+                        key=lambda p: (p.stat().st_mtime, p.name), reverse=True):
+            for t in sorted((t for t in d.iterdir() if t.is_dir()),
+                            key=lambda p: (p.stat().st_mtime, p.name), reverse=True):
                 data = read_json(t / "allergy.json")
                 if data:
                     return data

@@ -629,3 +629,120 @@ def test_blend_predictor_cache_reuse(tmp_path, monkeypatch):
 
     assert len(files) >= 2
 
+
+
+# ===== from test_eval_review_elo.py（评审修复回归：B 组）=====
+
+import pytest
+
+
+def test_recent_success_rate_dedupes_retested_methods():
+    """同一方法重复测试时，窗口按 distinct 方法计数，各取最近一次结果。"""
+    tr = ELOTracker()
+    # 时间序：m1 胜 → m2 胜 → m1 重测败（m1 最近一次为败）
+    tr.update_round("def", [("m1", 3.0)])
+    tr.update_round("def", [("m2", 3.0)])
+    tr.update_round("def", [("m1", -1.0)])
+
+    rate = tr._recent_success_rate(window_methods=15)
+    # 去重口径：{m1: 最近=败, m2: 胜} → 1/2 = 0.5（旧口径数场次 = 2/3）
+    assert rate == pytest.approx(0.5), f"应按方法去重取最近一次结果，得 {rate}"
+
+
+def test_recent_success_rate_window_counts_distinct_methods():
+    """window_methods 限的是最近 N 个 distinct 方法而非最近 N 场。"""
+    tr = ELOTracker()
+    for _ in range(5):  # m1 连测 5 场全败，之后 m2 一场胜
+        tr.update_round("def", [("m1", -1.0)])
+    tr.update_round("def", [("m2", 3.0)])
+
+    assert tr._recent_success_rate(window_methods=2) == pytest.approx(0.5)
+    assert tr._recent_success_rate(window_methods=1) == pytest.approx(1.0)
+
+
+def test_security_boundary_raises_on_multiple_defenders_without_name():
+    """多于一个防御方且未显式指定时 raise ValueError（不再任意取插入序第一个）。"""
+    tr = ELOTracker()
+    tr.update_round("def_a", [("m1", 3.0)])
+    tr.update_round("def_b", [("m1", -1.0)])
+
+    with pytest.raises(ValueError, match="defender_name"):
+        tr.compute_security_boundary()
+
+    b = tr.compute_security_boundary("def_a")  # 显式指定则正常
+    assert b["defender"] == "def_a"
+
+
+def test_security_boundary_single_defender_default_still_works():
+    """恰有一个防御方时缺省取它（唯一选择，无歧义）。"""
+    tr = ELOTracker()
+    tr.update_round("def_a", [("m1", 3.0)])
+
+    assert tr.compute_security_boundary()["defender"] == "def_a"
+    empty = ELOTracker().compute_security_boundary()  # 无防御方：早退 dict，不 raise
+    assert empty["converged"] is False
+
+
+# ===== elo_access 补充覆盖：tracker memoize / 缓存容错 / active_model =====
+
+def test_elo_tracker_for_memoize_and_invalidate(tmp_path, monkeypatch):
+    """elo_tracker_for：无数据 None；命中进程内缓存返回同一对象；R 变动重派生。"""
+    _setup(tmp_path, monkeypatch)
+    ea._TRACKER_CACHE.clear()
+    try:
+        assert ea.elo_tracker_for("ghost") is None, "R 无该模型列 → None"
+
+        t = ELOTracker()
+        t.update_round("m1", [("DAN", 3.5)])
+        t.record_round_end("m1")
+        ea.publish_tracker(t, "m1")
+
+        tr1 = ea.elo_tracker_for("m1")
+        assert tr1 is not None and "DAN" in tr1.attacker_ratings
+        tr2 = ea.elo_tracker_for("m1")
+        assert tr1 is tr2, "同指纹应命中进程内缓存（同一对象）"
+
+        # R 变动 → 指纹变 → 重派生新对象
+        R = ResultsMatrix.load()
+        R.upsert("new-rec", "m1", 2.0, status="fully_compliant", extra={"unit": "DAN"})
+        R.save()
+        tr3 = ea.elo_tracker_for("m1")
+        assert tr3 is not tr1, "R 列变动应使 tracker 缓存失效"
+        assert ea.attacker_ratings_for("m1"), "便捷读取返回非空映射"
+    finally:
+        ea._TRACKER_CACHE.clear()
+
+
+def test_load_cache_tolerates_corrupt_schema(tmp_path, monkeypatch):
+    """缓存文件非 dict / 版本漂移 → 整体作废返回 {}。"""
+    import json as _json
+
+    _setup(tmp_path, monkeypatch)
+    cfg.ELO_CACHE_FILE.write_text(_json.dumps(["not", "a", "dict"]), encoding="utf-8")
+    assert ea._load_cache() == {}, "非 dict 缓存应作废"
+
+    cfg.ELO_CACHE_FILE.write_text(_json.dumps({"_version": 999, "m1": {}}), encoding="utf-8")
+    assert ea._load_cache() == {}, "schema 版本漂移应作废"
+
+    cfg.ELO_CACHE_FILE.write_text(_json.dumps({"_version": ea._CACHE_VERSION, "m1": {"k": 1}}),
+                                  encoding="utf-8")
+    assert ea._load_cache() == {"_version": ea._CACHE_VERSION, "m1": {"k": 1}}, "同版本保留"
+
+
+def test_active_model_by_latest_ts(tmp_path, monkeypatch):
+    """active_model 取结果 ts 最新的模型；ts 混合 int/str 也能比较；R 空 → None。"""
+    _setup(tmp_path, monkeypatch)
+    assert ea.active_model() is None, "空 R → None"
+
+    R = ResultsMatrix()
+    R.upsert("r1", "older", 3.0, status="ok", ts=10)
+    R.upsert("r2", "newer", 3.0, status="ok", ts=20)
+    R.save()
+    assert ea.active_model() == "newer", "纯数字 ts：应取最大的模型"
+
+    # 字符串 ts 走防 TypeError 的兜底分支（(1,str) 恒大于 (0,float)）：混型时
+    # active_model 的"最新"判定无真值，此处仅锁定与 ordered_results 一致的确定性次序
+    R.upsert("r3", "iso", 3.0, status="ok", ts="2026-01-01")
+    R.save()
+    assert ea.active_model() == "iso", "兜底次序：字符串 ts 排在数字 ts 之后"
+    assert ea._ts_key(5) == (0, 5.0) and ea._ts_key("x") == (1, "x"), "数值/字符串双分支"

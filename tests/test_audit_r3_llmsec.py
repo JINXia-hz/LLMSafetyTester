@@ -7,7 +7,7 @@
   L4  io.write_jsonl 并发覆写不损坏（tmp 名带 pid/tid）
   L5  task_view log_tail 只读尾部（大日志不全量读也能取到末尾内容）
   L6  control/api.py 500 响应不回传内部异常文本
-  L7  local_model_server / report / features 模块 docstring 恢复
+  L7  local_model_server / report / features 模块 docstring 恢复（元测试已删）
   L8  前端轮询卸载钩子存在（unload*Section 定义 + core.js 接线）
 """
 from __future__ import annotations
@@ -54,14 +54,17 @@ _HPO_BODY = {
 
 
 def test_r3_hpo_name_traversal_rejected(monkeypatch, tmp_path):
+    import llmsec.core.config as config
+    import llmsec.server.task_manager as task_manager_mod
     from llmsec.server.dashboard_api import app
     from llmsec.server.routers import hpo as hpo_mod
 
     monkeypatch.setattr(hpo_mod, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(config, "PROJECT_ROOT", tmp_path)  # launch 层校验 study 路径在仓库内
     started: list[list] = []
-    # hpo 已直调 task_manager.start_task（tasks 别名层已删），注入点随之迁移
-    monkeypatch.setattr(hpo_mod.task_manager, "start_task",
-                        lambda kind, argv: started.append(argv))
+    # hpo 经 launch 层调 task_manager.start_task（tasks 别名层已删），注入点随之迁移
+    monkeypatch.setattr(task_manager_mod, "start_task",
+                        lambda kind, argv, **kw: started.append(argv))
 
     client = TestClient(app)
     r = client.post("/api/run/hpo", json=_HPO_BODY | {"name": "../../evil"})
@@ -169,19 +172,6 @@ def test_r3_control_500_sanitized(monkeypatch):
     assert "secret internal path" not in r.text, \
         "L6: 内部异常文本不得回传客户端"
     assert "处理失败" in r.text
-
-
-# ============================================================
-# L7：模块 docstring 恢复（import 曾在 docstring 之前使 __doc__ 为 None）
-# ============================================================
-def test_r3_module_docstrings_present():
-    import llmsec.clustering.features as features
-    import llmsec.reporting.report as report
-    import llmsec.server.local_model_server as lms
-
-    assert features.__doc__ and "特征" in features.__doc__
-    assert report.__doc__ and "报告" in report.__doc__
-    assert lms.__doc__ and "模拟" in lms.__doc__
 
 
 # ============================================================

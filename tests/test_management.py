@@ -53,6 +53,9 @@ def iso_output(monkeypatch, tmp_path):
     from llmsec.management import snapshot
     monkeypatch.setattr(snapshot, "SNAPSHOT_DIR", snapshots)
     monkeypatch.setattr(snapshot, "OUTPUT_DIR", out)
+    # snapshot 的 run:<name> 源与 global 源 elo_cache 也走模块级绑定，一并隔离
+    monkeypatch.setattr(snapshot, "RUNS_DIR", runs)
+    monkeypatch.setattr(snapshot, "ELO_CACHE_FILE", state / "elo_cache.json")
     # runs 模块的 RUNS_DIR
     from llmsec.management import runs as runs_mod
     monkeypatch.setattr(runs_mod, "RUNS_DIR", runs)
@@ -61,6 +64,7 @@ def iso_output(monkeypatch, tmp_path):
     monkeypatch.setattr(caches, "ELO_CACHE_FILE", state / "elo_cache.json")
     monkeypatch.setattr(caches, "PREDICTORS_DIR", predictors)
     monkeypatch.setattr(caches, "FEATURE_CACHE_FILE", out / "feature_cache.pkl")
+    monkeypatch.setattr(caches, "EMBEDDING_CACHE_FILE", out / "embedding_cache.pkl")
     monkeypatch.setattr(caches, "CLUSTER_RESULT_FILE", out / "cluster_result.pkl")
     monkeypatch.setattr(caches, "TASK_LOG_DIR", tasks)
     monkeypatch.setattr(caches, "OUTPUT_DIR", out)
@@ -365,3 +369,247 @@ class TestCLI:
         assert run_dir.exists()  # dry-run 未删
         out = capsys.readouterr().out
         assert "dry-run" in out
+
+
+# ============================================================
+# snapshot：run:<name> 源重建 / tar.gz 打包 / out 越界 / cmd 返回码
+# ============================================================
+class TestSnapshotSources:
+    def test_export_run_source_rebuilds_r(self, iso_output):
+        """run:<name> 源：从 run 目录 state.json 的 history 重建 R，缺 record 的条目跳过。"""
+        from llmsec.management import snapshot
+        run_dir = cfg.RUNS_DIR / "2026-08-11_120000" / "modelA"
+        run_dir.mkdir(parents=True)
+        write_json(run_dir / "state.json", {
+            "defender_ratings": {"modelA": 1600.0},
+            "round_defender_elos": {"modelA": [1600.0, 1601.0]},
+            "history": [
+                {"record": "r1", "defender": "modelA", "eval_score": 1.5,
+                 "status": "fully_compliant", "round": 1, "unit": "c1"},
+                {"record": "r2", "defender": "modelA", "eval_score": -1.0,
+                 "status": "refused", "round": 2, "unit": "c2"},
+                {"defender": "modelA", "eval_score": 2.0, "round": 2},  # 无 record → 跳过
+            ],
+        })
+        write_json(run_dir / "runner_report.json", {"target_model": "modelA"})
+
+        out_dir = cfg.OUTPUT_DIR / "snap_run"
+        info = snapshot.export_snapshot("run:2026-08-11_120000/modelA", out=out_dir)
+        assert info["models"] == ["modelA"], "❌1 重建 R 应只有 modelA 列"
+        assert info["records"] == 2, "❌2 r1/r2 入 R，缺 record 条目应跳过"
+        assert info["has_elo_cache"] is False, "❌3 run 源不导出 elo_cache（派生层）"
+        R2 = ResultsMatrix.load(out_dir / "results.json")
+        assert R2.get("r1", "modelA").eval_score == 1.5, "❌4 快照 R 内容应与 history 一致"
+        m = read_json(out_dir / "manifest.json")
+        assert "state.json 重建" in m["source_desc"], "❌5 manifest 应标注来源描述"
+
+    def test_export_run_source_defender_from_report(self, iso_output):
+        """history 无 defender 键时，模型名回退 runner_report.target_model。"""
+        from llmsec.management import snapshot
+        run_dir = cfg.RUNS_DIR / "2026-08-12_090000" / "modelB"
+        run_dir.mkdir(parents=True)
+        write_json(run_dir / "state.json", {
+            "history": [{"record": "r1", "eval_score": 0.5, "round": 1, "unit": "c1"}],
+        })
+        write_json(run_dir / "runner_report.json", {"target_model": "modelB"})
+        info = snapshot.export_snapshot("run:2026-08-12_090000/modelB",
+                                        out=cfg.OUTPUT_DIR / "snap_b")
+        assert info["models"] == ["modelB"], "❌1 defender 应回退到报告里的 target_model"
+        assert info["records"] == 1, "❌2 该条目应入 R"
+
+    def test_export_run_source_old_layout_fallback(self, iso_output):
+        """旧布局回退：ts/target 无 state.json 时用 ts/state.json。"""
+        from llmsec.management import snapshot
+        batch = cfg.RUNS_DIR / "2026-08-10_000000"
+        batch.mkdir(parents=True)
+        write_json(batch / "state.json", {
+            "history": [{"record": "r9", "defender": "modelC", "eval_score": 1.0, "round": 1}],
+        })
+        info = snapshot.export_snapshot("run:2026-08-10_000000/modelC",
+                                        out=cfg.OUTPUT_DIR / "snap_old")
+        assert info["records"] == 1 and info["models"] == ["modelC"], \
+            "❌1 旧布局 ts/state.json 应被回退命中"
+
+    def test_export_out_escape_rejected(self, iso_output, tmp_path):
+        """out 越界（output/ 之外，绝对路径或 ../ 相对）→ ValueError，绝不写出。"""
+        from llmsec.management import snapshot
+        with pytest.raises(ValueError, match="越界"):
+            snapshot.export_snapshot("global", out=tmp_path / "escape")
+        with pytest.raises(ValueError, match="越界"):
+            snapshot.export_snapshot("global", out=Path("../evil"))
+        assert not (tmp_path / "evil").exists(), "❌1 越界路径不得被创建"
+
+    def test_export_relative_out_anchors_to_output(self, iso_output, tmp_path, monkeypatch):
+        """相对 out 锚到 OUTPUT_DIR：校验与写盘同锚点，不落 CWD、不在 manifest 阶段崩。
+
+        回归：原实现校验按 OUTPUT_DIR 解析、写盘按 CWD 解析——相对 out 先把
+        results.json 写到 output/ 之外，再在 relative_to(OUTPUT_DIR) 处 ValueError。
+        """
+        import tarfile
+
+        from llmsec.management import snapshot
+        R = ResultsMatrix()
+        R.upsert("r1", "modelA", 1.0, ts=1)
+        R.save()
+        monkeypatch.chdir(tmp_path)  # CWD 与 OUTPUT_DIR 分离，验证不漂移
+
+        info = snapshot.export_snapshot("global", out=Path("relsnap"))
+        assert info["snapshot"] == "relsnap", f"❌1 snapshot 应为 output 内相对路径: {info['snapshot']}"
+        assert (cfg.OUTPUT_DIR / "relsnap" / "results.json").exists(), "❌2 应落盘到 OUTPUT_DIR/relsnap"
+        assert not (tmp_path / "relsnap").exists(), "❌3 CWD 下不得出现快照目录（写盘锚点漂移回归）"
+
+        # 相对 .tar.gz 同样锚定
+        info2 = snapshot.export_snapshot("global", out=Path("rel.tar.gz"))
+        archive = cfg.OUTPUT_DIR / "rel.tar.gz"
+        assert archive.exists(), "❌4 相对 tar 名应锚到 OUTPUT_DIR"
+        assert not (tmp_path / "rel.tar.gz").exists(), "❌5 tar 不得写进 CWD"
+        with tarfile.open(archive) as tar:
+            assert "results.json" in [p.split("/")[-1] for p in tar.getnames()]
+        assert info2["snapshot"] == "rel.tar.gz"
+
+    def test_export_tar_gz_self_contained(self, iso_output, tmp_path):
+        """.tar.gz 输出：打包 results/manifest/elo_cache，staging 清理，tar 可解出可用 R。"""
+        import tarfile
+
+        from llmsec.management import snapshot
+        R = ResultsMatrix()
+        R.upsert("r1", "modelA", 1.0, ts=1)
+        R.save()
+        write_json(cfg.ELO_CACHE_FILE, {"_version": 3, "mA": {}})
+
+        archive = cfg.OUTPUT_DIR / "snap.tar.gz"
+        info = snapshot.export_snapshot("global", out=archive)
+        assert archive.exists(), "❌1 应产出 tar.gz"
+        assert info["has_elo_cache"] is True, "❌2 global 源应带 elo_cache"
+        staging = cfg.OUTPUT_DIR / ".snapshot_staging"
+        assert not staging.exists() or not any(staging.iterdir()), "❌3 staging 应已清理"
+
+        ex = tmp_path / "extracted"
+        ex.mkdir()
+        with tarfile.open(archive) as tar:
+            tar.extractall(ex)
+        names = [p.name for p in ex.rglob("*")]
+        assert {"results.json", "manifest.json", "elo_cache.json"} <= set(names), \
+            f"❌4 包内缺文件: {names}"
+        R2 = ResultsMatrix.load(next(p for p in ex.rglob("results.json")))
+        assert R2.n_for_model("modelA") == 1, "❌5 tar 内 R 应可直接加载"
+
+    def test_cmd_export_return_codes(self, iso_output, capsys):
+        """cmd_export：未知源 / 无 state.json 的 run 返回 1；成功（json/人读）返回 0。"""
+        from llmsec.management import snapshot
+        assert snapshot.cmd_export("bogus") == 1, "❌1 未知 source 应返回 1"
+        assert snapshot.cmd_export("run:no-such-run") == 1, "❌2 无 state.json 的 run 应返回 1"
+        rc = snapshot.cmd_export("global", out=str(cfg.OUTPUT_DIR / "ok_json"), json_mode=True)
+        assert rc == 0, "❌3 json 模式成功应返回 0"
+        data = json.loads(capsys.readouterr().out)
+        assert data["source"] == "global", "❌4 json 输出应含 source"
+        rc2 = snapshot.cmd_export("global", out=str(cfg.OUTPUT_DIR / "ok_human"))
+        assert rc2 == 0, "❌5 人读模式成功应返回 0"
+        assert "snapshot" in capsys.readouterr().out, "❌6 人读模式应打印表格"
+
+
+# ============================================================
+# caches：list/clean 子命令、legacy 判定、未知类别告警
+# ============================================================
+class TestCachesCommands:
+    def test_cmd_list_json_and_human(self, iso_output, capsys):
+        """cmd_list：json 输出全部类别汇总；人读输出含表格与"绝不清"提示。"""
+        from llmsec.management import caches
+        write_json(cfg.ELO_CACHE_FILE, {"_version": 3})
+        rc = caches.cmd_list(json_mode=True)
+        assert rc == 0, "❌1 cmd_list 应返回 0"
+        data = json.loads(capsys.readouterr().out)
+        assert data["count"] == len(caches.CACHE_CATEGORIES), "❌2 类别数应齐全"
+        by_name = {c["name"]: c for c in data["categories"]}
+        assert by_name["elo_cache"]["file_count"] == 1, "❌3 elo_cache 应计 1 个文件"
+        rc2 = caches.cmd_list()
+        out = capsys.readouterr().out
+        assert rc2 == 0 and "elo_cache" in out and "绝不清" in out, "❌4 人读模式应有表格与提示"
+
+    def test_legacy_predictor_split(self, iso_output):
+        """predictors 按现行前缀 blend_v2_ 判活；无版本盐的旧键归 predictors_legacy。"""
+        from llmsec.management import caches
+        (cfg.PREDICTORS_DIR / "blend_v2_abc.pkl").write_bytes(b"x" * 16)
+        (cfg.PREDICTORS_DIR / "blend_abc.pkl").write_bytes(b"y" * 16)
+        live = caches.category_summary("predictors")
+        legacy = caches.category_summary("predictors_legacy")
+        assert live["file_count"] == 2, "❌1 predictors 应含新旧全部 pkl"
+        assert legacy["file_count"] == 1, "❌2 legacy 只应含 blend_ 旧前缀"
+        assert legacy["rebuildable"] == "disposable", "❌3 legacy 应标记 disposable"
+
+    def test_task_log_paths_patterns(self, iso_output):
+        """task_logs 只匹配 *.log 与 *.progress.jsonl，其它扩展名不计。"""
+        from llmsec.management import caches
+        (cfg.TASK_LOG_DIR / "eval-1.log").write_text("x\n", encoding="utf-8")
+        (cfg.TASK_LOG_DIR / "eval-2.progress.jsonl").write_text("{}\n", encoding="utf-8")
+        (cfg.TASK_LOG_DIR / "notes.txt").write_text("x\n", encoding="utf-8")
+        s = caches.category_summary("task_logs")
+        assert s["file_count"] == 2, f"❌1 应只计 2 个日志文件，实际 {s['file_count']}"
+
+    def test_plan_clean_unknown_category_marked(self, iso_output):
+        """未知类别不展开任何路径，标记 unknown_category 且提示。"""
+        from llmsec.management import caches
+        write_json(cfg.ELO_CACHE_FILE, {"_version": 3})
+        plan = caches.plan_clean(["elo_cache", "no_such_cat"])
+        kinds = [(i.kind, i.detail) for i in plan.items]
+        assert any(k == "unknown_category" and "未知类别" in d for k, d in kinds), \
+            f"❌1 未知类别未标记: {kinds}"
+        assert sum(1 for k, _ in kinds if k == "cache_file") == 1, "❌2 elo_cache 应恰 1 条"
+
+    def test_execute_clean_skips_unknown_and_missing(self, iso_output):
+        """执行期：未知类别条目跳过；已不存在的文件标记 missing 而非失败。"""
+        from llmsec.management import caches
+        plan = caches.plan_clean(["elo_cache", "nope"])  # elo_cache 文件不存在
+        done = caches.execute_clean(plan)
+        by_kind = {i.kind: i for i in done.items}
+        assert by_kind["missing"].detail == "已不存在", "❌1 缺失文件应标记 missing"
+        assert by_kind["unknown_category"].detail == "跳过", "❌2 未知类别应被跳过"
+
+    def test_cmd_clean_dry_run_then_yes(self, iso_output, capsys):
+        """clean：默认 dry-run 不动盘；--yes 软删到 .trash 且原文件可寻回。"""
+        from llmsec.management import caches
+        write_json(cfg.ELO_CACHE_FILE, {"_version": 3})
+        (cfg.PREDICTORS_DIR / "blend_v2_k.pkl").write_bytes(b"z" * 16)
+        rc = caches.cmd_clean(["elo_cache", "predictors"])
+        assert rc == 0, "❌1 dry-run 应返回 0"
+        out = capsys.readouterr().out
+        assert "dry-run" in out and "--yes" in out, "❌2 应提示 dry-run 与 --yes"
+        assert cfg.ELO_CACHE_FILE.exists(), "❌3 dry-run 不得动盘"
+        assert (cfg.PREDICTORS_DIR / "blend_v2_k.pkl").exists(), "❌4 dry-run 不得动盘"
+        rc2 = caches.cmd_clean(["elo_cache", "predictors"], yes=True)
+        assert rc2 == 0, "❌5 --yes 应返回 0"
+        assert not cfg.ELO_CACHE_FILE.exists() \
+            and not (cfg.PREDICTORS_DIR / "blend_v2_k.pkl").exists(), "❌6 --yes 后原文件应消失"
+        assert any((cfg.OUTPUT_DIR / ".trash").rglob("elo_cache.json")), "❌7 应软删进 .trash"
+
+    def test_cmd_clean_json_modes(self, iso_output, capsys):
+        """clean --json：dry-run 输出 Plan 序列化且不动盘；--yes 输出执行结果且真删。"""
+        from llmsec.management import caches
+        write_json(cfg.ELO_CACHE_FILE, {"_version": 3})
+        rc = caches.cmd_clean(["elo_cache"], yes=False, json_mode=True)
+        data = json.loads(capsys.readouterr().out)
+        assert rc == 0 and data["_title"] == "clean (dry-run)" and data["dry_run"] is True, \
+            "❌1 json dry-run 结构错误"
+        assert cfg.ELO_CACHE_FILE.exists(), "❌2 json dry-run 不动盘"
+        rc2 = caches.cmd_clean(["elo_cache"], yes=True, json_mode=True)
+        data2 = json.loads(capsys.readouterr().out)
+        assert rc2 == 0 and data2["_title"] == "clean (executed)" and data2["dry_run"] is False, \
+            "❌3 json 执行结构错误"
+        assert not cfg.ELO_CACHE_FILE.exists(), "❌4 json --yes 应真删"
+
+    def test_cmd_clean_invalid_category_warns(self, iso_output, capsys):
+        """clean 带未知类别：提示未知与可选项，不影响返回 0。"""
+        from llmsec.management import caches
+        rc = caches.cmd_clean(["ghost_cat"])
+        out = capsys.readouterr().out
+        assert rc == 0, "❌1 未知类别不应非零退出"
+        assert "未知类别" in out and "elo_cache" in out, "❌2 应提示未知类别与可选项"
+
+    def test_missing_dirs_yield_empty_categories(self, iso_output, monkeypatch):
+        """目录不存在时 predictor/task_log 类别安静为空（早退分支），不报错。"""
+        from llmsec.management import caches
+        monkeypatch.setattr(caches, "PREDICTORS_DIR", cfg.OUTPUT_DIR / "no_pred_dir")
+        monkeypatch.setattr(caches, "TASK_LOG_DIR", cfg.OUTPUT_DIR / "no_task_dir")
+        assert caches._predictor_paths() == [], "❌1 目录缺失应返回空列表"
+        assert caches._task_log_paths() == [], "❌2 目录缺失应返回空列表"
+        assert caches.category_summary("predictors")["file_count"] == 0, "❌3 汇总应为 0"

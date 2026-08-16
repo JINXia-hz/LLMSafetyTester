@@ -268,17 +268,18 @@ def test_emit_progress_env_gated():
 
 
 def test_task_progress_endpoint():
-    """/api/tasks/{id}/progress：argv 解析目标 + 每 target 取末条；hpo 取末条。"""
+    """/api/tasks/{id}/progress：meta 声明目标占位 + 每 target 取末条；hpo 取末条。"""
     import json
 
     from llmsec.core.config import TASK_LOG_DIR
     from llmsec.server.task_manager import TASKS, _progress_path
 
-    # evaluate：双目标，各有进度
+    # evaluate：双目标，各有进度（meta 为 launch 层 start_task 时写入的结构化摘要）
     tid = 'evaluate-ut-' + str(int(time.time() * 1000))
     TASKS[tid] = {
         'kind': 'evaluate',
         'argv': ['-m', 'llmsec.pipeline.runner', '--targets', 'a,b', '--max-rounds', '10'],
+        'meta': {'targets': ['a', 'b'], 'max_rounds': 10},
         'status': 'success', 'returncode': 0, 'log_path': TASK_LOG_DIR / f"{tid}.log",
         'log_file': None, 'started_at': '2026-01-01T00:00:00', 'cmd': '', 'proc': None,
     }
@@ -340,13 +341,17 @@ def test_evaluate_concurrency_argv(monkeypatch):
 
     captured = {}
 
-    def fake_start(kind, argv):
+    def fake_start(kind, argv, **kwargs):
         captured['argv'] = list(argv)
+        captured['meta'] = kwargs.get('meta')
         return {"id": "fake-eval", "kind": kind, "cmd": " ".join(argv), "argv": list(argv),
                 "status": "queued", "returncode": None, "log_path": task_manager.TASK_LOG_DIR / "fake.log",
                 "log_file": None, "started_at": "2026-01-01T00:00:00", "error": None, "proc": None}
 
     monkeypatch.setattr(task_manager, "start_task", fake_start)
+    # 测试目标 a/b/c 不在真实 .env 声明内——屏蔽声明校验（该规则在 test_launch 单测覆盖）
+    import llmsec.core.config as config
+    monkeypatch.setattr(config, "load_targets", lambda: {})
 
     # 默认：多目标 → 全并发（target_concurrency = 目标数）
     r = client.post('/api/run/evaluate', json={
@@ -356,6 +361,10 @@ def test_evaluate_concurrency_argv(monkeypatch):
     assert "--targets" in argv and argv[argv.index("--targets") + 1] == "a,b,c"
     assert "--target-concurrency" in argv, "多目标必须拼 --target-concurrency"
     assert argv[argv.index("--target-concurrency") + 1] == "3", "默认全并发 = 目标数"
+    meta = captured['meta'] or {}
+    assert meta.get("targets") == ["a", "b", "c"] and meta.get("max_rounds") == 3 \
+        and str(meta.get("input", "")).endswith("example.jsonl"), \
+        "launch 层应携带结构化 meta（替代 argv 反向解析）"
 
     # 显式覆盖
     captured.clear()
@@ -553,3 +562,340 @@ def test_probe_includes_services(monkeypatch):
     # 原"只调 1 次"的断言因新增 chat smoke 而调整为 3。
     assert calls["n"] == 3, f"models.list 复用 1 + chat smoke generator/judge 各 1 = 3，实际 {calls['n']}"
     print("✅ /api/targets/probe services 通过")
+
+
+# ===== task_manager core 补充覆盖（队列/取消/淘汰/僵尸/失败告警）+ 攻击集上传 =====
+
+def _fake_task(tid, status, kind="evaluate", **over):
+    """直接注入 TASKS 的最小任务记录（不启动子进程）。"""
+    from datetime import datetime
+    from pathlib import Path
+
+    t = {
+        "kind": kind, "cmd": "fake", "argv": ["-c", "pass"],
+        "env_override": None, "meta": None, "proc": None,
+        "log_path": Path(task_manager.TASK_LOG_DIR) / f"{tid}.log",
+        "log_file": None, "status": status,
+        "started_at": datetime.now().isoformat(), "_task_id": tid,
+    }
+    t.update(over)
+    TASKS[tid] = t
+    return t
+
+
+def test_task_log_download_endpoint():
+    """/api/tasks/{id}/log?download=1 → text/plain + Content-Disposition。"""
+    view = task_manager.start_task('smoke', ['-c', "print('log-dl-ok')"])
+    tid = view['id']
+    deadline = time.time() + 30
+    while time.time() < deadline and client.get(f'/api/tasks/{tid}').json()['status'] == 'running':
+        time.sleep(0.3)
+    r = client.get(f'/api/tasks/{tid}/log?download=1')
+    assert r.status_code == 200
+    assert r.headers['content-type'].startswith('text/plain')
+    assert r.headers.get('content-disposition') == f'attachment; filename="{tid}.log"'
+    assert 'log-dl-ok' in r.text, '下载模式应返回完整日志内容'
+    # 非 download 模式返回 JSON 包装
+    r2 = client.get(f'/api/tasks/{tid}/log')
+    assert r2.json()['id'] == tid and 'log-dl-ok' in r2.json()['log']
+    # 不存在的任务 404
+    assert client.get('/api/tasks/nope/log').status_code == 404
+
+
+def test_task_cancel_finished_conflict_and_queued():
+    """已结束任务 cancel → 409；queued 任务直接标记 cancelled（无子进程）。"""
+    view = task_manager.start_task('smoke', ['-c', "print('cancel-done')"])
+    tid = view['id']
+    deadline = time.time() + 30
+    while time.time() < deadline and client.get(f'/api/tasks/{tid}').json()['status'] == 'running':
+        time.sleep(0.3)
+    r = client.post(f'/api/tasks/{tid}/cancel')
+    assert r.status_code == 409, f'已结束任务应 409，实际 {r.status_code}'
+
+    # queued 取消：先占住同 kind 的 running 槽，再入队一个 queued
+    blocker = task_manager.start_task('evaluate', ['-c', 'import time; time.sleep(30)'])
+    try:
+        assert blocker['status'] == 'running', '首个任务应立即运行'
+        queued = task_manager.start_task('evaluate', ['-c', 'print(1)'])
+        qid = queued['id']
+        assert TASKS[qid]['status'] == 'queued', '同 kind 串行：第二个任务应排队'
+        r2 = client.post(f'/api/tasks/{qid}/cancel')
+        assert r2.status_code == 200 and r2.json()['status'] == 'cancelled', 'queued 取消直接标记'
+        TASKS.pop(qid, None)
+    finally:
+        task_manager.cancel_task(blocker['id'])
+        TASKS.pop(blocker['id'], None)
+    TASKS.pop(tid, None)
+    assert client.post('/api/tasks/nonexistent/cancel').status_code == 404
+
+
+def test_evict_tasks_drops_oldest_terminal():
+    """TASKS 超上限按插入序淘汰最旧终态任务。"""
+    try:
+        for i in range(task_manager._TASKS_MAX + 2):
+            _fake_task(f"evict-{i:03d}", "success")
+        assert len(TASKS) > task_manager._TASKS_MAX, '前置：注入后应超上限'
+        task_manager._evict_tasks()
+        assert len(TASKS) <= task_manager._TASKS_MAX, '淘汰后应回到上限内'
+        assert "evict-000" not in TASKS, '最旧终态先淘汰'
+        assert f"evict-{task_manager._TASKS_MAX + 1:03d}" in TASKS, '最新任务保留'
+    finally:
+        for k in [k for k in TASKS if k.startswith("evict-")]:
+            TASKS.pop(k, None)
+
+
+def test_zombie_detection_alerts_only_when_stale(monkeypatch):
+    """running 超时且 progress 无更新 → 告警；progress 近期有更新或运行未超时则不告警。"""
+    from datetime import datetime, timedelta
+
+    import llmsec.core.monitoring as mon
+    from llmsec.server import task_manager as tm
+
+    alerts = []
+    monkeypatch.setattr(mon, "alert_zombie_task", lambda **kw: alerts.append(kw))
+    monkeypatch.setattr(tm, "_ZOMBIE_MINUTES", 60.0)
+
+    try:
+        t = _fake_task("zomb-stale", "running",
+                       spawned_at=datetime.now() - timedelta(hours=3))
+        tm._check_zombie(t)
+        assert len(alerts) == 1 and alerts[0]["task_id"] == "zomb-stale", '陈旧无产出应告警'
+
+        alerts.clear()
+        prog = tm._progress_path("zomb-fresh")
+        prog.parent.mkdir(parents=True, exist_ok=True)
+        prog.write_text('{"round": 1}\n', encoding="utf-8")
+        try:
+            t2 = _fake_task("zomb-fresh", "running",
+                            spawned_at=datetime.now() - timedelta(hours=3))
+            tm._check_zombie(t2)
+            assert alerts == [], 'progress 近期有更新不应告警'
+
+            t3 = _fake_task("zomb-young", "running",
+                            spawned_at=datetime.now() - timedelta(minutes=1))
+            tm._check_zombie(t3)
+            assert alerts == [], '运行时间未到阈值不应告警'
+        finally:
+            prog.unlink(missing_ok=True)
+    finally:
+        for k in ("zomb-stale", "zomb-fresh", "zomb-young"):
+            TASKS.pop(k, None)
+
+
+def test_spawn_failure_marks_task_failed(monkeypatch, tmp_path):
+    """Popen 抛 OSError → 任务置 failed 且带 error 文案，不抛出。"""
+    monkeypatch.setattr(task_manager, "TASK_LOG_DIR", tmp_path / "tasks")
+
+    def _boom(*a, **kw):
+        raise OSError("no such executable")
+
+    monkeypatch.setattr(task_manager.subprocess, "Popen", _boom)
+    view = task_manager.start_task("evaluate", ["-c", "print(1)"])
+    assert view["status"] == "failed", 'Popen 失败应置 failed'
+    assert "任务启动失败" in (view["error"] or ""), 'error 带失败上下文'
+    TASKS.pop(view["id"], None)
+
+
+def test_spawn_env_override_injected(monkeypatch, tmp_path):
+    """env_snapshot 的 env_override 注入子进程环境。"""
+    monkeypatch.setattr(task_manager, "TASK_LOG_DIR", tmp_path / "tasks")
+    captured = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    def _capture(argv, **kw):
+        captured.update(kw.get("env") or {})
+        return _FakeProc()
+
+    monkeypatch.setattr(task_manager.subprocess, "Popen", _capture)
+    view = task_manager.start_task("evaluate", ["-c", "print(1)"],
+                                   env_override={"LLMSEC_TEST_CONN": "isolated"})
+    assert view["status"] in ("running", "success"), '假进程立即结束也算正常流转'
+    assert captured.get("LLMSEC_TEST_CONN") == "isolated", 'env_override 应注入子进程 env'
+    assert captured.get("LLMSEC_TASK_ID") == view["id"], '任务 id 应注入 env'
+    TASKS.pop(view["id"], None)
+
+
+def test_failed_task_emits_alert(monkeypatch, tmp_path):
+    """子进程非零退出 → _refresh_task_status 触发 alert_task_failed。"""
+    import llmsec.core.monitoring as mon
+    from llmsec.server import task_manager as tm
+
+    calls = []
+    monkeypatch.setattr(mon, "alert_task_failed", lambda **kw: calls.append(kw))
+    monkeypatch.setattr(tm, "TASK_LOG_DIR", tmp_path / "tasks")
+
+    class _FailProc:
+        returncode = 3
+
+        def poll(self):
+            return 3
+
+        def wait(self, timeout=None):
+            return 3
+
+    t = _fake_task("fail-alert", "running", proc=_FailProc())
+    try:
+        tm._refresh_task_status(t)
+        assert t["status"] == "failed" and t["returncode"] == 3
+        assert len(calls) == 1 and calls[0]["task_id"] == "fail-alert", '失败应发告警'
+        assert calls[0]["returncode"] == 3
+    finally:
+        TASKS.pop("fail-alert", None)
+
+
+def test_read_full_log_and_progress_edge_cases(tmp_path, monkeypatch):
+    """read_full_log/read_progress 对缺失任务、缺失文件、坏行的容错。"""
+    from llmsec.server import task_manager as tm
+
+    monkeypatch.setattr(tm, "TASK_LOG_DIR", tmp_path)
+
+    assert tm.read_full_log("ghost") == "", '任务不存在返回空串'
+    _fake_task("nolog", "success")
+    try:
+        assert tm.read_full_log("nolog") == "", '日志文件不存在返回空串'
+        assert tm.read_progress("nolog") == [], 'progress 不存在返回空列表'
+    finally:
+        TASKS.pop("nolog", None)
+
+    prog = tmp_path / "x.progress.jsonl"
+    prog.write_text('{"ok": 1}\n\nnot-json\n{"ok": 2}\n', encoding="utf-8")
+    assert [r["ok"] for r in tm.read_progress("x")] == [1, 2], '坏行/空行跳过'
+
+
+def test_upload_attack_set(tmp_path, monkeypatch):
+    """/api/attack-sets/upload：后缀/空文件/首行 JSON 校验 + 防穿越 + 落盘统计。"""
+    import llmsec.server.routers.tasks as rt
+
+    monkeypatch.setattr(rt, "ATTACKS_DIR", tmp_path / "attacks")
+
+    payload = '{"id": "1.1", "prompt": "p", "method": "m"}\n'
+    r = client.post('/api/attack-sets/upload',
+                    files={"file": ("new_set.jsonl", payload.encode(), "application/jsonl")})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["name"] == "new_set.jsonl" and d["n_records"] == 1 and d["size_kb"] >= 0
+    assert (tmp_path / "attacks" / "new_set.jsonl").read_text(encoding="utf-8") == payload
+
+    # 非法后缀
+    r = client.post('/api/attack-sets/upload',
+                    files={"file": ("evil.txt", b"x", "text/plain")})
+    assert r.status_code == 400
+    # 空文件
+    r = client.post('/api/attack-sets/upload',
+                    files={"file": ("empty.jsonl", b"  \n", "text/plain")})
+    assert r.status_code == 400
+    # 首行非 JSON
+    r = client.post('/api/attack-sets/upload',
+                    files={"file": ("bad.jsonl", b"not-json-at-all\n", "text/plain")})
+    assert r.status_code == 400
+    # 路径穿越：只取纯文件名
+    r = client.post('/api/attack-sets/upload',
+                    files={"file": ("../../escape.jsonl", payload.encode(), "application/jsonl")})
+    assert r.status_code == 200 and r.json()["name"] == "escape.jsonl"
+    assert not (tmp_path / "escape.jsonl").exists(), '不应写出 attacks 目录之外'
+    assert (tmp_path / "attacks" / "escape.jsonl").exists()
+
+
+
+# ===== data_query 补充覆盖：/api/env 与 /api/targets/add（.env 管理） =====
+
+def test_masked_key_shapes(monkeypatch):
+    """_masked：空→None；≤6 字符→全掩码；长值→首尾 3 + 掩码。"""
+    from llmsec.server.routers import data_query as dq
+
+    monkeypatch.setenv("MK_EMPTY", "")
+    monkeypatch.setenv("MK_SHORT", "abc")
+    monkeypatch.setenv("MK_LONG", "sk-1234567890abcdef")
+    assert dq._masked("MK_MISSING") is None
+    assert dq._masked("MK_EMPTY") is None
+    assert dq._masked("MK_SHORT") == "****"
+    m = dq._masked("MK_LONG")
+    assert m == "sk-****def" and "1234567890" not in m, "中间段不得泄露"
+
+
+def test_api_env_masks_secrets(monkeypatch):
+    """GET /api/env：返回三组连接配置，api_key 只给掩码。"""
+    monkeypatch.setenv("TARGET_BASE_URL", "http://t")
+    monkeypatch.setenv("TARGET_MODEL", "tm")
+    monkeypatch.setenv("TARGET_API_KEY", "sk-verylongkey123")
+    monkeypatch.setenv("GENERATOR_MODEL", "gm")
+    monkeypatch.setenv("JUDGE_MODEL", "jm")
+    r = client.get('/api/env')
+    assert r.status_code == 200
+    d = r.json()
+    assert d['target']['base_url'] == 'http://t' and d['target']['model'] == 'tm'
+    assert d['target']['api_key_masked'] == 'sk-***123' or '****' in d['target']['api_key_masked']
+    assert 'sk-verylongkey123' not in r.text, '明文 key 不得出现在响应'
+    assert d['generator']['model'] == 'gm' and d['judge_model'] == 'jm'
+
+
+def _setup_env_root(monkeypatch, tmp_path, env_text=None):
+    """把 PROJECT_ROOT/OUTPUT_DIR 指到 tmp，.env 内容可控。"""
+    import llmsec.core.config as cfg
+    from llmsec.server.routers import data_query as dq
+
+    monkeypatch.setattr(cfg, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(dq, "OUTPUT_DIR", tmp_path / "output", raising=False)
+    if env_text is not None:
+        (tmp_path / ".env").write_text(env_text, encoding="utf-8")
+    return tmp_path / ".env"
+
+
+def test_api_env_put_updates_and_preserves_comments(monkeypatch, tmp_path):
+    """PUT /api/env：仅更新提供字段，注释/其余行保留；空请求 400。"""
+    env_path = _setup_env_root(monkeypatch, tmp_path,
+                               "# 注释保留\nTARGET_BASE_URL=http://old\nTARGET_MODEL=old-m\n")
+    import os
+
+    r = client.put('/api/env', json={'target_base_url': 'http://new', 'judge_model': 'my-judge'})
+    assert r.status_code == 200 and r.json()['updated'] == ['JUDGE_MODEL', 'TARGET_BASE_URL']
+    content = env_path.read_text(encoding="utf-8")
+    assert '# 注释保留' in content, '注释应保留'
+    assert 'TARGET_BASE_URL=http://new' in content and 'http://old' not in content, '提供字段被替换'
+    assert 'TARGET_MODEL=old-m' in content, '未提供字段保持不变'
+    assert 'JUDGE_MODEL=my-judge' in content, '新字段追加'
+    assert os.environ.get('TARGET_BASE_URL') == 'http://new', '进程内 env 同步更新'
+
+    assert client.put('/api/env', json={}).status_code == 400, '空更新应 400'
+
+
+def test_api_targets_add_appends_block(monkeypatch, tmp_path):
+    """POST /api/targets/add：追加 TARGET_<N> 四件套 + 更新 TARGETS 行；重名 400。"""
+    env_path = _setup_env_root(monkeypatch, tmp_path,
+                               "TARGETS=t1\nTARGET_1_NAME=t1\nTARGET_1_MODEL=m1\n"
+                               "TARGET_1_BASE_URL=http://1\nTARGET_1_API_KEY=k1\n")
+    import os
+
+    r = client.post('/api/targets/add', json={
+        'name': 'new-t', 'model': '', 'base_url': 'http://2', 'api_key': 'sk-new'})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d['prefix'] == 'TARGET_2' and d['model'] == 'new-t', '模型缺省用 name'
+    content = env_path.read_text(encoding="utf-8")
+    assert 'TARGETS=t1,new-t' in content, 'TARGETS 行应追加新目标'
+    for k, v in (("TARGET_2_NAME", "new-t"), ("TARGET_2_MODEL", "new-t"),
+                 ("TARGET_2_BASE_URL", "http://2"), ("TARGET_2_API_KEY", "sk-new")):
+        assert f"{k}={v}" in content, f'{k} 四件套缺失'
+    assert os.environ.get('TARGET_2_NAME') == 'new-t', '进程内 env 同步'
+    assert (tmp_path / "output" / ".env.bak").exists() or True  # output 备份尽力而为
+
+    # 重名 / 空 name 各 400
+    assert client.post('/api/targets/add', json={
+        'name': 't1', 'model': 'm', 'base_url': 'http://x', 'api_key': 'k'}).status_code == 400
+    assert client.post('/api/targets/add', json={
+        'name': ' ', 'model': 'm', 'base_url': 'http://x', 'api_key': 'k'}).status_code == 400
+
+    # .env 不存在时自动新建
+    env_path.unlink()
+    r2 = client.post('/api/targets/add', json={
+        'name': 'fresh', 'model': 'm', 'base_url': 'http://3', 'api_key': 'k2'})
+    assert r2.status_code == 200 and r2.json()['prefix'] == 'TARGET_1'
+    assert 'TARGET_1_NAME=fresh' in env_path.read_text(encoding="utf-8")

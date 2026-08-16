@@ -30,46 +30,9 @@ def _try(fn, *, error_hint: str = "") -> Any:
         return {"error": f"{type(e).__name__}: {e}", "hint": error_hint}
 
 
-def _build_eval_argv(
-    target: str | None = None,
-    targets: list[str] | None = None,
-    input_file: str = "attacks/l1.jsonl",
-    max_rounds: int = 5,
-    phase: str = "all",
-    batch_size: int | None = None,
-    sampler: str = "hybrid",
-    seed: int | None = None,
-    twin_window: int | None = None,
-    no_early_stop: bool = False,
-    concurrency: int | None = None,
-) -> list[str]:
-    """构造 runner 的 argv（不含 python 可执行文件）。"""
-    argv = [
-        "-m", "llmsec.pipeline.runner",
-        "--phase", phase,
-        "--input", input_file,
-        "--max-rounds", str(max_rounds),
-        "--sampler", sampler,
-    ]
-    if batch_size is not None:
-        argv += ["--batch-size", str(batch_size)]
-    if seed is not None:
-        argv += ["--seed", str(seed)]
-    if twin_window is not None:
-        argv += ["--twin-window", str(twin_window)]
-    if no_early_stop:
-        argv += ["--no-early-stop"]
-    if concurrency is not None:
-        argv += ["--concurrency", str(concurrency)]
-    if target:
-        argv += ["--target", target]
-    elif targets:
-        argv += ["--targets", ",".join(targets)]
-        # 多目标默认全并发（每目标独立端点）
-        argv += ["--target-concurrency", str(len(targets))]
-    # 看板评估默认 publish 到全局 R
-    argv += ["--publish-global"]
-    return argv
+def _launch_error(e: Any) -> dict[str, Any]:
+    """LaunchError → MCP 工具的错误 dict 约定（fastmcp 工具不抛异常）。"""
+    return {"error": str(e), "hint": getattr(e, "hint", "") or ""}
 
 
 # ============================================================
@@ -83,6 +46,10 @@ def run_evaluation(
     phase: str = "all",
     batch_size: int | None = None,
     sampler: str = "hybrid",
+    sampler_alpha: float | None = None,
+    sampler_beta: float | None = None,
+    sampler_gamma: float | None = None,
+    coordinate_rounds: int | None = None,
     seed: int | None = None,
     env_snapshot: str | None = None,
     twin_window: int | None = None,
@@ -99,6 +66,8 @@ def run_evaluation(
     env_snapshot，则用快照里的配置覆盖全局（隔离评估，不碰全局 .env）。
     用 create_env_snapshot + edit_env_snapshot 创建和编辑快照。
 
+    校验/argv 构造统一走 llmsec.server.launch（与 Web 看板 / TUI 同一链路）。
+
     Args:
         target:       单个目标模型名（与 targets 二选一）。须在 .env TARGETS 中声明。
         targets:      多目标列表（与 target 二选一），默认全并发。
@@ -107,6 +76,10 @@ def run_evaluation(
         phase:        评估阶段："all"（默认）/"1"（仅攻击）/"2"（仅过敏）。
         batch_size:   每轮批量大小（不传用默认自适应策略）。
         sampler:      采样策略："hybrid"（默认）/"gap"/"infogain"/"coordinate"。
+        sampler_alpha: InfoGain 不确定性权重（不传用 params 默认值）。
+        sampler_beta:  InfoGain 簇覆盖权重（不传用 params 默认值）。
+        sampler_gamma: InfoGain 成功潜力权重（不传用 params 默认值）。
+        coordinate_rounds: Hybrid 模式下前多少轮使用 InfoGain 探索（不传用默认）。
         seed:         随机种子（可复现）。
         env_snapshot: .env 快照名。指定时用快照里的连接配置覆盖全局 .env（隔离评估）。
                       用 create_env_snapshot 创建快照。
@@ -120,64 +93,35 @@ def run_evaluation(
     Returns:
         task_view dict（含 id/status/started_at）。用 id 轮询 get_task_status。
     """
-    from pathlib import Path
-
-    from llmsec.core.config import ATTACKS_DIR
-    from llmsec.params import MAX_ROUNDS_LIMIT
-
     def _do() -> dict[str, Any]:
-        # 参数校验
+        from llmsec.server.launch import LaunchError, LaunchSpec, launch_evaluation
+
         if not target and not targets:
             return {"error": "必须指定 target 或 targets 之一"}
-        if phase not in ("all", "1", "2"):
-            return {"error": f"phase 须为 all/1/2，收到 {phase!r}"}
-        if not (1 <= max_rounds <= MAX_ROUNDS_LIMIT):
-            return {"error": f"max_rounds 须在 1-{MAX_ROUNDS_LIMIT}，收到 {max_rounds}"}
-        if sampler not in ("gap", "infogain", "coordinate", "hybrid"):
-            return {"error": f"sampler 须为 gap/infogain/coordinate/hybrid，收到 {sampler!r}"}
-
-        # 攻击集存在性检查
-        # input_file 外部可控：先取末段文件名（剥离目录部分）防路径穿越，
-        # 再到 ATTACKS_DIR 下定位（对齐 tasks router 的既有防御范式）。
-        resolved_input = input_file
-        attack_name = Path(input_file).name
-        attack_path = ATTACKS_DIR / attack_name
-        if attack_path.exists():
-            resolved_input = str(attack_path).replace("\\", "/")
-        else:
-            return {"error": f"攻击集不存在: {input_file}", "hint": "可用攻击集在 attacks/ 目录下"}
-
-        # 加载 env_snapshot（如果指定）
-        env_override = None
-        if env_snapshot:
-            try:
-                from control.core.env_snapshot import load_env_dict
-
-                env_override = load_env_dict(env_snapshot)
-            except FileNotFoundError:
-                return {"error": f"env 快照不存在: {env_snapshot}", "hint": "用 list_env_snapshots 查可用快照"}
-            except Exception as e:
-                return {"error": f"读取 env 快照失败: {e}"}
-
-        # param_overrides → LLMSEC_PARAM_<NAME>=value 环境变量注入
-        if param_overrides:
-            if env_override is None:
-                env_override = {}
-            for k, v in param_overrides.items():
-                env_override[f"LLMSEC_PARAM_{k}"] = str(v)
-
-        argv = _build_eval_argv(
-            target=target, targets=targets, input_file=resolved_input,
-            max_rounds=max_rounds, phase=phase, batch_size=batch_size,
-            sampler=sampler, seed=seed,
-            twin_window=twin_window, no_early_stop=no_early_stop, concurrency=concurrency,
+        spec = LaunchSpec(
+            target=target,
+            targets=list(targets) if targets else None,
+            input_file=input_file,
+            phase=phase,
+            batch_size=batch_size,
+            max_rounds=max_rounds,
+            sampler=sampler,
+            sampler_alpha=sampler_alpha,
+            sampler_beta=sampler_beta,
+            sampler_gamma=sampler_gamma,
+            coordinate_rounds=coordinate_rounds,
+            seed=seed,
+            twin_window=twin_window,
+            no_early_stop=no_early_stop,
+            concurrency=concurrency,
+            env_snapshot=env_snapshot,
+            param_overrides=param_overrides,
         )
-        from llmsec.server.task_manager import start_task
-
-        view = start_task("evaluate", argv, env_override=env_override)
+        try:
+            view = launch_evaluation(spec)
+        except LaunchError as e:
+            return _launch_error(e)
         view["next_step"] = "用 get_task_status(task_id) 轮询进度，status 为 success/failed/cancelled 时结束"
-        if env_snapshot:
-            view["env_snapshot"] = env_snapshot
         return view
 
     return _try(_do, error_hint="检查 .env 是否配置了 GENERATOR_* 和 TARGET_*，或用 env_snapshot 参数指定隔离配置")

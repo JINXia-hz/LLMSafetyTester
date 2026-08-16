@@ -28,6 +28,7 @@ TARGET_RETRY_DELAY = 3.0     # 目标模型 API 重试间隔（外网延迟更�
 # 审查：所有模块统一 import 本组值，改这里 → 全链路生效。
 
 DEFAULT_BATCH_SIZE = 10      # 每轮自适应测试的攻击方法数
+DEFAULT_SAMPLER = "hybrid"   # Phase 1 采样策略（gap/infogain/coordinate/hybrid），runner --sampler 默认值
 DEFAULT_MAX_ROUNDS = 5       # 最大自适应轮次
 MAX_ROUNDS_LIMIT = 50        # CLI/dashboard 的 --max-rounds 上限
 # 解释：runner 主循环的两个规模旋钮，CLI --batch-size/--max-rounds 可覆盖。
@@ -288,6 +289,12 @@ SIM_MATH_ACCURACY = 0.55       # 模拟模型数学题基础正确率（随 harm
 # 支持类型推断：bool/int/float/str；非法值忽略并警告。
 def _apply_env_overrides() -> None:
     import os
+
+    # 先确保 .env 已加载：llmsec.params 可能早于 llmsec/__init__ 的 _load_env()
+    # 被 import（经 core/llm.py 等链路），此时 os.environ 尚无 LLMSEC_PARAM_*，
+    # 覆盖会静默落空。load_env 幂等且 override=False，不影响子进程注入的真实 env。
+    from llmsec.core.config import load_env
+    load_env()
 
     from llmsec.core.logging import get_logger
     logger = get_logger(__name__)

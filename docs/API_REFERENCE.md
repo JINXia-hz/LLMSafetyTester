@@ -491,17 +491,22 @@ Agent → xxx_confirm(token) →  返回 {status: "executed", result}
 评估跑几分钟到几十分钟（调 LLM API），不能同步阻塞。采用**提交 → 返回 task_id → 轮询状态**模式。
 
 #### `run_evaluation(...)`
-提交一次评估任务，立即返回 task_id。
+提交一次评估任务，立即返回 task_id。校验/argv 构造统一走 `llmsec.server.launch`
+（与 Web 看板 `POST /api/run/evaluate`、TUI 同一链路，参数面一致）。
 
 | 参数 | 类型 | 默认 | 说明 |
 |------|------|------|------|
 | `target` | str \| None | `None` | 单目标（与 `targets` 二选一）。须在 `.env TARGETS` 中声明 |
 | `targets` | list[str] \| None | `None` | 多目标列表，默认全并发 |
-| `input_file` | str | `"attacks/l1.jsonl"` | 攻击集路径（相对仓库根） |
+| `input_file` | str | `"attacks/l1.jsonl"` | 攻击集路径（相对仓库根；取末段文件名防穿越，须 `.jsonl`） |
 | `max_rounds` | int | `5` | 自适应最大轮数（1-50） |
 | `phase` | str | `"all"` | `"all"` / `"1"`(仅攻击) / `"2"`(仅过敏) |
 | `batch_size` | int \| None | `None` | 每轮批量大小 |
 | `sampler` | str | `"hybrid"` | `"hybrid"` / `"gap"` / `"infogain"` / `"coordinate"` |
+| `sampler_alpha` | float \| None | `None` | InfoGain 不确定性权重（不传用 params 默认值） |
+| `sampler_beta` | float \| None | `None` | InfoGain 簇覆盖权重 |
+| `sampler_gamma` | float \| None | `None` | InfoGain 成功潜力权重 |
+| `coordinate_rounds` | int \| None | `None` | Hybrid 模式下前多少轮使用 InfoGain 探索 |
 | `seed` | int \| None | `None` | 随机种子（可复现） |
 | `env_snapshot` | str \| None | `None` | .env 快照名，指定时覆盖全局 .env（隔离评估） |
 | `twin_window` | int \| None | `None` | 过敏检测方法数上限 |
@@ -509,7 +514,8 @@ Agent → xxx_confirm(token) →  返回 {status: "executed", result}
 | `concurrency` | int \| None | `None` | 批内并行度；None=默认全并发 |
 | `param_overrides` | dict \| None | `None` | 覆写 params.py 参数 `{"PARAM_NAME": value}`，类型推断 bool/int/float/str |
 
-**返回**：task_view dict（含 `id / status / started_at`）。用 `id` 轮询 `get_task_status`。
+**返回**：task_view dict（含 `id / status / started_at / meta`；`meta.targets/max_rounds`
+为结构化任务摘要，`GET /api/tasks/{id}/progress` 的目标占位行同源）。用 `id` 轮询 `get_task_status`。
 
 > 💡 `param_overrides` 用法：先用 `get_params` 查参数名和当前值，再如 `{"K_FACTOR": 32, "CONV_CI_TARGET": 15.0}` 传入。只在本次评估生效，不改全局。
 
@@ -696,12 +702,13 @@ uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
 子进程任务队列（`subprocess.Popen`），同 kind FIFO 串行，超 64 个淘汰最旧终态。
 
 ##### `POST /api/run/evaluate` — 启动评估任务
-请求体 `EvaluateRequest`：
+请求体 `EvaluateRequest`。校验/argv 构造统一在 `llmsec.server.launch`
+（与 MCP `run_evaluation`、TUI 同一链路）——目标未在 `.env TARGETS` 声明会 400。
 
 | 字段 | 类型 | 默认 | 校验 | 说明 |
 |------|------|------|------|------|
 | `phase` | str | `"all"` | `^(all\|1\|2)$` | 运行阶段 |
-| `input` | str | `"l1.jsonl"` | — | 攻击集文件名（attacks/ 下） |
+| `input` | str | `"l1.jsonl"` | `.jsonl` + 防穿越 | 攻击集文件名（attacks/ 下） |
 | `batch_size` | int | `min(DEFAULT, ADAPTIVE_MAX)` | `ge=1, le=ADAPTIVE_BATCH_MAX` | 每轮批量 |
 | `max_rounds` | int | `DEFAULT_MAX_ROUNDS` | `ge=1, le=MAX_ROUNDS_LIMIT` | 最大轮次 |
 | `sampler` | str | `"hybrid"` | `^(gap\|infogain\|coordinate\|hybrid)$` | 采样策略 |
@@ -712,8 +719,12 @@ uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
 | `target` | str \| None | `None` | `^[\w.\-:]+$` | 单目标 |
 | `targets` | str \| None | `None` | — | 多目标子集，逗号分隔 |
 | `target_concurrency` | int \| None | `None` | `ge=1, le=32` | 多目标并发数 |
+| `no_early_stop` | bool | `False` | — | 跑满轮数不早停 |
+| `env_snapshot` | str \| None | `None` | — | .env 快照名（隔离评估，能力与 MCP 对齐） |
+| `param_overrides` | dict \| None | `None` | — | 覆写 params.py 参数（同 MCP） |
 
-自动注入 `--publish-global`，预检越狱税探针。返回 task_view（额外带 `has_tax_probe`）。
+自动注入 `--publish-global`，预检越狱税探针。返回 task_view（额外带 `has_tax_probe`
+与 `meta` 结构化摘要）。
 
 ##### 任务操作端点
 

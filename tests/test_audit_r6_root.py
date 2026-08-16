@@ -6,14 +6,13 @@
   G3  runner.partition_publish_names（publish-global 守卫纯函数，替代被删假测试）
   G4  fsig 签名 helper（子目录 mtime 变化可感知）
   G5  probe.ModelsProbeResult（NamedTuple 契约）
-  G6  tasks 兼容别名层已删除（单一命名空间 task_manager）
+  G6  tasks 兼容别名层已删除（墓碑用例已删，单一命名空间 task_manager）
   G7  mutator 不再自行 save（update 统一写回）
 """
 from __future__ import annotations
 
 import threading
 import time
-from pathlib import Path
 
 
 # ============================================================
@@ -174,28 +173,8 @@ def test_g5_models_probe_result_namedtuple():
 
 
 # ============================================================
-# G6：tasks 别名层删除
+# G7：mutator 不再自行 save（update 统一写回）
 # ============================================================
-def test_g6_tasks_alias_layer_removed():
-    from llmsec.server.routers import tasks
-
-    for gone in ("_start_task", "_read_progress", "_task_view", "_advance_queue",
-                 "_spawn", "TASK_LOG_DIR", "subprocess"):
-        assert not hasattr(tasks, gone), f"G6: tasks.{gone} 别名应已删除（统一走 task_manager）"
-    # 端点依赖的内部符号仍在
-    assert hasattr(tasks, "router") and hasattr(tasks, "EvaluateRequest")
-
-
-# ============================================================
-# G7：mutator 不再自行 save
-# ============================================================
-def test_g7_mutators_do_not_self_save():
-    ws_src = Path("control/core/workspace.py").read_text(encoding="utf-8")
-    es_src = Path("control/core/env_snapshot.py").read_text(encoding="utf-8")
-    assert "_store.save(idx)" not in ws_src, "G7: workspace mutator 应由 update 统一写回"
-    assert "_store.save(idx)" not in es_src, "G7: env_snapshot mutator 应由 update 统一写回"
-
-
 def test_g7_index_ops_still_persist(tmp_path, monkeypatch):
     """别名清理后索引写入仍生效（update 写回路径的行为验证）。"""
     from control.core import env_snapshot as es

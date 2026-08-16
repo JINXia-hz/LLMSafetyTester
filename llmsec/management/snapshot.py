@@ -66,8 +66,13 @@ def export_snapshot(
         archive = None
     else:
         out = Path(out)
+        # 相对路径统一锚到 OUTPUT_DIR：校验与写盘必须同锚点。原实现校验按
+        # OUTPUT_DIR 解析、写盘却按 CWD 解析——相对 out 会先把文件写到 output/
+        # 之外，再在 manifest 的 relative_to(OUTPUT_DIR) 处崩溃，残留文件逃出约束。
+        if not out.is_absolute():
+            out = OUTPUT_DIR / out
         # out 外部可控（MCP/CLI 传入），约束在 OUTPUT_DIR 子树内防穿越写出
-        out_r = out.resolve() if out.is_absolute() else (OUTPUT_DIR / out).resolve()
+        out_r = out.resolve()
         out_root = OUTPUT_DIR.resolve()
         if out_r != out_root and out_root not in out_r.parents:
             raise ValueError(f"输出路径越界，须在 output/ 内: {out}")
