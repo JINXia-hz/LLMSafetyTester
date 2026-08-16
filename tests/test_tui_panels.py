@@ -105,11 +105,18 @@ def _notes_recorder():
 
 
 async def _wait_until(pilot, cond, tries: int = 25) -> None:
-    """有界等待条件成立（每次迭代排空一轮消息队列），消除高负载下的时序抖动。"""
+    """有界等待条件成立（每次迭代排空一轮消息队列 + 让出真实时间片）。
+
+    超时必须抛错：静默返回会让失败推迟到后续步骤、报出误导性错误（如 click 的
+    NoMatches 实际是屏从未弹出）；pause() 只推进消息队列不保证真实时间，
+    慢机上还需 sleep 让后台线程有机会完成。
+    """
     for _ in range(tries):
         if cond():
             return
         await pilot.pause()
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"_wait_until 超时（{tries} 轮）：条件始终未成立")
 
 
 # ============================================================
@@ -1160,12 +1167,9 @@ class TestHelpOverlay:
 
 class TestRunsAnalysisViews:
     def _panel_with_runs(self):
-        """构造带两个 run 的面板（不走真实 _load）。"""
-
-        class _RunsApp(App):
-            def compose(self) -> ComposeResult:
-                yield RunsPanel()
-
+        """构造带两个 run 的面板。复用模块级 _RunsApp（拦截 _load）——
+        真实 _load 的后台磁盘扫描在干净环境返回空列表并回写 _runs={}，
+        会把测试注入的数据清掉（CI 首跑即因此挂掉）。"""
         return _RunsApp()
 
     def test_boundary_surprises_pairing(self, monkeypatch):
@@ -1183,9 +1187,7 @@ class TestRunsAnalysisViews:
             app = self._panel_with_runs()
             async with app.run_test() as pilot:
                 panel = app.query_one(RunsPanel)
-                panel._runs = {"r1": {"name": "r1", "target": "模型A"},
-                               "r2": {"name": "r2", "target": "模型B"}}
-                panel._render_runs([])
+                panel._render_runs([_run_row("r1", target="模型A"), _run_row("r2", target="模型B")])
                 await pilot.pause()
                 from llmsec.tui.widgets import LogModal
 

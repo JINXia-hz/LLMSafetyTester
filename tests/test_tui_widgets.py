@@ -67,15 +67,20 @@ class _ModalApp(App):
 
 
 async def _wait_until(pilot, cond, tries: int = 25) -> None:
-    """有界等待条件成立（每次迭代排空一轮消息队列）。
+    """有界等待条件成立（每次迭代排空一轮消息队列 + 让出真实时间片）。
 
     全量套件冷启动时 worker 高负载可能让 dismiss 消息晚到一拍，
     单次 pause 不足以观察终态；有界轮询消除该时序抖动。
+    超时必须抛错：静默返回会让失败推迟到后续步骤、报出误导性错误
+    （如 click 的 NoMatches 实际是屏从未弹出）；pause() 只推进消息队列
+    不保证真实时间，慢机上还需 sleep 让后台线程有机会完成。
     """
     for _ in range(tries):
         if cond():
             return
         await pilot.pause()
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"_wait_until 超时（{tries} 轮）：条件始终未成立")
 
 
 # ============================================================
