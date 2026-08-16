@@ -41,6 +41,9 @@ jobs:
         run: |
           pip install -r llmsec/requirements.txt
           pip install pytest pytest-xdist pytest-cov pip-audit
+          # TUI 测试依赖可选 [tui] extra（pyproject）；不进 requirements.txt——
+          # 该文件面向 Docker/Web 部署，TUI 仅终端侧需要
+          pip install "textual>=1,<4"
       - name: Run tests
         # -n 4（与 pyproject addopts 同值）：-n auto(=12 核)下 worker 冷启动开销
         # 远超并行收益（pyproject 注释有实测数据：130s vs 37s）

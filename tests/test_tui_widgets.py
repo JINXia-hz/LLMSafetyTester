@@ -9,6 +9,11 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
+# 可选依赖：textual 属 [tui] extra（rich 随其安装），未安装环境整体跳过（沿用 hdbscan 惯例）
+pytest.importorskip("textual")
+
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, RichLog, Static

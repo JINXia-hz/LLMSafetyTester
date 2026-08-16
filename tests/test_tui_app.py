@@ -10,6 +10,10 @@ import asyncio
 import json
 
 import pytest
+
+# 可选依赖：textual 属 [tui] extra，未安装环境整体跳过（沿用 hdbscan 惯例）
+pytest.importorskip("textual")
+
 from textual.widgets import DataTable
 
 from llmsec.tui.app import LlmsecTUI

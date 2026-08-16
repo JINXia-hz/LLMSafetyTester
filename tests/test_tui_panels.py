@@ -12,6 +12,11 @@ import asyncio
 import json
 import os
 
+import pytest
+
+# 可选依赖：textual 属 [tui] extra，未安装环境整体跳过（沿用 hdbscan 惯例）
+pytest.importorskip("textual")
+
 from textual.app import App, ComposeResult
 from textual.widgets import Checkbox, DataTable, Input, RichLog, Select, SelectionList, Static
 
