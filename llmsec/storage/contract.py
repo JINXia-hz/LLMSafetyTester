@@ -30,10 +30,8 @@ from llmsec.storage.catalog import (
     reconcile_tasks,
     register_run,
     register_task,
-    register_trial,
     remove_run,
     update_task,
-    update_trial,
     upsert_task,
 )
 from llmsec.storage.ctlstore import (
@@ -89,6 +87,6 @@ __all__ = [
     "save_env_snapshot", "list_env_snapshots", "get_env_snapshot", "delete_env_snapshot",
     "get_run", "get_task", "query_runs", "query_tasks", "query_trials",
     "reconcile_runs", "reconcile_tasks",
-    "register_run", "register_task", "register_trial",
-    "remove_run", "rebuild_runs", "update_task", "update_trial", "upsert_task",
+    "register_run", "register_task",
+    "remove_run", "rebuild_runs", "update_task", "upsert_task",
 ]

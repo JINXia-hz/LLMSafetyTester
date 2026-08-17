@@ -48,6 +48,12 @@ async def _submit(app, pilot, line: str) -> None:
 
     程序化设值后 caret 可能停在 0 且 Changed 滞后一拍，显式置行尾光标 +
     同步刷新补全态，等价于真人敲完整行后的状态（决策路径见 _on_submitted）。"""
+    tick = getattr(app, "_inject_tick", None)
+    if tick:
+        # 有注入：先等补丁后首个轮询 tick 完成（见 _inject），排干在途真实
+        # refresh 的空快照消息，命令才不会读到被清空的 _snaps
+        await _wait_until(pilot, lambda: bool(tick))
+        await pilot.pause()
     inp = _input(app)
     inp.value = line
     inp.cursor_position = len(line)
@@ -89,9 +95,24 @@ def _snap(sid="evaluate-101010-ab12cd", *, status="running", owned=True, pid=Non
 def _inject(app, monkeypatch, snaps: list[TaskSnapshot]) -> None:
     """注入任务快照并钉住 store.refresh——否则轮询线程 2s 周期会用磁盘扫描的
     空结果覆盖 _snaps，命令读取的时机变成竞态（真实 app 中轮询=磁盘真相，测试
-    中注入=真相，二者必须同源）。"""
+    中注入=真相，二者必须同源）。
+
+    竞态根治：补丁落点可能晚于轮询 worker 在途的一次真实 refresh——它的空
+    快照消息会在注入之后才被处理（全套跑时机器慢、窗口更宽，ls -l tasks 曾
+    因此间歇超时）。这里记录补丁后首个 tick 标记并 _wake 立即触发下一轮；
+    _submit 提交前等该标记——worker 单线程顺序发消息，补丁后的 tick 入队时
+    在途空消息必已处理完（先冲掉、再由 tick 恢复注入快照），命令读取
+    时机不再靠运气。"""
     app._console.update_snapshots(snaps)
-    monkeypatch.setattr(app.store, "refresh", lambda: (snaps, False))
+    tick: list[bool] = []
+
+    def _fake_refresh():
+        tick.append(True)
+        return snaps, False
+
+    monkeypatch.setattr(app.store, "refresh", _fake_refresh)
+    app._inject_tick = tick
+    app._wake.set()
 
 
 # ============================================================

@@ -249,11 +249,6 @@ class ResultsMatrix:
         self._models = [m for m in self._models if m != model]
         return n
 
-    def remove_record(self, record: str) -> int:
-        """删除某记录行（跨全部模型）。返回删除的模型列条数。"""
-        col = self._r.pop(record, None)
-        return len(col) if col else 0
-
     # ---------- 持久化 ----------
     def to_store_dict(self) -> dict:
         """遗留 results.json 格式的完整 dict（v2）——快照导出 / verify 对账用。"""

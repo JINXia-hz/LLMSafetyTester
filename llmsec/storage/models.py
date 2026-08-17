@@ -14,7 +14,6 @@ control / MCP / TUI）零字段损失。
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from pathlib import Path
 
@@ -149,6 +148,21 @@ class Task(SQLModel, table=True):
             "started_at": self.started_at or _iso(self.registered_at),
             "meta": self.meta,
         }
+
+
+class PredictorCache(SQLModel, table=True):
+    """预测器登记行（P8：真 LRU——last_hit 行内记录，取代 mtime-touch 近似。
+
+    blob 仍是 predictors/<key>.pkl 文件（登记只存元数据）；行是可重建的
+    派生索引：删库后 prune 前对账重建（created 用文件 mtime 兜底）。"""
+
+    __tablename__ = "predictor_cache"
+
+    key: str = Field(primary_key=True)   # cache_key（文件名去 .pkl）
+    size: int = 0
+    created: float = 0.0
+    last_hit: float = 0.0
+    hits: int = 0
 
 
 # ============================================================
@@ -306,11 +320,6 @@ class CtlEnvSnapshot(SQLModel, table=True):
 def run_name(batch: str, target: str | None) -> str:
     """构造 run 名（management.runs._run_entry 的 'batch/target' 口径）。"""
     return f"{batch}/{target}" if target and batch != target else batch
-
-
-def metrics_to_json(metrics: dict | None) -> str | None:
-    """metrics dict → JSON 字符串（verify/dump 对账用；ORM 路径自动走 JSON 列）。"""
-    return json.dumps(metrics, ensure_ascii=False) if metrics else None
 
 
 def dir_size(path: Path) -> int:

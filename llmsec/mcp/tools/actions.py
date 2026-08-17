@@ -123,15 +123,15 @@ def delete_runs_confirm(token: str) -> dict[str, Any]:
 def clean_caches_preview(categories: list[str]) -> dict[str, Any]:
     """预览清理可重建缓存的影响（不执行删除）。
 
-    所有缓存类别都是可重建的（elo_cache / predictors 自动重建，task_logs 一次性），
+    所有缓存类别都是可重建的（predictors/model_state 自动重建或重算），
     但清理会释放磁盘空间。
 
     Args:
         categories: 要清理的缓存类别列表，可选值：
-            "elo_cache"      — Elo 派生缓存（删后从 R 重算）
+            "model_state"    — 模型指纹/预筛模型（可重算重训）
             "predictors"     — 混合预测器 pkl（删后重训）
             "feature_cluster"— 特征缓存 + 聚类产物（特征自动重建/聚类需重跑）
-            "task_logs"      — 已完成任务的日志（一次性，不可恢复）
+
 
     Returns:
         {action, summary, confirm_token, ttl_seconds}

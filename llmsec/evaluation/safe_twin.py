@@ -185,11 +185,23 @@ def generate_safe_twin(attack_prompt: str, client) -> dict | None:
 # core.io.append_jsonl 无锁，并发 append 会产生半写行/重复生成（M9）
 _TWIN_APPEND_LOCK = threading.Lock()
 
+# 轮转阈值（P8：append-only 无轮转只增不减；与 alerts.jsonl 同策略——
+# 孪生是"生成记录"，最近一份完整轮转足够回溯，超阈值滚动为 .1）
+_TWINS_MAX_BYTES = 10 * 1024 * 1024
+
 
 def append_twin_entry(entry: dict) -> None:
-    """向 SAFE_TWINS_FILE 追加一条安全孪生（线程安全，M9）。"""
+    """向 SAFE_TWINS_FILE 追加一条安全孪生（线程安全 M9 + 10MB 轮转 P8）。"""
     with _TWIN_APPEND_LOCK:
-        append_jsonl(_config.SAFE_TWINS_FILE, entry)
+        path = _config.SAFE_TWINS_FILE
+        try:
+            if path.exists() and path.stat().st_size > _TWINS_MAX_BYTES:
+                rotated = path.with_suffix(path.suffix + ".1")
+                rotated.unlink(missing_ok=True)
+                path.replace(rotated)
+        except OSError:
+            pass  # 被占用/不存在：跳过轮转直接追加
+        append_jsonl(path, entry)
 
 
 def make_twin_entry(rec: dict, original_id, clean_prompt: str, twin: dict) -> dict:

@@ -239,13 +239,18 @@ def test_tasks_reconcile_lifecycle(iso, tmp_path, monkeypatch):
     assert rows[0].status == "success"
 
 
-def test_register_and_query_trials(iso):
-    contract.register_trial("s1", 0, work_dir="/tmp/t0", target="m", seed="42")
-    contract.register_trial("s1", 1, work_dir="/tmp/t1", target="m", seed="43")
-    contract.update_trial("s1", 0, status="success", metrics={"conv_rounds": 5})
+def test_upsert_trial_record_roundtrip(iso):
+    from llmsec.storage import catalog
+    catalog.upsert_trial_record("s1", {"trial": 0, "work_dir": "/tmp/t0", "target": "m",
+                                       "seed": "42", "status": "running"})
+    catalog.upsert_trial_record("s1", {"trial": 1, "work_dir": "/tmp/t1", "target": "m",
+                                       "seed": "43", "status": "success",
+                                       "metrics": {"conv_rounds": 5}})
+    catalog.upsert_trial_record("s1", {"trial": 0, "work_dir": "/tmp/t0",
+                                       "status": "success", "metrics": {"conv_rounds": 3}})
     rows = contract.query_trials("s1")
     assert [r.idx for r in rows] == [0, 1]
-    assert rows[0].status == "success" and rows[0].metrics == {"conv_rounds": 5}
+    assert rows[0].status == "success" and rows[0].metrics == {"conv_rounds": 3}
     assert contract.query_trials("nope") == []
 
 

@@ -525,7 +525,7 @@ def _build() -> list[Capability]:
         ),
         Capability(
             name="clean_cache",
-            description="清理派生缓存（elo_cache/predictors/feature_cluster/task_logs）。可重建。",
+            description="清理派生缓存（predictors/feature_cluster/model_state）。可重建。",
             parameters={
                 "type": "object",
                 "properties": {

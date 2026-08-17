@@ -71,7 +71,7 @@ LS_RESOURCES = (
     "cache",
     "params",
 )
-CACHE_CATEGORIES = ("elo_cache", "predictors", "feature_cluster", "task_logs")
+CACHE_CATEGORIES = ("predictors", "feature_cluster", "model_state")
 CAT_PREFIXES = ("tasks", "runs")
 
 _COMMANDS: tuple[Command, ...] = (
@@ -113,7 +113,7 @@ _COMMANDS: tuple[Command, ...] = (
                 "categories",
                 variadic=True,
                 completer="cache_categories",
-                help="elo_cache/predictors/feature_cluster/task_logs",
+                help="predictors/feature_cluster/model_state",
             ),
         ),
     ),

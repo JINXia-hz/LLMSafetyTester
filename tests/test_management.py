@@ -46,7 +46,6 @@ def iso_output(monkeypatch, tmp_path):
     # caches 的 OUTPUT_DIR/TASK_LOG_DIR 是模块级冻结导入（静态锚点，守卫不拦），patch 模块属性
     from llmsec.management import caches as _caches
     monkeypatch.setattr(_caches, "OUTPUT_DIR", out)
-    monkeypatch.setattr(_caches, "TASK_LOG_DIR", tasks)
     # management.common 也持有 OUTPUT_DIR/TRASH_DIR 的 import-time 引用，patch 它们
     from llmsec.management import common
     monkeypatch.setattr(common, "OUTPUT_DIR", out)
@@ -98,16 +97,6 @@ class TestRemoveMethods:
         assert R.record_row("r2") == {}
         # r1 还有 modelB
         assert R.get("r1", "modelB") is not None
-
-    def test_remove_record_deletes_row(self):
-        R = ResultsMatrix()
-        R.upsert("r1", "mA", 1.0)
-        R.upsert("r1", "mB", 0.5)
-        R.upsert("r2", "mA", 0.0)
-        n = R.remove_record("r1")
-        assert n == 2
-        assert R.record_row("r1") == {}
-        assert R.get("r2", "mA") is not None
 
     def test_column_payload_none_after_remove_triggers_elo_invalidation(self):
         """删 model 列后 column_payload 返回 None → elo_cache 指纹失效（契约验证）。"""
@@ -232,14 +221,14 @@ class TestRunsDelete:
 class TestCaches:
     def test_list_categories_with_sizes(self, iso_output):
         from llmsec.management import caches
-        # 造一个 predictor + 一个 task log（elo_cache 已表化进 results.db，无文件类别）
+        # 造一个 predictor + 一个 model_state 文件（P8：task_logs 类别已并入 gc-tasks）
         (cfg.PREDICTORS_DIR / "blend_abc.pkl").write_bytes(b"\x80\x04" * 100)
-        (cfg.TASK_LOG_DIR / "eval-1.log").write_text("log line\n", encoding="utf-8")
+        (cfg.STATE_DIR / "probes.json").write_text("{}", encoding="utf-8")
 
         summaries = caches.all_category_summaries()
         by_name = {s["name"]: s for s in summaries}
         assert by_name["predictors"]["file_count"] == 1
-        assert by_name["task_logs"]["file_count"] == 1
+        assert by_name["model_state"]["file_count"] == 1
 
     def test_clean_dry_run_no_touch(self, iso_output):
         from llmsec.management import caches
@@ -499,14 +488,13 @@ class TestCachesCommands:
         assert legacy["file_count"] == 1, "❌2 legacy 只应含 blend_ 旧前缀"
         assert legacy["rebuildable"] == "disposable", "❌3 legacy 应标记 disposable"
 
-    def test_task_log_paths_patterns(self, iso_output):
-        """task_logs 只匹配 *.log 与 *.progress.jsonl，其它扩展名不计。"""
+    def test_model_state_paths_exact(self, iso_output):
+        """model_state 精确点名 probes.json + prescreen_model.joblib（P8 新类别）。"""
         from llmsec.management import caches
-        (cfg.TASK_LOG_DIR / "eval-1.log").write_text("x\n", encoding="utf-8")
-        (cfg.TASK_LOG_DIR / "eval-2.progress.jsonl").write_text("{}\n", encoding="utf-8")
-        (cfg.TASK_LOG_DIR / "notes.txt").write_text("x\n", encoding="utf-8")
-        s = caches.category_summary("task_logs")
-        assert s["file_count"] == 2, f"❌1 应只计 2 个日志文件，实际 {s['file_count']}"
+        (cfg.STATE_DIR / "probes.json").write_text("{}", encoding="utf-8")
+        (cfg.STATE_DIR / "unrelated.txt").write_text("x", encoding="utf-8")
+        s = caches.category_summary("model_state")
+        assert s["file_count"] == 1, f"❌1 只应计 probes.json，实际 {s['file_count']}"
 
     def test_plan_clean_unknown_category_marked(self, iso_output):
         """未知类别不展开任何路径，标记 unknown_category 且提示。"""
@@ -562,8 +550,7 @@ class TestCachesCommands:
         assert "未知类别" in out and "predictors" in out, "❌2 应提示未知类别与可选项"
 
     def test_missing_dirs_yield_empty_categories(self, iso_output, monkeypatch):
-        """目录不存在时 predictor/task_log 类别安静为空（早退分支），不报错。"""
+        """目录不存在时 predictor 类别安静为空（早退分支），不报错。"""
         from llmsec.management import caches
         assert caches._predictor_paths() == [], "❌1 目录缺失应返回空列表"
-        assert caches._task_log_paths() == [], "❌2 目录缺失应返回空列表"
         assert caches.category_summary("predictors")["file_count"] == 0, "❌3 汇总应为 0"

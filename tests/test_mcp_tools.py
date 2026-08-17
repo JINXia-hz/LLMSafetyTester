@@ -42,13 +42,13 @@ def iso_out(monkeypatch, tmp_path):
     res_file = out / "state" / "catalog.db"
 
     monkeypatch.setattr(cfg, "OUTPUT_DIR", out)
+    monkeypatch.setattr(cfg, "STATE_DIR", out / "state")  # model_state 类别动态读
     monkeypatch.setattr(cfg, "CATALOG_DB", res_file)
     monkeypatch.setattr(cfg, "RUNS_DIR", out / "runs")
     monkeypatch.setattr(cfg, "TASK_LOG_DIR", out / "tasks")
     monkeypatch.setattr(common_mod, "OUTPUT_DIR", out)
     monkeypatch.setattr(common_mod, "TRASH_DIR", out / ".trash")
     monkeypatch.setattr(runs_mod, "RUNS_DIR", out / "runs")
-    monkeypatch.setattr(cfg, "CATALOG_DB", res_file)
     monkeypatch.setattr(compare_mod, "RUNS_DIR", out / "runs")
     monkeypatch.setattr(compare_mod, "WORKSPACES_DIR", out / "workspaces")
 
@@ -540,14 +540,13 @@ class TestActionsConfirmFlows:
     def test_clean_caches_full_flow(self, iso_out, monkeypatch):
         from llmsec.management import caches as caches_mod
 
-        tasks_dir = iso_out / "tasks"
-        tasks_dir.mkdir()
-        (tasks_dir / "a.log").write_text("log", encoding="utf-8")
-        (tasks_dir / "a.progress.jsonl").write_text("{}", encoding="utf-8")
-        monkeypatch.setattr(caches_mod, "TASK_LOG_DIR", tasks_dir)
+        # P8：model_state 两件套（task_logs 已并入 storage gc-tasks）
+        (iso_out / "state").mkdir(exist_ok=True)
+        (iso_out / "state" / "probes.json").write_text("{}", encoding="utf-8")
+        (iso_out / "state" / "prescreen_model.joblib").write_bytes(b"\x80\x04")
         monkeypatch.setattr(caches_mod, "OUTPUT_DIR", iso_out)
 
-        prev = actions.clean_caches_preview(["task_logs"])
+        prev = actions.clean_caches_preview(["model_state"])
         assert prev["action"] == "clean_caches"
         items = prev["summary"]["items"]
         assert len([i for i in items if i["kind"] == "cache_file"]) == 2
@@ -558,8 +557,8 @@ class TestActionsConfirmFlows:
 
         res = actions.clean_caches_confirm(prev["confirm_token"])
         assert res["status"] == "executed"
-        assert not (tasks_dir / "a.log").exists()
-        assert not (tasks_dir / "a.progress.jsonl").exists()
+        assert not (iso_out / "state" / "probes.json").exists()
+        assert not (iso_out / "state" / "prescreen_model.joblib").exists()
 
     def test_merge_workspaces_full_flow(self, iso_out, monkeypatch):
         import llmsec.core.config as cfg

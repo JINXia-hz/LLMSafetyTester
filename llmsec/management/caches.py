@@ -4,13 +4,13 @@
 
 类别：
   predictors        output/predictors/*.pkl            删了自动重建（load_or_fit 重训）
-  （elo_cache 已表化进 results.db 的 elo_cache 表，指纹自动失效，无需清理类别）
+  （elo_cache 已表化进 catalog.db 的 elo_cache 表，指纹自动失效，无需清理类别）
   predictors_legacy output/predictors/blend_*.pkl（无 v2）  版本迁移遗留死缓存，现行代码永不命中
   feature_cluster   output/feature_cache.pkl + cluster_result.pkl + embedding_cache.pkl
                                                        feature/embedding 可重建 / cluster 需重跑
-  task_logs         output/tasks/*.log + *.progress.jsonl            终态任务日志
+  model_state       output/state/probes.json + prescreen_model.joblib  可重算/重训
 
-绝不清：results.json（R 矩阵，唯一真相）。
+绝不清：catalog.db（runs/trials/tasks/R 观测，全库唯一真相）。
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from llmsec.core import config as _config  # 重绑常量调期动态读（work-dir 兼容）
-from llmsec.core.config import OUTPUT_DIR, TASK_LOG_DIR
+from llmsec.core.config import OUTPUT_DIR
 from llmsec.core.logging import get_logger
 from llmsec.management.common import (
     Plan,
@@ -68,10 +68,13 @@ CACHE_CATEGORIES: dict[str, dict] = {
             (_config.CLUSTER_RESULT_FILE, False, "cluster_result.pkl"),
         ],
     },
-    "task_logs": {
-        "rebuildable": "disposable",
-        "desc": "已完成任务的日志（.log / .progress.jsonl）",
-        "paths": lambda: _task_log_paths(),
+    "model_state": {
+        "rebuildable": "automatic",
+        "desc": "模型指纹探测 + 预筛 ML 模型（可重算/重训）",
+        "paths": lambda: [
+            (_config.STATE_DIR / "probes.json", False, "probes.json"),
+            (_config.STATE_DIR / "prescreen_model.joblib", False, "prescreen_model.joblib"),
+        ],
     },
 }
 
@@ -87,22 +90,12 @@ def _predictor_paths(*, legacy_only: bool = False) -> list[tuple[Path, bool, str
     return out
 
 
-def _task_log_paths() -> list[tuple[Path, bool, str]]:
-    if not TASK_LOG_DIR.exists():
-        return []
-    out = []
-    for pat in ("*.log", "*.progress.jsonl"):
-        for p in TASK_LOG_DIR.glob(pat):
-            out.append((p, False, p.name))
-    return out
-
-
 def category_summary(name: str) -> dict:
-    """单个类别的占用汇总。"""
+    """单个类别的占用汇总（只计实际存在的文件——固定路径类别缺文件不计）。"""
     meta = CACHE_CATEGORIES[name]
     entries = meta["paths"]()
-    files = [e for e in entries if not e[1]]
-    dirs = [e for e in entries if e[1]]
+    files = [e for e in entries if not e[1] and e[0].exists()]
+    dirs = [e for e in entries if e[1] and e[0].exists()]
     size = sum(dir_size(p) for p, _, _ in files) + sum(dir_size(p) for p, _, _ in dirs)
     return {
         "name": name,

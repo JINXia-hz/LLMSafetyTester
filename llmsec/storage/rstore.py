@@ -263,16 +263,6 @@ def upsert_observations(items: list[MatchResult], path: Path | str | None = None
     return len(items)
 
 
-def matrix_items(matrix: ResultsMatrix, model: str | None = None) -> list[MatchResult]:
-    """矩阵 → MatchResult 列表（merge 透传用）。"""
-    out = []
-    for _record, col in matrix._r.items():
-        for m, res in col.items():
-            if model is None or m == model:
-                out.append(res)
-    return out
-
-
 def remove_models(models: list[str], path: Path | str | None = None) -> int:
     """删除模型列（单事务）。返回删除的观测条数（=旧 remove_model 之和）。"""
     dbp = _as_db_path(path)
@@ -286,19 +276,6 @@ def remove_models(models: list[str], path: Path | str | None = None) -> int:
             rm = s.get(RModel, m)
             if rm is not None:
                 s.delete(rm)
-        return n
-
-
-def remove_records(records: list[str], path: Path | str | None = None) -> int:
-    """删除记录行（跨全部模型，单事务）。"""
-    dbp = _as_db_path(path)
-    with _db.tx(dbp) as s:
-        n = 0
-        for r in records:
-            rows = s.exec(_select(Observation).where(Observation.record == r)).all()
-            n += len(rows)
-            for row in rows:
-                s.delete(row)
         return n
 
 

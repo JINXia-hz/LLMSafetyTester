@@ -32,7 +32,7 @@ from llmsec.core import config as _config
 from llmsec.core.io import read_json
 from llmsec.core.results import extract_report_metrics
 from llmsec.storage import db
-from llmsec.storage.models import Run, Task, Trial, dir_size, run_name
+from llmsec.storage.models import PredictorCache, Run, Task, Trial, dir_size, run_name
 
 # run 目录命名契约的单一来源（原 management/runs.py 与 data_query 各一份且
 # 带 $ 锚——`_allocate_runs_dir` 产生的 `<ts>_2` 撞名后缀不匹配，同秒第二个
@@ -297,6 +297,73 @@ def get_run(name: str, *, runs_root: Path | str | None = None, db_path=None) -> 
         return s.get(Run, name)
 
 
+# ============================================================
+# predictor_cache：登记行（真 LRU）
+# ============================================================
+def predictor_hit(key: str, size: int = 0) -> None:
+    """命中登记（upsert：last_hit=now, hits+1）；行不存在则建（size 已知时带上）。"""
+    import time as _time
+    now = _time.time()
+    with db.tx() as s:
+        row = s.get(PredictorCache, key)
+        if row is None:
+            s.add(PredictorCache(key=key, size=size, created=now, last_hit=now, hits=1))
+        else:
+            row.last_hit = now
+            row.hits += 1
+            if size:
+                row.size = size
+            s.add(row)
+
+
+def predictor_saved(key: str, size: int) -> None:
+    """新缓存落盘登记（fit 后调用）。"""
+    import time as _time
+    now = _time.time()
+    with db.tx() as s:
+        row = s.get(PredictorCache, key)
+        if row is None:
+            s.add(PredictorCache(key=key, size=size, created=now, last_hit=now, hits=0))
+        else:
+            row.size = size
+            s.add(row)
+
+
+def reconcile_predictors(predictors_dir: Path | None = None) -> int:
+    """登记行 ↔ predictors 目录对账：缺行的文件按 mtime 补建（created=last_hit=mtime），
+    文件已删的行清除。返回登记行数。blob 文件是真相，行是派生索引。"""
+    d = Path(predictors_dir) if predictors_dir is not None else Path(_config.PREDICTORS_DIR)
+    disk: dict[str, Path] = {}
+    if d.is_dir():
+        for f in d.glob("*.pkl"):
+            disk[f.name[: -len(".pkl")]] = f
+    with db.tx() as s:
+        known = {r.key: r for r in s.exec(select(PredictorCache)).all()}
+        for key, f in disk.items():
+            if key in known:
+                continue
+            try:
+                mt = f.stat().st_mtime
+                sz = f.stat().st_size
+            except OSError:
+                continue
+            s.add(PredictorCache(key=key, size=sz, created=mt, last_hit=mt, hits=0))
+        for key in known:
+            if key not in disk:
+                s.delete(known[key])
+    return len(disk)
+
+
+def lru_evict_keys(max_n: int, *, db_path=None) -> list[str]:
+    """返回超出保留数的 LRU 淘汰键（last_hit 最旧的先淘汰；无行的不在此列——
+    调用方对账后再来）。"""
+    dbp = db.catalog_db() if db_path is None else Path(db_path)
+    with db.session(dbp) as s:
+        rows = s.exec(select(PredictorCache)
+                      .order_by(PredictorCache.last_hit.desc())).all()
+        return [r.key for r in rows[max_n:]]
+
+
 def get_task(task_id: str, *, tasks_dir: Path | str | None = None, db_path=None) -> Task | None:
     """task_id → 登记行（默认先对账 meta.json，外部进程写的任务入册）。"""
     dbp = db.catalog_db() if db_path is None else Path(db_path)
@@ -364,45 +431,6 @@ def upsert_trial_record(study: str, rec: dict) -> None:
         if existing is not None:
             row.registered_at = existing.registered_at  # 首登时间不漂移
         s.merge(row)
-
-
-def register_trial(
-    study: str,
-    idx: int,
-    *,
-    work_dir: Path | str,
-    target: str | None = None,
-    seed: str | None = None,
-    status: str | None = "running",
-    metrics: dict | None = None,
-    db_path=None,
-) -> None:
-    row = Trial(
-        study=study,
-        idx=idx,
-        work_dir=str(Path(work_dir).resolve()),
-        registered_at=time.time(),
-        target=target,
-        seed=seed,
-        status=status,
-        metrics=metrics,
-        updated_at=time.time(),
-    )
-    with db.tx(db.catalog_db() if db_path is None else db_path) as s:
-        s.merge(row)
-
-
-def update_trial(study: str, idx: int, *, status: str | None = None, metrics: dict | None = None, db_path=None) -> None:
-    with db.tx(db.catalog_db() if db_path is None else db_path) as s:
-        row = s.get(Trial, (study, idx))
-        if row is None:
-            return
-        if status is not None:
-            row.status = status
-        if metrics is not None:
-            row.metrics = metrics
-        row.updated_at = time.time()
-        s.add(row)
 
 
 def query_trials(study: str | None = None, *, db_path=None) -> list[Trial]:

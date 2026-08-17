@@ -399,19 +399,23 @@ def load_or_fit_blend_predictor(
 
     cached = BlendPredictor.load(cache_path)
     if cached is not None:
-        # 命中 touch（LRU 依据）：caches.py 的 predictors_prune 按 mtime 淘汰最久
-        # 未用的缓存文件——不 touch 的话 mtime 只反映"何时训练"，淘汰会误杀
-        # 高频复用的活缓存（Windows 无可用 atime，用 mtime 近似访问时间）。
+        # 命中登记（P8 真 LRU）：predictor_cache 行记 last_hit/hits——
+        # 原 mtime-touch 近似会被文件复制/杀软扫描扰动排序
         try:
-            import os
-            os.utime(cache_path)
-        except OSError:
-            pass
+            from llmsec.storage import catalog as _catalog
+            _catalog.predictor_hit(key, cache_path.stat().st_size if cache_path.exists() else 0)
+        except Exception:
+            pass  # 登记失败不影响命中路径
         return cached
 
     bp = BlendPredictor().fit(results, features, method_catalog=catalog)
     try:
         bp.save(cache_path)
+        try:
+            from llmsec.storage import catalog as _catalog
+            _catalog.predictor_saved(key, cache_path.stat().st_size)
+        except Exception:
+            pass
     except Exception as e:
         # 缓存写失败不影响功能（下次重 fit），但不可完全静默——
         # 持续失败意味着每次评估都在白付训练成本，须可排查
