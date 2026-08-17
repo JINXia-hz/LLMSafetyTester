@@ -232,15 +232,17 @@ def test_load_artifact_garbage_is_corruption(tmp_path):
 # 病根5: task 终态迁移中央化
 # ============================================================
 
-def test_spawn_oserror_persists_meta_and_advances(tmp_path, monkeypatch):
-    """Popen 失败：终态落盘 meta.json（原先不落盘）+ 推进队列。"""
-    import json
-
+def test_spawn_oserror_persists_row_and_advances(tmp_path, monkeypatch):
+    """Popen 失败：终态入库（P4：目录库行取代 meta.json）+ 推进队列。"""
+    import llmsec.core.config as cfg
     import llmsec.server.task_manager as tm
 
     tm.TASKS.clear()
     log_dir = tmp_path / "logs"
     monkeypatch.setattr(tm, "TASK_LOG_DIR", log_dir)
+    monkeypatch.setattr(cfg, "CATALOG_DB", tmp_path / "catalog.db")
+    from llmsec.storage import db as storage_db
+    storage_db.close()
     try:
         t1 = {"kind": "r8", "cmd": "x", "argv": ["x"], "env_override": None,
               "meta": None, "proc": None, "log_path": log_dir / "q1.log",
@@ -254,11 +256,13 @@ def test_spawn_oserror_persists_meta_and_advances(tmp_path, monkeypatch):
 
         tm._advance_queue("r8")
         assert t1["status"] == "failed"
-        meta_file = log_dir / "q1.meta.json"
-        assert meta_file.exists(), "r8/病根5：spawn 失败的终态必须落盘 meta（外部可见）"
-        assert json.loads(meta_file.read_text(encoding="utf-8"))["status"] == "failed"
+        from llmsec.storage import catalog
+        row = catalog.get_task("q1", tasks_dir=None, db_path=cfg.CATALOG_DB)
+        assert row is not None and row.status == "failed", (
+            "r8/病根5：spawn 失败的终态必须入库（外部可见）")
     finally:
         tm.TASKS.clear()
+        storage_db.close()
 
 
 def test_refresh_terminal_advances_queue(tmp_path, monkeypatch):

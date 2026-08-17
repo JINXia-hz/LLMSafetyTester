@@ -41,7 +41,7 @@ class TaskSnapshot:
     log_tail: str = ""
     state: EvalProgressState | None = None
     meta: dict | None = None  # launch 层结构化摘要（targets/max_rounds/study）
-    pid: int | None = None    # 外部任务的进程号（meta.json 提供，跨进程取消用）
+    pid: int | None = None  # 外部任务的进程号（meta.json 提供，跨进程取消用）
 
 
 def _tail_text(path: Path, limit: int = 4000) -> str:
@@ -196,16 +196,18 @@ class TaskStore:
             if status in ("running", "queued") and not _pid_alive(row.pid):
                 # 持有进程已退出且无人回写终态（如看板被关闭后任务自然结束）
                 status = "ended"
-            out.append(TaskSnapshot(
-                id=tid,
-                kind=row.kind,
-                status=status,
-                cmd=row.cmd or "",
-                started_at=row.started_at or "",
-                owned=False,
-                meta=row.meta,
-                pid=row.pid,
-            ))
+            out.append(
+                TaskSnapshot(
+                    id=tid,
+                    kind=row.kind,
+                    status=status,
+                    cmd=row.cmd or "",
+                    started_at=row.started_at or "",
+                    owned=False,
+                    meta=row.meta,
+                    pid=row.pid,
+                )
+            )
         # 裸文件残留兜底：只在目录里存在、目录库无行的旧任务（一次性 iterdir，零文件读）
         mtimes: dict[str, float] = {}
         for f in self._dir.iterdir():
@@ -227,13 +229,15 @@ class TaskStore:
         for tid, mtime in sorted(mtimes.items(), key=lambda kv: kv[1], reverse=True):
             if len(out) >= _EXTERNAL_MAX:
                 break
-            out.append(TaskSnapshot(
-                id=tid,
-                kind=tid.split("-", 1)[0],
-                status=EXTERNAL,
-                owned=False,
-                started_at=datetime.fromtimestamp(mtime).isoformat(timespec="seconds"),
-            ))
+            out.append(
+                TaskSnapshot(
+                    id=tid,
+                    kind=tid.split("-", 1)[0],
+                    status=EXTERNAL,
+                    owned=False,
+                    started_at=datetime.fromtimestamp(mtime).isoformat(timespec="seconds"),
+                )
+            )
         return out[:_EXTERNAL_MAX]
 
     def _replay(self, task_id: str, kind: str) -> EvalProgressState:
@@ -317,19 +321,10 @@ class TaskStore:
         pid = row.pid if row is not None else None
         if isinstance(pid, int) and _pid_alive(pid):
             if _kill_pid(pid):
-                # 双侧回写：库行是查询面；meta.json 是 P4 之前其它进程的可见通道
-                # （reconcile 以 meta mtime 为锚，单写库行会被对账覆盖回来）
                 try:
                     _storage.update_task(task_id, status="cancelled")
                 except Exception:
-                    pass
-                try:
-                    mp = self._dir / f"{task_id}.meta.json"
-                    meta = json.loads(mp.read_text(encoding="utf-8", errors="replace"))
-                    meta["status"] = "cancelled"
-                    mp.write_text(json.dumps(meta, ensure_ascii=False, default=str), encoding="utf-8")
-                except (OSError, json.JSONDecodeError):
-                    pass
+                    pass  # P4：库行即唯一真相；写失败不阻断取消回报
                 return {"id": task_id, "status": "cancelled", "killed_pid": pid}
             return {"error": f"强杀 PID {pid} 失败（taskkill 返回非零），请手动处理"}
         return {"error": "任务不存在或已结束（外部任务无存活 PID，无法跨进程取消）"}
@@ -342,6 +337,46 @@ class TaskStore:
         if not log:
             log = _tail_text(self._dir / f"{task_id}.log", limit=2_000_000)
         return log
+
+
+# ============================================================
+# 展示助手（console 的 ls tasks 与 top 视图共用）
+# ============================================================
+_KIND_LABEL = {"evaluate": "评估", "hpo": "HPO"}
+
+
+def kind_label(kind: str) -> str:
+    return _KIND_LABEL.get(kind, kind)
+
+
+def short_cmd(cmd: str) -> str:
+    """从任务命令行提取有辨识度的短摘要（目标名 / yaml 名）。
+
+    仅作 meta 缺席时的兜底（launch 层统一携带 meta 后，常规任务不走这里）。
+    """
+    if not cmd:
+        return ""
+    toks = cmd.split()
+    for flag in ("--target", "--targets"):
+        if flag in toks:
+            i = toks.index(flag)
+            if i + 1 < len(toks):
+                v = toks[i + 1]
+                return v.replace(",", "+") if flag == "--targets" else v
+    if "llmsec.experiments" in cmd:
+        last = toks[-1].replace("\\", "/").rsplit("/", 1)[-1]
+        return last
+    return cmd[:48]
+
+
+def task_summary(snap: TaskSnapshot) -> str:
+    """任务短摘要：优先 launch 层 meta（结构化，无反向解析），兜底 short_cmd。"""
+    meta = snap.meta or {}
+    if meta.get("targets"):
+        return "+".join(meta["targets"])
+    if meta.get("study"):
+        return str(meta["study"])
+    return short_cmd(snap.cmd)
 
 
 # ============================================================

@@ -132,10 +132,30 @@ def _engine_for(db_path: Path | str | None, *, write: bool) -> Engine:
                         "请升级代码后再访问"
                     )
             SQLModel.metadata.create_all(pair["write"])
+            _ensure_columns(pair["write"])  # 模型扩列后旧库自动 ALTER ADD
             with pair["write"].begin() as conn:
                 conn.exec_driver_sql(f"PRAGMA user_version={_SCHEMA_VERSION}")
             _ENGINES[key] = pair
         return pair["write" if write else "read"]
+
+
+def _ensure_columns(eng: Engine) -> None:
+    """模型新增列 → 旧库 ALTER TABLE ADD COLUMN（幂等）。
+
+    SQLite 的 ALTER 只支持 ADD COLUMN（无约束变更），恰好覆盖"扩列不改约束"
+    的演进；列删除/改型走删库重建（目录库本来就是派生索引）。
+    """
+    with eng.begin() as conn:
+        for table in SQLModel.metadata.sorted_tables:
+            existing = {row[1] for row in conn.exec_driver_sql(
+                f"PRAGMA table_info({table.name})")}
+            if not existing:
+                continue  # 表刚建（create_all 已含全部列）
+            for col in table.columns:
+                if col.name in existing:
+                    continue
+                coltype = col.type.compile(eng.dialect)
+                conn.exec_driver_sql(f"ALTER TABLE {table.name} ADD COLUMN {col.name} {coltype}")
 
 
 def _emit_begin_immediate(conn) -> None:

@@ -327,6 +327,32 @@ def rebuild_runs(runs_root: Path | str | None = None, *, db_path=None, include_e
 # trials：登记 / 查询（真相源 trials.jsonl 不动）
 # ============================================================
 
+def upsert_trial_record(study: str, rec: dict) -> None:
+    """trial record 整行 upsert（study.py 的唯一写点，P4 起 db 为真相）。
+
+    rec 形状 = run_trial 返回 + study 补登记（trial/idx/target/seed/search_fp/
+    search_params）；同 (study, idx) 覆盖。
+    """
+    idx = rec.get("trial", rec.get("idx"))
+    if idx is None:
+        return
+    now = time.time()
+    row = Trial(
+        study=study, idx=int(idx), work_dir=str(rec.get("work_dir", "")),
+        registered_at=now, target=rec.get("target"), seed=rec.get("seed"),
+        status=rec.get("status"), metrics=rec.get("metrics") or None,
+        updated_at=now, params=rec.get("params") or None,
+        search_fp=rec.get("search_fp"), search_params=rec.get("search_params") or None,
+        returncode=rec.get("returncode"), error=rec.get("error"),
+        elapsed_s=rec.get("elapsed_s"),
+    )
+    with db.tx() as s:
+        existing = s.get(Trial, (study, int(idx)))
+        if existing is not None:
+            row.registered_at = existing.registered_at  # 首登时间不漂移
+        s.merge(row)
+
+
 def register_trial(study: str, idx: int, *, work_dir: Path | str, target: str | None = None,
                    seed: str | None = None, status: str | None = "running",
                    metrics: dict | None = None, db_path=None) -> None:

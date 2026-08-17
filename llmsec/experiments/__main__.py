@@ -40,9 +40,9 @@ def _cmd_report(name: str) -> int:
 
 
 def _cmd_trials(name: str) -> int:
-    from llmsec.experiments.study import _load_trials, study_dir
+    from llmsec.experiments.study import load_trial_records
 
-    trials = _load_trials(study_dir(name) / "trials.jsonl")
+    trials = load_trial_records(name)
     if not trials:
         logger.info(f"(study '{name}' 无 trial 记录)")
         return 0

@@ -6,7 +6,7 @@
 职责：
   - 维护全局 TASKS dict（task_id → 状态 + Popen 句柄）
   - 按 kind 串行执行（同 kind 有 running 时排队）
-  - 状态刷新（poll 子进程终态）
+  - 状态刷新（poll 子进程终态；每次迁移 upsert 目录库行——P4 起 db 即真相）
   - 日志/进度读取
   - 取消（SIGTERM → SIGKILL）
 
@@ -181,7 +181,7 @@ def _finish(t, status: str, *, returncode: int | None = None) -> None:
     t["status"] = status
     if returncode is not None:
         t["returncode"] = returncode
-    _persist_meta(t, t.get("_task_id", ""))
+    _persist_task(t, t.get("_task_id", ""))
     _advance_queue(t["kind"])
 
 
@@ -216,7 +216,7 @@ def _spawn(task_id: str, t: dict) -> None:
     t["log_file"] = log_file
     t["status"] = "running"
     t["spawned_at"] = datetime.now()
-    _persist_meta(t, task_id)  # pid 已知，立即对外可见
+    _persist_task(t, task_id)  # pid 已知，立即对外可见
 
 
 def _advance_queue(kind: str) -> None:
@@ -234,49 +234,26 @@ def _progress_path(task_id: str) -> Path:
     return TASK_LOG_DIR / f"{task_id}.progress.jsonl"
 
 
-def _meta_path(task_id: str) -> Path:
-    """<task_id>.meta.json 路径——任务元数据（跨进程可见性的钥匙）。
+def _persist_task(t: dict, task_id: str, *, pid: int | None = None, status: str | None = None) -> None:
+    """任务状态迁移的唯一持久化点（P4：目录库即真相，meta.json 退役）。
 
-    本进程 TASKS 注册表对外部进程不可见（dashboard / MCP / TUI 三队列隔离），
-    meta.json 让任何进程都能读到任务的 kind/cmd/pid/状态：TUI 据此显示外部
-    任务真实状态并支持跨进程取消。best-effort 落盘，失败只影响外部可见性。
+    每次 queued→running→终态迁移整行 upsert——本进程 TASKS 注册表对外部
+    进程不可见（dashboard / MCP / TUI 三队列隔离），跨进程可见性全靠库行
+    （PID 在行内，TUI 据此探活推断崩溃终态并支持跨进程取消）。
+    直写不吞错：库写失败是系统性故障（磁盘满/库损坏），静默继续会让任务
+    状态凭空消失。
     """
-    return TASK_LOG_DIR / f"{task_id}.meta.json"
+    from llmsec.storage import catalog as _catalog
 
-
-def _persist_meta(t: dict, task_id: str, *, pid: int | None = None, status: str | None = None) -> None:
-    """任务元数据写入/覆盖 meta.json（try 吞错——绝不能影响任务本体）。"""
-    import json
-
-    try:
-        proc = t.get("proc")
-        data = {
-            "id": task_id,
-            "kind": t.get("kind"),
-            "cmd": t.get("cmd"),
-            "argv": t.get("argv"),
-            "meta": t.get("meta"),
-            "started_at": t.get("started_at"),
-            "pid": pid if pid is not None else getattr(proc, "pid", None),
-            "status": status or t.get("status"),
-        }
-        TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        _meta_path(task_id).write_text(
-            json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
-    except OSError:
-        pass
-    # 目录库镜像：注册/状态迁移统一随 meta.json 落一行（查询免扫 tasks/ 目录）。
-    # best-effort——与 meta.json 同口径，失败只影响索引新鲜度（reconcile 自愈）。
-    try:
-        from llmsec.storage import catalog as _catalog
-        _catalog.upsert_task(
-            task_id, data["kind"],
-            cmd=data["cmd"], pid=data["pid"], status=data["status"],
-            log_path=TASK_LOG_DIR / f"{task_id}.log",
-            started_at=data["started_at"], meta=data["meta"],
-        )
-    except Exception:
-        pass
+    proc = t.get("proc")
+    _catalog.upsert_task(
+        task_id, t.get("kind"),
+        cmd=t.get("cmd"),
+        pid=pid if pid is not None else getattr(proc, "pid", None),
+        status=status or t.get("status"),
+        log_path=TASK_LOG_DIR / f"{task_id}.log",
+        started_at=t.get("started_at"), meta=t.get("meta"),
+    )
 
 
 # ============================================================
@@ -320,7 +297,7 @@ def start_task(
     )
     _evict_tasks()
     _advance_queue(kind)
-    _persist_meta(TASKS[task_id], task_id)  # queued 状态先落盘（尚无 pid）
+    _persist_task(TASKS[task_id], task_id)  # queued 状态先落盘（尚无 pid）
     return task_view(task_id)
 
 

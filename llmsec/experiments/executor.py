@@ -59,15 +59,6 @@ def run_trial(
     capture_manifest(work_dir, argv, env_override, seed,
                      attack_set=_resolve_attack_set_path(config), config=config)
 
-    # trial 入目录库（索引；断点真相仍是 trials.jsonl）。best-effort。
-    target_name = str(config.get("target") or "") or None
-    try:
-        from llmsec.storage import contract as _storage
-        _storage.register_trial(study_name, trial_idx, work_dir=work_dir,
-                                target=target_name, seed=str(seed), status="running")
-    except Exception:
-        pass
-
     log_path = work_dir / "runner.log"
     started = datetime.now()
     status = "running"
@@ -97,12 +88,6 @@ def run_trial(
     elapsed = (datetime.now() - started).total_seconds()
     # 任何已落盘的部分状态都尝试提取（timeout/failed 也有诊断价值）；error（未跑）跳过
     metrics = extract_metrics(work_dir, max_rounds=_max_rounds_of(config)) if status != "error" else {}
-
-    try:
-        from llmsec.storage import contract as _storage
-        _storage.update_trial(study_name, trial_idx, status=status, metrics=metrics or None)
-    except Exception:
-        pass
 
     return {
         "study": study_name,

@@ -67,7 +67,7 @@ def cmd_verify(*, json_mode: bool = False) -> int:
     2. 物理一致：每行 dir_path 存在、has_report 与实际文件一致；
     3. 覆盖一致：树上每个含产物的 run 目录都有库行（无不可见 run——
        RUN_NAME_RE 裂缝类问题的直接检测）；
-    4. tasks：meta.json 文件集与库行集一致。
+    （P4 起 tasks 库行即真相，不再与文件对账。）
     """
     problems: list[str] = []
     root = Path(_config.RUNS_DIR)
@@ -116,10 +116,11 @@ def cmd_verify(*, json_mode: bool = False) -> int:
 # gc-tasks
 # ============================================================
 def plan_gc_tasks(older_than_days: float) -> Plan:
-    """构造终态任务清理预览：终态（success/failed/cancelled/ended/unknown）
-    且 meta.json mtime 早于阈值的任务三件套（.log/.progress.jsonl/.meta.json）。
+    """构造终态任务清理预览（P4：行驱动）。
 
-    running/queued 永不清理（meta.json 是跨进程可见性通道，动了会变孤儿）。
+    终态（success/failed/cancelled/ended/unknown）且 updated_at 早于阈值的行
+    → 三件套文件（.log/.progress.jsonl/.meta.json）软删 + 删行。
+    running/queued 永不清理。旧世代 meta.json（无行的）按文件 mtime 判龄清理。
     """
     tdir = Path(_config.TASK_LOG_DIR)
     cutoff = time.time() - older_than_days * 86400
@@ -127,13 +128,22 @@ def plan_gc_tasks(older_than_days: float) -> Plan:
     if not tdir.is_dir():
         return plan
     terminal = ("success", "failed", "cancelled", "ended", "unknown", "external")
-    metas = sorted(tdir.glob("*.meta.json"))
+    rows = catalog.query_tasks(reconcile=False)
+    by_id = {r.task_id: r for r in rows}
     doomed: set[str] = set()
-    for m in metas:
+    for r in rows:
+        if r.status in terminal and (r.updated_at or 0) < cutoff:
+            doomed.add(r.task_id)
+    # 旧世代残件：有文件无行的 meta.json（reindex 前）
+    legacy = 0
+    for m in tdir.glob("*.meta.json"):
+        tid = m.name[: -len(".meta.json")]
+        if tid in by_id:
+            continue
         data = read_json(m) or {}
-        status = str(data.get("status") or "unknown")
-        if status in terminal and m.stat().st_mtime < cutoff:
-            doomed.add(m.name[: -len(".meta.json")])
+        if str(data.get("status") or "unknown") in terminal and m.stat().st_mtime < cutoff:
+            doomed.add(tid)
+            legacy += 1
     for tid in sorted(doomed):
         size = 0
         for suffix in (".meta.json", ".log", ".progress.jsonl"):
@@ -143,7 +153,8 @@ def plan_gc_tasks(older_than_days: float) -> Plan:
         plan.add(tdir / f"{tid}.meta.json", size=size, kind="task_files",
                  detail=f"{tid}（终态，三件套软删 + 删库行）")
     plan.extra["tasks"] = len(doomed)
-    plan.extra["scanned"] = len(metas)
+    plan.extra["scanned"] = len(rows)
+    plan.extra["legacy_files"] = legacy
     return plan
 
 

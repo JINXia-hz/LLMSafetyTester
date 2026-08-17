@@ -3,7 +3,7 @@ experiments.study — 实验编排：加载配置 → 顺序执行 trials → �
 
 study 目录：output/experiments/<name>/
   study.yaml     配置副本
-  trials.jsonl   append-only trial 记录（断点续跑的真相源）
+  trials         目录库 trials 表（P4 唯一真相；旧 jsonl 首读自动导入）
   best.json      report 时写入的最佳 config
 """
 
@@ -38,6 +38,7 @@ def _fingerprint(params: dict) -> str:
 
 
 def _load_trials(path: Path) -> list[dict]:
+    """读旧世代 trials.jsonl（仅作一次性导入源，P4 起不再写）。"""
     if not path.exists():
         return []
     out = []
@@ -49,6 +50,20 @@ def _load_trials(path: Path) -> list[dict]:
             except json.JSONDecodeError:
                 pass  # 跳过损坏行（断点续跑容错）
     return out
+
+
+def load_trial_records(study_name: str) -> list[dict]:
+    """读取 study 的 trial 记录（P4：db 唯一真相；旧 jsonl 首读一次性导入）。"""
+    from llmsec.storage import catalog
+    rows = catalog.query_trials(study_name)
+    if rows:
+        return [r.as_dict() for r in rows]
+    path = study_dir(study_name) / "trials.jsonl"
+    if path.exists():
+        for rec in _load_trials(path):
+            catalog.upsert_trial_record(study_name, rec)
+        rows = catalog.query_trials(study_name)
+    return [r.as_dict() for r in rows]
 
 
 def _effective_targets(config: StudyConfig, config_full: dict) -> list[str]:
@@ -85,7 +100,7 @@ def run_study(config: StudyConfig) -> dict:
     elif not cfg_copy.exists():
         logger.info("ℹ 配置来自 from_dict（无源 yaml），未落盘 study.yaml——report 命令将不可用")
 
-    completed = _load_trials(trials_path)
+    completed = load_trial_records(config.name)  # P4：db 真相（jsonl 已退役）
     seeds = [config.seed_base + i for i in range(config.repeats)]
     trials_lock = threading.Lock()   # 并发 trial 写 trials.jsonl 的互斥
 
@@ -319,7 +334,7 @@ def _completed_for_engine(trials: list[dict], config: StudyConfig) -> list[dict]
 
 def summarize(config: StudyConfig) -> dict:
     """聚合所有 trial，按 search config 分组，排名；多目标时附每目标拆分。"""
-    trials = _load_trials(study_dir(config.name) / "trials.jsonl")
+    trials = load_trial_records(config.name)
     by_fp: dict[str, list[dict]] = {}
     for t in trials:
         fp = t.get("search_fp") or _fingerprint(t.get("params", {}))

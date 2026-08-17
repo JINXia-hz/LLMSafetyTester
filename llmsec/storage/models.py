@@ -80,7 +80,8 @@ class Run(SQLModel, table=True):
 
 
 class Trial(SQLModel, table=True):
-    """trials 表：HPO trial 登记（断点真相仍是 trials.jsonl，本表只做索引）。"""
+    """trials 表：HPO trial 记录（P4 起唯一真相——原 trials.jsonl append-only 退役，
+    断点续跑改读表；旧 jsonl 经 study.load_trial_records 一次性导入）。"""
 
     __tablename__ = "trials"
 
@@ -93,19 +94,32 @@ class Trial(SQLModel, table=True):
     status: str | None = None
     metrics: dict | None = Field(default=None, sa_column=Column(JSON))
     updated_at: float | None = None
+    # P4 扩列（db.ensure_columns 对旧库自动 ALTER ADD）
+    params: dict | None = Field(default=None, sa_column=Column(JSON))
+    search_fp: str | None = None
+    search_params: dict | None = Field(default=None, sa_column=Column(JSON))
+    returncode: int | None = None
+    error: str | None = None
+    elapsed_s: float | None = None
 
     def as_dict(self) -> dict:
-        d = {
+        """与 study 侧 trial record 形状兼容（"trial" 键 = idx）。"""
+        return {
             "study": self.study,
+            "trial": self.idx,
             "idx": self.idx,
             "target": self.target,
             "seed": self.seed,
             "work_dir": self.work_dir,
             "status": self.status,
+            "metrics": self.metrics or {},
+            "params": self.params or {},
+            "search_fp": self.search_fp,
+            "search_params": self.search_params or {},
+            "returncode": self.returncode,
+            "error": self.error,
+            "elapsed_s": self.elapsed_s,
         }
-        if self.metrics:
-            d["metrics"] = self.metrics
-        return d
 
 
 class Task(SQLModel, table=True):
