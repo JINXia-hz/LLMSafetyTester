@@ -1,8 +1,8 @@
 """第 7 轮审计回归——清理轮（死代码/无用参数/冗余单源）。
 
-  - 冗余收敛后的行为等价与单源一致性（method_set_hash / _try / SAMPLERS /
-    RUN_NAME_RE / dir_size）。
-  - 死代码移除的回归护栏（不得复活）。
+- 冗余收敛后的行为等价与单源一致性（method_set_hash / _try / SAMPLERS /
+  RUN_NAME_RE / dir_size）。
+- 死代码移除的回归护栏（不得复活）。
 """
 
 from __future__ import annotations
@@ -11,13 +11,15 @@ from __future__ import annotations
 # 冗余收敛：method_set_hash 单源
 # ============================================================
 
+
 def test_method_set_hash_single_source():
     from llmsec.core.units import method_set_hash
     from llmsec.evaluation.predictors.cold_start import _compute_method_set_hash
 
     methods = ["b", "a", "c", "a"]
     assert method_set_hash(methods) == _compute_method_set_hash(methods), (
-        "cold_start 别名必须与 core.units 的单源实现完全一致")
+        "cold_start 别名必须与 core.units 的单源实现完全一致"
+    )
     assert method_set_hash(["a", "b"]) == method_set_hash(["b", "a"])  # 顺序无关
     assert method_set_hash(["a"]) != method_set_hash(["b"])
 
@@ -33,6 +35,7 @@ def test_hdb_uses_shared_hash():
 # ============================================================
 # 冗余收敛：MCP _try 单源
 # ============================================================
+
 
 def test_mcp_try_single_source():
     import llmsec.mcp.tools as tools
@@ -54,14 +57,15 @@ def test_mcp_try_single_source():
 # 冗余收敛：SAMPLERS 单源
 # ============================================================
 
+
 def test_samplers_single_source():
     import llmsec.server.launch as launch
-    import llmsec.tui.panels.tasks_panel as tp
+    import llmsec.tui.console as tui_console
     from llmsec.params import SAMPLERS
 
     assert launch._SAMPLERS == SAMPLERS
-    assert set(tp._SAMPLERS) == set(SAMPLERS)
-    assert tp._SAMPLERS[0] == "hybrid", "TUI 表单保持 hybrid 默认置顶"
+    assert set(tui_console._sampler_names()) == set(SAMPLERS)
+    assert tui_console._sampler_names()[0] == "hybrid", "TUI 补全保持 hybrid 默认置顶"
 
     # 任务路由校验从单源派生：接受全部成员、拒绝清单外值
     import pytest
@@ -78,6 +82,7 @@ def test_samplers_single_source():
 # ============================================================
 # 冗余收敛：RUN_NAME_RE / dir_size 单源
 # ============================================================
+
 
 def test_run_name_re_single_source():
     """命名契约单源：data_query 与 management 都指向 storage.contract 的同一对象。"""
@@ -98,16 +103,16 @@ def test_dir_size_single_source():
 # 死代码移除护栏
 # ============================================================
 
+
 def test_dead_code_stays_removed():
     import control.agent.menxia.block as block
-    import control.core.fsig as fsig
     import llmsec.clustering as clustering_pkg
     import llmsec.clustering.space as space
     import llmsec.mcp.confirm as confirm
 
     assert not hasattr(confirm, "peek")
     assert not hasattr(block, "list_pending_blocks")
-    assert not hasattr(fsig, "dir_sig")
+    # fsig 模块整体已随 P5 删除（无消费者）
     assert not hasattr(space, "transform_to_space")
     assert "transform_to_space" not in clustering_pkg.__all__
 
@@ -116,12 +121,12 @@ def test_dead_code_stays_removed():
 # 清理后的接口仍工作（签名收窄不破坏正常调用）
 # ============================================================
 
+
 def test_build_tree_and_registry_narrowed_signatures(tmp_path):
     """build_tree/build_method_registry 收窄签名后仍正常产出。"""
     from llmsec.reporting.report import build_method_registry, build_method_stats, build_tree
 
-    results = [{"method": f"m{i}", "is_harmful": False, "harm_type": "t", "category": "c"}
-               for i in range(6)]
+    results = [{"method": f"m{i}", "is_harmful": False, "harm_type": "t", "category": "c"} for i in range(6)]
     method_stats = build_method_stats(results, {}, {})
     tree = build_tree(method_stats, {"summary": {"false_positive_rate": 0.0}})
     assert "overall" in tree

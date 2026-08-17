@@ -123,7 +123,7 @@ class Trial(SQLModel, table=True):
 
 
 class Task(SQLModel, table=True):
-    """tasks 表：后台任务登记（跨进程真相仍是 meta.json，本表让查询免扫目录）。"""
+    """tasks 表：后台任务登记（P4 起库行即跨进程唯一真相；legacy meta.json 经 reconcile 吸收）。"""
 
     __tablename__ = "tasks"
 
@@ -148,6 +148,154 @@ class Task(SQLModel, table=True):
             "log_path": self.log_path,
             "started_at": self.started_at or _iso(self.registered_at),
             "meta": self.meta,
+        }
+
+
+# ============================================================
+# control 侧表（P5：control 层数据库化——原 _index.json×3 / gazette jsonl /
+# plans json / 内存 tickets / queue 落库；经 storage.contract 供 control 消费）
+# ============================================================
+
+class CtlEvent(SQLModel, table=True):
+    """文牍事件流（append-only INSERT；自增 id 即事件序）。"""
+
+    __tablename__ = "ctl_events"
+
+    id: int | None = Field(default=None, primary_key=True)
+    ts: float = Field(index=True)
+    kind: str = Field(index=True)
+    dept: str
+    plan_id: str = Field(index=True)
+    step_id: str | None = None
+    session_id: str | None = Field(default=None, index=True)
+    detail: dict | None = Field(default=None, sa_column=Column(JSON))
+
+    def event_dict(self) -> dict:
+        """与原 GazetteEvent.to_dict() 形状一致（消费方零改动）。"""
+        return {
+            "ts": self.ts, "kind": self.kind, "dept": self.dept,
+            "plan_id": self.plan_id, "step_id": self.step_id,
+            "session_id": self.session_id, "detail": self.detail or {},
+        }
+
+
+class CtlPlanMeta(SQLModel, table=True):
+    """文牍 Plan 元数据（原 gazette/_index.json 的 plans 项）。"""
+
+    __tablename__ = "ctl_plan_meta"
+
+    plan_id: str = Field(primary_key=True)
+    intent: str = ""
+    session_id: str | None = None
+    created: float = 0.0
+    status: str = "active"
+    last_event: str = ""
+    last_ts: float = 0.0
+    finished: float | None = None
+
+    def as_dict(self) -> dict:
+        d = {
+            "plan_id": self.plan_id, "intent": self.intent,
+            "session_id": self.session_id, "created": self.created,
+            "status": self.status, "last_event": self.last_event,
+            "last_ts": self.last_ts,
+        }
+        if self.finished is not None:
+            d["finished"] = self.finished
+        return d
+
+
+class CtlPlan(SQLModel, table=True):
+    """三省 Plan 快照（整 plan 一个 JSON blob 行——executor 线程池内改共享
+    对象后整体覆写，与原 save_plan 语义一致且原子）。"""
+
+    __tablename__ = "ctl_plans"
+
+    id: str = Field(primary_key=True)
+    intent: str = ""
+    status: str = ""
+    session_id: str | None = None
+    created: float = 0.0
+    updated_at: float = 0.0
+    payload: dict = Field(default_factory=dict, sa_column=Column(JSON))  # 完整 to_dict
+
+    def as_dict(self) -> dict:
+        return dict(self.payload)
+
+
+class CtlTicket(SQLModel, table=True):
+    """封驳令（P5 落库：原内存 _TICKETS 重启即丢——封驳静默放行的安全修复）。
+
+    列形状与 BlockTicket.to_dict() 一致（control.agent.menxia.block）。"""
+
+    __tablename__ = "ctl_tickets"
+
+    plan_id: str = Field(primary_key=True)
+    step_id: str = Field(primary_key=True)
+    token: str = ""
+    capability: str = ""
+    risk_level: str = ""
+    summary: str = ""
+    detail: str = ""
+    created: float = 0.0
+
+
+class CtlQueueItem(SQLModel, table=True):
+    """Plan 队列项（内容落库获重启恢复；worker 线程协议留内存）。"""
+
+    __tablename__ = "ctl_queue"
+
+    id: int | None = Field(default=None, primary_key=True)
+    plan_id: str = Field(index=True)
+    queued_at: float = 0.0
+    status: str = "queued"   # queued / running / done
+
+
+class CtlWorkspace(SQLModel, table=True):
+    """workspace 索引（原 workspaces/_index.json；gc_log 作 JSON 数组内嵌）。"""
+
+    __tablename__ = "ctl_workspaces"
+
+    name: str = Field(primary_key=True)
+    path: str = ""
+    source: str = ""
+    note: str = ""
+    created: str = ""
+    models: list = Field(default_factory=list, sa_column=Column(JSON))
+    records: int = 0
+    merged: bool = False
+    merged_at: str | None = None
+    merged_to: str | None = None
+    gc_log: list = Field(default_factory=list, sa_column=Column(JSON))
+
+    def as_dict(self) -> dict:
+        d = {
+            "name": self.name, "path": self.path, "source": self.source,
+            "note": self.note, "created": self.created, "models": self.models or [],
+            "records": self.records, "merged": self.merged,
+            "merged_at": self.merged_at, "merged_to": self.merged_to,
+        }
+        return d
+
+
+class CtlEnvSnapshot(SQLModel, table=True):
+    """env_snapshot 索引（原 env_snapshots/_index.json；.env 文件本体保留）。"""
+
+    __tablename__ = "ctl_env_snapshots"
+
+    name: str = Field(primary_key=True)
+    path: str = ""
+    source: str = ""
+    note: str = ""
+    created: str = ""
+    keys: list = Field(default_factory=list, sa_column=Column(JSON))
+    merged_to_global: str | None = None
+
+    def as_dict(self) -> dict:
+        return {
+            "name": self.name, "path": self.path, "source": self.source,
+            "note": self.note, "created": self.created, "keys": self.keys or [],
+            "merged_to_global": self.merged_to_global,
         }
 
 

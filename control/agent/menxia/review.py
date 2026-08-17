@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 
 from control.agent.prompts import MENXIA_PROMPT
-from control.config import _FALLBACK_THRESHOLDS
 from control.core.compare import extract_elo_fields
 
 _SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2, "good": 3}
@@ -27,31 +26,32 @@ _SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2, "good": 3}
 # 阈值获取：经 invoker 调 llmsec-manage thresholds
 # ============================================================
 # r9/P3-5：TTLCache 统一实现（llmsec 侧改阈值后本进程最多滞后 5 分钟，
-# 此前永不过期）。loader 内部降级 fallback——fallback 同样享受 TTL。
-from llmsec.core.caches import TTLCache
-
-_THRESHOLDS_CACHE = TTLCache(ttl=300.0)
-
-
 def get_thresholds() -> dict:
-    """从 llmsec 经 CLI 获取审查阈值（带 TTL 缓存；失败降级 fallback 并告警）。"""
-    import sys
-
-    def _load() -> dict:
-        try:
-            from control.core.invoker import _manage_argv, _run
-            # 超时保护：本函数在门下省总线同步派发回调内首次触发，挂起会卡死 Plan 步骤
-            res = _run(_manage_argv(["thresholds", "--json"]), timeout=30)
-            if res.ok and res.json:
-                return res.json
-            print(f"[门下省] 阈值获取失败 (rc={res.returncode})，降级 fallback: "
-                  f"{res.stderr[-200:]}", file=sys.stderr)
-        except Exception as e:
-            print(f"[门下省] 阈值获取异常，降级 fallback: {type(e).__name__}: {e}",
-                  file=sys.stderr)
-        return dict(_FALLBACK_THRESHOLDS)
-
-    return _THRESHOLDS_CACHE.get(_load)
+    """审查阈值（P5：直读 llmsec.params 单一来源——原"subprocess CLI + TTL 缓存
+    + fallback 复制体"机器删除；control 直 import llmsec 共享层已有
+    paths/dir_size/storage 先例，纯常量读取无隔离收益）。"""
+    from llmsec.params import (
+        ALLERGY_FPR_SAFE,
+        CONV_CI_TARGET,
+        CONV_DRIFT_TARGET,
+        MIN_COVERAGE_ABSOLUTE,
+        MIN_COVERAGE_RATIO,
+        PORTRAIT_ASR_SAFE,
+        PORTRAIT_MIN_CONFIDENCE,
+        PORTRAIT_MIN_TESTED,
+        TWIN_SEVERITY_FPR_MED,
+    )
+    return {
+        "PORTRAIT_MIN_TESTED": PORTRAIT_MIN_TESTED,
+        "PORTRAIT_MIN_CONFIDENCE": PORTRAIT_MIN_CONFIDENCE,
+        "PORTRAIT_ASR_SAFE": PORTRAIT_ASR_SAFE,
+        "ALLERGY_FPR_SAFE": ALLERGY_FPR_SAFE,
+        "TWIN_SEVERITY_FPR_MED": TWIN_SEVERITY_FPR_MED,
+        "CONV_CI_TARGET": CONV_CI_TARGET,
+        "CONV_DRIFT_TARGET": CONV_DRIFT_TARGET,
+        "MIN_COVERAGE_RATIO": MIN_COVERAGE_RATIO,
+        "MIN_COVERAGE_ABSOLUTE": MIN_COVERAGE_ABSOLUTE,
+    }
 
 
 # ============================================================

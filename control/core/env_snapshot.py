@@ -21,14 +21,12 @@ import time
 
 from control.config import LLMSEC_REPO
 from control.core.paths import safe_component
-from control.core.store import AtomicIndexStore
 
 ENV_SNAPSHOTS_DIR = LLMSEC_REPO / "output" / "env_snapshots"
 _GLOBAL_ENV = LLMSEC_REPO / ".env"
 
 # env 快照索引存储（原子读写 + Windows PermissionError 重试 + 并发锁）
 # base_dir 传 lambda：测试期 monkeypatch ENV_SNAPSHOTS_DIR 后能动态生效
-_store = AtomicIndexStore(lambda: ENV_SNAPSHOTS_DIR, "snapshots")
 
 # .env 里受管理的 key 前缀（编辑/merge 时校验合法性，防乱写）
 _ALLOWED_KEY_PREFIXES = (
@@ -45,7 +43,7 @@ def _is_allowed_key(key: str) -> bool:
 
 
 def _ensure_dir() -> None:
-    _store.ensure_dir()
+    ENV_SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ============================================================
@@ -123,26 +121,24 @@ def create(name: str, *, source: str = "global", note: str = "") -> dict:
 
     env_file.write_text(_serialize_env(keys), encoding="utf-8")
 
+    from datetime import datetime as _dt
     info = {
         "name": name,
         "path": str(snap_dir.relative_to(LLMSEC_REPO)).replace("\\", "/"),
         "source": source,
         "note": note,
-        "created": _store.now(),
+        "created": _dt.now().isoformat(timespec="seconds"),
         "keys": sorted(keys.keys()),
     }
-    def _record(idx):
-        idx["snapshots"][name] = info
-    _store.update(_record)
+    from control.core.storage import save_env_snapshot
+    save_env_snapshot(info)
     return info
 
 
 def list_snapshots() -> list[dict]:
-    """列出所有 .env 快照（按创建时间倒序）。"""
-    idx = _store.load()
-    snaps = list(idx.get("snapshots", {}).values())
-    snaps.sort(key=lambda x: x.get("created", ""), reverse=True)
-    return snaps
+    """列出所有 .env 快照（按创建时间倒序，库行直查）。"""
+    from control.core.storage import list_env_snapshots
+    return list_env_snapshots()
 
 
 
@@ -167,25 +163,26 @@ def edit_key(name: str, key: str, value: str) -> dict:
     keys[key] = value
     env_file.write_text(_serialize_env(keys), encoding="utf-8")
 
-    # 更新索引的 keys 列表（update 统一写回）
-    def _upd(idx):
-        if name in idx.get("snapshots", {}):
-            idx["snapshots"][name]["keys"] = sorted(keys.keys())
-    _store.update(_upd)
+    # 更新库行的 keys 列表
+    from control.core.storage import get_env_snapshot, save_env_snapshot
+    info = get_env_snapshot(name)
+    if info is not None:
+        info["keys"] = sorted(keys.keys())
+        save_env_snapshot(info)
     return {"name": name, "key": key, "value": value, "keys": sorted(keys.keys())}
 
 
 
 def delete(name: str) -> dict:
-    """删除快照（目录 + 索引项）。"""
-    def _delete(idx):
-        if name not in idx.get("snapshots", {}):
-            raise KeyError(f"快照不存在: {name}")
-        snap_dir = safe_component(ENV_SNAPSHOTS_DIR, name)
-        if snap_dir.exists():
-            shutil.rmtree(snap_dir)
-        return idx["snapshots"].pop(name)
-    info = _store.update(_delete)
+    """删除快照（目录 + 索引行）。"""
+    from control.core.storage import delete_env_snapshot, get_env_snapshot
+    info = get_env_snapshot(name)
+    if info is None:
+        raise KeyError(f"快照不存在: {name}")
+    snap_dir = safe_component(ENV_SNAPSHOTS_DIR, name)
+    if snap_dir.exists():
+        shutil.rmtree(snap_dir)
+    delete_env_snapshot(name)
     return {"deleted": name, "info": info}
 
 
@@ -227,11 +224,14 @@ def merge_to_global(name: str) -> dict:
 
         _GLOBAL_ENV.write_text(_serialize_env(global_keys), encoding="utf-8")
 
-    # 更新索引（update 统一写回，mutator 内不再自行 save）
-    def _upd(idx):
-        if name in idx.get("snapshots", {}):
-            idx["snapshots"][name]["merged_to_global"] = _store.now()
-    _store.update(_upd)
+    # 更新库行的合并标记
+    from datetime import datetime as _dt
+
+    from control.core.storage import get_env_snapshot, save_env_snapshot
+    info = get_env_snapshot(name)
+    if info is not None:
+        info["merged_to_global"] = _dt.now().isoformat(timespec="seconds")
+        save_env_snapshot(info)
 
     return {
         "merged": name,

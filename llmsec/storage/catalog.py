@@ -59,6 +59,7 @@ RUN_ARTIFACTS = (
 # 扫描（rebuild / reconcile 共用）
 # ============================================================
 
+
 def _has_any_artifact(d: Path) -> bool:
     return any((d / a).exists() for a in RUN_ARTIFACTS)
 
@@ -104,7 +105,9 @@ def _is_satellite(root: Path) -> bool:
         return True
 
 
-def _scan_candidates(root: Path, *, satellite: bool, include_empty: bool = False) -> list[tuple[Path, str, str | None, bool]]:
+def _scan_candidates(
+    root: Path, *, satellite: bool, include_empty: bool = False
+) -> list[tuple[Path, str, str | None, bool]]:
     """扫 runs 根的两级结构，产出 (run_dir, batch, target_hint, has_artifact) 候选。
 
     - 时间戳批次目录（匹配 RUN_NAME_RE）：其下含产物的 target 子目录各是一个
@@ -149,6 +152,7 @@ def _scan_candidates(root: Path, *, satellite: bool, include_empty: bool = False
 # ============================================================
 # runs：登记 / 对账 / 查询
 # ============================================================
+
 
 def register_run(run_dir: Path, *, batch: str | None = None, target: str | None = None) -> None:
     """写入口轻登记：per-target run 目录刚创建（尚无产物）时占一行。
@@ -251,7 +255,7 @@ def query_runs(
     target: str | None = None,
     has_report: bool | None = None,
     has_artifact: bool | None = None,
-    since: str | None = None,       # ISO 日期 YYYY-MM-DD（含），按 batch 前缀
+    since: str | None = None,  # ISO 日期 YYYY-MM-DD（含），按 batch 前缀
     until: str | None = None,
     limit: int | None = None,
     reconcile: bool = True,
@@ -327,6 +331,7 @@ def rebuild_runs(runs_root: Path | str | None = None, *, db_path=None, include_e
 # trials：登记 / 查询（真相源 trials.jsonl 不动）
 # ============================================================
 
+
 def upsert_trial_record(study: str, rec: dict) -> None:
     """trial record 整行 upsert（study.py 的唯一写点，P4 起 db 为真相）。
 
@@ -338,12 +343,20 @@ def upsert_trial_record(study: str, rec: dict) -> None:
         return
     now = time.time()
     row = Trial(
-        study=study, idx=int(idx), work_dir=str(rec.get("work_dir", "")),
-        registered_at=now, target=rec.get("target"), seed=rec.get("seed"),
-        status=rec.get("status"), metrics=rec.get("metrics") or None,
-        updated_at=now, params=rec.get("params") or None,
-        search_fp=rec.get("search_fp"), search_params=rec.get("search_params") or None,
-        returncode=rec.get("returncode"), error=rec.get("error"),
+        study=study,
+        idx=int(idx),
+        work_dir=str(rec.get("work_dir", "")),
+        registered_at=now,
+        target=rec.get("target"),
+        seed=rec.get("seed"),
+        status=rec.get("status"),
+        metrics=rec.get("metrics") or None,
+        updated_at=now,
+        params=rec.get("params") or None,
+        search_fp=rec.get("search_fp"),
+        search_params=rec.get("search_params") or None,
+        returncode=rec.get("returncode"),
+        error=rec.get("error"),
         elapsed_s=rec.get("elapsed_s"),
     )
     with db.tx() as s:
@@ -353,20 +366,33 @@ def upsert_trial_record(study: str, rec: dict) -> None:
         s.merge(row)
 
 
-def register_trial(study: str, idx: int, *, work_dir: Path | str, target: str | None = None,
-                   seed: str | None = None, status: str | None = "running",
-                   metrics: dict | None = None, db_path=None) -> None:
+def register_trial(
+    study: str,
+    idx: int,
+    *,
+    work_dir: Path | str,
+    target: str | None = None,
+    seed: str | None = None,
+    status: str | None = "running",
+    metrics: dict | None = None,
+    db_path=None,
+) -> None:
     row = Trial(
-        study=study, idx=idx, work_dir=str(Path(work_dir).resolve()),
-        registered_at=time.time(), target=target, seed=seed,
-        status=status, metrics=metrics, updated_at=time.time(),
+        study=study,
+        idx=idx,
+        work_dir=str(Path(work_dir).resolve()),
+        registered_at=time.time(),
+        target=target,
+        seed=seed,
+        status=status,
+        metrics=metrics,
+        updated_at=time.time(),
     )
     with db.tx(db.catalog_db() if db_path is None else db_path) as s:
         s.merge(row)
 
 
-def update_trial(study: str, idx: int, *, status: str | None = None,
-                 metrics: dict | None = None, db_path=None) -> None:
+def update_trial(study: str, idx: int, *, status: str | None = None, metrics: dict | None = None, db_path=None) -> None:
     with db.tx(db.catalog_db() if db_path is None else db_path) as s:
         row = s.get(Trial, (study, idx))
         if row is None:
@@ -392,21 +418,38 @@ def query_trials(study: str | None = None, *, db_path=None) -> list[Trial]:
 # tasks：登记 / 对账 / 查询（跨进程真相仍是 meta.json）
 # ============================================================
 
-def register_task(task_id: str, kind: str, *, cmd: str | None = None, pid: int | None = None,
-                  status: str = "queued", log_path: Path | str | None = None,
-                  started_at: str | None = None, meta: dict | None = None, db_path=None) -> None:
+
+def register_task(
+    task_id: str,
+    kind: str,
+    *,
+    cmd: str | None = None,
+    pid: int | None = None,
+    status: str = "queued",
+    log_path: Path | str | None = None,
+    started_at: str | None = None,
+    meta: dict | None = None,
+    db_path=None,
+) -> None:
     row = Task(
-        task_id=task_id, kind=kind, cmd=cmd, pid=pid, status=status,
+        task_id=task_id,
+        kind=kind,
+        cmd=cmd,
+        pid=pid,
+        status=status,
         log_path=str(log_path) if log_path else None,
-        started_at=started_at, meta=meta,
-        registered_at=time.time(), updated_at=time.time(),
+        started_at=started_at,
+        meta=meta,
+        registered_at=time.time(),
+        updated_at=time.time(),
     )
     with db.tx(db.catalog_db() if db_path is None else db_path) as s:
         s.merge(row)
 
 
-def update_task(task_id: str, *, status: str | None = None, pid: int | None = None,
-                meta: dict | None = None, db_path=None) -> None:
+def update_task(
+    task_id: str, *, status: str | None = None, pid: int | None = None, meta: dict | None = None, db_path=None
+) -> None:
     with db.tx(db.catalog_db() if db_path is None else db_path) as s:
         row = s.get(Task, task_id)
         if row is None:
@@ -421,20 +464,35 @@ def update_task(task_id: str, *, status: str | None = None, pid: int | None = No
         s.add(row)
 
 
-def upsert_task(task_id: str, kind: str, *, cmd: str | None = None, pid: int | None = None,
-                status: str = "unknown", log_path: Path | str | None = None,
-                started_at: str | None = None, meta: dict | None = None, db_path=None) -> None:
+def upsert_task(
+    task_id: str,
+    kind: str,
+    *,
+    cmd: str | None = None,
+    pid: int | None = None,
+    status: str = "unknown",
+    log_path: Path | str | None = None,
+    started_at: str | None = None,
+    meta: dict | None = None,
+    db_path=None,
+) -> None:
     """任务元数据 upsert（保留首登时间）。task_manager._persist_meta 的落库镜像：
     meta.json（跨进程真相）写完就镜像一行，注册/状态迁移统一入口。"""
     with db.tx(db.catalog_db() if db_path is None else db_path) as s:
         row = s.get(Task, task_id)
         if row is None:
-            row = Task(task_id=task_id, kind=kind, status=status,
-                       registered_at=time.time(), cmd=cmd, pid=pid,
-                       log_path=str(log_path) if log_path else None,
-                       started_at=started_at,
-                       meta=meta if isinstance(meta, dict) else None,
-                       updated_at=time.time())
+            row = Task(
+                task_id=task_id,
+                kind=kind,
+                status=status,
+                registered_at=time.time(),
+                cmd=cmd,
+                pid=pid,
+                log_path=str(log_path) if log_path else None,
+                started_at=started_at,
+                meta=meta if isinstance(meta, dict) else None,
+                updated_at=time.time(),
+            )
         else:
             row.kind = kind
             row.cmd = cmd
@@ -448,10 +506,17 @@ def upsert_task(task_id: str, kind: str, *, cmd: str | None = None, pid: int | N
 
 
 def reconcile_tasks(tasks_dir: Path | str | None = None, *, db_path=None) -> dict:
-    """meta.json 文件 ↔ tasks 行对账：导入新/变更，清理消失（gc 后）。
+    """legacy meta.json → tasks 行对账导入（P4 后库行是唯一真相，本函数只做
+    旧世代文件的一次性吸收与变更跟进）。
 
-    task_manager 每次状态迁移都会覆盖写 meta.json（mtime 变化），据此做增量。
-    持有进程崩溃无人回写终态的行以 meta.json 为准（PID 通道语义不变）。
+    变更检测：文件 mtime > 行 updated_at 才重导。不能按"不相等就重导"——
+    update_task 回写的 updated_at 是 walltime，与任何文件 mtime 恒不等，
+    过期 legacy 文件会复活覆盖库行真相（如 TUI 跨进程取消置 cancelled 后
+    又被 reconcile 翻回 running）。
+
+    不做反向删行：行清理是 gc 的职责（plan_gc_tasks 行驱动，软删文件后
+    自删行）；P4 起 task_manager 原生行不再写 meta.json，按"磁盘无文件删行"
+    会误杀这些行。
     """
     tdir = Path(tasks_dir) if tasks_dir is not None else Path(_config.TASK_LOG_DIR)
     dbp = db.catalog_db() if db_path is None else Path(db_path)
@@ -472,39 +537,40 @@ def reconcile_tasks(tasks_dir: Path | str | None = None, *, db_path=None) -> dic
     imported = 0
     with db.tx(dbp) as s:
         for tid, mtime in disk.items():
-            if known.get(tid) == mtime:
+            if known.get(tid, 0.0) >= mtime:
                 continue
             try:
                 data = json.loads((tdir / f"{tid}.meta.json").read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
             imported += 1
-            s.merge(Task(
-                task_id=tid,
-                kind=str(data.get("kind") or tid.split("-", 1)[0]),
-                cmd=data.get("cmd"),
-                pid=data.get("pid") if isinstance(data.get("pid"), int) else None,
-                status=str(data.get("status") or "unknown"),
-                log_path=str(tdir / f"{tid}.log"),
-                started_at=data.get("started_at"),
-                meta=data.get("meta") if isinstance(data.get("meta"), dict) else None,
-                registered_at=mtime,  # 首见时间不可考，用文件 mtime 近似
-                updated_at=mtime,
-            ))
-        removed = 0
-        for tid in list(known):
-            if tid not in disk:
-                row = s.get(Task, tid)
-                if row is not None:
-                    s.delete(row)
-                    removed += 1
-    return {"imported": imported, "removed": removed}
+            s.merge(
+                Task(
+                    task_id=tid,
+                    kind=str(data.get("kind") or tid.split("-", 1)[0]),
+                    cmd=data.get("cmd"),
+                    pid=data.get("pid") if isinstance(data.get("pid"), int) else None,
+                    status=str(data.get("status") or "unknown"),
+                    log_path=str(tdir / f"{tid}.log"),
+                    started_at=data.get("started_at"),
+                    meta=data.get("meta") if isinstance(data.get("meta"), dict) else None,
+                    registered_at=mtime,  # 首见时间不可考，用文件 mtime 近似
+                    updated_at=mtime,
+                )
+            )
+    return {"imported": imported, "removed": 0}
 
 
-def query_tasks(*, kinds: tuple[str, ...] | None = None, active_only: bool = False,
-                limit: int | None = None, db_path=None, tasks_dir: Path | str | None = None,
-                reconcile: bool = True) -> list[Task]:
-    """查询任务登记（registered_at 倒序）。默认先对账（meta.json 入册/清理）。
+def query_tasks(
+    *,
+    kinds: tuple[str, ...] | None = None,
+    active_only: bool = False,
+    limit: int | None = None,
+    db_path=None,
+    tasks_dir: Path | str | None = None,
+    reconcile: bool = True,
+) -> list[Task]:
+    """查询任务登记（registered_at 倒序）。默认先对账（吸收 legacy meta.json 的变更）。
 
     tasks_dir：对账来源目录（默认 config.TASK_LOG_DIR）。TaskStore 等支持
     注入目录的消费者传入自己的目录，避免对账打到真实 output/tasks。

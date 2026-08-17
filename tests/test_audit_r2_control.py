@@ -177,20 +177,8 @@ def test_r2_final_summary_prompt_not_persisted(monkeypatch):
     assert "总结回复" in contents
 
 
-# ============================================================
-# M6：store.load 损坏自愈
-# ============================================================
-def test_r2_store_load_corrupt_self_heals(tmp_path):
-    from control.core.store import AtomicIndexStore
-
-    store = AtomicIndexStore(tmp_path, "plans")
-    store.ensure_dir()
-    store.path.write_text("{broken json", encoding="utf-8")
-
-    idx = store.load()
-    assert idx == {"plans": {}}, "M6: 损坏索引应返回空索引而非抛 JSONDecodeError"
-    corrupt = list(tmp_path.glob("_index.json.corrupt.*"))
-    assert corrupt, "M6: 损坏文件应隔离保存现场"
+# （M6 store.load 损坏自愈：AtomicIndexStore 已随 P5 库化退役——
+#  索引健壮性由 SQLite 事务承接，本测试移除）
 
 
 # ============================================================
@@ -200,26 +188,8 @@ def test_r2_store_load_corrupt_self_heals(tmp_path):
 # ============================================================
 
 
-# ============================================================
-# M8：阈值缓存 TTL
-# ============================================================
-def test_r2_thresholds_cache_ttl(monkeypatch):
-    from control.agent.menxia import review
-    from control.core import invoker
+# （M8 阈值缓存 TTL：CLI+TTLCache+fallback 机器已随 P5 直读化删除）
 
-    # r9/P3-5：TTLCache——预置一个已过期的值（_at 置 1 小时前）
-    review._THRESHOLDS_CACHE._value = {"stale": True}
-    review._THRESHOLDS_CACHE._at = time.time() - 3600  # 1 小时前，早已过期
-
-    def _fake_run(argv, *, timeout=None, **kw):
-        return invoker.InvokeResult(argv=argv, returncode=0, json={"fresh": True})
-
-    monkeypatch.setattr(invoker, "_run", _fake_run)
-    try:
-        th = review.get_thresholds()
-        assert th == {"fresh": True}, "M8: TTL 过期后应重新获取阈值（此前永不过期）"
-    finally:
-        review._THRESHOLDS_CACHE.clear()
 
 
 # ============================================================

@@ -57,99 +57,63 @@ def _search_history_schema() -> dict:
     }
 
 
-# 文牍可搜索文本的进程内缓存。
-# 缓存每个 plan 的分层文本（intent/user_text/steps_text/steps_desc/stats），
-# 按 _index.json 的 mtime 失效——append_event 写索引时 mtime 更新，缓存自动重建。
-# 阶段 2 优化：消除每次 search_history 重复读 jsonl 全文 + 逐行 json.loads 的开销。
-# 数据天然小（每 plan ~60 字符），缓存让"多次搜索"零 I/O 成本；未来文牍增长到数百时
-# 叠加 2-gram 倒排索引进一步加速（当前规模缓存已足够，索引暂不引入）。
-# r9/P3-5：SigCache 单槽签名缓存（sig = _index.json (mtime, size)），
-# 线程安全由缓存助手保证（executor 线程池并发搜索不再互踩）
-from llmsec.core.caches import SigCache
-
-_GAZETTE_TEXT_CACHE = SigCache(maxsize=1)
-
-
-def _load_gazette_texts() -> dict[str, dict]:
-    """加载所有文牍的可搜索文本（进程内缓存，按 _index.json mtime 失效）。
-
-    Returns:
-        {plan_id: {intent, user_text, steps_text, steps_desc, stats, status, idx_entry}}
-    """
-    from control.agent import gazette
-    from control.core.fsig import file_sig
-
-    sig = file_sig(gazette.index_path())
-    if sig is None:
-        sig = 0.0
-
-    def _load() -> dict[str, dict]:
-        texts: dict[str, dict] = {}
-        for g in gazette.list_gazettes(recent=500):
-            pid = g.get("plan_id", "")
-            events = gazette.read_events(pid)
-            if not events:
-                continue
-            intent_text = (g.get("intent", "") or "").lower()
-            user_text = ""
-            steps_text = ""
-            steps_desc = []
-            stats = {}
-            for ev in events:
-                if ev.kind == gazette.EV_COMMISSION:
-                    user_text = (ev.detail.get("user_text", "") or "").lower()
-                elif ev.kind == gazette.EV_PLAN_DRAFTED:
-                    ut = (ev.detail.get("user_text", "") or "").lower()
-                    if ut:
-                        user_text = ut
-                    for s in ev.detail.get("steps_summary", []):
-                        desc = s.get("description", "")
-                        steps_desc.append(desc)
-                        steps_text += " " + desc.lower()
-                elif ev.kind == gazette.EV_STEP_STARTED:
-                    desc = ev.detail.get("description", "")
-                    if desc:
-                        steps_text += " " + desc.lower()
-                elif ev.kind == gazette.EV_PLAN_FINISHED:
-                    stats = ev.detail.get("step_stats", {})
-            texts[pid] = {
-                "intent": g.get("intent", "")[:100],
-                "status": g.get("status", "?"),
-                "_intent_lc": intent_text,
-                "_user_text_lc": user_text,
-                "_steps_text_lc": steps_text,
-                "steps_desc": steps_desc[:5],
-                "step_stats": stats,
-            }
-        return texts
-
-    return _GAZETTE_TEXT_CACHE.get((), sig, _load)
-
-
 def _do_search_history(args: dict) -> str:
     """执行历史搜索：在文牍的多层文本里 AND 匹配关键词，按相关性排序。
 
-    召回质量优化（调研发现：原 OR 语义 + 高同质数据 = 无区分度）：
-      - AND 语义：所有关键词都须命中才收录，精确查找"同时涉及多个方面的 Plan"
-      - 文本源补全：intent（索引层）+ commission.user_text（用户原话）
-        + plan_drafted.steps_summary + step_started.description（更丰富的步骤描述）
-      - 相关性排序：intent 命中权重最高(×3)，user_text 次之(×2)，步骤描述最低(×1)
-      - 全量搜索：数据天然小（每 plan 平均 ~60 字符可搜索文本），无 recent 上限
+    P5（control 库化）：候选集由 SQL 召回（ctlstore.search_gazette，OR 命中
+    事件/元数据），命中 plan 再取全量事件做分层评分——原"500 文件全文读 +
+    SigCache 文本缓存"机器删除。语义保持：
+      - AND 语义：所有关键词都须命中才收录（在任一文本层）
+      - 文本层：intent + commission.user_text + plan_drafted.steps_summary
+        + step_started.description
+      - 相关性排序：intent 命中权重最高(×3)，user_text 次之(×2)，步骤最低(×1)
     """
+    from control.agent import gazette
+    from control.core.storage import search_gazettes
+
     keywords = [k.lower() for k in args.get("keywords", [])]
     recent = args.get("recent", 5)
     if not keywords:
         return "（未提供关键词）"
 
-    texts = _load_gazette_texts()
+    # SQL 候选（OR）：命中的 plan 集合
+    candidates = search_gazettes(keywords, limit=500)
+    plan_ids = list(dict.fromkeys(c["plan_id"] for c in candidates))
+    statuses = {g.get("plan_id"): g.get("status", "?")
+                for g in gazette.list_gazettes(recent=500)}
+
     matches = []
-    for pid, t in texts.items():
-        intent_lc = t["_intent_lc"]
-        user_lc = t["_user_text_lc"]
-        steps_lc = t["_steps_text_lc"]
+    for pid in plan_ids:
+        events = gazette.read_events(pid)
+        if not events:
+            continue
+        intent_lc = ""
+        user_lc = ""
+        steps_text = ""
+        steps_desc = []
+        stats = {}
+        for ev in events:
+            if ev.kind == gazette.EV_COMMISSION:
+                user_lc = (ev.detail.get("user_text", "") or "").lower()
+            elif ev.kind == gazette.EV_PLAN_DRAFTED:
+                ut = (ev.detail.get("user_text", "") or "").lower()
+                if ut:
+                    user_lc = ut
+                for s in ev.detail.get("steps_summary", []):
+                    desc = s.get("description", "")
+                    steps_desc.append(desc)
+                    steps_text += " " + desc.lower()
+            elif ev.kind == gazette.EV_STEP_STARTED:
+                desc = ev.detail.get("description", "")
+                if desc:
+                    steps_text += " " + desc.lower()
+            elif ev.kind == gazette.EV_PLAN_FINISHED:
+                stats = ev.detail.get("step_stats", {})
+        meta = gazette.read_plan_context(pid) or {}
+        intent_lc = (meta.get("intent", "") or "").lower()
 
         # AND 语义：所有关键词都须命中（在任一文本层）
-        all_texts = [intent_lc, user_lc, steps_lc]
+        all_texts = [intent_lc, user_lc, steps_text]
         if not all(any(kw in txt for txt in all_texts) for kw in keywords):
             continue
 
@@ -160,15 +124,15 @@ def _do_search_history(args: dict) -> str:
                 score += 3
             if kw in user_lc:
                 score += 2
-            if kw in steps_lc:
+            if kw in steps_text:
                 score += 1
 
         matches.append({
             "plan_id": pid[:12],
-            "intent": t["intent"],
-            "status": t["status"],
-            "steps": t["steps_desc"],
-            "step_stats": t["step_stats"],
+            "intent": meta.get("intent", "")[:100],
+            "status": statuses.get(pid, "?"),
+            "steps": steps_desc[:5],
+            "step_stats": stats,
             "_score": score,  # 排序用，不回传给 LLM
         })
 

@@ -68,7 +68,6 @@ def test_g1_different_sessions_not_blocked():
 def test_g2_gazette_unblocked_flag_survives_step_started(tmp_path, monkeypatch):
     from control.agent import gazette
 
-    monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
     gazette.reset_gazettes()
 
     gazette.append_event("p", gazette.EV_STEP_STARTED, "尚书省", step_id="s1", detail={})
@@ -111,13 +110,8 @@ def test_g3_partition_publish_names():
 # ============================================================
 # G4：fsig 签名 helper（r7：dir_sig 无生产调用方已删，此处只测 file_sig）
 # ============================================================
-def test_g4_fsig_file_sig(tmp_path):
-    from control.core.fsig import file_sig
+# （g4 fsig：模块已随 P5 库化删除——mtime 签名缓存的消费者已不存在）
 
-    f = tmp_path / "f.json"
-    f.write_text("{}", encoding="utf-8")
-    assert file_sig(f) is not None
-    assert file_sig(tmp_path / "missing") is None
 
 
 def test_g4_data_query_uses_shared_sig(tmp_path, monkeypatch):

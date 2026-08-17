@@ -110,12 +110,11 @@ def seed_results(path, model, unit_scores, prefix="rec"):
 
 @pytest.fixture
 def offline_thresholds(monkeypatch):
-    """把 menxia.review 的阈值获取替换为 fallback 常量（不打 subprocess CLI）。"""
+    """固定 menxia.review 的阈值（P5 直读常量，无 subprocess 可打）。"""
     from control.agent.menxia import review as review_mod
-    from control.config import _FALLBACK_THRESHOLDS
 
-    monkeypatch.setattr(review_mod, "get_thresholds",
-                        lambda: dict(_FALLBACK_THRESHOLDS))
+    th = review_mod.get_thresholds()
+    monkeypatch.setattr(review_mod, "get_thresholds", lambda: dict(th))
 
 
 # ============================================================
@@ -376,7 +375,6 @@ class TestQueryPlansAndGazettes:
     def iso_plans(self, monkeypatch, iso_out):
         from control.agent.shangshu import plan as plan_mod
 
-        monkeypatch.setattr(plan_mod, "_PLANS_DIR", iso_out / "plans")
         monkeypatch.setattr(plan_mod, "_PLANS", {})
         return plan_mod
 
@@ -402,7 +400,6 @@ class TestQueryPlansAndGazettes:
     def test_gazette_tools_roundtrip(self, monkeypatch, iso_out):
         from control.agent import gazette
 
-        monkeypatch.setattr(gazette, "_GAZETTE_DIR", iso_out / "gazette")
         gazette.append_event("plan-1", gazette.EV_PLAN_DRAFTED, "尚书省",
                              intent="意图A", session_id="s1", detail={})
         gazette.append_event("plan-1", gazette.EV_STEP_STARTED, "尚书省",
@@ -420,9 +417,7 @@ class TestQueryPlansAndGazettes:
         assert [e["kind"] for e in events] == ["plan_drafted", "step_started"]
 
     def test_gazette_tools_missing(self, monkeypatch, iso_out):
-        from control.agent import gazette
 
-        monkeypatch.setattr(gazette, "_GAZETTE_DIR", iso_out / "gazette")
         assert query.list_gazettes() == []
         assert query.get_plan_context("nope") is None
         assert query.read_plan_events("nope") == []
@@ -713,8 +708,10 @@ class TestWorkspaceAndSnapshot:
     def test_gc_merged_workspaces(self, iso_ws):
         actions.fork_workspace("exp-gc")
         # 标记已 merge 且超期（merged_at 拨回 2020 年）
-        iso_ws._store.update(lambda idx: idx["workspaces"]["exp-gc"].update(
-            {"merged": True, "merged_at": "2020-01-01T00:00:00", "merged_to": "global"}))
+        from control.core.storage import get_workspace, save_workspace
+        row = get_workspace("exp-gc")
+        row.update({"merged": True, "merged_at": "2020-01-01T00:00:00", "merged_to": "global"})
+        save_workspace(row)
 
         r = actions.gc_merged_workspaces(older_than_days=7)
         assert [c["name"] for c in r["cleaned"]] == ["exp-gc"]

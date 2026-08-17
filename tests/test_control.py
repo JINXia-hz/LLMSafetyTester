@@ -279,26 +279,25 @@ class TestWorkspaceObservability:
 
 
 # ============================================================
-# 状态闭合：merge 后 mark_merged 回写 _index.json
+# 状态闭合：merge 后 mark_merged 回写库行
 # ============================================================
 class TestMergeStatusClosure:
-    def test_mark_merged_updates_index(self, tmp_path, monkeypatch):
-        """mark_merged 把 workspace 的 merged/merged_at/merged_to 写进 _index.json。"""
+    def test_mark_merged_updates_row(self, tmp_path, monkeypatch):
+        """mark_merged 把 workspace 的 merged/merged_at/merged_to 写进库行。"""
         from control import config
         from control.core import workspace as ws
         ws_root = tmp_path / "workspaces"
         ws_root.mkdir()
         monkeypatch.setattr(config, "WORKSPACES_DIR", ws_root)
         monkeypatch.setattr(ws, "WORKSPACES_DIR", ws_root)
-        # 造一个已登记的 workspace
-        idx = {"workspaces": {"ab1": {"name": "ab1", "merged": False, "merged_at": None, "merged_to": None}}}
-        (ws_root / "_index.json").write_text(json.dumps(idx), encoding="utf-8")
+        from control.core.storage import get_workspace, save_workspace
+        save_workspace({"name": "ab1", "merged": False, "merged_at": None, "merged_to": None})
 
-        ws.mark_merged("ab1", "global")
-        idx2 = json.loads((ws_root / "_index.json").read_text(encoding="utf-8"))
-        assert idx2["workspaces"]["ab1"]["merged"] is True
-        assert idx2["workspaces"]["ab1"]["merged_to"] == "global"
-        assert idx2["workspaces"]["ab1"]["merged_at"] is not None
+        assert ws.mark_merged("ab1", "global") is True
+        row = get_workspace("ab1")
+        assert row["merged"] is True
+        assert row["merged_to"] == "global"
+        assert row["merged_at"] is not None
 
 
 # ============================================================
@@ -336,9 +335,9 @@ class TestWorkspace:
         assert info["models"] == ["mA"]
         # results.db 落到 workspace（库级 clone 产物）
         assert (workspaces / "ws1" / "results.db").exists()
-        # 索引记录
-        idx = json.loads((workspaces / "_index.json").read_text(encoding="utf-8"))
-        assert "ws1" in idx["workspaces"]
+        # 索引行（P5：ctl_workspaces 表）
+        from control.core.storage import get_workspace
+        assert get_workspace("ws1") is not None
 
     def test_fork_duplicate_name_raises(self, tmp_path, monkeypatch):
         from control import config
@@ -361,11 +360,11 @@ class TestWorkspace:
         monkeypatch.setattr(ws, "WORKSPACES_DIR", workspaces)
         monkeypatch.setattr(config, "LLMSEC_REPO", tmp_path)
         monkeypatch.setattr(ws, "LLMSEC_REPO", tmp_path)
-        # 造索引 + 目录
+        # 造索引行 + 目录
         (workspaces / "ws1").mkdir()
-        idx = {"workspaces": {"ws1": {"name": "ws1", "path": "output/workspaces/ws1",
-                                      "source": "global", "created": "2026-01-01", "records": 5}}}
-        (workspaces / "_index.json").write_text(json.dumps(idx), encoding="utf-8")
+        from control.core.storage import save_workspace
+        save_workspace({"name": "ws1", "path": "output/workspaces/ws1",
+                        "source": "global", "created": "2026-01-01", "records": 5})
 
         ws_list = ws.list_workspaces()
         assert len(ws_list) == 1 and ws_list[0]["name"] == "ws1"
@@ -570,18 +569,17 @@ class TestReview:
         if "critical" in severities and "warning" in severities:
             assert severities.index("critical") < severities.index("warning")
 
-    def test_get_thresholds_from_cli(self, monkeypatch):
-        """阈值经 CLI 获取（不复制），mock invoker 验证。"""
+    def test_get_thresholds_direct(self):
+        """P5：阈值直读 llmsec.params 单一来源（CLI/缓存/fallback 已删）。"""
         from control.agent.menxia import review
-        review._THRESHOLDS_CACHE.clear()  # 清缓存（r9/P3-5：TTLCache）
-        from control.core import invoker
-        monkeypatch.setattr(invoker, "_run", lambda argv: type("R", (), {
-            "ok": True, "json": {"PORTRAIT_ASR_SAFE": 0.3, "ALLERGY_FPR_SAFE": 0.05},
-            "returncode": 0, "stdout": "", "stderr": "", "elapsed_s": 0,
-        })())
+        from llmsec.params import PORTRAIT_ASR_SAFE
         th = review.get_thresholds()
-        assert th["PORTRAIT_ASR_SAFE"] == 0.3
-        review._THRESHOLDS_CACHE.clear()  # 清理（r9/P3-5：TTLCache）
+        assert th["PORTRAIT_ASR_SAFE"] == PORTRAIT_ASR_SAFE
+        assert set(th) == {
+            "PORTRAIT_MIN_TESTED", "PORTRAIT_MIN_CONFIDENCE", "PORTRAIT_ASR_SAFE",
+            "ALLERGY_FPR_SAFE", "TWIN_SEVERITY_FPR_MED", "CONV_CI_TARGET",
+            "CONV_DRIFT_TARGET", "MIN_COVERAGE_RATIO", "MIN_COVERAGE_ABSOLUTE",
+        }
 
     def test_review_run_returns_structure(self, tmp_path, monkeypatch):
         """review_run 完整流程（mock 读报告）。"""
@@ -597,7 +595,6 @@ class TestReview:
         (d / "runner_report.json").write_text(json.dumps(report), encoding="utf-8")
         monkeypatch.setattr(config, "RUNS_DIR", runs)
         monkeypatch.setattr(cmp, "RUNS_DIR", runs)
-        review._THRESHOLDS_CACHE.clear()
         result = review.review_run("2026-08-11_120000/modelA", use_llm=False)
         assert "error" not in result
         assert result["summary"]

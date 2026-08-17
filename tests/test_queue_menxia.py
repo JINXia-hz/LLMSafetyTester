@@ -14,14 +14,9 @@ class TestPlanQueue:
         reset_queue()
 
     def test_submit_queued(self, tmp_path, monkeypatch):
-        from control.agent import gazette
+        from control.agent.shangshu import plan as plan_mod
         from control.agent.shangshu.plan import P_APPROVED, Plan, Step, save_plan
         from control.agent.shangshu.queue import get_queue
-
-        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
-        from control.agent.shangshu import plan as plan_mod
-        monkeypatch.setattr(plan_mod, "_PLANS_DIR", tmp_path / "plans")
-        plan_mod._PLANS_DIR.mkdir(parents=True, exist_ok=True)
         plan_mod.reset_plans()
 
         # mock execute_plan 避免真正执行
@@ -44,14 +39,9 @@ class TestPlanQueue:
         assert plan.id in executed
 
     def test_duplicate_rejected(self, tmp_path, monkeypatch):
-        from control.agent import gazette
+        from control.agent.shangshu import plan as plan_mod
         from control.agent.shangshu.plan import P_APPROVED, Plan, Step, save_plan
         from control.agent.shangshu.queue import get_queue
-
-        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
-        from control.agent.shangshu import plan as plan_mod
-        monkeypatch.setattr(plan_mod, "_PLANS_DIR", tmp_path / "plans")
-        plan_mod._PLANS_DIR.mkdir(parents=True, exist_ok=True)
         plan_mod.reset_plans()
 
         from control.agent.shangshu import executor
@@ -69,14 +59,9 @@ class TestPlanQueue:
         assert result == "duplicate"
 
     def test_status(self, tmp_path, monkeypatch):
-        from control.agent import gazette
+        from control.agent.shangshu import plan as plan_mod
         from control.agent.shangshu.plan import P_APPROVED, Plan, Step, save_plan
         from control.agent.shangshu.queue import get_queue
-
-        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
-        from control.agent.shangshu import plan as plan_mod
-        monkeypatch.setattr(plan_mod, "_PLANS_DIR", tmp_path / "plans")
-        plan_mod._PLANS_DIR.mkdir(parents=True, exist_ok=True)
         plan_mod.reset_plans()
 
         from control.agent.shangshu import executor
@@ -98,14 +83,9 @@ class TestPlanQueue:
         assert st["running"] is not None or len(st["queued"]) > 0
 
     def test_cancel_queued(self, tmp_path, monkeypatch):
-        from control.agent import gazette
+        from control.agent.shangshu import plan as plan_mod
         from control.agent.shangshu.plan import P_APPROVED, Plan, Step, save_plan
         from control.agent.shangshu.queue import get_queue
-
-        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
-        from control.agent.shangshu import plan as plan_mod
-        monkeypatch.setattr(plan_mod, "_PLANS_DIR", tmp_path / "plans")
-        plan_mod._PLANS_DIR.mkdir(parents=True, exist_ok=True)
         plan_mod.reset_plans()
 
         from control.agent.shangshu import executor
@@ -163,7 +143,6 @@ class TestMenxiaThreeStage:
 
     def test_plan_drafted_triggers_review(self, tmp_path, monkeypatch):
         """拟案通知 → 门下省审查 → 发 review 报告（如果有问题）。"""
-        from control.agent import gazette
         from control.agent.bus import (
             KIND_PLAN_DRAFTED,
             KIND_REVIEW,
@@ -171,11 +150,7 @@ class TestMenxiaThreeStage:
             get_bus,
             notify,
         )
-
-        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
         from control.agent.shangshu import plan as plan_mod
-        monkeypatch.setattr(plan_mod, "_PLANS_DIR", tmp_path / "plans")
-        plan_mod._PLANS_DIR.mkdir(parents=True, exist_ok=True)
         plan_mod.reset_plans()
 
         # 构造一个含 critical 步骤的 Plan
@@ -205,7 +180,6 @@ class TestMenxiaThreeStage:
 
     def test_plan_approved_triggers_risk_report(self, tmp_path, monkeypatch):
         """准奏通知 → 门下省发高危步骤报告。"""
-        from control.agent import gazette
         from control.agent.bus import (
             KIND_PLAN_APPROVED,
             KIND_REVIEW,
@@ -213,11 +187,7 @@ class TestMenxiaThreeStage:
             get_bus,
             notify,
         )
-
-        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
         from control.agent.shangshu import plan as plan_mod
-        monkeypatch.setattr(plan_mod, "_PLANS_DIR", tmp_path / "plans")
-        plan_mod._PLANS_DIR.mkdir(parents=True, exist_ok=True)
         plan_mod.reset_plans()
 
         from control.agent.shangshu.plan import P_APPROVED, Plan, Step, save_plan

@@ -9,15 +9,10 @@ Plan = 有序步骤列表，每步指向一个 capability + 参数 + 依赖。
 
 from __future__ import annotations
 
-import json
 import time
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 from threading import Lock
-
-from control.config import OUTPUT_DIR
-from control.core.paths import safe_component
 
 # 步骤状态
 S_PENDING = "pending"      # 未开始
@@ -118,45 +113,37 @@ class Plan:
 
 
 # ============================================================
-# Plan 注册表（内存 + 磁盘持久化）
+# Plan 注册表（内存对象缓存 + 目录库持久化，P5）
 # ============================================================
+# executor 在线程池 worker 里改共享 Plan/Step 对象后整体 save——内存 dict
+# 保留对象身份语义，库行（ctl_plans.payload）是持久层，save 时整行覆写。
 _PLANS: dict[str, Plan] = {}
 _LOCK = Lock()
 
-_PLANS_DIR = OUTPUT_DIR / "plans"
-
-
-def _plans_dir() -> Path:
-    _PLANS_DIR.mkdir(parents=True, exist_ok=True)
-    return _PLANS_DIR
-
 
 def save_plan(plan: Plan) -> None:
-    """持久化 Plan 到内存注册表 + 磁盘（output/plans/<id>.json）。"""
+    """持久化 Plan：内存对象缓存 + 目录库整行 upsert（原子，取代裸 write_text）。"""
     with _LOCK:
         _PLANS[plan.id] = plan
-    p = safe_component(_plans_dir(), f"{plan.id}.json")
-    p.write_text(json.dumps(plan.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    from control.core.storage import save_ctl_plan
+    save_ctl_plan(plan.to_dict())
 
 
 def load_plan(plan_id: str) -> Plan | None:
-    """取 Plan：先查内存，没有则从磁盘加载（重启后补全）。"""
+    """取 Plan：先查内存缓存，没有则从库行重建（重启后补全）。"""
     with _LOCK:
         p = _PLANS.get(plan_id)
     if p is not None:
         return p
-    # 尝试磁盘（plan_id 外部可控，走 safe_component 防穿越）
-    try:
-        fp = safe_component(_plans_dir(), f"{plan_id}.json")
-    except ValueError:
-        return None  # 非法 plan_id 视为不存在
-    if not fp.exists():
+    from control.core.storage import get_ctl_plan
+    d = get_ctl_plan(plan_id)
+    if d is None:
         return None
-    return _from_json(json.loads(fp.read_text(encoding="utf-8")))
+    return _from_dict(d)
 
 
-def _from_json(d: dict) -> Plan:
-    """从 dict 重建 Plan 对象。"""
+def _from_dict(d: dict) -> Plan:
+    """从库行 payload 重建 Plan 对象。"""
     plan = Plan(
         id=d["id"], intent=d.get("intent", ""), status=d.get("status", P_DRAFTED),
         created=d.get("created", time.time()), approved=d.get("approved"),
@@ -179,32 +166,17 @@ def _from_json(d: dict) -> Plan:
 
 
 def list_plans(*, recent: int = 20) -> list[dict]:
-    """列出最近的 Plan（按创建时间倒序，默认 20 条）。供前端展示历史。
-
-    内存注册表重启即空——先扫磁盘补全（修复重启后 list_plans 返回空、
-    与"持久历史"承诺不符的缺陷；P5 库化后此处整体变 SQL 查询）。
-    """
-    for fp in _plans_dir().glob("*.json"):
-        plan_id = fp.stem
-        with _LOCK:
-            if plan_id in _PLANS:
-                continue
-        try:
-            _from_json(json.loads(fp.read_text(encoding="utf-8")))
-        except (OSError, json.JSONDecodeError, KeyError):
-            continue  # 损坏/半写文件跳过（save_plan 无原子写的已知缺陷，P5 修复）
-    with _LOCK:
-        plans = list(_PLANS.values())
-    plans.sort(key=lambda p: p.created, reverse=True)
-    return [p.to_dict() for p in plans[:recent]]
+    """列出最近的 Plan（按创建时间倒序，库行直查——重启即全量可见）。"""
+    from control.core.storage import list_ctl_plans
+    return list_ctl_plans(recent=recent)
 
 
 def reset_plans() -> None:
     """清空注册表（测试用）。"""
     with _LOCK:
         _PLANS.clear()
-
-
+    from control.core.storage import reset_ctl_plans
+    reset_ctl_plans()
 def make_plan_from_llm(intent: str, steps_raw: list[dict]) -> Plan:
     """从 LLM submit_plan 工具返回的原始步骤列表构造 Plan。
 

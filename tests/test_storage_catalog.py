@@ -231,9 +231,12 @@ def test_tasks_reconcile_lifecycle(iso, tmp_path, monkeypatch):
     rows = contract.query_tasks()
     assert rows[0].status == "success"
 
-    # 文件消失（gc）→ 行清理
+    # 文件消失（gc）→ 行保留（P4 语义：reconcile 不反向删行——原生行无
+    # meta.json，按文件删行会误杀；行清理是 gc-tasks 的职责）
     (tdir / "evaluate-143025-ab12cd.meta.json").unlink()
-    assert contract.query_tasks() == []
+    rows = contract.query_tasks(reconcile=False)
+    assert [r.task_id for r in rows] == ["evaluate-143025-ab12cd"]
+    assert rows[0].status == "success"
 
 
 def test_register_and_query_trials(iso):

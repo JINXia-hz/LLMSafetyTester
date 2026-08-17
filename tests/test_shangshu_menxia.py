@@ -115,8 +115,6 @@ class TestPlan:
 
     def test_save_load_plan(self, tmp_path, monkeypatch):
         from control.agent.shangshu import plan as plan_mod
-        monkeypatch.setattr(plan_mod, "_PLANS_DIR", tmp_path / "plans")
-        plan_mod._PLANS_DIR.mkdir(parents=True, exist_ok=True)
         plan_mod.reset_plans()
 
         from control.agent.shangshu.plan import Plan, Step, load_plan, save_plan
@@ -126,8 +124,8 @@ class TestPlan:
         save_plan(p)
         # 内存命中
         assert load_plan(p.id) is not None
-        # 清内存后磁盘命中
-        plan_mod.reset_plans()
+        # 内存丢失后库行命中（reset_plans 会连库清，这里只清对象缓存）
+        plan_mod._PLANS.clear()
         loaded = load_plan(p.id)
         assert loaded is not None
         assert loaded.intent == "测试"
@@ -227,7 +225,8 @@ class TestEnvSnapshot:
         result = env_snapshot.delete("s")
         assert result["deleted"] == "s"
         # get_snapshot 已删（生产零调用）——用索引直查确认条目已移除
-        assert "s" not in env_snapshot._store.load().get("snapshots", {})
+        from control.core.storage import get_env_snapshot
+        assert get_env_snapshot("s") is None
 
     def test_merge_to_global(self, tmp_path, monkeypatch):
         env_snapshot = self._setup(monkeypatch, tmp_path)
@@ -334,11 +333,7 @@ class TestExecutor:
 
     def test_simple_plan_executes(self, tmp_path, monkeypatch):
         """简单 plan（无封驳）执行成功。"""
-        from control.agent import gazette
         from control.agent.shangshu import plan as plan_mod
-        monkeypatch.setattr(plan_mod, "_PLANS_DIR", tmp_path / "plans")
-        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
-        plan_mod._PLANS_DIR.mkdir(parents=True, exist_ok=True)
         plan_mod.reset_plans()
 
         from control.agent.shangshu import executor
@@ -373,11 +368,7 @@ class TestExecutor:
 
     def test_blocked_step_skips_dependents(self, tmp_path, monkeypatch):
         """被封驳的步骤，其依赖者标 skipped。"""
-        from control.agent import gazette
         from control.agent.shangshu import plan as plan_mod
-        monkeypatch.setattr(plan_mod, "_PLANS_DIR", tmp_path / "plans")
-        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
-        plan_mod._PLANS_DIR.mkdir(parents=True, exist_ok=True)
         plan_mod.reset_plans()
 
         from control.agent import menxia
@@ -400,11 +391,7 @@ class TestExecutor:
 
     def test_non_dependent_continues_after_block(self, tmp_path, monkeypatch):
         """被封驳步骤的不依赖者继续执行。"""
-        from control.agent import gazette
         from control.agent.shangshu import plan as plan_mod
-        monkeypatch.setattr(plan_mod, "_PLANS_DIR", tmp_path / "plans")
-        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
-        plan_mod._PLANS_DIR.mkdir(parents=True, exist_ok=True)
         plan_mod.reset_plans()
 
         from control.agent import menxia

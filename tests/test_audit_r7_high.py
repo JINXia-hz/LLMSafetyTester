@@ -110,14 +110,9 @@ def test_phase2_standalone_allergy_keyspace(tmp_path, monkeypatch):
 def test_approve_plan_notifies_menxia(tmp_path, monkeypatch):
     """approve_plan 的 KIND_PLAN_APPROVED 必须能被门下省（dept=MENXIA）订阅收到。"""
     from control.agent import bus as bus_mod
-    from control.agent import gazette
     from control.agent.bus import KIND_PLAN_APPROVED, reset_bus
     from control.agent.menxia.listener import reinit_menxia
-
-    monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
     from control.agent.shangshu import plan as plan_mod
-    monkeypatch.setattr(plan_mod, "_PLANS_DIR", tmp_path / "plans")
-    plan_mod._PLANS_DIR.mkdir(parents=True, exist_ok=True)
     plan_mod.reset_plans()
 
     reset_bus()

@@ -1,40 +1,37 @@
 """control.agent.gazette — 文牍存储（三省任务的持久化事件流）。
 
-每个 Plan 的完整生命周期记录在一个 append-only JSONL 文件里。
-与 Plan JSON 快照（output/plans/<id>.json，当前状态视图）互补：
-文牍是事件流——记录"怎么走到这个状态"，不可变，重启不丢。
+P5（control 库化）：事件流迁入目录库 ctl_events 表（append-only INSERT）+
+ctl_plan_meta 元数据表——原 <plan_id>.jsonl + _index.json 双结构、复合锁、
+跨进程 RMW 全部退役（单事务保证"事件 + 元数据"原子）。
 
-存储：
-  output/gazette/
-  ├── <plan_id>.jsonl     # 每个 Plan 的事件流（一行一个事件）
-  └── _index.json         # 所有 Plan 的元信息索引
-
-事件流是三省协作的**共享记忆**：
+与 Plan 快照（ctl_plans 表，当前状态视图）互补：文牍是事件流——记录
+"怎么走到这个状态"，不可变，重启不丢。三省协作的**共享记忆**：
   - 门下省封驳时从文牍取上下文（intent / 前置步骤结果 / 封驳历史）
   - 尚书省审查时从文牍知道哪个步骤产出了哪个 run
   - 前端轮询时每条总线消息可从文牍补充来龙去脉
+
+消费经 control.core.storage 薄契约（llmsec.storage.ctlstore）。
 """
 
 from __future__ import annotations
 
-import json
-import threading
-import time
 from dataclasses import asdict, dataclass
-from pathlib import Path
 
-from control.config import OUTPUT_DIR
-from control.core.paths import safe_component
-from control.core.store import AtomicIndexStore
-
-_GAZETTE_DIR = OUTPUT_DIR / "gazette"
-# append JSONL 事件 + 更新 _index.json 是复合操作，需在同一把锁内
-_LOCK = threading.Lock()
-
-# 文牍索引存储（原子读写 + Windows PermissionError 重试）
-# base_dir 传 lambda：测试期 monkeypatch _GAZETTE_DIR 后能动态生效
-_store = AtomicIndexStore(lambda: _GAZETTE_DIR, "plans")
-
+from control.core.storage import (
+    append_event as _append_row,
+)
+from control.core.storage import (
+    gazette_events as _rows,
+)
+from control.core.storage import (
+    gazette_meta as _meta_row,
+)
+from control.core.storage import (
+    list_gazette_meta as _list_rows,
+)
+from control.core.storage import (
+    reset_gazette as _reset_rows,
+)
 
 # ============================================================
 # 事件类型
@@ -61,7 +58,7 @@ EV_REVIEW_FILED = "review_filed"        # 审查呈递
 
 @dataclass
 class GazetteEvent:
-    """文牍事件。"""
+    """文牍事件（形状与库行一致——读路径直构，写路径经 to_dict）。"""
     ts: float               # 事件时间
     kind: str               # 事件类型（EV_* 常量）
     dept: str               # 发起部门（中书省/尚书省/门下省/用户）
@@ -72,20 +69,6 @@ class GazetteEvent:
 
     def to_dict(self) -> dict:
         return asdict(self)
-
-
-# ============================================================
-# 存储
-# ============================================================
-def _gazette_path(plan_id: str) -> Path:
-    _store.ensure_dir()
-    # plan_id 外部可控，走校验防穿越（`../x` 逃出 gazette 目录）
-    return safe_component(_GAZETTE_DIR, f"{plan_id}.jsonl")
-
-
-def index_path() -> Path:
-    """索引文件路径（公开访问器——dialogue 的缓存签名此前直接摸 _store.path 私有属性）。"""
-    return _store.path
 
 
 # ============================================================
@@ -101,80 +84,14 @@ def append_event(
     session_id: str | None = None,
     intent: str | None = None,
 ) -> None:
-    """向文牍 append 一条事件（原子追加，带锁）。同时更新 _index.json。
-
-    Args:
-        plan_id: 关联 Plan id
-        kind: 事件类型（EV_* 常量）
-        dept: 发起部门
-        detail: 事件详情
-        step_id: 关联步骤（plan 级事件为 None）
-        session_id: 关联 session
-        intent: Plan 意图（首次记录时写入 _index）
-    """
-    event = GazetteEvent(
-        ts=time.time(), kind=kind, dept=dept, plan_id=plan_id,
-        step_id=step_id, session_id=session_id, detail=detail or {},
-    )
-    line = json.dumps(event.to_dict(), ensure_ascii=False) + "\n"
-    with _LOCK:
-        # append 事件
-        with open(_gazette_path(plan_id), "a", encoding="utf-8") as f:
-            f.write(line)
-
-        # 更新索引：走 _store.update（线程锁 + 跨进程文件锁的 RMW）。
-        # 此前手工 load/save 绕过了跨进程锁——dashboard 与 MCP 进程并发写
-        # gazette 时两个进程各 load 同一旧索引、后写覆盖先写，丢更新。
-        def _update_index(idx: dict) -> None:
-            plans = idx.setdefault("plans", {})  # 索引半写/缺键时兜底，与 read_plan_context 同一防御
-            entry = plans.setdefault(plan_id, {
-                "plan_id": plan_id,
-                "intent": intent or "",
-                "session_id": session_id,
-                "created": event.ts,
-                "status": "active",
-                "last_event": kind,
-                "last_ts": event.ts,
-            })
-            # 首次记录时补 intent/session
-            if intent and not entry.get("intent"):
-                entry["intent"] = intent
-            if session_id and not entry.get("session_id"):
-                entry["session_id"] = session_id
-            entry["last_event"] = kind
-            entry["last_ts"] = event.ts
-            # 根据 kind 更新 status
-            if kind == EV_PLAN_FINISHED:
-                entry["status"] = "finished"
-                entry["finished"] = event.ts
-            elif kind == EV_PLAN_REJECTED:
-                entry["status"] = "rejected"
-                entry["finished"] = event.ts
-
-        _store.update(_update_index)
+    """向文牍追加一条事件（单事务：INSERT 事件 + upsert Plan 元数据）。"""
+    _append_row(plan_id, kind, dept, detail=detail, step_id=step_id,
+                session_id=session_id, intent=intent)
 
 
 def read_events(plan_id: str) -> list[GazetteEvent]:
-    """读某 Plan 的全部事件流（按 ts 排序）。"""
-    p = _gazette_path(plan_id)
-    if not p.exists():
-        return []
-    events = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            d = json.loads(line)
-            events.append(GazetteEvent(
-                ts=d["ts"], kind=d["kind"], dept=d["dept"],
-                plan_id=d["plan_id"], step_id=d.get("step_id"),
-                session_id=d.get("session_id"), detail=d.get("detail", {}),
-            ))
-        except (json.JSONDecodeError, KeyError):
-            continue
-    events.sort(key=lambda e: e.ts)
-    return events
+    """读某 Plan 的全部事件流（事件序升序）。"""
+    return [GazetteEvent(**d) for d in _rows(plan_id)]
 
 
 def read_plan_context(plan_id: str) -> dict | None:
@@ -185,17 +102,13 @@ def read_plan_context(plan_id: str) -> dict | None:
          blocks: [...], reviews: [...], events_count} 或 None（无文牍）
 
     供门下省封驳/审查时取上下文——不再盲判。
-    intent/session_id 优先从 _index.json 取（首个 append_event 时记入）。
+    intent/session_id 优先从元数据表取（首个 append_event 时记入）。
     """
     events = read_events(plan_id)
     if not events:
         return None
 
-    # 先从索引取 intent/session（比从事件流里拼更可靠）
-    with _LOCK:
-        idx = _store.load()
-    idx_entry = idx.get("plans", {}).get(plan_id, {})
-
+    idx_entry = _meta_row(plan_id) or {}
     ctx = {
         "plan_id": plan_id,
         "intent": idx_entry.get("intent", ""),
@@ -253,21 +166,10 @@ def read_plan_context(plan_id: str) -> dict | None:
 
 
 def list_gazettes(*, session_id: str | None = None, recent: int = 20) -> list[dict]:
-    """列出最近的文牍（_index.json），可按 session 过滤。"""
-    idx = _store.load()
-    plans = list(idx.get("plans", {}).values())
-    if session_id:
-        plans = [p for p in plans if p.get("session_id") == session_id]
-    plans.sort(key=lambda p: p.get("last_ts", 0), reverse=True)
-    return plans[:recent]
+    """列出最近的文牍（元数据表），可按 session 过滤。"""
+    return _list_rows(session_id=session_id, recent=recent)
 
 
 def reset_gazettes() -> None:
     """清空文牍（测试用）。"""
-    with _LOCK:
-        import shutil
-        try:
-            if _GAZETTE_DIR.exists():
-                shutil.rmtree(_GAZETTE_DIR)
-        except OSError:
-            pass  # Windows 并发文件锁，忽略
+    _reset_rows()

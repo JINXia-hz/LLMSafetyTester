@@ -22,7 +22,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import re
 import threading
 import time
@@ -353,9 +352,6 @@ def test_h10_executor_receives_block_and_exempts_on_retry(tmp_path, monkeypatch)
     from control.agent.shangshu import plan as plan_mod
     from control.agent.shangshu.plan import P_APPROVED, Plan, Step, save_plan
 
-    monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
-    monkeypatch.setattr(plan_mod, "_PLANS_DIR", tmp_path / "plans")
-    plan_mod._PLANS_DIR.mkdir(parents=True, exist_ok=True)
     plan_mod.reset_plans()
     bus_mod.reset_bus()
     listener.reinit_menxia()
@@ -481,35 +477,35 @@ def test_h12_env_tmp_naming():
 # ============================================================
 # H13：gazette 索引并发不丢更新
 # ============================================================
-def test_h13_gazette_index_no_lost_updates(tmp_path, monkeypatch):
-    """禁用 gazette 进程内锁（模拟另一进程的锁保护不到本进程），并发 append
-    不得丢索引条目——并发安全只能靠 _store.update 的跨进程文件锁。"""
+def test_h13_gazette_concurrent_appends_no_lost_events():
+    """H13（P5 表化后）：多线程并发 append_event → 事件与元数据零丢失
+    （原锁机器的丢更新场景由单事务承接）。"""
+    import threading
+
     from control.agent import gazette
 
-    monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
     gazette.reset_gazettes()
-    monkeypatch.setattr(gazette, "_LOCK", contextlib.nullcontext())
+    errors: list[Exception] = []
 
-    n_threads, n_plans = 8, 5
-    barrier = threading.Barrier(n_threads)
+    def worker(w: int) -> None:
+        try:
+            for i in range(10):
+                gazette.append_event(f"plan-{w}", "step_started", "尚书省",
+                                     step_id=f"s{i}", detail={"i": i})
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
 
-    def _work(w):
-        barrier.wait()
-        for i in range(n_plans):
-            gazette.append_event(f"p{w}_{i}", gazette.EV_PLAN_DRAFTED, "尚书省",
-                                 detail={})
-
-    threads = [threading.Thread(target=_work, args=(w,)) for w in range(n_threads)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=30)
-
-    idx = gazette._store.load()
-    names = set(idx.get("plans", {}))
-    expected = {f"p{w}_{i}" for w in range(n_threads) for i in range(n_plans)}
-    missing = expected - names
-    assert not missing, f"H13: 索引丢更新（缺 {len(missing)}/{len(expected)} 个条目）"
+    threads = [threading.Thread(target=worker, args=(w,)) for w in range(4)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert not errors
+    metas = {g["plan_id"] for g in gazette.list_gazettes(recent=100)}
+    for w in range(4):
+        assert len(gazette.read_events(f"plan-{w}")) == 10
+        assert f"plan-{w}" in metas
+    gazette.reset_gazettes()
 
 
 # ============================================================

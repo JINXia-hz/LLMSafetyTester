@@ -312,6 +312,114 @@ def execute_migrate_layouts(plan: Plan) -> Plan:
 # ============================================================
 # migrate-r / backup-r（阶段 2：R 矩阵 → SQLite）
 # ============================================================
+def cmd_migrate_control(*, yes: bool = False, json_mode: bool = False) -> int:
+    """control 层旧文件一次性导入目录库（P5）。
+
+    导入：gazette/*.jsonl + _index.json → ctl_events/ctl_plan_meta；
+    plans/*.json → ctl_plans；workspaces/_index.json → ctl_workspaces（gc_log
+    → 哨兵行）；env_snapshots/_index.json → ctl_env_snapshots。
+    迁移后源文件改名 .migrated（保留可回滚）。幂等：已导入（表非空或文件
+    已 .migrated）自动跳过。
+    """
+    import json as _json
+
+    from llmsec.storage import ctlstore
+
+    out = Path(_config.OUTPUT_DIR)
+    stats: dict[str, int] = {"events": 0, "plan_meta": 0, "plans": 0, "workspaces": 0, "env_snapshots": 0}
+
+    def _renamed(p: Path) -> bool:
+        return p.suffix == ".migrated" or p.name.endswith(".json.migrated") or p.name.endswith(".jsonl.migrated")
+
+    if not yes and not json_mode:
+        print("将把 gazette/plans/workspaces/env_snapshots 的旧文件导入目录库（ctl_* 表），")
+        print("迁移后源文件改名 .migrated。幂等，可重复执行。确认执行请加 --yes")
+        return 0
+
+    # 1) gazette：jsonl 事件 + _index 元数据
+    gz = out / "gazette"
+    meta_idx = {}
+    idx_file = gz / "_index.json"
+    if idx_file.exists():
+        try:
+            meta_idx = _json.loads(idx_file.read_text(encoding="utf-8")).get("plans", {})
+        except (OSError, _json.JSONDecodeError):
+            meta_idx = {}
+    for f in sorted(gz.glob("*.jsonl")) if gz.is_dir() else []:
+        if _renamed(f):
+            continue
+        pid = f.name[: -len(".jsonl")]
+        entry = meta_idx.get(pid, {})
+        first = True
+        for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            ctlstore.append_event(
+                pid, d.get("kind", ""), d.get("dept", ""),
+                detail=d.get("detail") or None, step_id=d.get("step_id"),
+                session_id=d.get("session_id"),
+                intent=entry.get("intent") if first else None,
+            )
+            stats["events"] += 1
+            first = False
+        if not first:
+            stats["plan_meta"] += 1
+        f.rename(f.with_suffix(f.suffix + ".migrated"))
+    if idx_file.exists():
+        idx_file.rename(idx_file.with_suffix(".json.migrated"))
+
+    # 2) plans/*.json
+    plans_dir = out / "plans"
+    for f in sorted(plans_dir.glob("*.json")) if plans_dir.is_dir() else []:
+        if _renamed(f):
+            continue
+        try:
+            d = _json.loads(f.read_text(encoding="utf-8"))
+            ctlstore.save_ctl_plan(d)
+            stats["plans"] += 1
+            f.rename(f.with_suffix(".json.migrated"))
+        except (OSError, _json.JSONDecodeError, KeyError):
+            continue
+
+    # 3) workspaces/_index.json
+    ws_idx = out / "workspaces" / "_index.json"
+    if ws_idx.exists():
+        try:
+            idx = _json.loads(ws_idx.read_text(encoding="utf-8"))
+            for info in idx.get("workspaces", {}).values():
+                ctlstore.save_workspace(info)
+                stats["workspaces"] += 1
+            for entry in idx.get("gc_log", []):
+                ctlstore.append_workspace_gc(entry)
+        except (OSError, _json.JSONDecodeError):
+            pass
+        else:
+            ws_idx.rename(ws_idx.with_suffix(".json.migrated"))
+
+    # 4) env_snapshots/_index.json
+    es_idx = out / "env_snapshots" / "_index.json"
+    if es_idx.exists():
+        try:
+            idx = _json.loads(es_idx.read_text(encoding="utf-8"))
+            for info in idx.get("snapshots", {}).values():
+                ctlstore.save_env_snapshot(info)
+                stats["env_snapshots"] += 1
+        except (OSError, _json.JSONDecodeError):
+            pass
+        else:
+            es_idx.rename(es_idx.with_suffix(".json.migrated"))
+
+    emit({"ok": True, **stats}, json_mode=json_mode, title="migrate-control")
+    if not json_mode:
+        print(f"✓ control 迁移完成：{stats}（源文件改名 .migrated 保留）")
+    return 0
+
+
 def cmd_backup_r(out: str | None, *, json_mode: bool = False) -> int:
     """R 库备份（sqlite3 backup API，WAL 安全；.bak 轮转的替代）。"""
     from llmsec.storage import rstore

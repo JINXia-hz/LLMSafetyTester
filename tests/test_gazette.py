@@ -6,7 +6,6 @@ from __future__ import annotations
 class TestGazette:
     def test_append_and_read(self, tmp_path, monkeypatch):
         from control.agent import gazette
-        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
         gazette.reset_gazettes()
 
         gazette.append_event("p1", gazette.EV_PLAN_DRAFTED, "尚书省",
@@ -28,7 +27,6 @@ class TestGazette:
     def test_read_plan_context(self, tmp_path, monkeypatch):
         """从事件流重建 Plan 上下文：intent + steps 状态 + 封驳历史 + 审查记录。"""
         from control.agent import gazette
-        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
         gazette.reset_gazettes()
 
         # 拟案
@@ -65,7 +63,6 @@ class TestGazette:
 
     def test_list_gazettes(self, tmp_path, monkeypatch):
         from control.agent import gazette
-        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
         gazette.reset_gazettes()
 
         gazette.append_event("p1", gazette.EV_PLAN_DRAFTED, "尚书省",
@@ -88,7 +85,6 @@ class TestGazette:
 
     def test_read_empty(self, tmp_path, monkeypatch):
         from control.agent import gazette
-        monkeypatch.setattr(gazette, "_GAZETTE_DIR", tmp_path / "gazette")
         gazette.reset_gazettes()
         assert gazette.read_events("nonexistent") == []
         assert gazette.read_plan_context("nonexistent") is None

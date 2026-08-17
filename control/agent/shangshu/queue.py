@@ -4,10 +4,12 @@
 这避免了并发执行多个 Plan 同时写 R 矩阵、同时消耗 API 额度的问题。
 
 设计：
-  - 单 worker 线程串行执行（Plan 之间有数据依赖——R 矩阵是共享状态）
+  - 单 worker 线程串行执行（Plan 之间有数据依赖——R 观测是共享状态）
   - submit() 不阻塞——立即返回 "queued" / "running" / "duplicate"
   - 前端轮询 bus feed 看执行进度（已有逻辑）
   - cancel() 只能取消排队中的，不能中断正在执行的
+  - P5：队列内容落 ctl_queue 表（重启恢复排队 Plan）；worker 线程生命周期
+    协议（Condition/摘牌）是进程内并发原语，永远在内存
 """
 
 from __future__ import annotations
@@ -28,16 +30,19 @@ class PlanQueue:
         self._cond = threading.Condition(self._lock)
 
     def submit(self, plan_id: str) -> str:
-        """提交 Plan 到队列。
+        """提交 Plan 到队列（内存 deque + ctl_queue 行双记）。
 
         Returns:
             "queued" — 已加入队列，等待执行
             "duplicate" — 该 Plan 已在队列或正在执行
         """
+        from control.core.storage import enqueue_plan
+
         with self._lock:
             if plan_id == self._running or plan_id in self._queue:
                 return "duplicate"
             self._queue.append(plan_id)
+            enqueue_plan(plan_id)
             # _ensure_worker 必须在锁内调用：锁外的读-判-写在两个并发 submit
             # 同时发现 worker 已死时会各启一个线程 → 双 worker 并发执行两个 Plan，
             # 违反"同一时间只跑一个 Plan"的核心不变量
@@ -55,9 +60,12 @@ class PlanQueue:
 
     def cancel(self, plan_id: str) -> bool:
         """从队列移除（只能取消排队中的，不能取消正在执行的）。"""
+        from control.core.storage import finish_queue_item
+
         with self._lock:
             if plan_id in self._queue:
                 self._queue.remove(plan_id)
+                finish_queue_item(plan_id)
                 return True
             return False
 
@@ -86,12 +94,15 @@ class PlanQueue:
                 plan_id = self._queue.popleft()
                 self._running = plan_id
 
+            from control.core.storage import finish_queue_item, mark_queue_running
+            mark_queue_running(plan_id)
             try:
                 execute_plan(plan_id)
             except Exception as e:
                 import sys
                 print(f"[plan-queue] Plan {plan_id} 执行失败: {e}", file=sys.stderr)
             finally:
+                finish_queue_item(plan_id)
                 with self._lock:
                     self._running = None
 
