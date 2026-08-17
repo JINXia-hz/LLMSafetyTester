@@ -244,3 +244,24 @@ def test_task_spec_schema_and_dict_bridge(tmp_path, monkeypatch):
         if t is not None and getattr(t, "log_file", None) is not None:
             t["log_file"].close()
         tm.TASKS.clear()
+
+
+# ============================================================
+# CI 修复回归：TF-IDF 降级的同质语料防护
+# ============================================================
+
+def test_tfidf_fallback_homogeneous_corpus(monkeypatch):
+    """无 embedding 通道 + 同质语料（模板化攻击集）时，TF-IDF 词项全被
+    max_df=0.9 剪除 → 原 ValueError 崩掉特征提取。降级路径必须放宽重拟合。
+
+    CI 复现路径：runner 离线测试的 8 条 "attack prompt i"（attack/prompt
+    在全部文档出现，df=1.0 > 0.9，数字被默认 token_pattern 丢弃）。
+    """
+    import llmsec.clustering.features as feats
+
+    monkeypatch.setattr(feats, "_get_embedding_model", lambda: None)
+    prompts = [f"attack prompt {i}" for i in range(8)]
+    emb, vec, _ = feats.extract_text_embeddings(prompts)
+    assert emb.shape[0] == 8, "全部样本都应有特征向量"
+    assert emb.shape[1] >= 1, "同质语料放宽 max_df 后必须有存活词项"
+    assert vec is not None

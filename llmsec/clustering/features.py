@@ -378,7 +378,27 @@ def extract_text_embeddings(
         stop_words="english",
     )
     if vectorizer is None:
-        tfidf_matrix = fit_vectorizer.fit_transform(cleaned_prompts)
+        try:
+            tfidf_matrix = fit_vectorizer.fit_transform(cleaned_prompts)
+        except ValueError:
+            # 同质语料（模板化攻击集的常态）：全部词项 df=1.0，被 max_df=0.9 整体剪除
+            # （单文档情形已在上方参数放宽，此处覆盖多文档同质语料）。放宽 max_df
+            # 重拟合；仍无词项（全停用词/全数字）则退到字符级 n-gram——不经词项剪枝，
+            # 任意非空文本恒有输出，降级路径不得崩掉整个特征提取。
+            logger.warning("⚠ TF-IDF 词项全被 max_df 剪除（同质语料），放宽 max_df=1.0 重拟合")
+            fit_vectorizer = TfidfVectorizer(
+                max_features=TFIDF_FALLBACK_FEATURES,
+                ngram_range=(1, 2), max_df=1.0, min_df=1, stop_words="english",
+            )
+            try:
+                tfidf_matrix = fit_vectorizer.fit_transform(cleaned_prompts)
+            except ValueError:
+                logger.warning("⚠ TF-IDF 仍无词项（全停用词/全数字），退到字符级 n-gram")
+                fit_vectorizer = TfidfVectorizer(
+                    analyzer="char", ngram_range=(2, 3),
+                    max_features=TFIDF_FALLBACK_FEATURES, min_df=1,
+                )
+                tfidf_matrix = fit_vectorizer.fit_transform(cleaned_prompts)
     else:
         tfidf_matrix = fit_vectorizer.transform(cleaned_prompts)
     dense = tfidf_matrix.toarray()

@@ -1,10 +1,10 @@
 # 测试清单（自动生成，勿手改）
 
-> 由 `scripts/gen_test_inventory.py` 生成于 2026-08-17T00:34:19；
+> 由 `scripts/gen_test_inventory.py` 生成于 2026-08-17T10:47:01；
 > CI 会校验本文件与实际收集结果一致（`--check`），过期即失败。
 > 本地刷新：`python scripts/gen_test_inventory.py`。
 
-合计 **65** 个文件 / **969** 个用例（含 parametrize 展开；
+合计 **65** 个文件 / **970** 个用例（含 parametrize 展开；
 含默认排除的 real_api/e2e 用例——它们需手动 `pytest -m real_api` / `-m e2e` 触发）。
 
 | 测试文件 | 用例数 |
@@ -22,7 +22,7 @@
 | tests/test_audit_r7_server.py | 12 |
 | tests/test_audit_r7_storage.py | 12 |
 | tests/test_audit_r8_rootfix.py | 11 |
-| tests/test_audit_r9_guard.py | 9 |
+| tests/test_audit_r9_guard.py | 10 |
 | tests/test_clustering.py | 17 |
 | tests/test_control.py | 40 |
 | tests/test_control_router.py | 10 |

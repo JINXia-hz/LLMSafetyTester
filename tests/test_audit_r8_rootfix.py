@@ -15,8 +15,12 @@ import threading
 
 def test_hpo_report_mixed_none_and_value_no_crash(tmp_path, monkeypatch):
     """stage1 缺 ci_half、stage2 有值：跳过 None 条目，best_overall 取数值条目。"""
+    import pytest
+
     import llmsec.experiments.study as study_mod
-    import scripts.weekend_hpo as wh
+
+    # scripts/ 已移出仓库（本地维护脚本）——本地有则测、CI 无则跳过
+    wh = pytest.importorskip("scripts.weekend_hpo")
 
     fake_summaries = {
         "weekend_stage1": {"best": {"ci_half_mean": None, "ci_half_std": 0,

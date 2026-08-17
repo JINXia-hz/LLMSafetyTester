@@ -37,6 +37,11 @@ def _offline_runner_env(tmp_path, monkeypatch):
     import llmsec.core.config as results_cfg
     monkeypatch.setattr(results_cfg, "RESULTS_FILE", tmp_path / "results.json")
 
+    # CI 无 sentence-transformers/本地模型缓存 → 特征走 TF-IDF 降级；本机有模型时
+    # 走真 embedding。固定走降级路径，保证本机与 CI 行为一致（也覆盖该路径）。
+    import llmsec.clustering.features as feats_mod
+    monkeypatch.setattr(feats_mod, "_get_embedding_model", lambda: None)
+
     # r9/P3-7：judge/twin_client/reporter 经 deps 注入（不再 patch 构造函数）
     monkeypatch.setattr(tgt, "available_targets", lambda: {
         "t1": NS(model="t1-model", api_key="k", base_url="http://t1"),

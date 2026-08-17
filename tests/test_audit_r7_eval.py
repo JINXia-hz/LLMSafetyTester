@@ -113,8 +113,12 @@ def test_safe_twin_judge_failure_degrades(tmp_path, monkeypatch):
 
 def test_hpo_report_handles_missing_ci_half(tmp_path, monkeypatch):
     """best 存在但 ci_half_mean=None（部分失败）时 cmd_report 不崩溃。"""
+    import pytest
+
     import llmsec.experiments.study as study_mod
-    import scripts.weekend_hpo as wh
+
+    # scripts/ 已移出仓库（本地维护脚本）——本地有则测、CI 无则跳过
+    wh = pytest.importorskip("scripts.weekend_hpo")
 
     fake_summaries = {
         "weekend_stage1": {"best": {"ci_half_mean": None, "ci_half_std": 0,
