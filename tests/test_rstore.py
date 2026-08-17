@@ -124,7 +124,7 @@ def test_no_implicit_json_migration(iso):
     mat = ResultsMatrix()
     mat.upsert("r1", "m", 1.0, ts=1)
     from llmsec.core.io import write_json
-    legacy = cfg.STATE_DIR / "results.json" if hasattr(cfg, "STATE_DIR") else iso / "results.json"
+    legacy = iso / "results.json"  # tmp 内（曾误写 cfg.STATE_DIR 泄漏进真实 output）
     write_json(legacy, mat.to_store_dict())  # 手写遗留 json（db 仍缺）
     assert legacy.exists() and not cfg.CATALOG_DB.exists()
 
