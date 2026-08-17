@@ -91,7 +91,7 @@ def run_trial(
 
     return {
         "study": study_name,
-        "trial": trial_idx,
+        "idx": trial_idx,
         "seed": seed,
         "params": config,
         "status": status,

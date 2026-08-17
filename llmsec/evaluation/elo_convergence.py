@@ -150,8 +150,11 @@ class ConvergenceMixin:
         round_elos = self._round_defender_elos.get(defender_name, [])
         current_elo = self.get_defender_elo(defender_name)
 
+        # max(1,·) 钳位对默认与显式传参一致生效：空攻击集（units 与 catalog 皆空）
+        # 时调用方会传 0，裸除会 ZeroDivisionError
         if total_methods is None:
-            total_methods = max(1, len(self.attacker_ratings))
+            total_methods = len(self.attacker_ratings)
+        total_methods = max(1, total_methods)
         if tested_count is None:
             tested_count = len(self.ground_truth_methods)
         coverage = tested_count / total_methods

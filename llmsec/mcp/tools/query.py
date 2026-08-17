@@ -8,7 +8,7 @@
   - compare_runs             对比多个 run 的指标
   - read_run_report          读单个 run 的完整报告 + 安全树
   - assess_run_findings      用阈值规则审查 run 的异常发现
-  - get_results_summary      R 矩阵（results.json）概要
+  - get_results_summary      R 矩阵（统一库 catalog.db）概要
   - elo_ranking              某模型的攻击方 Elo 排名
   - elo_security_boundary    某模型的安全边界（含收敛/置信度）
   - elo_find_surprises       双向意外（防御短板 / 强项）
@@ -131,7 +131,7 @@ def assess_run_findings(run_name: str) -> dict[str, Any]:
 
 
 def get_results_summary() -> dict[str, Any]:
-    """读取 R 矩阵（results.json）的概要信息。
+    """读取 R 矩阵（统一库 catalog.db）的概要信息。
 
     所有模型的评估观测（统一库 observations 表）。
 
@@ -162,7 +162,7 @@ def get_results_summary() -> dict[str, Any]:
 def elo_ranking(model: str) -> list[dict[str, Any]]:
     """从 R 矩阵派生指定模型的攻击方 Elo 排名（降序：高 Elo = 强攻击）。
 
-    Elo 从 R 矩阵纯函数回放派生（R 是唯一真相，可随时重算）。进程内按列指纹
+    Elo 从 R 矩阵纯函数回放派生（可随时重算）。进程内按列指纹
     缓存派生的 tracker（elo_access.elo_tracker_for），同一 MCP 会话连续调用不重复
     全量 derive_elo。
 
@@ -170,7 +170,8 @@ def elo_ranking(model: str) -> list[dict[str, Any]]:
         model: 目标模型名（R 矩阵中的一列）。
 
     Returns:
-        攻击方排名 dict 列表，每条含 attacker/elo/played/predicted 等字段。
+        攻击方排名 dict 列表，每条含 unit/elo/predicted 字段
+        （predicted=True 表示该 Elo 是未实测的预测值）。
     """
     return _elo_derive(model, lambda tracker: tracker.get_attacker_ranking())
 
@@ -365,6 +366,9 @@ def probe_targets(name: str | None = None) -> dict[str, Any]:
             return {"targets": [], "services": [], "error": "load_targets 失败，检查 .env"}
 
         if name:
+            if name not in targets_cfg:
+                return {"targets": [], "services": [],
+                        "error": f"目标 {name!r} 不存在（可用: {', '.join(targets_cfg) or '无'}）"}
             targets_cfg = {k: v for k, v in targets_cfg.items() if k == name}
 
         def _probe_one(n: str, cfg) -> dict[str, Any]:
@@ -407,7 +411,7 @@ def elo_suggest_next_pairing(
         n:     返回配对数（默认 5）。
 
     Returns:
-        配对建议列表，每条含 attacker / defender / elo_gap。
+        配对建议列表，每条为 {attacker, defender}（按信息增益排序的二元组）。
     """
     def _extract(tracker):
 

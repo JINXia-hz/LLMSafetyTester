@@ -128,7 +128,8 @@ class ELOTracker(ConvergenceMixin):
     ) -> list[dict]:
         """
         同步轮次 ELO 更新（Model B）：一个 round 的全部观测用**轮始快照**算 delta，
-        攻击方各自更新、防御方一次性加总。
+        攻击方按 unit 聚合（同 unit 多条观测 delta 求和后 √n 阻尼）、
+        防御方一次性加总。
 
         参数:
             matches: [(attacker_name, eval_score), ...]，一个 round 的全部（通常 batch_size 个）。
@@ -170,7 +171,7 @@ class ELOTracker(ConvergenceMixin):
             rec_id = record_ids[i] if record_ids and i < len(record_ids) else attacker_name
             computed[-1] = (*computed[-1], rec_id)
 
-        # 第二遍：写状态——攻击方各自更新、防御方一次性加总
+        # 第二遍：写状态——攻击方按 unit 聚合、防御方一次性加总
         # √N 缩放：N 场同基线(def_0)观测的有效独立数 ~ √N，防御方聚合步长除以 √N。
         # 蒙特卡洛验证：消过冲（误差 ~115→~13，优于逐场更新（历史 Model A，已移除）的 ~102）、覆盖率最优；
         # N=1 时 √1=1 退化为逐场更新。权威数字见 params.py 注释。
@@ -178,11 +179,26 @@ class ELOTracker(ConvergenceMixin):
         self.defender_ratings[defender_name] = new_def_elo
         self._defender_match_count[defender_name] = n_def_0 + len(matches)
 
+        # 攻击方同口径聚合：同轮同 unit 多条观测 delta 求和后按 √n 阻尼——
+        # 逐条写 att_0+delta 会让同 unit 后写覆盖先写（只有末条生效，观测静默丢失）。
+        # n=1 时与单条路径完全一致。
+        att_sum: dict[str, float] = {}
+        att_n: dict[str, int] = {}
+        for (att_name_i, _sc, _a0, _p, _e, _w, delta_att_i, _dd, _st, _rid) in computed:
+            att_sum[att_name_i] = att_sum.get(att_name_i, 0.0) + delta_att_i
+            att_n[att_name_i] = att_n.get(att_name_i, 0) + 1
+
         infos = []
-        for (attacker_name, eval_score, att_0, perf, expected_att, attacker_won, delta_att, delta_def, status_i, rec_id) in computed:
-            new_att_elo = att_0 + delta_att
+        for (attacker_name, eval_score, att_0, perf, expected_att, attacker_won, _delta_att, delta_def, status_i, rec_id) in computed:
+            new_att_elo = att_0 + att_sum[attacker_name] / (att_n[attacker_name] ** 0.5)
             self.attacker_ratings[attacker_name] = new_att_elo
-            self.ground_truth_methods.add(attacker_name)
+            if attacker_name not in self.ground_truth_methods:
+                self.ground_truth_methods.add(attacker_name)
+                # 预测残留清理：方法转正后 pred_source/std 不再有语义
+                # （predicted_* 只统计未测集合），残留只会让 _RIGOROUS 的
+                # "ground_truth" 成员看似可达
+                self.attacker_pred_source.pop(attacker_name, None)
+                self.attacker_pred_std.pop(attacker_name, None)
             self.predictor.update_ground_truth(attacker_name, new_att_elo)
             self._update_attacker_stats(attacker_name, eval_score, attacker_won)
 
@@ -486,8 +502,10 @@ class ELOTracker(ConvergenceMixin):
         )
         # S-0：按预测来源拆分——严格（svd_ridge/blend/unified_only/model_only）vs
         # 启发式（predicted_global/predicted_variant/predicted_suffix_variant/fallback），
-        # 使下游报告/看板能区分"模型预测的威胁"与"全局平均猜的威胁"
-        _RIGOROUS = {"svd_ridge", "blend", "unified_only", "model_only", "ground_truth"}
+        # 使下游报告/看板能区分"模型预测的威胁"与"全局平均猜的威胁"。
+        # 注意不含 ground_truth：本集合只统计未测方法，而未测方法的 source
+        # 不可能是 ground_truth（实测转正时 source 已被清除）
+        _RIGOROUS = {"svd_ridge", "blend", "unified_only", "model_only"}
         predicted_above = sum(
             1 for m, elo in self.attacker_ratings.items()
             if m not in tested_set and elo > def_elo

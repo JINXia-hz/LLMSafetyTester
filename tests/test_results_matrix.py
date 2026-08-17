@@ -28,7 +28,8 @@ def test_results_matrix_basics():
 
     assert mat.get("DAN", "qwen").eval_score == 3.0, "get 取值错误"
     assert set(mat.model_column("qwen").keys()) == {"DAN", "rot13"}, "model_column 错误"
-    assert set(mat.record_row("DAN").keys()) == {"qwen", "gpt"}, "record_row 错误"
+    assert {m for m in mat.all_models() if mat.get("DAN", m) is not None} == {"qwen", "gpt"}, \
+        "记录行跨模型读取错误"
     assert mat.tested_records("gpt") == {"DAN"} and mat.n_for_model("gpt") == 1, \
         "覆盖率统计错误"
     # 时序：gpt 列只有 DAN(ts=1)；qwen 列应按 ts 升序

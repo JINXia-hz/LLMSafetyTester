@@ -197,7 +197,7 @@ def _default_sources() -> dict[str, Callable[[], list[str]]]:
     return {
         "ls_resources": lambda: list(LS_RESOURCES),
         "cache_categories": lambda: list(CACHE_CATEGORIES),
-        "verbs": lambda: [c.name for c in _COMMANDS if not c.slash] + [c.name for c in _COMMANDS if c.slash],
+        "verbs": lambda: [c.name for c in _COMMANDS],
     }
 
 
@@ -400,7 +400,10 @@ def parse(line: str) -> Parsed:
                 continue
             if opt.kind == "bool":
                 if eq and inline.lower() not in ("true", "1"):
+                    # 报错后不置 True——"报错但照写值"会在重构拿掉 errors 拦截时变真 bug
                     errors.append(f"--{fname} 是布尔开关（不接受 = 值）")
+                    i += 1
+                    continue
                 values[opt.long] = True
                 i += 1
                 continue
@@ -673,11 +676,3 @@ def complete(
     cands = _source_values(arg.completer, src)
     items = [Completion(c + " ", c, arg.help) for c in cands if not partial or c.lower().startswith(pkey)]
     return done(items, hint)
-
-
-def hint(line: str, sources: Mapping[str, Callable[[], list[str]]] | None = None) -> tuple[str, bool]:
-    """实时提示行：(文案, 是否错误)。"""
-    if not line.strip():
-        return "命令 Tab 补全 · / 前缀为 TUI 特制（/agent）· help 查看全部", False
-    r = complete(line, len(line), sources)
-    return r.hint, r.hint_error

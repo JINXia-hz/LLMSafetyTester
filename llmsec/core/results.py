@@ -1,5 +1,5 @@
 """
-core.results — 结果矩阵 R（唯一真相存储）
+core.results — 结果矩阵 R（原始观测存储）
 
 定位（P7 去神圣化后）：
   结果矩阵 R[record][model] = **不可重算的原始观测**——Elo、预测器、收敛
@@ -17,9 +17,8 @@ schema v2（簇粒度）：
   R 观测存于统一库 output/state/catalog.db 的 observations 表（P7：与目录
   登记同库同事务域；work-dir 卫星库 <wd>/catalog.db）。并发写由单事务保证——
   此前的手写文件锁 RMW、.bak/.corrupt.bak 轮转机器已退役（F-3/F1/B1 的
-  语义由 SQLite 事务与 quick_check 承接）。
-  显式 .json 路径的 save/load = 遗留 JSON 快照格式（人读友好的导出产物，
-  原 v1 method 键纪元的 results.method-era.bak 仍留档取证）。
+  语义由 SQLite 事务与 quick_check 承接）。遗留 results.json 读写通道
+  已整体删除（本项目不做版本兼容）。
 
 本模块只负责存储与访问；Elo 派生见 evaluation.elo.derive_elo；
 预测器派生见 evaluation.predictors（cold_start / blend）。
@@ -33,7 +32,6 @@ from pathlib import Path
 from llmsec.core.logging import get_logger
 
 logger = get_logger(__name__)
-_SCHEMA_VERSION = 2
 
 
 # runner_report.json 三段式结构的标准字段路径。
@@ -89,44 +87,15 @@ class MatchResult:
     ts: object = None             # 时序键（数字/字符串）；排序用，可为 None
     extra: dict = field(default_factory=dict)  # unit/round/judge 细节等可选附注
 
-    def to_dict(self) -> dict:
-        d = {"eval_score": self.eval_score}
-        if self.status:
-            d["status"] = self.status
-        if self.ts is not None:
-            d["ts"] = self.ts
-        if self.extra:
-            d["extra"] = self.extra
-        return d
-
-    @classmethod
-    def from_store(cls, record: str, model: str, d: dict) -> MatchResult:
-        # R-3 修复：eval_score 用 .get 防御半残 JSON 缺该键（其他字段都已用 .get，唯此处不一致）
-        score = d.get("eval_score")
-        if score is None:
-            raise ValueError(f"记录缺 eval_score 字段: record={record} model={model}")
-        try:
-            score = float(score)
-        except (TypeError, ValueError) as e:
-            raise ValueError(f"eval_score 非 float: record={record} model={model}: {e}")
-        return cls(
-            record=record,
-            model=model,
-            eval_score=score,
-            status=str(d.get("status", "")),
-            ts=d.get("ts"),
-            extra=dict(d.get("extra", {})),
-        )
-
 
 class ResultsMatrix:
     """
     结果矩阵 R：record（实测记录 id）→ model → MatchResult。
 
-    - upsert 写入；get / model_column / record_row 读取。
+    - upsert 写入；get / model_column 读取。
     - tested_records(model) / tested_units(model) / n_for_model(model) 支撑覆盖率与续跑。
     - ordered_results(model) 按 ts 返回该模型的时序结果，供 Elo 回放。
-    - save / load 幂等持久化（version 2；v1 method 键文件 load 时归档重建）。
+    - save / load 幂等持久化（列删除走 rstore.remove_models，单事务）。
     """
 
     def __init__(self, units: list[str] | None = None, models: list[str] | None = None):
@@ -182,10 +151,6 @@ class ResultsMatrix:
             parts.append(seg)
         return ",".join(parts)
 
-    def record_row(self, record: str) -> dict[str, MatchResult]:
-        """返回 {model: MatchResult}——该记录行跨全部模型的结果。"""
-        return dict(self._r.get(record, {}))
-
     def tested_records(self, model: str) -> set[str]:
         """该模型已真实评估的记录集合（原始观测口径）。"""
         return {m for m, col in self._r.items() if model in col}
@@ -232,41 +197,11 @@ class ResultsMatrix:
             return (1, str(t))
         return sorted(self.model_column(model).values(), key=_key)
 
-    # ---------- 删除 ----------
-    def remove_model(self, model: str) -> int:
-        """删除某模型列（全部观测）。返回删除的记录条数。
-
-        列删除后 ``column_payload(model) → None``，下游 elo_cache 指纹失效、
-        ``elo_state_for`` 返回空，符合现有指纹失效机制（无需手动清缓存）。
-        """
-        n = 0
-        for col in self._r.values():
-            if model in col:
-                del col[model]
-                n += 1
-        # 清空空 record 行 + 从 _models 移除
-        self._r = {m: col for m, col in self._r.items() if col}
-        self._models = [m for m in self._models if m != model]
-        return n
-
     # ---------- 持久化 ----------
-    def to_store_dict(self) -> dict:
-        """遗留 results.json 格式的完整 dict（v2）——快照导出 / verify 对账用。"""
-        return {
-            "version": _SCHEMA_VERSION,
-            "units": self._units,
-            "models": self.all_models(),
-            "results": {
-                m: {model: res.to_dict() for model, res in col.items()}
-                for m, col in self._r.items()
-            },
-        }
-
     def save(self, filepath: str | Path | None = None) -> Path:
         """持久化到 R 真相库（单事务全量覆写；并发安全由 BEGIN IMMEDIATE 保证）。
 
-        filepath 缺省 = 统一库（storage.db.catalog_db）。人读 JSON 导出走
-        ``rstore.export_legacy_json``（显式工具，不再是隐式路径路由）。
+        filepath 缺省 = 统一库（storage.db.catalog_db）。
         """
         from llmsec.storage import rstore  # 函数内导入防环（rstore 反向引用本类）
         return rstore.save_matrix(self, filepath)

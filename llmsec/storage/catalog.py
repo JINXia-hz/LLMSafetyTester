@@ -26,7 +26,7 @@ import re
 import time
 from pathlib import Path
 
-from sqlmodel import or_, select
+from sqlmodel import select
 
 from llmsec.core import config as _config
 from llmsec.core.io import read_json
@@ -204,12 +204,11 @@ def reconcile_runs(runs_root: Path | str | None = None, *, db_path=None, include
     """
     root = Path(runs_root) if runs_root is not None else Path(_config.RUNS_DIR)
     dbp = Path(db_path) if db_path is not None else db.db_for(root)
-    if not root.exists():
+    # is_dir 检查在开 session 之前——root 是文件时不再白建卫星库文件
+    if not root.is_dir():
         return {"rescanned": 0, "removed": 0, "adopted": 0}
     with db.session(dbp) as s:
         known: dict[str, float] = {r.name: r.mtime for r in s.exec(select(Run)).all()}
-    if not root.is_dir():
-        return {"rescanned": 0, "removed": 0, "adopted": 0}
 
     cands = _scan_candidates(root, satellite=_is_satellite(root), include_empty=include_empty)
     rescanned = adopted = 0
@@ -252,12 +251,8 @@ def query_runs(
     *,
     runs_root: Path | str | None = None,
     db_path=None,
-    target: str | None = None,
     has_report: bool | None = None,
     has_artifact: bool | None = None,
-    since: str | None = None,  # ISO 日期 YYYY-MM-DD（含），按 batch 前缀
-    until: str | None = None,
-    limit: int | None = None,
     reconcile: bool = True,
 ) -> list[Run]:
     """查询 run 登记（name 倒序，与旧 discover 实现排序一致）。默认先对账。
@@ -272,19 +267,11 @@ def query_runs(
     if reconcile:
         reconcile_runs(root, db_path=dbp)
     q = select(Run)
-    if target:
-        q = q.where(or_(Run.target == target, Run.target_model == target))
     if has_report is not None:
         q = q.where(Run.has_report == has_report)
     if has_artifact is not None:
         q = q.where(Run.has_artifact == has_artifact)
-    if since:
-        q = q.where(Run.batch >= since)
-    if until:
-        q = q.where(Run.batch <= until + "_zz")
     q = q.order_by(Run.name.desc())
-    if limit:
-        q = q.limit(limit)
     with db.session(dbp) as s:
         return list(s.exec(q).all())
 
@@ -302,8 +289,7 @@ def get_run(name: str, *, runs_root: Path | str | None = None, db_path=None) -> 
 # ============================================================
 def predictor_hit(key: str, size: int = 0) -> None:
     """命中登记（upsert：last_hit=now, hits+1）；行不存在则建（size 已知时带上）。"""
-    import time as _time
-    now = _time.time()
+    now = time.time()
     with db.tx() as s:
         row = s.get(PredictorCache, key)
         if row is None:
@@ -318,8 +304,7 @@ def predictor_hit(key: str, size: int = 0) -> None:
 
 def predictor_saved(key: str, size: int) -> None:
     """新缓存落盘登记（fit 后调用）。"""
-    import time as _time
-    now = _time.time()
+    now = time.time()
     with db.tx() as s:
         row = s.get(PredictorCache, key)
         if row is None:
@@ -373,17 +358,6 @@ def get_task(task_id: str, *, tasks_dir: Path | str | None = None, db_path=None)
         return s.get(Task, task_id)
 
 
-def remove_run(name: str, *, db_path=None) -> bool:
-    """删登记行（run 目录被软删/清理后同步库）。返回是否删到了。"""
-    dbp = Path(db_path) if db_path is not None else db.catalog_db()
-    with db.tx(dbp) as s:
-        row = s.get(Run, name)
-        if row is None:
-            return False
-        s.delete(row)
-        return True
-
-
 def rebuild_runs(runs_root: Path | str | None = None, *, db_path=None, include_empty: bool = True) -> dict:
     """全量重建 runs 索引（清空该库 runs 行后重扫；storage reindex 用）。"""
     root = Path(runs_root) if runs_root is not None else Path(_config.RUNS_DIR)
@@ -405,7 +379,7 @@ def upsert_trial_record(study: str, rec: dict) -> None:
     rec 形状 = run_trial 返回 + study 补登记（trial/idx/target/seed/search_fp/
     search_params）；同 (study, idx) 覆盖。
     """
-    idx = rec.get("trial", rec.get("idx"))
+    idx = rec.get("idx")
     if idx is None:
         return
     now = time.time()
@@ -445,34 +419,6 @@ def query_trials(study: str | None = None, *, db_path=None) -> list[Trial]:
 # ============================================================
 # tasks：登记 / 对账 / 查询（跨进程真相仍是 meta.json）
 # ============================================================
-
-
-def register_task(
-    task_id: str,
-    kind: str,
-    *,
-    cmd: str | None = None,
-    pid: int | None = None,
-    status: str = "queued",
-    log_path: Path | str | None = None,
-    started_at: str | None = None,
-    meta: dict | None = None,
-    db_path=None,
-) -> None:
-    row = Task(
-        task_id=task_id,
-        kind=kind,
-        cmd=cmd,
-        pid=pid,
-        status=status,
-        log_path=str(log_path) if log_path else None,
-        started_at=started_at,
-        meta=meta,
-        registered_at=time.time(),
-        updated_at=time.time(),
-    )
-    with db.tx(db.catalog_db() if db_path is None else db_path) as s:
-        s.merge(row)
 
 
 def update_task(
@@ -577,7 +523,9 @@ def reconcile_tasks(tasks_dir: Path | str | None = None, *, db_path=None) -> dic
                     task_id=tid,
                     kind=str(data.get("kind") or tid.split("-", 1)[0]),
                     cmd=data.get("cmd"),
-                    pid=data.get("pid") if isinstance(data.get("pid"), int) else None,
+                    # bool 是 int 子类：JSON true 会入库成 pid=1，显式排除
+                    pid=data.get("pid") if isinstance(data.get("pid"), int)
+                    and not isinstance(data.get("pid"), bool) else None,
                     status=str(data.get("status") or "unknown"),
                     log_path=str(tdir / f"{tid}.log"),
                     started_at=data.get("started_at"),
@@ -591,8 +539,6 @@ def reconcile_tasks(tasks_dir: Path | str | None = None, *, db_path=None) -> dic
 
 def query_tasks(
     *,
-    kinds: tuple[str, ...] | None = None,
-    active_only: bool = False,
     limit: int | None = None,
     db_path=None,
     tasks_dir: Path | str | None = None,
@@ -608,10 +554,6 @@ def query_tasks(
         reconcile_tasks(tasks_dir=tasks_dir, db_path=dbp)
     with db.session(dbp) as s:
         q = select(Task)
-        if kinds:
-            q = q.where(Task.kind.in_(list(kinds)))
-        if active_only:
-            q = q.where(Task.status.in_(["queued", "running"]))
         q = q.order_by(Task.registered_at.desc())
         if limit:
             q = q.limit(limit)

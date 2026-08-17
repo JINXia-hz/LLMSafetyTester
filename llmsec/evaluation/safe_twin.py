@@ -36,7 +36,7 @@ from llmsec.core.config import (
     TargetConfig,
     resolve_defender_name,
 )
-from llmsec.core.io import append_jsonl, load_done_ids, read_jsonl, write_json
+from llmsec.core.io import append_jsonl, iter_jsonl, read_jsonl, write_json
 from llmsec.core.llm import (
     create_openai_client,
     extract_message_text,
@@ -204,8 +204,15 @@ def append_twin_entry(entry: dict) -> None:
         append_jsonl(path, entry)
 
 
-def make_twin_entry(rec: dict, original_id, clean_prompt: str, twin: dict) -> dict:
-    """构造 safe_twins.jsonl 落盘 entry（generate_all_twins 与 allergy_phase 共用）。"""
+def make_twin_entry(rec: dict, original_id, clean_prompt: str, twin: dict,
+                    *, key_space: str = "method") -> dict:
+    """构造 safe_twins.jsonl 落盘 entry（generate_all_twins 与 allergy_phase 共用）。
+
+    key_space 区分两种键空间（同一 append-only 文件混存，读侧必须按空间过滤）：
+      "method"——CLI 批量生成：original_id=攻击集记录 id、method=原始方法名；
+      "unit"  ——allergy_phase：original_id/method=unit 代理记录（簇粒度）。
+    旧条目无该字段，按 "method" 空间解读。
+    """
     from llmsec.core.taxonomy import normalize_harm_type
 
     return {
@@ -216,6 +223,7 @@ def make_twin_entry(rec: dict, original_id, clean_prompt: str, twin: dict) -> di
         "original_prompt": clean_prompt[:PREVIEW_PROMPT],
         "safe_prompt": twin["safe_prompt"],
         "replacement": twin["replacement"],
+        "key_space": key_space,
     }
 
 
@@ -230,8 +238,10 @@ def generate_all_twins():
 
     records = read_jsonl(input_file)
 
-    # 加载已生成的孪生（断点续传）
-    done_ids = load_done_ids(twin_file, key="original_id")
+    # 加载已生成的孪生（断点续传；只认 method 空间的条目——unit 空间的
+    # original_id 是簇 id，与记录 id 不同空间，混算会误跳过/误命中）
+    done_ids = {row.get("original_id") for row in iter_jsonl(twin_file)
+                if row.get("key_space", "method") == "method" and row.get("original_id")}
     if done_ids:
         logger.info(f"📋 已有 {len(done_ids)} 条安全孪生，将跳过\n")
 
@@ -325,7 +335,10 @@ def evaluate_allergy(*, twins=None, client=None, judge=None, result_file=None):
             logger.error(f"❌ 安全孪生集不存在: {twin_file}")
             logger.info("   请先运行 safe_twin.py (不加 --evaluate)")
             sys.exit(1)
-        twins = read_jsonl(twin_file)
+        # 只测 method 空间（prompt 级孪生）——unit 空间是 allergy_phase 的簇代理
+        # 记录，键粒度不同，混测会把簇级孪生当普通孪生评估
+        twins = [t for t in read_jsonl(twin_file)
+                 if t.get("key_space", "method") == "method"]
 
     logger.info(f"📋 将测试 {len(twins)} 条安全孪生\n")
 

@@ -459,8 +459,14 @@ def update_elo(all_results: list[dict], summary: dict,
         group_list = list(group)
         matches = [(r.get("method", "unknown"), r.get("eval_score", 0)) for r in group_list]
         statuses = [r.get("status", "") for r in group_list]
-        tracker.update_round(defender_name, matches, round_idx=rd, statuses=statuses)
-    tracker.record_round_end(defender_name)
+        # R 行键 = 实测记录 id（与 attack_phase/derive_elo 同口径）。缺省回退方法名时
+        # 同 method 多条 prompt 在 R 内互相覆盖（upsert 按行键），观测静默丢失。
+        record_ids = [str(r.get("id") or r.get("method", "unknown")) for r in group_list]
+        tracker.update_round(defender_name, matches, round_idx=rd, statuses=statuses,
+                             record_ids=record_ids)
+        # 每轮一个轨迹点（--repeat N>1 时 N 个点，收敛判定的 n_rounds 才有效）——
+        # 与 derive_elo / attack_phase 的每轮 record_round_end 同口径
+        tracker.record_round_end(defender_name)
     publish_tracker(tracker, defender_name)  # R 唯一真相 + 派生缓存
     elo_summary = tracker.get_summary()
     elo_boundary = tracker.compute_security_boundary(defender_name)

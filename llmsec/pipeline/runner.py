@@ -76,9 +76,6 @@ TARGET_MODEL = _tcfg.model
 GENERATOR_API_KEY = _gcfg.api_key
 GENERATOR_BASE_URL = _gcfg.base_url
 
-# 目标后端类型（路由协议，非连接配置）
-TARGET_TYPE = os.getenv("TARGET_TYPE", "openai")
-
 
 # ============================================================
 # Phase 2: 过敏检测

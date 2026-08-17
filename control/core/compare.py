@@ -95,16 +95,6 @@ def _resolve_run_dir(run_name: str) -> Path | None:
 # ============================================================
 # 单 run 指标提取
 # ============================================================
-def extract_elo_fields(report: dict) -> dict:
-    """从 runner_report 抽取 Elo/攻击/过敏的核心指标字段。
-
-    storage 重构：实现收敛到 ``extract_report_metrics``（本函数是其严格超集
-    的反向兼容名，review/compare 既有引用零改动）。额外多出的 rounds/drift
-    等字段对旧调用方是纯增量。
-    """
-    return extract_report_metrics(report or {})
-
-
 def run_metrics(run_name: str) -> dict | None:
     """提取单个 run 的对比指标（轻量，只读 runner_report.json）。"""
     run_dir = _resolve_run_dir(run_name)
@@ -120,7 +110,7 @@ def run_metrics(run_name: str) -> dict | None:
         "run": run_name,
         "target_model": rep.get("target_model"),
         "security_level": rep.get("security_level", "inconclusive"),
-        **extract_elo_fields(rep),
+        **extract_report_metrics(rep),
         "total_methods": elo.get("total_methods"),
         "methods_above_boundary": elo.get("methods_above_boundary"),
         "rounds": attack.get("rounds"),

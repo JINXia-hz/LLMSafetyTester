@@ -8,8 +8,7 @@ SQL/ORM 只存在于 storage 包内）。本模块使 control 内部代码从
 用法规约：
   - run 发现/解析一律走 ``query_runs`` / ``get_run``（先 ``reconcile_runs``
     对账，目录库是可重建的派生索引）；
-  - runner_report 指标提取一律走 ``extract_report_metrics``（control 原私有
-    ``extract_elo_fields`` 的超集，字段单一来源）；
+  - runner_report 指标提取一律走 ``extract_report_metrics``（字段单一来源）；
   - 不要在 control 内 import sqlite3/sqlalchemy/sqlmodel（AST 守卫拦截）。
 """
 
@@ -48,10 +47,8 @@ from llmsec.storage.contract import (
     query_runs,
     query_tasks,
     query_trials,
-    queued_plans,
     reconcile_runs,
     register_run,
-    remove_run,
     reset_ctl_plans,
     reset_gazette,
     reset_queue,
@@ -72,10 +69,10 @@ __all__ = [
     "append_event", "gazette_events", "gazette_meta", "list_gazette_meta", "reset_gazette",
     "save_ctl_plan", "get_ctl_plan", "list_ctl_plans", "reset_ctl_plans",
     "clear_ticket", "clear_tickets_for_plan", "get_ticket", "reset_tickets", "save_ticket",
-    "enqueue_plan", "queued_plans", "mark_queue_running", "finish_queue_item", "reset_queue",
+    "enqueue_plan", "mark_queue_running", "finish_queue_item", "reset_queue",
     "save_workspace", "get_workspace", "list_workspaces", "delete_workspace_row",
     "append_workspace_gc", "workspace_gc_log",
     "save_env_snapshot", "list_env_snapshots", "get_env_snapshot", "delete_env_snapshot",
     "extract_report_metrics", "get_run", "query_runs", "query_tasks",
-    "query_trials", "reconcile_runs", "register_run", "remove_run",
+    "query_trials", "reconcile_runs", "register_run",
 ]

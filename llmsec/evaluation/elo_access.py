@@ -219,10 +219,14 @@ def publish_tracker(tracker: ELOTracker, model: str) -> None:
     R = ResultsMatrix.load()  # 读回完整矩阵（指纹/派生口径不变）
 
     fp = _model_fingerprint(R, model)
+    if fp is None:
+        # 模型列为空（如全部观测被过滤成 judge_error 后仍 publish）：
+        # fp=None 的缓存行读取侧永不命中（elo_state_for 对 None 直接返回 {}),
+        # 写下去只是垃圾行
+        return
     # M-2：ratings/ground_truth 用 R 派生态（同键多次观测以末值为准），
     # 不直接拷 live tracker 的累积态
     derived = derive_elo(R, model)
-    # M-2：ratings/ground_truth 用 R 派生态（同键多次观测以末值为准）
     _cache_store(model, fp, {
         "attacker_ratings": dict(derived.attacker_ratings),
         "defender_ratings": dict(derived.defender_ratings),

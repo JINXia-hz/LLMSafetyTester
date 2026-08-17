@@ -28,6 +28,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 # ============================================================
@@ -42,7 +43,7 @@ _DEDUP_WINDOW = 15 * 60  # 15 分钟
 _WEBHOOK_TIMEOUT = 10
 
 # 单例线程池（惰性创建，避免 import 期开线程）
-_executor: None = None
+_executor: ThreadPoolExecutor | None = None
 _executor_lock = threading.Lock()
 
 # 去抖状态：{title_hash: last_emit_ts}

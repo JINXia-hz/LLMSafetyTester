@@ -139,7 +139,7 @@ def test_orchestration_mock():
             "attack_phase": {"asr": 0.1, "rounds": 5, "total_tested": 10},
             "allergy": {},
         }), encoding="utf-8")
-        return {"study": study_name, "trial": trial_idx, "seed": seed, "params": config,
+        return {"study": study_name, "idx": trial_idx, "seed": seed, "params": config,
                 "status": "success", "metrics": {"conv_rounds": cr, "defender_elo": 1600.0 + cr},
                 "work_dir": str(work_dir)}
 

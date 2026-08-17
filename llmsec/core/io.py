@@ -71,10 +71,13 @@ def read_jsonl(path) -> list[dict]:
 def iter_jsonl(path) -> Iterator[dict]:
     """逐行迭代 JSONL，坏行（JSON 解析失败）跳过并记 warning。文件不存在时不产出任何行。"""
     path = Path(path)
-    if not path.exists():
+    try:
+        f = open(path, encoding="utf-8")
+    except FileNotFoundError:
+        # exists→open 之间文件被并发删除（gc/软删）时不抛，与"不存在=无行"语义一致
         return
     bad_count = 0
-    with open(path, encoding="utf-8") as f:
+    with f:
         for _lineno, line in enumerate(f, 1):
             line = line.strip()
             if not line:
@@ -299,7 +302,9 @@ def save_artifact(path, obj, *, atomic: bool = True, backup: bool = False) -> No
         try:
             joblib.dump(obj, tmp)
             _replace_with_retry(tmp, path)
-        except OSError:
+        except BaseException:
+            # 与 write_json 同口径捕 BaseException：joblib 序列化失败（pickle
+            # TypeError 等，非 OSError）也要清 tmp，否则遗留 *.tmp.* 垃圾
             try:
                 tmp.unlink()
             except OSError:

@@ -93,9 +93,10 @@ class TestRebindCoverage:
         wd = tmp_path / "wd"
         rebind_to_workdir(wd)
 
-        # 预置 work-dir 孪生：method 键 = 排行榜里的 unit 名
+        # 预置 work-dir 孪生：method 键 = 排行榜里的 unit 名（unit 键空间）
         twin_file = wd / "state" / "safe_twins.jsonl"
-        write_jsonl(str(twin_file), [{"method": "u1", "safe_prompt": "cached twin"}])
+        write_jsonl(str(twin_file), [{"method": "u1", "safe_prompt": "cached twin",
+                                      "key_space": "unit"}])
 
         tracker = ELOTracker()
         tracker.update_round("def", [("u1", 3.0)])

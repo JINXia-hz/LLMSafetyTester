@@ -241,12 +241,12 @@ def test_tasks_reconcile_lifecycle(iso, tmp_path, monkeypatch):
 
 def test_upsert_trial_record_roundtrip(iso):
     from llmsec.storage import catalog
-    catalog.upsert_trial_record("s1", {"trial": 0, "work_dir": "/tmp/t0", "target": "m",
+    catalog.upsert_trial_record("s1", {"idx": 0, "work_dir": "/tmp/t0", "target": "m",
                                        "seed": "42", "status": "running"})
-    catalog.upsert_trial_record("s1", {"trial": 1, "work_dir": "/tmp/t1", "target": "m",
+    catalog.upsert_trial_record("s1", {"idx": 1, "work_dir": "/tmp/t1", "target": "m",
                                        "seed": "43", "status": "success",
                                        "metrics": {"conv_rounds": 5}})
-    catalog.upsert_trial_record("s1", {"trial": 0, "work_dir": "/tmp/t0",
+    catalog.upsert_trial_record("s1", {"idx": 0, "work_dir": "/tmp/t0",
                                        "status": "success", "metrics": {"conv_rounds": 3}})
     rows = contract.query_trials("s1")
     assert [r.idx for r in rows] == [0, 1]

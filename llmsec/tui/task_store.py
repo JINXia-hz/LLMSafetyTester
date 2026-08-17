@@ -88,7 +88,7 @@ def _pid_alive(pid: int | None) -> bool:
 
 
 def _kill_pid(pid: int) -> bool:
-    """跨进程强杀（win32 taskkill /T 连子进程树一起；posix SIGTERM→SIGKILL）。"""
+    """跨进程强杀（win32 taskkill /T 连子进程树一起；posix SIGTERM 宽限后 SIGKILL）。"""
     if sys.platform == "win32":
         import subprocess
 
@@ -100,12 +100,19 @@ def _kill_pid(pid: int) -> bool:
         )
         return r.returncode == 0
     import signal
+    import time as _time
 
     try:
         os.kill(pid, signal.SIGTERM)
-        return True
     except OSError:
         pass
+    # SIGTERM 宽限（对齐 cancel_task 文案的 5s）：进程自行清理收尾，仍存活才 SIGKILL
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True
+        _time.sleep(0.1)
     try:
         os.kill(pid, signal.SIGKILL)
         return True
@@ -238,7 +245,7 @@ class TaskStore:
                     started_at=datetime.fromtimestamp(mtime).isoformat(timespec="seconds"),
                 )
             )
-        return out[:_EXTERNAL_MAX]
+        return out
 
     def _replay(self, task_id: str, kind: str) -> EvalProgressState:
         """增量回放 progress.jsonl：从上次 offset 读新完整行，逐条 apply_record。"""
@@ -271,7 +278,9 @@ class TaskStore:
                 return st
             chunk = chunk[: nl + 1]
             consumed = nl + 1
-        self._offsets[task_id] = self._offsets.get(task_id, 0) + consumed
+        # 基值用 off（截断分支已重置为 0）——用旧存量 offset 会在截断后
+        # 越积越大，导致反复全量重放、增长后跳过未消费行
+        self._offsets[task_id] = off + consumed
         for line in chunk.decode("utf-8", errors="replace").splitlines():
             line = line.strip()
             if not line:
@@ -380,7 +389,7 @@ def task_summary(snap: TaskSnapshot) -> str:
 
 
 # ============================================================
-# 表单数据源
+# 命令补全数据源
 # ============================================================
 def attack_files() -> list[str]:
     """attacks/ 目录下可选攻击集（文件名）。"""

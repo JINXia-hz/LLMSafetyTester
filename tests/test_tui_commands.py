@@ -1,4 +1,4 @@
-"""commands.py 转译层单测——parse / complete / hint / fuzzy 纯逻辑。
+"""commands.py 转译层单测——parse / complete / fuzzy 纯逻辑。
 
 动作分发与后端映射在 test_tui_console.py（run_test 环境）覆盖；
 本文件只测语法面：分词、旗标类型、资源校验、纠错阈值、补全位置感知。
@@ -9,7 +9,6 @@ from __future__ import annotations
 from llmsec.tui.commands import (
     REGISTRY,
     complete,
-    hint,
     parse,
     strong_match,
     usage,
@@ -298,21 +297,9 @@ class TestComplete:
 
 
 # ============================================================
-# hint 与 usage
+# usage
 # ============================================================
-class TestHint:
-    def test_empty(self):
-        text, err = hint("")
-        assert not err and "Tab" in text
-
-    def test_unknown(self):
-        text, err = hint("zzzz")
-        assert err
-
-    def test_known(self):
-        text, err = hint("eval -t glm4")
-        assert not err and "红队评估" in text
-
+class TestUsage:
     def test_usage_shape(self):
         u = usage(REGISTRY["compare"])
         assert u.startswith("compare <a> <b>")

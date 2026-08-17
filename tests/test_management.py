@@ -79,39 +79,46 @@ def _make_run(runs_dir: Path, ts: str, target: str, *, has_report=True, asr=None
 
 
 # ============================================================
-# results.remove_model / remove_record
+# rstore.remove_models：删模型列（生产路径）
 # ============================================================
 class TestRemoveMethods:
-    def test_remove_model_deletes_column_and_cleans_empty_rows(self):
+    def test_remove_models_deletes_column_and_cleans_empty_rows(self, iso_output):
+        from llmsec.storage import rstore
+
         R = ResultsMatrix()
         R.upsert("r1", "modelA", 1.0)
         R.upsert("r2", "modelA", 0.5)
         R.upsert("r1", "modelB", -1.0)
+        R.save()
         assert R.n_for_model("modelA") == 2
 
-        n = R.remove_model("modelA")
+        n = rstore.remove_models(["modelA"])
         assert n == 2
-        assert R.n_for_model("modelA") == 0
-        assert "modelA" not in R.all_models()
-        # r2 只剩 modelA → 删后整行应被清空（record_row 为空）
-        assert R.record_row("r2") == {}
+        R2 = ResultsMatrix.load()
+        assert R2.n_for_model("modelA") == 0
+        assert "modelA" not in R2.all_models()
+        # r2 只剩 modelA → 删后整行应被清空
+        assert R2.get("r2", "modelA") is None
         # r1 还有 modelB
-        assert R.get("r1", "modelB") is not None
+        assert R2.get("r1", "modelB") is not None
 
-    def test_column_payload_none_after_remove_triggers_elo_invalidation(self):
+    def test_column_payload_none_after_remove_triggers_elo_invalidation(self, iso_output):
         """删 model 列后 column_payload 返回 None → elo_cache 指纹失效（契约验证）。"""
+        from llmsec.storage import rstore
+
         R = ResultsMatrix()
         R.upsert("r1", "mA", 1.0, ts=1)
-        assert R.column_payload("mA") is not None
-        R.remove_model("mA")
-        assert R.column_payload("mA") is None  # 指纹变 None → elo_state_for 返回 {}
+        R.save()
+        assert ResultsMatrix.load().column_payload("mA") is not None
+        rstore.remove_models(["mA"])
+        assert ResultsMatrix.load().column_payload("mA") is None  # 指纹变 None → elo_state_for 返回 {}
 
 
 # ============================================================
 # runs: discover / filter / size
 # ============================================================
 class TestRunsList:
-    def test_discover_runs_with_size(self, iso_output, monkeypatch):
+    def test_discover_runs_with_size(self, iso_output):
         from llmsec.management import runs as runs_mod
         runs_dir = cfg.RUNS_DIR
         _make_run(runs_dir, "2026-08-11_120000", "modelA", asr=0.5)
@@ -463,7 +470,7 @@ class TestSnapshotSources:
 
 
 # ============================================================
-# caches：list/clean 子命令、legacy 判定、未知类别告警
+# caches：list/clean 子命令、未知类别告警
 # ============================================================
 class TestCachesCommands:
     def test_cmd_list_json_and_human(self, iso_output, capsys):
@@ -477,16 +484,35 @@ class TestCachesCommands:
         out = capsys.readouterr().out
         assert rc2 == 0 and "predictors" in out and "绝不清" in out, "❌4 人读模式应有表格与提示"
 
-    def test_legacy_predictor_split(self, iso_output):
-        """predictors 按现行前缀 blend_v2_ 判活；无版本盐的旧键归 predictors_legacy。"""
+    def test_prune_uses_registered_last_hit_not_mtime(self, iso_output):
+        """P8 真 LRU：淘汰按 predictor_cache.last_hit（命中登记），不按文件 mtime。
+
+        回归：原 prune 按 mtime 排序，而命中已不再 touch 文件——文件复制/杀软
+        扫描会扰动 mtime，导致高频命中的活缓存被误删、从未命中的新文件被保留。
+        """
+        import os as _os
+        import time as _time
+
         from llmsec.management import caches
-        (cfg.PREDICTORS_DIR / "blend_v2_abc.pkl").write_bytes(b"x" * 16)
-        (cfg.PREDICTORS_DIR / "blend_abc.pkl").write_bytes(b"y" * 16)
-        live = caches.category_summary("predictors")
-        legacy = caches.category_summary("predictors_legacy")
-        assert live["file_count"] == 2, "❌1 predictors 应含新旧全部 pkl"
-        assert legacy["file_count"] == 1, "❌2 legacy 只应含 blend_ 旧前缀"
-        assert legacy["rebuildable"] == "disposable", "❌3 legacy 应标记 disposable"
+        from llmsec.storage import catalog
+
+        old = cfg.PREDICTORS_DIR / "a_few_hit.pkl"
+        new = cfg.PREDICTORS_DIR / "b_hot.pkl"
+        old.write_bytes(b"x" * 16)
+        new.write_bytes(b"y" * 16)
+        # mtime 故意相反：冷缓存文件更"新"（模拟 mtime 被扰动）
+        now = _time.time()
+        _os.utime(new, (now - 1000, now - 1000))
+        _os.utime(old, (now, now))
+        catalog.predictor_saved("a_few_hit", 16)
+        catalog.predictor_saved("b_hot", 16)
+        catalog.predictor_hit("b_hot", 16)  # 只有热缓存被命中过
+
+        plan = caches.plan_prune_predictors(1)
+        evicted = {Path(i.path).name for i in plan.items}
+        assert evicted == {"a_few_hit.pkl"}, \
+            f"❌1 应淘汰命中最旧的，实际淘汰 {evicted}（mtime 语义未切换？）"
+        assert plan.extra["kept"] == 1 and plan.extra["total"] == 2
 
     def test_model_state_paths_exact(self, iso_output):
         """model_state 精确点名 probes.json + prescreen_model.joblib（P8 新类别）。"""

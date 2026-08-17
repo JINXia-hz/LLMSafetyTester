@@ -44,7 +44,7 @@ def _resolve_results_path(spec: str) -> Path:
       "global"         → output/state/catalog.db（统一库）
       "ws:<name>"      → output/workspaces/<name>/catalog.db（name 走校验防穿越）
       其他 .db         → 视为文件路径
-      其他             → 视为目录，取其下 results.db
+      其他             → 视为目录，取其下 catalog.db
 
     裸路径分支用于「合并任意 work-dir 的 R」（合法且只读：合并只解析观测，
     读不到有效结构即视作空矩阵）。为防路径穿越注入，拒绝含 ``..`` 段的
@@ -96,14 +96,16 @@ def plan_merge(
     if not target_path.exists():
         plan.add(target_path, size=0, kind="target_new", detail="目标 R 不存在，将新建")
 
-    # 聚合各 source 的 model 列
+    # 聚合各 source 的 model 列（每个源只整库加载一次，模型循环内复用）
     source_models: dict[str, set[str]] = {}
+    loaded: dict[str, ResultsMatrix] = {}
     for src in sources:
         src_path = _resolve_results_path(src)
         if not src_path.exists():
             plan.add(src_path, size=0, kind="source_missing", detail=f"源 {src} 不存在，跳过")
             continue
         src_R = _load_R(src_path)
+        loaded[src] = src_R
         src_models = src_R.all_models()
         if models:
             src_models = [m for m in src_models if m in models]
@@ -120,8 +122,7 @@ def plan_merge(
         target_n = target_R.n_for_model(model)
         # 合并后该 model 的记录数上界（target 已有 + 各 source 新增，去重按 record）
         source_records: set[str] = set()
-        for src in sources:
-            src_R = _load_R(_resolve_results_path(src))
+        for src_R in loaded.values():
             source_records |= set(src_R.model_column(model).keys())
         new_records = source_records - set(target_R.model_column(model).keys())
         preview[model] = {

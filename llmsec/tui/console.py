@@ -26,6 +26,7 @@ from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import Input, RichLog, Static
 
+from llmsec.core.logging import get_logger
 from llmsec.tui.commands import (
     CACHE_CATEGORIES,
     COMMANDS,
@@ -57,6 +58,7 @@ from llmsec.tui.widgets import LogModal
 _HIST_MAX = 200
 _POPUP_MAX_ROWS = 6
 _PROMPT = Text("❯ ", style=C_GOLD)
+logger = get_logger(__name__)
 
 # ============================================================
 # 小工具
@@ -105,10 +107,12 @@ class _RunsCache:
 
             runs = [r for r in (list_runs() or []) if isinstance(r, dict) and r.get("name")]
             self.names = [str(r["name"]) for r in runs]
-            self.models = sorted({str(r.get("target") or r.get("target_model")) for r in runs} - {"None"})
+            # 缺目标（两键皆 None）直接过滤，不做 str(None) 再减 {"None"} 的脆弱写法
+            self.models = sorted({str(t) for r in runs
+                                  if (t := (r.get("target") or r.get("target_model"))) is not None})
             self._at = time.time()
         except Exception:
-            pass
+            logger.debug("runs 补全源刷新失败", exc_info=True)
 
 
 def _fmt_num(v) -> str:
@@ -701,7 +705,8 @@ class ConsoleScreen(Screen):
             if base == "cache":
                 from llmsec.mcp.tools.actions import clean_caches_preview
 
-                data = clean_caches_preview(list(CACHE_CATEGORIES))
+                # issue_token=False：ls 是只读命令，不签发可执行的 confirm token
+                data = clean_caches_preview(list(CACHE_CATEGORIES), issue_token=False)
                 app.call_from_thread(self.out, _dict_block(data) if isinstance(data, dict) else Text(str(data)))
                 return
             if base == "params":
@@ -1052,13 +1057,13 @@ class ConsoleScreen(Screen):
         if not isinstance(data, list):
             self.app.call_from_thread(self.err, "ELO 派生失败（R 矩阵无该模型列？）")
             return
-        t = _table(f"攻击方 Elo 榜 · {model}（高 = 强攻击）", ["攻击方法", "Elo", "场次", "预测Elo"])
+        # get_attacker_ranking 的键是 unit/elo/predicted（predicted=True 为未测的预测值）
+        t = _table(f"攻击方 Elo 榜 · {model}（高 = 强攻击）", ["攻击方法", "Elo", "预测"])
         for r in data:
             if isinstance(r, dict):
                 t.add_row(
-                    str(r.get("attacker", "?")),
+                    str(r.get("unit", "?")),
                     _fmt_num(r.get("elo")),
-                    _fmt_num(r.get("played")),
                     _fmt_num(r.get("predicted")),
                 )
         self.app.call_from_thread(self.out, t)

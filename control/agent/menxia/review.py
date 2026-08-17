@@ -17,7 +17,10 @@ from __future__ import annotations
 import json
 
 from control.agent.prompts import MENXIA_PROMPT
-from control.core.compare import extract_elo_fields
+from control.core.storage import extract_report_metrics
+from llmsec.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 _SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2, "good": 3}
 
@@ -80,8 +83,8 @@ def assess_findings(report: dict, tree: dict | None) -> list[dict]:
     th = get_thresholds()
     level = report.get("security_level", "inconclusive")
     target = report.get("target_model", "?")
-    # 复用 compare.extract_elo_fields 统一提取（与 _build_metrics_digest 同源）
-    f = extract_elo_fields(report)
+    # 复用 extract_report_metrics 统一提取（与 _build_metrics_digest 同源）
+    f = extract_report_metrics(report or {})
     asr = f["asr"]
     fpr = f["fpr"]
     tested = f["total_tested"] or 0
@@ -89,8 +92,7 @@ def assess_findings(report: dict, tree: dict | None) -> list[dict]:
     coverage = f["coverage"]
     ci_half = f["ci_half"]
     confidence = f["boundary_confidence"]
-    # drift 不在 extract_elo_fields 标准字段里（仅门下省审查用），单独取
-    drift = (report.get("elo", {}) or {}).get("drift")
+    drift = f["drift"]
 
     def _num(v):
         return v if isinstance(v, (int, float)) else None
@@ -221,7 +223,7 @@ def _build_metrics_digest(report: dict, tree: dict | None) -> dict:
         "target": report.get("target_model", "?"),
         "security_level": report.get("security_level", "?"),
         "verdict": report.get("overall_verdict", ""),
-        **extract_elo_fields(report),
+        **extract_report_metrics(report or {}),
         "recommendation": report.get("recommendation", ""),
     }
     if tree:
@@ -279,7 +281,10 @@ def render_digest(findings: list[dict], metrics: dict, *, use_llm: bool = True) 
         )
         llm_text = resp.choices[0].message.content or ""
         return llm_text if llm_text.strip() else template
-    except Exception:
+    except Exception as e:
+        # 降级到规则模板，但留 debug 线索——静默失败会让"LLM 润色从未生效"
+        # 这类配置问题无从排查
+        logger.warning(f"LLM 摘要润色失败，降级规则模板: {e}")
         return template
 
 

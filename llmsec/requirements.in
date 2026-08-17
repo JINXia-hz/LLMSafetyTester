@@ -30,3 +30,6 @@ optuna>=3,<4
 
 # 控制层（control/）跨进程文件锁——workspace/env_snapshot/gazette 的索引 RMW
 filelock>=3,<4
+
+# 统一存储层（llmsec/storage/）——目录库/R 矩阵的 ORM（模型即 schema，零裸 SQL）
+sqlmodel>=0.0.16,<1

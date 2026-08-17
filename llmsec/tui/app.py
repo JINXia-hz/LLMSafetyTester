@@ -102,7 +102,11 @@ class LlmsecTUI(App):
     def _poll_tasks(self) -> None:
         while self.is_running:  # 应用退出时协作结束（worker 线程无法被强杀）
             try:
-                snaps, _dirty = self.store.refresh()
+                snaps, runs_dirty = self.store.refresh()
+                # 任务进入终态 → 新 run 落盘，强制刷新补全源（否则 60s TTL 内
+                # `rm <Tab>` 看不到刚完成的 run 名）
+                if runs_dirty and self._console is not None:
+                    self._console._runs.refresh(force=True)
                 self.post_message(TasksUpdated(snaps))
             except Exception:
                 pass  # 轮询永不死——单轮失败下一轮再来

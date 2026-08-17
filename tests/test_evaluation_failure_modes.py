@@ -56,8 +56,6 @@ def test_train_skips_judge_failure_rows(monkeypatch, tmp_path):
 def test_strip_reasoning_keeps_open_think_intact():
     raw = "<think>truncated reasoning without close"
     assert strip_reasoning(raw) == raw
-    raw = "<think>truncated reasoning without close"
-    assert strip_reasoning(raw) == raw
 
 
 def test_strip_reasoning_noop_without_think():

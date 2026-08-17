@@ -38,7 +38,10 @@ def _fingerprint(params: dict) -> str:
 
 
 def _load_trials(path: Path) -> list[dict]:
-    """读旧世代 trials.jsonl（仅作一次性导入源，P4 起不再写）。"""
+    """读旧世代 trials.jsonl（仅作一次性导入源，P4 起不再写）。
+
+    旧世代行用 "trial" 键（现统一为 "idx"）——导入时归一，键口径单化。
+    """
     if not path.exists():
         return []
     out = []
@@ -46,23 +49,26 @@ def _load_trials(path: Path) -> list[dict]:
         line = line.strip()
         if line:
             try:
-                out.append(json.loads(line))
+                rec = json.loads(line)
             except json.JSONDecodeError:
-                pass  # 跳过损坏行（断点续跑容错）
+                continue  # 跳过损坏行（断点续跑容错）
+            if "idx" not in rec and "trial" in rec:
+                rec["idx"] = rec.pop("trial")
+            out.append(rec)
     return out
 
 
 def load_trial_records(study_name: str) -> list[dict]:
     """读取 study 的 trial 记录（P4：db 唯一真相；旧 jsonl 首读一次性导入）。"""
-    from llmsec.storage import catalog
-    rows = catalog.query_trials(study_name)
+    from llmsec.storage import contract as _storage
+    rows = _storage.query_trials(study_name)
     if rows:
         return [r.as_dict() for r in rows]
     path = study_dir(study_name) / "trials.jsonl"
     if path.exists():
         for rec in _load_trials(path):
-            catalog.upsert_trial_record(study_name, rec)
-        rows = catalog.query_trials(study_name)
+            _storage.upsert_trial_record(study_name, rec)
+        rows = _storage.query_trials(study_name)
     return [r.as_dict() for r in rows]
 
 
@@ -127,7 +133,7 @@ def run_study(config: StudyConfig) -> dict:
 
     engine = build_search(config, _completed_for_engine(completed, config))
 
-    trial_idx = max([t.get("trial", 0) for t in completed], default=0)
+    trial_idx = max([t.get("idx", 0) for t in completed], default=0)
     session_trials = 0
     consecutive_failures = 0   # 连续失败/超时计数；>=3 中止（防系统性故障空转烧 API）
     _FAIL_ABORT = 3
@@ -210,7 +216,7 @@ def run_study(config: StudyConfig) -> dict:
                     # 补登记 target/seed/search_fp（run_trial 不知情多目标语义）
                     rec["target"] = tgt
                     rec["seed"] = sd
-                    rec["trial"] = tidx
+                    rec["idx"] = tidx
                     rec["search_fp"] = search_fp
                     rec["search_params"] = search_params
                     with trials_lock:

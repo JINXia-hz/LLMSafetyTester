@@ -221,14 +221,6 @@ def enqueue_plan(plan_id: str) -> None:
         s.add(CtlQueueItem(plan_id=plan_id, queued_at=time.time(), status="queued"))
 
 
-def queued_plans() -> list[str]:
-    with _db.session() as s:
-        rows = s.exec(_select(CtlQueueItem)
-                      .where(CtlQueueItem.status == "queued")
-                      .order_by(CtlQueueItem.id)).all()
-        return [r.plan_id for r in rows]
-
-
 def mark_queue_running(plan_id: str) -> None:
     with _db.tx() as s:
         for r in s.exec(_select(CtlQueueItem).where(CtlQueueItem.plan_id == plan_id)).all():

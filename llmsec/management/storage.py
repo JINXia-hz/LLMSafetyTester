@@ -71,7 +71,7 @@ def cmd_verify(*, json_mode: bool = False) -> int:
     """
     problems: list[str] = []
     root = Path(_config.RUNS_DIR)
-    dbp = catalog.db.db_for(root)
+    dbp = _storage.db_for(root)
 
     catalog.reconcile_runs(root, db_path=dbp)  # 第一次：吸收树上的新变更
     st2 = catalog.reconcile_runs(root, db_path=dbp)

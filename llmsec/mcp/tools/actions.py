@@ -120,7 +120,7 @@ def delete_runs_confirm(token: str) -> dict[str, Any]:
 # ============================================================
 # clean_caches — 两步确认
 # ============================================================
-def clean_caches_preview(categories: list[str]) -> dict[str, Any]:
+def clean_caches_preview(categories: list[str], *, issue_token: bool = True) -> dict[str, Any]:
     """预览清理可重建缓存的影响（不执行删除）。
 
     所有缓存类别都是可重建的（predictors/model_state 自动重建或重算），
@@ -131,30 +131,37 @@ def clean_caches_preview(categories: list[str]) -> dict[str, Any]:
             "model_state"    — 模型指纹/预筛模型（可重算重训）
             "predictors"     — 混合预测器 pkl（删后重训）
             "feature_cluster"— 特征缓存 + 聚类产物（特征自动重建/聚类需重跑）
+        issue_token: False 时纯只读预览（TUI `ls cache` 等列资源场景用）——
+            不签发 confirm token，避免只读命令注册可执行凭证。
 
 
     Returns:
-        {action, summary, confirm_token, ttl_seconds}
+        {action, summary, confirm_token, ttl_seconds}（issue_token=False 时无 token 字段）
     """
     from llmsec.management.caches import plan_clean
 
     def _do() -> dict[str, Any]:
         plan = plan_clean(categories)
         plan_dict = plan.to_dict()
+        out: dict[str, Any] = {
+            "action": "clean_caches",
+            "summary": plan_dict,
+            "impact_note": f"将清理 {len(plan_dict['items'])} 项，释放 {plan_dict['total_size_human']}",
+        }
+        if not issue_token:
+            return out
         token = confirm_mod.issue(
             action="clean_caches",
             summary=plan_dict,
             execute_fn=lambda: _execute_clean(categories),
             args_repr=f"categories={categories}",
         )
-        return {
-            "action": "clean_caches",
-            "summary": plan_dict,
-            "impact_note": f"将清理 {len(plan_dict['items'])} 项，释放 {plan_dict['total_size_human']}",
+        out.update({
             "confirm_token": token,
             "ttl_seconds": 300,
             "next_step": "审阅后调用 clean_caches_confirm(token) 执行清理",
-        }
+        })
+        return out
 
     return _try(_do)
 
@@ -309,7 +316,7 @@ def get_env_config() -> dict[str, Any]:
     用于了解当前已配置了哪些连接（哪些 key 已填、哪些还缺）。
 
     Returns:
-        {configured: {...}, missing: [...], raw_keys: [...]}
+        {configured: {...}, missing_essential: [...], total_keys: int}
     """
 
     from control.core.env_snapshot import _read_global_env
@@ -323,9 +330,15 @@ def get_env_config() -> dict[str, Any]:
                 masked[k] = v[:8] + "***"
             else:
                 masked[k] = v
-        # 检查关键配置是否齐全
-        essential = ["GENERATOR_API_KEY", "GENERATOR_BASE_URL"]
-        missing = [k for k in essential if not env.get(k)]
+        # 检查关键配置是否齐全（与 control/agent/llm.py 同口径：CONTROL_* 可备选）
+        def _present(*keys: str) -> bool:
+            return any(env.get(k) for k in keys)
+
+        missing = []
+        if not _present("GENERATOR_API_KEY", "CONTROL_API_KEY"):
+            missing.append("GENERATOR_API_KEY（或 CONTROL_API_KEY）")
+        if not _present("GENERATOR_BASE_URL", "CONTROL_BASE_URL"):
+            missing.append("GENERATOR_BASE_URL（或 CONTROL_BASE_URL）")
         return {
             "configured": masked,
             "missing_essential": missing,
@@ -366,9 +379,9 @@ def merge_workspaces_preview(
     upsert 到目标 R（同 record+model 覆盖，不同 record 累加）。
 
     source/target 描述符格式：
-      "global"    → output/state/results.json（全局 R 矩阵）
-      "ws:<name>" → output/workspaces/<name>/results.json（某工作区的 R）
-      其他        → 视为目录路径，取其下 results.json
+      "global"    → output/state/catalog.db（全局 R 矩阵，统一库）
+      "ws:<name>" → output/workspaces/<name>/catalog.db（某工作区的 R）
+      其他        → 视为目录路径，取其下 catalog.db
 
     典型场景：fork 工作区跑完实验后，把 ws:xxx 合并回 global。
 
@@ -405,7 +418,7 @@ def merge_workspaces_preview(
             "next_step": "审阅后调用 merge_workspaces_confirm(token) 执行合并",
         }
 
-    return _try(_do, error_hint="源/目标描述符无效，或 results.json 不存在")
+    return _try(_do, error_hint="源/目标描述符无效，或 catalog.db 不存在")
 
 
 def _execute_merge(sources: list[str], target: str, models: list[str] | None) -> dict[str, Any]:

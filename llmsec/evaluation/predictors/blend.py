@@ -402,8 +402,8 @@ def load_or_fit_blend_predictor(
         # 命中登记（P8 真 LRU）：predictor_cache 行记 last_hit/hits——
         # 原 mtime-touch 近似会被文件复制/杀软扫描扰动排序
         try:
-            from llmsec.storage import catalog as _catalog
-            _catalog.predictor_hit(key, cache_path.stat().st_size if cache_path.exists() else 0)
+            from llmsec.storage.contract import predictor_hit
+            predictor_hit(key, cache_path.stat().st_size if cache_path.exists() else 0)
         except Exception:
             pass  # 登记失败不影响命中路径
         return cached
@@ -412,8 +412,8 @@ def load_or_fit_blend_predictor(
     try:
         bp.save(cache_path)
         try:
-            from llmsec.storage import catalog as _catalog
-            _catalog.predictor_saved(key, cache_path.stat().st_size)
+            from llmsec.storage.contract import predictor_saved
+            predictor_saved(key, cache_path.stat().st_size)
         except Exception:
             pass
     except Exception as e:

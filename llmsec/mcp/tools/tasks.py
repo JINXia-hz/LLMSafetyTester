@@ -134,7 +134,7 @@ def get_task_status(task_id: str) -> dict[str, Any] | None:
     """
     from llmsec.server.task_manager import task_view
 
-    return task_view(task_id)
+    return _try(lambda: task_view(task_id))
 
 
 def get_task_progress(task_id: str) -> dict[str, Any]:
@@ -185,10 +185,13 @@ def get_task_log(task_id: str) -> dict[str, Any]:
     """
     from llmsec.server.task_manager import read_full_log
 
-    log = read_full_log(task_id)
-    if not log:
-        return {"id": task_id, "log": "", "note": "日志为空（任务不存在或尚未产生输出）"}
-    return {"id": task_id, "log": log}
+    def _do() -> dict[str, Any]:
+        log = read_full_log(task_id)
+        if not log:
+            return {"id": task_id, "log": "", "note": "日志为空（任务不存在或尚未产生输出）"}
+        return {"id": task_id, "log": log}
+
+    return _try(_do)
 
 
 def cancel_task(task_id: str) -> dict[str, Any]:
@@ -210,12 +213,13 @@ def cancel_task(task_id: str) -> dict[str, Any]:
     def _do() -> dict[str, Any]:
         view = _cancel(task_id)
         if view is None:
-            # 区分"不存在"和"已结束"
+            # 区分"不存在"和"已结束"（task_view 只查一次）
             from llmsec.server.task_manager import task_view
 
-            if task_view(task_id) is None:
+            current = task_view(task_id)
+            if current is None:
                 return {"error": f"任务不存在: {task_id}"}
-            return {"error": "任务已结束，无法取消", "current_status": task_view(task_id)["status"]}
+            return {"error": "任务已结束，无法取消", "current_status": current["status"]}
         return view
 
     return _try(_do)
@@ -229,7 +233,7 @@ def list_tasks() -> list[dict[str, Any]]:
     """
     from llmsec.server.task_manager import list_tasks as _lt
 
-    return _lt()
+    return _try(lambda: _lt())
 
 
 # ============================================================
@@ -272,9 +276,20 @@ def orchestrate_runs(
     def _do() -> dict[str, Any]:
         if not specs:
             return {"error": "specs 不能为空"}
+        # 入口校验 spec 键（RunSpec 字段白名单）——坏键原本会在子进程里
+        # TypeError，MCP 侧只见"排队成功"，失败要翻任务日志才能发现
+        from dataclasses import fields as _dc_fields
+
+        from control.core.orchestrator import RunSpec as _RunSpec
+
+        allowed = {f.name for f in _dc_fields(_RunSpec)} | {"param_overrides"}
         for i, s in enumerate(specs):
             if not s.get("name"):
                 return {"error": f"specs[{i}] 缺少 name 字段"}
+            unknown = sorted(set(s) - allowed)
+            if unknown:
+                return {"error": f"specs[{i}] 含未知字段: {', '.join(unknown)}",
+                        "hint": f"可用字段: {', '.join(sorted(allowed))}"}
 
         # 加载 env_snapshot（如果指定）——整个批次共享的连接配置。
         # C 修复：与 run_evaluation 语义统一，经 env_override 通道注入（不再各自内联 os.environ）。

@@ -1,8 +1,7 @@
 """rstore（R 矩阵 SQLite 后端）阶段 2 回归测试。
 
 核心承诺：并发写零丢失（H5/H6 场景——原文件锁 RMW 的丢更新路径）、
-遗留 json 自迁移的幂等与防复活、指纹保真（elo_cache/predictor 缓存键稳定）、
-删除列后不被旧 json 复活。
+旁置遗留 json 不被隐式消费、指纹保真（elo_cache/predictor 缓存键稳定）。
 """
 
 from __future__ import annotations
@@ -72,6 +71,19 @@ def test_upsert_overwrite_same_record_keeps_value(iso):
     assert R.n_for_model("m") == 1
 
 
+def test_upsert_none_ts_keeps_existing_ts(iso):
+    """重发布（publish_tracker 恒传 ts=None）不覆盖已有数值 ts。
+
+    回归：原实现无脑覆盖 ts_json="null"，带数值 ts 的行被重发后在
+    ordered_results（None 排最后）里静默跳到时间轴末尾，改变 Elo 回放分段。
+    """
+    rstore.upsert_observations([MatchResult("r1", "m", 1.0, ts=5)])
+    rstore.upsert_observations([MatchResult("r1", "m", 3.0, ts=None)])
+    R = ResultsMatrix.load(cfg.CATALOG_DB)
+    assert R.get("r1", "m").ts == 5, "ts=None 重发布不应抹掉原时序"
+    assert R.get("r1", "m").eval_score == 3.0, "分数仍取末值"
+
+
 # ============================================================
 # 指纹与类型保真
 # ============================================================
@@ -90,9 +102,6 @@ def test_ts_type_fidelity(iso):
     assert type(back.get("a", "m").ts) is int
     assert type(back.get("b", "m").ts) is float
     assert back.get("c", "m").ts == "t5"
-    # ts=None 只经遗留 json 路径存在（upsert 对 None 自动编号）；from_store 保真
-    m_none = MatchResult.from_store("z", "m", {"eval_score": 1.0})
-    assert m_none.ts is None
 
 
 def test_full_round_trip_fingerprint_equal(iso):
@@ -113,27 +122,21 @@ def test_full_round_trip_fingerprint_equal(iso):
 
 
 # ============================================================
-# 遗留 json 自迁移
+# 遗留 json 不再被消费
 # ============================================================
 
 def test_no_implicit_json_migration(iso):
     """P3：隐式 json 自迁移已删——db 缺失时 load 返回空，旁边的 json 不再被吃。
 
-    遗留 json 的显式工具：matrix_from_legacy_json（读）/ export_legacy_json（写）。
+    （遗留 json 读写通道已整体删除：本项目不做版本兼容。）
     """
-    mat = ResultsMatrix()
-    mat.upsert("r1", "m", 1.0, ts=1)
     from llmsec.core.io import write_json
     legacy = iso / "results.json"  # tmp 内（曾误写 cfg.STATE_DIR 泄漏进真实 output）
-    write_json(legacy, mat.to_store_dict())  # 手写遗留 json（db 仍缺）
+    write_json(legacy, {"version": 2, "results": {"r1": {"m": {"eval_score": 1.0}}}})
     assert legacy.exists() and not cfg.CATALOG_DB.exists()
 
     R = ResultsMatrix.load()  # db 缺 → 空，不隐式导入
     assert R.all_models() == []
-
-    # 显式读取：matrix_from_legacy_json
-    R2 = rstore.matrix_from_legacy_json(legacy)
-    assert R2.n_for_model("m") == 1
 
 
 # ============================================================

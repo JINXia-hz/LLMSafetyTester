@@ -42,6 +42,7 @@ fastapi==0.141.1
     # via -r llmsec/requirements.in
 filelock==3.32.2
     # via
+    #   -r llmsec/requirements.in
     #   huggingface-hub
     #   torch
 fsspec==2026.7.0
@@ -123,6 +124,7 @@ pydantic==2.13.4
     #   -r llmsec/requirements.in
     #   fastapi
     #   openai
+    #   sqlmodel
 pydantic-core==2.46.4
     # via pydantic
 pygments==2.20.0
@@ -133,6 +135,7 @@ python-multipart==0.0.32
     # via -r llmsec/requirements.in
 pyyaml==6.0.3
     # via
+    #   -r llmsec/requirements.in
     #   huggingface-hub
     #   optuna
     #   transformers
@@ -169,6 +172,9 @@ sqlalchemy==2.0.51
     # via
     #   alembic
     #   optuna
+    #   sqlmodel
+sqlmodel==0.0.39
+    # via -r llmsec/requirements.in
 starlette==1.4.1
     # via fastapi
 sympy==1.14.0
@@ -203,6 +209,7 @@ typing-extensions==4.16.0
     #   pydantic-core
     #   sentence-transformers
     #   sqlalchemy
+    #   sqlmodel
     #   starlette
     #   torch
     #   typing-inspection

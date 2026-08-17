@@ -102,10 +102,9 @@ class Trial(SQLModel, table=True):
     elapsed_s: float | None = None
 
     def as_dict(self) -> dict:
-        """与 study 侧 trial record 形状兼容（"trial" 键 = idx）。"""
+        """与 study 侧 trial record 形状兼容（键统一为 idx）。"""
         return {
             "study": self.study,
-            "trial": self.idx,
             "idx": self.idx,
             "target": self.target,
             "seed": self.seed,
@@ -326,10 +325,19 @@ def dir_size(path: Path) -> int:
     """递归目录大小（management.common.dir_size 的等价实现）。
 
     storage 包自带一份：catalog 扫描是唯一调用方，避免反向 import
-    management（DAO 层不依赖 service 层）。
+    management（DAO 层不依赖 service 层）。入口语义与 common 版对齐：
+    不存在返回 0、文件入口返回其大小。
     """
+    path = Path(path)
+    try:
+        if not path.exists():
+            return 0
+        if path.is_file():
+            return path.stat().st_size
+    except OSError:
+        return 0
     total = 0
-    for p in Path(path).rglob("*"):
+    for p in path.rglob("*"):
         try:
             if p.is_file():
                 total += p.stat().st_size

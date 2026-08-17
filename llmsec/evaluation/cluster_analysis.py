@@ -471,7 +471,7 @@ if __name__ == "__main__":
     else:
         tracker = derive_elo(R, model)
 
-    analysis = analyze_clusters(tracker, defender_name=model or args.defender)
+    analysis = analyze_clusters(tracker, defender_name=model)
     out_path = save_cluster_analysis(analysis, args.output)
     logger.info(f"聚类安全分析已保存: {out_path}")
     logger.info(f"  簇数: {analysis.get('n_clusters', 0)}")

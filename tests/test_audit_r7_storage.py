@@ -77,56 +77,6 @@ class TestReadJsonClassification:
 
 
 class TestResultsMatrixLoad:
-    def _valid_matrix_file(self, path):
-        """写一个遗留 results.json（含 .bak）——P3 后遗留格式的显式读写走
-        rstore.matrix_from_legacy_json / export_legacy_json，不经 ResultsMatrix。"""
-        from llmsec.core.io import write_json
-        from llmsec.core.results import ResultsMatrix
-
-        mat = ResultsMatrix(units=["u1"], models=["m1"])
-        mat.upsert("r1", "m1", 2.0, status="fully_compliant", extra={"unit": "u1"})
-        write_json(path, mat.to_store_dict())            # 首写（无旧文件，不产生 .bak）
-        write_json(path, mat.to_store_dict(), backup=True)  # 二次写 → .bak 生成
-        return mat
-
-    def test_corrupt_main_recovers_from_bak(self, tmp_path):
-        """主文件损坏 → .corrupt.bak 取证 + 从 .bak 恢复（F1 行为保持，
-        归宿在遗留读取器 matrix_from_legacy_json）。"""
-        from llmsec.storage import rstore
-
-        main = tmp_path / "results.json"
-        self._valid_matrix_file(main)
-        main.write_text("{broken", encoding="utf-8")
-
-        mat = rstore.matrix_from_legacy_json(main)
-        assert (tmp_path / "results.json.bak").exists()
-        assert (tmp_path / "results.json.corrupt.bak").exists(), "残文件应被备份供取证"
-        assert mat.n_for_model("m1") > 0, "应从 .bak 恢复出模型列"
-
-    def test_permission_error_does_not_trigger_corrupt_bak(self, tmp_path, monkeypatch):
-        """M-4 核心：瞬时/持续占用不得把完好文件判成损坏回退旧数据。"""
-        import llmsec.core.io as io_mod
-        from llmsec.storage import rstore
-
-        main = tmp_path / "results.json"
-        self._valid_matrix_file(main)
-        # 先造一个"旧"备份（若误判会回退到这份旧数据）
-        (tmp_path / "results.json.bak").write_text(
-            '{"version": 2, "units": [], "models": [], "results": {}}', encoding="utf-8")
-
-        real_open = builtins.open
-
-        def denied_open(file, *a, **kw):
-            if str(file) == str(main):
-                raise PermissionError(5, "Access is denied (simulated)")
-            return real_open(file, *a, **kw)
-
-        monkeypatch.setattr(io_mod, "open", denied_open, raising=False)
-        with pytest.raises(PermissionError):
-            rstore.matrix_from_legacy_json(main)
-        assert not (tmp_path / "results.json.corrupt.bak").exists(), (
-            "PermissionError 不是损坏：不得把完好的新数据备份成 .corrupt.bak 并回退旧 .bak")
-
     def test_load_takes_file_lock(self, tmp_path, monkeypatch):
         """阶段 2 语义：db 真相路径不再用文件锁——改为完整性快检。
 

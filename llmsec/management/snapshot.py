@@ -1,11 +1,10 @@
 """management.snapshot — 导出 R 库快照（人工备份 / 分发用）。
 
 P3（json 链清除）后：
-  - 输出是 **results.db 的整库副本**（sqlite3 backup API，WAL 安全）+ manifest.json
+  - 输出是 **catalog.db 的整库副本**（sqlite3 backup API，WAL 安全）+ manifest.json
     ——控制层 fork 已不走本模块（workspace.fork 经薄契约直调 rstore backup/clone），
     快照只剩人工备份/分发用途。
   - run:<name> 源从 state.json 重建（rstore.clone_from_run）。
-  - 人读 JSON 导出用 ``storage backup-r`` 之外的 ``rstore.export_legacy_json``（按需调用）。
 """
 
 from __future__ import annotations
@@ -54,7 +53,7 @@ def export_snapshot(
     if source == "global":
         rstore.backup(dst)
         stats = rstore.results_stats(dst)
-        source_desc = "global R (results.db)"
+        source_desc = "global R (catalog.db)"
     elif source.startswith("run:"):
         stats = rstore.clone_from_run(source[4:], dst)
         source_desc = f"run:{source[4:]} (state.json 重建)"

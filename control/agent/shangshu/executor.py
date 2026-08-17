@@ -10,7 +10,7 @@
   4. 全部完成文牍记 plan_finished + notify(plan_done) → 门下省自动审查。
 
 文牍：每个事件 append 到 output/gazette/<plan_id>.jsonl，持久化完整执行历史。
-总线：用 notify() 统一发布，带 plan_id/intent/session_id 公共信封。
+总线：用 notify_routed() 按路由表发布，带 plan_id/intent/session_id 公共信封。
 """
 
 from __future__ import annotations
@@ -28,8 +28,7 @@ from control.agent.bus import (
     KIND_STEP_FAILED,
     KIND_STEP_START,
     SHANGSHU,
-    notify,
-        notify_routed,
+    notify_routed,
 )
 from control.agent.shangshu import capabilities as caps_mod
 from control.agent.shangshu import plan as plan_mod
@@ -197,9 +196,9 @@ def _execute_step(step: Step, plan: Plan, on_progress: ProgressCallback | None) 
         gazette.append_event(plan.id, gazette.EV_STEP_FAILED, SHANGSHU,
                              step_id=step.id, session_id=plan.session_id, intent=plan.intent,
                              detail={"capability": step.capability, "error": step.error})
-        notify(KIND_STEP_FAILED, from_dept=SHANGSHU, plan_id=plan.id,
-               intent=plan.intent, session_id=plan.session_id,
-               step_id=step.id, capability=step.capability, error=step.error)
+        notify_routed(KIND_STEP_FAILED, from_dept=SHANGSHU, plan_id=plan.id,
+                      intent=plan.intent, session_id=plan.session_id,
+                      step_id=step.id, capability=step.capability, error=step.error)
 
 
 def _propagate_blockage(plan: Plan) -> None:
@@ -223,10 +222,10 @@ def _notify_progress(plan: Plan, on_progress: ProgressCallback | None) -> None:
             on_progress(plan)
         except Exception:
             pass
-    notify(KIND_PLAN_PROGRESS, from_dept=SHANGSHU, plan_id=plan.id,
-           intent=plan.intent, session_id=plan.session_id,
-           status=plan.status,
-           steps=[{"id": s.id, "status": s.status} for s in plan.steps])
+    notify_routed(KIND_PLAN_PROGRESS, from_dept=SHANGSHU, plan_id=plan.id,
+                  intent=plan.intent, session_id=plan.session_id,
+                  status=plan.status,
+                  steps=[{"id": s.id, "status": s.status} for s in plan.steps])
 
 
 def _sanitize_result(result) -> dict | None:

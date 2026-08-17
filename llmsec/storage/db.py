@@ -54,8 +54,7 @@ def catalog_db() -> Path:
 def db_for(runs_root: Path | str | None) -> Path:
     """runs 根目录 → 该根的目录库路径。
 
-    全局 runs 根（output/runs/）的索引在 output/state/catalog.db（与 results.json
-    同住 state/）；其它根（work-dir / workspace / trial workdir）用 <root>/catalog.db
+    全局 runs 根（output/runs/）的索引在 output/state/catalog.db（统一库）；其它根（work-dir / workspace / trial workdir）用 <root>/catalog.db
     卫星库——隔离单元自带索引，删除/归档单元时索引随之消失，不污染全局。
     """
     if runs_root is None:
@@ -123,18 +122,25 @@ def _engine_for(db_path: Path | str | None, *, write: bool) -> Engine:
                 if w:
                     event.listen(eng, "begin", _emit_begin_immediate)
                 pair["write" if w else "read"] = eng
-            # 降级守卫：库 schema 比当前代码新 → 拒绝打开（防旧代码写坏新库）
-            with pair["read"].connect() as conn:
-                v = int(conn.exec_driver_sql("PRAGMA user_version").scalar() or 0)
-                if v > _SCHEMA_VERSION:
-                    raise RuntimeError(
-                        f"目录库 schema v{v} 比当前代码支持的 v{_SCHEMA_VERSION} 新——"
-                        "请升级代码后再访问"
-                    )
-            SQLModel.metadata.create_all(pair["write"])
-            _ensure_columns(pair["write"])  # 模型扩列后旧库自动 ALTER ADD
-            with pair["write"].begin() as conn:
-                conn.exec_driver_sql(f"PRAGMA user_version={_SCHEMA_VERSION}")
+            # 后续任一步失败（降级守卫拒绝 / create_all 出错）都必须 dispose——
+            # 半初始化的引擎不 dispose 会泄漏连接池（Windows 上还会占住库文件句柄）
+            try:
+                # 降级守卫：库 schema 比当前代码新 → 拒绝打开（防旧代码写坏新库）
+                with pair["read"].connect() as conn:
+                    v = int(conn.exec_driver_sql("PRAGMA user_version").scalar() or 0)
+                    if v > _SCHEMA_VERSION:
+                        raise RuntimeError(
+                            f"目录库 schema v{v} 比当前代码支持的 v{_SCHEMA_VERSION} 新——"
+                            "请升级代码后再访问"
+                        )
+                SQLModel.metadata.create_all(pair["write"])
+                _ensure_columns(pair["write"])  # 模型扩列后旧库自动 ALTER ADD
+                with pair["write"].begin() as conn:
+                    conn.exec_driver_sql(f"PRAGMA user_version={_SCHEMA_VERSION}")
+            except BaseException:
+                for eng in pair.values():
+                    eng.dispose()
+                raise
             _ENGINES[key] = pair
         return pair["write" if write else "read"]
 

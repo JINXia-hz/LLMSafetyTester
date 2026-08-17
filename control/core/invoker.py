@@ -108,6 +108,12 @@ def _manage_argv(subcmd: list[str]) -> list[str]:
     return [PYTHON, "-m", "llmsec.management", *subcmd]
 
 
+def run_manage(subcmd: list[str], *, timeout: float | None = 600) -> InvokeResult:
+    """执行 llmsec-manage 子命令（capabilities 等外部消费者的公共入口——
+    不跨模块引用 _run/_manage_argv 私有实现）。"""
+    return _run(_manage_argv(subcmd), timeout=timeout)
+
+
 def list_runs(*, target: str | None = None, since: str | None = None,
               junk_only: bool = False) -> list[dict]:
     """列出 llmsec 的 run 历史（结构化）。经 ``llmsec-manage runs list --json``。"""

@@ -19,7 +19,6 @@ from pathlib import Path
 
 from llmsec.core.config import _resolve_target_prefixes, load_targets, target_backend
 from llmsec.core.io import CorruptedFileError, read_json, write_json
-from llmsec.core.results import ResultsMatrix
 from llmsec.evaluation.elo import ELOTracker
 from llmsec.params import ELO_SCALE
 
@@ -114,39 +113,6 @@ def test_f3_read_json_strict_true_raises():
         assert raised, 'F3: strict=True 损坏文件抛 CorruptedFileError'
         assert read_json(Path(d) / 'missing.json', default='X', strict=True) == 'X', 'F3: strict=True 文件不存在仍返回 default'
 
-def test_f3_results_matrix_load_corruption_backup():
-    """F1：遗留 json 损坏时 matrix_from_legacy_json 备份残文件 + .bak 恢复 + 仍失败 raise。"""
-    from llmsec.core.io import CorruptedFileError, write_json
-    from llmsec.storage import rstore
-    with tempfile.TemporaryDirectory() as d:
-        p = Path(d) / 'r.json'
-        mat = ResultsMatrix()
-        mat.upsert('DAN', 'qwen', 3.0, ts=1)
-        write_json(p, mat.to_store_dict())
-        assert p.exists(), 'F3: 正常写入后文件存在'
-        # 损坏
-        p.write_text('{"version":1,"results":{"DAN":{"qwen":{', encoding='utf-8')
-        try:
-            rstore.matrix_from_legacy_json(p)
-            raised = False
-        except CorruptedFileError:
-            raised = True
-        assert raised, 'F1: 损坏且无 .bak 时应 raise（不返空矩阵防永久数据丢失）'
-        corrupt_bak = Path(str(p) + '.corrupt.bak')
-        assert corrupt_bak.exists(), 'F1: 损坏 json 已备份为 .corrupt.bak'
-
-    # F1：有 .bak 时从备份恢复
-    with tempfile.TemporaryDirectory() as d:
-        p = Path(d) / 'r.json'
-        mat = ResultsMatrix()
-        mat.upsert('DAN', 'qwen', 3.0, ts=1)
-        write_json(p, mat.to_store_dict(), backup=True)
-        mat.upsert('DAN2', 'qwen', 5.0, ts=2)
-        write_json(p, mat.to_store_dict(), backup=True)  # .bak 含上一版（1 条）
-        p.write_text('{corrupt', encoding='utf-8')
-        mat2 = rstore.matrix_from_legacy_json(p)
-        assert mat2.n_for_model('qwen') == 1, 'F1: 从 .bak 恢复成功（1 条记录）'
-
 def test_f3_state_load_corruption_no_crash():
     """state.json 损坏时：ELOTracker.load 备份 + 不抛（保持初始 ELO）。"""
     with tempfile.TemporaryDirectory() as d:
@@ -163,33 +129,17 @@ def test_f3_state_load_corruption_no_crash():
         corrupt_bak = Path(str(p) + '.corrupt.bak')
         assert corrupt_bak.exists(), 'F3: 损坏 state.json 已备份为 .corrupt.bak'
 
-def test_f3_from_store_missing_eval_score():
-    """R-3: 半残 JSON 缺 eval_score 字段时跳过该记录（不 KeyError 崩溃）。"""
-    from llmsec.storage import rstore
-    with tempfile.TemporaryDirectory() as d:
-        p = Path(d) / 'r.json'
-        p.write_text('{"version":2,"units":[],"models":[],"results":{"good":{"qwen":{"eval_score":3.0}},"bad":{"qwen":{"status":"refused"}}}}', encoding='utf-8')
-        mat = rstore.matrix_from_legacy_json(p)
-        assert mat.get('good', 'qwen') is not None, 'F3: 正常记录被加载'
-        assert mat.get('bad', 'qwen') is None, 'F3: 缺 eval_score 的记录被跳过（不崩溃）'
-
 def test_f3_round_trip_results_with_backup():
-    """遗留导出 write_json backup=True：多次导出后 .bak 是上一版。"""
-    from llmsec.core.io import write_json
-    from llmsec.storage import rstore
+    """write_json backup=True：多次写后 .bak 是上一版（io 层语义，R 已不走 json）。"""
+    from llmsec.core.io import read_json, write_json
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / 'r.json'
-        mat = ResultsMatrix()
-        mat.upsert('A', 'm', 1.0, ts=1)
-        write_json(p, mat.to_store_dict(), backup=True)
-        mat.upsert('B', 'm', 2.0, ts=2)
-        write_json(p, mat.to_store_dict(), backup=True)
+        write_json(p, {"version": 2, "results": {"A": 1}}, backup=True)
+        write_json(p, {"version": 2, "results": {"A": 1, "B": 2}}, backup=True)
         bak = Path(str(p) + '.bak')
         assert bak.exists(), 'F3: 二次写产生 .bak'
-        mat_bak = rstore.matrix_from_legacy_json(bak)
-        assert mat_bak.get('A', 'm') is not None and mat_bak.get('B', 'm') is None, 'F3: .bak 是上一版（仅 A）'
-        mat_new = rstore.matrix_from_legacy_json(p)
-        assert mat_new.get('A', 'm') is not None and mat_new.get('B', 'm') is not None, 'F3: 新版含 A+B'
+        assert read_json(bak) == {"version": 2, "results": {"A": 1}}, 'F3: .bak 是上一版（仅 A）'
+        assert read_json(p) == {"version": 2, "results": {"A": 1, "B": 2}}, 'F3: 新版含 A+B'
 
 def _snapshot_target_env():
     """快照当前所有 TARGET_* 环境变量（用于测试隔离/还原）。"""

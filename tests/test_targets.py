@@ -500,7 +500,7 @@ def test_m19_update_elo_defender_name():
 
 
 
-        def update_round(self, defender, matches, round_idx=None, statuses=None):
+        def update_round(self, defender, matches, round_idx=None, statuses=None, record_ids=None):
 
             used_names.append(defender)
 

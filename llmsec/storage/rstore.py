@@ -1,4 +1,4 @@
-"""storage.rstore — R 矩阵（唯一真相）的 SQLite 后端（数据库重构阶段 2）。
+"""storage.rstore — R 矩阵（原始观测）的 SQLite 后端（数据库重构阶段 2）。
 
 设计要点：
   - ``Observation`` 表 = R[record][model] 的扁平化；``runits``/``rmodels``
@@ -10,26 +10,25 @@
   - **并发写零丢失**：upsert_observations / remove_models 单事务
     （BEGIN IMMEDIATE），取代旧的"文件锁 load→改→save RMW"——两个并发
     publish 各自的事务串行提交，不存在后写覆盖先写。
-  - **遗留 json 自迁移**：db 缺失而旁有 results.json（旧 workspace/全局
-    存量）时，load 首次自动导入；显式 ``.json`` 路径的 load/save 走
-    遗留 JSON 读写（快照导出格式，人读友好）。
   - 损坏处置：load 时 PRAGMA quick_check 轻量校验（替代 .bak/.corrupt.bak
     机器——SQLite 事务本身保证不落半截写）；显式备份走 ``backup()``
-    （sqlite3 backup API，WAL 安全）。
+    （sqlite3 backup API，WAL 安全）。遗留 results.json 读写通道已删除
+    （本项目不做版本兼容）。
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3 as _sqlite3
+import time
 from pathlib import Path
 
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, delete, func
 from sqlmodel import Field, SQLModel
 from sqlmodel import select as _select
 
 from llmsec.core import config as _config
-from llmsec.core.io import CorruptedFileError, read_json, write_json
+from llmsec.core.io import read_json
 from llmsec.core.logging import get_logger
 from llmsec.core.results import MatchResult, ResultsMatrix
 from llmsec.storage import db as _db
@@ -82,7 +81,7 @@ class EloCache(SQLModel, table=True):
 
 
 # ============================================================
-# 路径与遗留迁移
+# 路径归一
 # ============================================================
 
 def results_db() -> Path:
@@ -99,67 +98,11 @@ def _as_db_path(path: Path | str | None) -> Path:
     return Path(path) if path is not None else results_db()
 
 
-def matrix_from_legacy_json(filepath: Path) -> ResultsMatrix:
-    """读遗留 results.json → 内存矩阵（保留 F1/F-3 的损坏处置语义）。
-
-    - v2：正常解析。
-    - v1（method 键纪元）：归档为同目录 results.method-era.bak 后返回空矩阵。
-    - 损坏：残文件备份为 <name>.corrupt.bak 供取证 → 尝试 <name>.bak 恢复 →
-      仍失败 raise CorruptedFileError（不返空矩阵防"空矩阵被写回=永久丢失"）。
-    """
-    filepath = Path(filepath)
-    data = None
-    try:
-        data = read_json(filepath, strict=True)
-    except CorruptedFileError as e:
-        logger.error("遗留 results.json 损坏: %s。原因: %s", filepath, e.cause)
-        try:
-            import shutil
-            shutil.copy2(filepath, str(filepath) + ".corrupt.bak")
-        except OSError:
-            pass
-        bak = filepath.with_suffix(filepath.suffix + ".bak")
-        if bak.exists():
-            try:
-                data = read_json(bak, strict=True)
-                logger.warning("已从备份 %s 恢复", bak)
-            except CorruptedFileError:
-                data = None
-        if data is None:
-            raise
-    if not data:
-        return ResultsMatrix()
-    if data.get("version") != 2:
-        # v1（method 键）废弃：归档后重建（行键是方法名，无法还原记录级观测）
-        try:
-            import shutil
-            bak = filepath.with_name("results.method-era.bak")
-            shutil.copy2(filepath, bak)
-            logger.warning("遗留 results.json 为 v1 schema，已归档为 %s 并按 v2 重建", bak)
-        except OSError:
-            pass
-        return ResultsMatrix()
-    mat = ResultsMatrix(units=data.get("units", []), models=data.get("models", []))
-    for record, col in data.get("results", {}).items():
-        for model, d in col.items():
-            try:
-                res = MatchResult.from_store(record, model, d)
-            except ValueError as e:
-                logger.warning("跳过损坏记录: %s", e)
-                continue
-            mat._r.setdefault(record, {})[model] = res
-            try:
-                t = float(res.ts) if res.ts is not None else 0
-            except (TypeError, ValueError):
-                t = 0
-            if t > mat._ins_order:
-                mat._ins_order = int(t)
-    return mat
-
-
 def _quick_check(dbp: Path) -> None:
     """SQLite 完整性快检（替代 .bak/.corrupt.bak 机器）。损坏抛 RuntimeError。"""
-    conn = _sqlite3.connect(str(dbp))
+    # timeout=5：写锁竞争时等待而非立刻 OperationalError——否则锁竞争会被
+    # 误报成"库损坏"
+    conn = _sqlite3.connect(str(dbp), timeout=5.0)
     try:
         try:
             row = conn.execute("PRAGMA quick_check").fetchone()
@@ -203,12 +146,10 @@ def save_matrix(matrix: ResultsMatrix, path: Path | str | None = None) -> Path:
     """全量覆写（单事务）。供 ResultsMatrix.save 与快照/工作区写入。"""
     dbp = _as_db_path(path)
     with _db.tx(dbp) as s:
-        for row in s.exec(_select(Observation)).all():
-            s.delete(row)
-        for row in s.exec(_select(RUnit)).all():
-            s.delete(row)
-        for row in s.exec(_select(RModel)).all():
-            s.delete(row)
+        # bulk DELETE：不再全量载入 ORM 行逐条 delete（大 R 库下省一次全表物化）
+        s.execute(delete(Observation))
+        s.execute(delete(RUnit))
+        s.execute(delete(RModel))
         order = 0
         for record, col in matrix._r.items():
             for model, res in col.items():
@@ -243,7 +184,10 @@ def upsert_observations(items: list[MatchResult], path: Path | str | None = None
             if existing is not None:
                 existing.eval_score = float(it.eval_score)
                 existing.status = it.status or ""
-                existing.ts_json = json.dumps(it.ts)
+                # ts=None（publish_tracker 恒缺省）不覆盖已有数值 ts——重发布
+                # 不应把该观测在 Elo 回放时间轴上挪到末尾
+                if it.ts is not None:
+                    existing.ts_json = json.dumps(it.ts)
                 existing.extra = dict(it.extra or {}) or None
                 s.add(existing)
             else:
@@ -269,10 +213,8 @@ def remove_models(models: list[str], path: Path | str | None = None) -> int:
     with _db.tx(dbp) as s:
         n = 0
         for m in models:
-            rows = s.exec(_select(Observation).where(Observation.model == m)).all()
-            n += len(rows)
-            for row in rows:
-                s.delete(row)
+            n += s.execute(
+                delete(Observation).where(Observation.model == m)).rowcount or 0
             rm = s.get(RModel, m)
             if rm is not None:
                 s.delete(rm)
@@ -283,8 +225,7 @@ def set_units(units: list[str], path: Path | str | None = None) -> None:
     """评级单位目录覆写（set_unit_catalog 的落库路径，单事务）。"""
     dbp = _as_db_path(path)
     with _db.tx(dbp) as s:
-        for row in s.exec(_select(RUnit)).all():
-            s.delete(row)
+        s.execute(delete(RUnit))
         for i, u in enumerate(units):
             s.add(RUnit(unit=u, position=i))
 
@@ -295,14 +236,18 @@ def backup(dest: Path | str, path: Path | str | None = None) -> Path:
     用独立连接而非引擎池里的连接——池连接归池管理，借出备份会与借还语义
     冲突，且引擎持有句柄时 Windows 上无法删除/改名库文件（回滚路径依赖此点）。
     """
-    src_conn = _sqlite3.connect(str(_as_db_path(path)))
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    out = _sqlite3.connect(str(dest))
+    src_conn = _sqlite3.connect(str(_as_db_path(path)))
     try:
-        src_conn.backup(out)
+        out = _sqlite3.connect(str(dest))
+        try:
+            src_conn.backup(out)
+        finally:
+            out.close()
     finally:
-        out.close()
+        # mkdir/第二个 connect 抛错也必须关 src——Windows 上滞留句柄会挡住
+        # 后续对该库的删除/改名
         src_conn.close()
     return dest
 
@@ -320,17 +265,16 @@ def get_elo_cache(model: str, path: Path | str | None = None) -> tuple[str, dict
 def upsert_elo_cache(model: str, fingerprint: str, payload: dict,
                      path: Path | str | None = None) -> None:
     """派生缓存 upsert（单事务——文件锁 RMW 的替代）。"""
-    import time as _time
     dbp = _as_db_path(path)
     with _db.tx(dbp) as s:
         row = s.get(EloCache, model)
         if row is None:
             row = EloCache(model=model, fingerprint=fingerprint,
-                           payload=dict(payload), updated_at=_time.time())
+                           payload=dict(payload), updated_at=time.time())
         else:
             row.fingerprint = fingerprint
             row.payload = dict(payload)
-            row.updated_at = _time.time()
+            row.updated_at = time.time()
         s.add(row)
 
 
@@ -345,11 +289,14 @@ def results_stats(path: Path | str | None = None) -> dict:
     if not dbp.exists():
         return {"models": [], "records": 0, "observations": 0, "units": 0}
     with _db.session(dbp) as s:
-        obs = s.exec(_select(Observation)).all()
         models = [m.model for m in s.exec(_select(RModel).order_by(RModel.position)).all()]
-        units = s.exec(_select(RUnit)).all()
-        return {"models": models, "records": len({o.record for o in obs}),
-                "observations": len(obs), "units": len(units)}
+        n_obs = s.exec(_select(func.count()).select_from(Observation)).one()
+        n_rec = s.exec(
+            _select(func.count(func.distinct(Observation.record))).select_from(Observation)
+        ).one()
+        n_units = s.exec(_select(func.count()).select_from(RUnit)).one()
+        return {"models": models, "records": n_rec,
+                "observations": n_obs, "units": n_units}
 
 
 def clone_from_run(run_name: str, dest: Path | str) -> dict:
@@ -364,9 +311,11 @@ def clone_from_run(run_name: str, dest: Path | str) -> dict:
     parts = run_name.split("/")
     run_dir = safe_subpath(Path(_config.RUNS_DIR), *parts)
     state_path = run_dir / "state.json"
-    if not state_path.exists():
-        # 旧布局
-        state_path = safe_subpath(Path(_config.RUNS_DIR), parts[0]) / "state.json"
+    if not state_path.exists() and len(parts) > 1:
+        # 旧布局（gen1/2 扁平）：run 目录为首段；单段名时 fallback 与首选同路径，
+        # 无需再试。runner_report 必须同步换到旧布局目录，否则 target_model 恒 None。
+        run_dir = safe_subpath(Path(_config.RUNS_DIR), parts[0])
+        state_path = run_dir / "state.json"
     if not state_path.exists():
         raise FileNotFoundError(
             f"run {run_name!r} 无 state.json，无法重建 R。"
@@ -390,11 +339,3 @@ def clone_from_run(run_name: str, dest: Path | str) -> dict:
         )
     save_matrix(mat, path=dest)
     return results_stats(dest)
-
-
-def export_legacy_json(out_path: Path | str, path: Path | str | None = None) -> Path:
-    """导出人读快照 results.json（派生产物；快照/分发用）。"""
-    mat = load_matrix(path)
-    out = Path(out_path)
-    write_json(out, mat.to_store_dict(), allow_nan=False)
-    return out

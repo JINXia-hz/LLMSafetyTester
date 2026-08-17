@@ -587,6 +587,28 @@ def test_recent_success_rate_window_counts_distinct_methods():
     assert tr._recent_success_rate(window_methods=1) == pytest.approx(1.0)
 
 
+def test_update_round_same_unit_observations_accumulate():
+    """同轮同 unit 多条观测 delta 聚合（求和 + √n 阻尼），不再只有末条生效。
+
+    回归：原实现第二遍逐条写 att_0+delta，同 unit 后写覆盖先写——同轮 3 条
+    观测只有末条 delta 生效，与 stats 逐条累计（n_matches=3）口径分裂。
+    """
+    tr = ELOTracker()
+    tr.update_round("def", [("u1", 3.0), ("u1", 3.0), ("u1", 3.0)])
+
+    # 单条参照：delta_1 = 一条 3.0 分观测的攻击方 delta
+    t1 = ELOTracker()
+    t1.update_round("def", [("u1", 3.0)])
+    delta_1 = t1.attacker_ratings["u1"] - float(t1.initial)
+
+    expected = float(tr.initial) + 3 * delta_1 / (3 ** 0.5)
+    assert tr.attacker_ratings["u1"] == pytest.approx(expected)
+    # stats 口径不变：3 条观测逐条累计
+    assert tr.attacker_stats["u1"]["n_matches"] == 3
+    # n=1 路径与原行为一致
+    assert t1.attacker_ratings["u1"] == pytest.approx(float(t1.initial) + delta_1)
+
+
 def test_security_boundary_raises_on_multiple_defenders_without_name():
     """多于一个防御方且未显式指定时 raise ValueError（不再任意取插入序第一个）。"""
     tr = ELOTracker()

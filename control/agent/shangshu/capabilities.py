@@ -124,14 +124,14 @@ def _h_fork_workspace(args: dict) -> dict:
 
 def _h_merge_results(args: dict) -> dict:
     """合并 R 矩阵。经 invoker 调 llmsec-manage merge。"""
-    from control.core.invoker import _manage_argv, _run
+    from control.core.invoker import run_manage
     from control.core.workspace import mark_merged
     sub = ["merge", "--sources", *args["sources"], "--target", args["target"], "--json"]
     if args.get("models"):
         sub += ["--models", *args["models"]]
     if args.get("confirm"):
         sub.append("--yes")
-    res = _run(_manage_argv(sub), timeout=600)
+    res = run_manage(sub, timeout=600)
     res.require_ok()
     result = res.json or {}
     if args.get("confirm") and result.get("dry_run") is False:
@@ -263,7 +263,7 @@ def _blk_merge_results(args: dict) -> dict | None:
         return {
             "summary": f"即将把 {src_str} 的观测合并到全局 R 矩阵",
             "detail": (
-                f"目标：全局 R（output/state/results.db，唯一真相）\n"
+                f"目标：全局 R（output/state/catalog.db，统一库）\n"
                 f"来源：{src_str}\n范围{model_str}\n"
                 f"全局 R 将永久累加这些观测，不可按来源精确剔除。"
                 f"这是不可逆的全局状态变更。"
@@ -299,7 +299,6 @@ def _blk_clean_cache(args: dict) -> dict | None:
         "summary": f"即将清理缓存：{cat_str}",
         "detail": (
             f"这些缓存（{cat_str}）下次评估时自动重建，但：\n"
-            f"- elo_cache 清后下次查询需从 R 重算（几秒）\n"
             f"- predictors 清后下次需重训预测器（几十秒）\n"
             f"软删除到 .trash/，可恢复。"
         ),
@@ -673,9 +672,3 @@ def _build() -> list[Capability]:
             risk_level="low",
         ),
     ]
-
-
-def reset_registry() -> None:
-    """重置注册表（测试用）。"""
-    global _REGISTRY
-    _REGISTRY = None

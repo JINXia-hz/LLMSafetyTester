@@ -320,6 +320,5 @@ def api_plan_status(plan_id: str):
 def api_bus_feed(since: float = 0.0, dept: str | None = None):
     """总线消息流（供前端面板轮询补全）。"""
     bus = get_bus()
-    kinds = None  # 返回所有 kind（前端按需过滤）
-    msgs = bus.recent(since_ts=since, dept=dept, kinds=kinds)
+    msgs = bus.recent(since_ts=since, dept=dept)  # kinds 缺省=所有 kind（前端按需过滤）
     return {"messages": [m.to_dict() for m in msgs], "latest_ts": msgs[-1].ts if msgs else since}

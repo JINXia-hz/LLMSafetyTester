@@ -525,7 +525,7 @@ class TestActionsConfirmFlows:
         assert res["status"] == "executed"
         assert not d.exists()                       # 目录已软删
         assert (iso_out / ".trash").exists()        # 进了回收站
-        assert ResultsMatrix.load(res_file.with_suffix(".db")).n_for_model("model-a") == 0
+        assert ResultsMatrix.load(res_file).n_for_model("model-a") == 0
 
         # token 一次性
         again = actions.delete_runs_confirm(prev["confirm_token"])
@@ -578,10 +578,10 @@ class TestActionsConfirmFlows:
 
         res = actions.merge_workspaces_confirm(prev["confirm_token"])
         assert res["status"] == "executed"
-        assert ResultsMatrix.load(res_file.with_suffix(".db")).n_for_model("m1") == 3
+        assert ResultsMatrix.load(res_file).n_for_model("m1") == 3
 
         # models 过滤：只合并指定列（阶段 2：workspace 真相在 db——json 重播种已不生效）
-        seed_results(ws_res.with_suffix(".db"), "m2", [("w1", 1.0)])
+        seed_results(ws_res, "m2", [("w1", 1.0)])
         prev2 = actions.merge_workspaces_preview(["ws:exp1"], target="global",
                                                  models=["m2"])
         assert prev2["summary"]["extra"]["per_model"].keys() == {"m2"}

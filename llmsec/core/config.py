@@ -307,7 +307,9 @@ class JudgeConfig:
         # 且不设 JUDGE_MODEL 时，Judge 用对方 base_url 请求 "deepseek-v4-flash" → 404。
         model = os.getenv("JUDGE_MODEL") or os.getenv("GENERATOR_MODEL") or DEFAULT_MODEL
         return cls(
-            api_key=os.getenv("GENERATOR_API_KEY", os.getenv("JUDGE_API_KEY", "")),
+            # api_key 用 or 链：os.getenv 的 default 只在键不存在时生效，
+            # .env 里 GENERATOR_API_KEY=（存在但空）时也须回退 JUDGE_API_KEY
+            api_key=os.getenv("GENERATOR_API_KEY") or os.getenv("JUDGE_API_KEY") or "",
             base_url=os.getenv("GENERATOR_BASE_URL", DEFAULT_BASE_URL),
             model=model,
             timeout=float(os.getenv("JUDGE_TIMEOUT", "90.0")),

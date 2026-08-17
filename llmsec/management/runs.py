@@ -22,6 +22,7 @@ from llmsec.management.common import (
     dir_size,
     emit,
     fmt_size,
+    print_plan,
     print_table,
     soft_rmtree,
 )
@@ -246,7 +247,7 @@ def cmd_delete(
         emit(done.to_dict(), json_mode=True, title="delete (executed)")
         return 0
     # 人可读
-    _print_plan(plan)
+    print_plan(plan)
     if plan.extra.get("r_rows_total"):
         print(f"\n⚠ R 矩阵影响：将删除 {plan.extra['r_rows_total']} 条观测"
               f"（models={plan.extra['r_models_affected']}）")
@@ -261,13 +262,3 @@ def cmd_delete(
     if done.extra.get("r_rows_removed") is not None:
         print(f"✓ R 矩阵：删除 {done.extra['r_rows_removed']} 条观测")
     return 0
-
-
-def _print_plan(plan: Plan) -> None:
-    """人可读打印 dry-run plan。"""
-    print(f"操作: {plan.action}  模式: {'dry-run' if plan.dry_run else 'executed'}")
-    rows = []
-    for item in plan.items:
-        rows.append([item.kind, item.path, fmt_size(item.size), item.detail])
-    print_table(rows, headers=["kind", "path", "size", "detail"])
-    print(f"合计: {len(plan.items)} 项, {fmt_size(plan.total_size)}")

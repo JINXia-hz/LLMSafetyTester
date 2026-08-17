@@ -1,7 +1,5 @@
 """簇粒度（unit）改造的核心测试：unit 构建/指纹/特征聚合 + R v2 记录级观测 + unit 回放聚合。"""
 
-import json
-
 import numpy as np
 
 from llmsec.core.results import ResultsMatrix
@@ -120,21 +118,8 @@ def test_r_v2_unit_aggregation(tmp_path):
     assert tracker.attacker_stats["c_x"]["n_matches"] == 2
 
     # 持久化 round-trip
-    p = tmp_path / "results.json"
+    p = tmp_path / "catalog.db"
     R.save(p)
     R2 = ResultsMatrix.load(p)
     assert R2.tested_units("modelA") == {"c_x", "c_y"}
     print("✅ R v2 记录级观测 + unit 回放聚合通过")
-
-
-def test_r_v1_archived(tmp_path):
-    """旧 schema（v1 method 键）load 时归档为 results.method-era.bak 并返回空矩阵。"""
-    p = tmp_path / "results.json"
-    p.write_text(json.dumps({"version": 1, "methods": ["DAN"], "models": ["qwen"],
-                             "results": {"DAN": {"qwen": {"eval_score": 3.0}}}}),
-                 encoding="utf-8")
-    from llmsec.storage import rstore
-    R = rstore.matrix_from_legacy_json(p)
-    assert R.n_for_model("qwen") == 0, "v1 数据不迁移（废弃重建）"
-    assert (tmp_path / "results.method-era.bak").exists(), "v1 文件已归档"
-    print("✅ R v1 归档废弃通过")

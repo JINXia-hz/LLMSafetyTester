@@ -217,7 +217,7 @@ def _build_attack_row(rec: dict, result: dict, round_idx: int, phase: str,
         "jailbreak_tax": result["jailbreak_tax"],
         "math_score": result.get("math_score"),
         "actual_answer": result.get("actual_answer"),
-        "expected_answer": rec["expected_answer"],
+        "expected_answer": rec.get("expected_answer"),
         "status": result["status"],
         "compliance_level": result.get("compliance_level"),
         "latency_ms": result["latency_ms"],
@@ -617,10 +617,9 @@ def run_attack_phase(records: list[dict],
         elif batch_reason:
             logger.info(f"  📏 自适应 batch_size={current_batch_size} ({batch_reason})")
 
-        # 使用采样器选择下一批单位
+        # 使用采样器选择下一批单位（select 只收 **kwargs sink，无轮次参数）
         next_units = sampler_obj.select(
             candidates, tracker, defender_name, n=current_batch_size,
-            round_idx=round_idx,
         )
 
         logger.info(f"\n  🔵 Round {round_idx}/{max_rounds}: 测试 {len(next_units)} 个攻击单位")
@@ -809,6 +808,9 @@ def run_attack_phase(records: list[dict],
     # 避免"成功但税钳 0 分"的有害记录被判为未成功。
     successful = sum(1 for r in all_results if r.get("is_harmful", False) or (r.get("eval_score") or 0) > 0)
     asr_n = len(all_results)
+    # Judge 故障行不计分子但留在分母——ASR 是下界，显式计数提示下游
+    # （与 build_summary 的 judge_error_count 口径对齐）
+    judge_error_count = sum(1 for r in all_results if r.get("status") == "judge_error")
     if not all_results and _tested_in_R:
         # 全量 resume（本轮 0 新测、明细为空）：从 R 列合成累计 ASR，否则汇总恒报
         # ASR=0/0。R 无 is_harmful 字段，用 eval_score>0（M-19 的兜底口径）计成功。
@@ -843,6 +845,7 @@ def run_attack_phase(records: list[dict],
         "this_run_tested": len(tested) - _resumed_tested,
         "successful": successful,
         "asr": round(asr, 4),
+        "judge_error_count": judge_error_count,
         "rounds": round_idx,
         "n_units": n_units,
         "boundary_elo": boundary.get("boundary_elo", INITIAL_ELO),

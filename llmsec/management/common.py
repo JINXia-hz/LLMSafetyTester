@@ -174,3 +174,13 @@ def print_table(rows: list[list[str]], headers: list[str], *, widths: list[int] 
     for r in rows:
         cells = [r[i].ljust(widths[i]) if i < len(r) else "" for i in range(len(headers))]
         print("  ".join(cells))
+
+
+def print_plan(plan: Plan) -> None:
+    """人可读打印 dry-run plan（runs/caches 共用的预览输出）。"""
+    print(f"操作: {plan.action}  模式: {'dry-run' if plan.dry_run else 'executed'}")
+    rows = []
+    for item in plan.items:
+        rows.append([item.kind, str(item.path), fmt_size(item.size), item.detail])
+    print_table(rows, headers=["kind", "path", "size", "detail"])
+    print(f"合计: {len(plan.items)} 项, {fmt_size(plan.total_size)}")

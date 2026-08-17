@@ -3,7 +3,7 @@
 Plan = 有序步骤列表，每步指向一个 capability + 参数 + 依赖。
 执行时按依赖拓扑分层，同层步骤可并行，被封驳的步骤跳过但其依赖者也标 blocked。
 
-持久化：Plan 存内存注册表（_PLANS），同时序列化到 output/plans/<id>.json 供前端轮询。
+持久化：Plan 存内存注册表（_PLANS），同时落 ctl_plans 表（ctlstore）。
 重启后内存清空（Plan 是短生命周期的，一次任务用完即弃；需要持久历史另做）。
 """
 

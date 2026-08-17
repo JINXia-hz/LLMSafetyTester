@@ -92,7 +92,8 @@ def get_or_create_twin(method_name: str, rec: dict, twin_cache: dict,
     # 追加写入孪生文件（append_twin_entry 带锁）；落盘失败不拖垮整个 phase——
     # 孪生已在内存缓存，本次检测照常进行
     try:
-        append_twin_entry(make_twin_entry(rec, rec.get("id", method_name), clean_prompt, twin))
+        append_twin_entry(make_twin_entry(rec, rec.get("id", method_name), clean_prompt, twin,
+                                          key_space="unit"))
     except OSError as e:
         logger.warning(f"  ⚠ {method_name[:30]} 孪生落盘失败: {e}")
 
@@ -175,10 +176,12 @@ def run_allergy_phase(method_records: dict[str, dict],
     logger.info(f"  ELO边界={boundary_elo:.0f}，选取 {len(twin_methods)} 个单位做过敏检测 (窗口={n_window})")
     logger.info(f"  单位: {', '.join(m[:25] for m in twin_methods)}")
 
-    # M9：并行前主线程一次性预载已有孪生（worker 内并发扫文件+append 有竞态）
+    # M9：并行前主线程一次性预载已有孪生（worker 内并发扫文件+append 有竞态）。
+    # 只认 unit 空间条目——method 空间（CLI 批量生成）的键是原始方法名，
+    # 与 unit id 不同空间，混载会假命中/重复生成
     twin_cache = {}
     for t in iter_jsonl(_config.SAFE_TWINS_FILE):
-        if t.get("method") and t.get("safe_prompt"):
+        if t.get("key_space") == "unit" and t.get("method") and t.get("safe_prompt"):
             twin_cache[t["method"]] = t["safe_prompt"]
     allergy_results = []
 
