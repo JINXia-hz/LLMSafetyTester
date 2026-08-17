@@ -16,6 +16,8 @@ import types
 
 import pytest
 
+import llmsec.core.config as cfg  # P9: TASK_LOG_DIR 动态读后统一 patch cfg
+
 # ============================================================
 # M-3: pcap 探活端点
 # ============================================================
@@ -128,14 +130,14 @@ def _task_env(tmp_path, monkeypatch):
     import llmsec.server.task_manager as tm
 
     tm.TASKS.clear()
-    monkeypatch.setattr(tm, "TASK_LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(cfg, "TASK_LOG_DIR", tmp_path / "logs")
     yield tm
     tm.TASKS.clear()
 
 
 def _mk_task(tm, tid, kind="r7"):
     return {"kind": kind, "cmd": "x", "argv": ["x"], "env_override": None,
-            "meta": None, "proc": None, "log_path": tm.TASK_LOG_DIR / f"{tid}.log",
+            "meta": None, "proc": None, "log_path": cfg.TASK_LOG_DIR / f"{tid}.log",
             "log_file": None, "status": "queued", "started_at": "now",
             "_task_id": tid}
 

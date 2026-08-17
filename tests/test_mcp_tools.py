@@ -13,6 +13,7 @@ import sys
 
 import pytest
 
+import llmsec.core.config as cfg  # P9: TASK_LOG_DIR 动态读后统一 patch cfg
 from llmsec.core.results import ResultsMatrix
 from llmsec.mcp import confirm as confirm_mod
 from llmsec.mcp.tools import actions, query
@@ -78,6 +79,12 @@ def make_report(**over):
     return rep
 
 
+def _reindex_runs():
+    """P9：查询纯读——造盘是旁路操作，造完显式对账入册（等价 storage reindex）。"""
+    from llmsec.storage import contract as _storage
+    _storage.reconcile_runs()
+
+
 def make_run(out, batch, target, report=None, tree=None):
     """造一个 run 目录（runs/<batch>/<target>/runner_report.json）。"""
     d = out / "runs" / batch / target
@@ -86,6 +93,7 @@ def make_run(out, batch, target, report=None, tree=None):
     (d / "runner_report.json").write_text(json.dumps(rep), encoding="utf-8")
     if tree is not None:
         (d / "security_tree.json").write_text(json.dumps(tree), encoding="utf-8")
+    _reindex_runs()
     return d
 
 
@@ -94,6 +102,7 @@ def make_junk_run(out, batch, target):
     d = out / "runs" / batch / target
     d.mkdir(parents=True, exist_ok=True)
     (d / "attack_results.jsonl").write_text('{"id": "a1"}\n', encoding="utf-8")
+    _reindex_runs()
     return d
 
 
@@ -427,6 +436,8 @@ class TestQueryPlansAndGazettes:
         d.mkdir(parents=True)
         (d / "runner_report.json").write_text(
             json.dumps(make_report(target_model="model-a")), encoding="utf-8")
+        from llmsec.storage import contract as _storage
+        _storage.reconcile_runs(d.parent)  # 卫星根对账入册（reindex 语义）
 
         runs = query.list_workspace_runs()
         assert [r["name"] for r in runs] == ["ws:exp1/model-a"]
@@ -540,16 +551,15 @@ class TestActionsConfirmFlows:
     def test_clean_caches_full_flow(self, iso_out, monkeypatch):
         from llmsec.management import caches as caches_mod
 
-        # P8：model_state 两件套（task_logs 已并入 storage gc-tasks）
+        # P8：model_state（task_logs 已并入 storage gc-tasks；probes 已表化 P9）
         (iso_out / "state").mkdir(exist_ok=True)
-        (iso_out / "state" / "probes.json").write_text("{}", encoding="utf-8")
         (iso_out / "state" / "prescreen_model.joblib").write_bytes(b"\x80\x04")
         monkeypatch.setattr(caches_mod, "OUTPUT_DIR", iso_out)
 
         prev = actions.clean_caches_preview(["model_state"])
         assert prev["action"] == "clean_caches"
         items = prev["summary"]["items"]
-        assert len([i for i in items if i["kind"] == "cache_file"]) == 2
+        assert len([i for i in items if i["kind"] == "cache_file"]) == 1
 
         # 未知类别不炸，标 unknown_category
         bad = actions.clean_caches_preview(["bogus_cat"])
@@ -557,7 +567,6 @@ class TestActionsConfirmFlows:
 
         res = actions.clean_caches_confirm(prev["confirm_token"])
         assert res["status"] == "executed"
-        assert not (iso_out / "state" / "probes.json").exists()
         assert not (iso_out / "state" / "prescreen_model.joblib").exists()
 
     def test_merge_workspaces_full_flow(self, iso_out, monkeypatch):
@@ -675,7 +684,7 @@ class TestWorkspaceAndSnapshot:
         def fake_stats(path):
             return {"models": ["m1"], "records": 1, "observations": 1, "units": 0}
 
-        monkeypatch.setattr(cstorage, "backup_results", fake_backup)
+        monkeypatch.setattr(cstorage, "backup", fake_backup)
         monkeypatch.setattr(cstorage, "results_stats", fake_stats)
         return ws_mod
 
@@ -700,7 +709,7 @@ class TestWorkspaceAndSnapshot:
         def boom(dest):
             raise RuntimeError("R 库不存在")
 
-        monkeypatch.setattr(cstorage, "backup_results", boom)
+        monkeypatch.setattr(cstorage, "backup", boom)
         r = actions.fork_workspace("exp-bad")
         assert "error" in r and "hint" in r
 
@@ -714,7 +723,6 @@ class TestWorkspaceAndSnapshot:
 
         r = actions.gc_merged_workspaces(older_than_days=7)
         assert [c["name"] for c in r["cleaned"]] == ["exp-gc"]
-        assert r["gc_log_size"] >= 1  # 审计日志保留合并去向
         assert not (iso_ws.WORKSPACES_DIR / "exp-gc").exists()
 
     def test_export_snapshot_tool(self, iso_out, tmp_path, monkeypatch):
@@ -748,7 +756,7 @@ class TestTaskQueries:
         tm.TASKS.clear()
         log_dir = tmp_path / "tasklogs"
         log_dir.mkdir()
-        monkeypatch.setattr(tm, "TASK_LOG_DIR", log_dir)
+        monkeypatch.setattr(cfg, "TASK_LOG_DIR", log_dir)
         yield tm, log_dir
         tm.TASKS.clear()
         tm.TASKS.update(saved)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 
+import llmsec.core.config as cfg  # P9: TASK_LOG_DIR 动态读后统一 patch cfg
 from llmsec.tui.task_store import EXTERNAL, TaskStore, attack_files, study_yamls
 
 # TASKS 隔离由 conftest 的 autouse _hermetic_tasks 统一提供。
@@ -318,11 +319,10 @@ class TestExternalMeta:
         """task_manager 落库（P4：库行即真相）：running（带 pid）→ 终态回写。"""
         import time as _time
 
-        import llmsec.core.config as cfg
         import llmsec.server.task_manager as tm
         from llmsec.storage import contract as _storage
 
-        monkeypatch.setattr(tm, "TASK_LOG_DIR", tmp_path)
+        monkeypatch.setattr(cfg, "TASK_LOG_DIR", tmp_path)
         # 子进程须活过 start_task 返回（首次含 ORM import/建引擎固定开销）
         view = tm.start_task("metauto", ["-c", "import time; time.sleep(0.5)"], meta={"targets": ["A"]})
         tid = view["id"]

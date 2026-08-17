@@ -90,7 +90,7 @@ def _hermetic_catalog(tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _hermetic_tasks():
+def _hermetic_tasks(tmp_path):
     """进程级 TASKS 注册表按测试隔离（全 suite autouse）。
 
     背景：xdist 把多个测试文件分到同一 worker，某文件的真实 start_task 残留任务
@@ -103,8 +103,14 @@ def _hermetic_tasks():
     分裂（即审计 H3 修过的 bug 形态）。teardown 直接 terminate 残留子进程而不用
     cancel_task（避免 _advance_queue 在清理中途再拉起新任务），并关闭日志句柄。
     """
+    import llmsec.core.config as cfg
     from llmsec.server import task_manager as tm
 
+    # 任务日志目录一并隔离（P9：堵 .log/.progress.jsonl 写进真实 output/tasks
+    # ——此前只隔离库行，测试起的任务把日志漏在真目录里；TASK_LOG_DIR 已
+    # 全线改为调用期动态读，此处重绑即全局生效）
+    saved_tasklog = cfg.TASK_LOG_DIR
+    cfg.TASK_LOG_DIR = tmp_path / "tasks"
     saved = dict(tm.TASKS)
     tm.TASKS.clear()
     try:
@@ -126,6 +132,7 @@ def _hermetic_tasks():
                     pass
         tm.TASKS.clear()
         tm.TASKS.update(saved)
+        cfg.TASK_LOG_DIR = saved_tasklog
 
 
 # ============================================================

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from llmsec.core.config import TASK_LOG_DIR
+from llmsec.core import config as _config  # TASK_LOG_DIR 调用期动态读（测试可重绑）
 from llmsec.tui.render import EvalProgressState
 
 EXTERNAL = "external"  # TUI 特有状态：磁盘扫描发现的外部任务
@@ -123,7 +123,7 @@ def _kill_pid(pid: int) -> bool:
 class TaskStore:
     def __init__(self, log_dir: Path | str | None = None) -> None:
         # 可注入目录（测试用）；默认 TASK_LOG_DIR（output/tasks/）
-        self._dir = Path(log_dir) if log_dir is not None else TASK_LOG_DIR
+        self._dir = Path(log_dir) if log_dir is not None else _config.TASK_LOG_DIR
         self._states: dict[str, EvalProgressState] = {}
         self._offsets: dict[str, int] = {}
         self._prev_status: dict[str, str] = {}
@@ -179,15 +179,21 @@ class TaskStore:
     def _scan_detached(self, owned: dict[str, TaskSnapshot]) -> list[TaskSnapshot]:
         """构造不在本进程 TASKS 里的任务的只读视图。
 
-        storage 重构：外部任务发现走目录库（query_tasks 自带 meta.json 对账，
-        免逐个读文件）；状态为 running/queued 时以 PID 存活为准（持有进程崩溃
-        后无人回写终态）；PID 已死且无终态记录 → "ended"。无 meta.json 的裸
-        文件残留（旧世代 .log/.progress.jsonl，目录扫兜底）保持 EXTERNAL 未知态。
+        storage 重构：外部任务发现走目录库；状态为 running/queued 时以 PID
+        存活为准（持有进程崩溃后无人回写终态）；PID 已死且无终态记录 →
+        "ended"。无 meta.json 的裸文件残留（旧世代 .log/.progress.jsonl，
+        目录扫兜底）保持 EXTERNAL 未知态。
+        P9：query_tasks 已纯读——legacy meta.json 的对账吸收在此显式做
+        （TUI 是历史目录的容错视图；目录 iterdir + mtime stat，成本同旧）。
         """
         if not self._dir.is_dir():
             return []
         from llmsec.storage import contract as _storage
 
+        try:
+            _storage.reconcile_tasks(tasks_dir=self._dir)
+        except Exception:
+            pass  # 对账失败退化为纯库行视图
         out: list[TaskSnapshot] = []
         seen: set[str] = set()
         try:
@@ -326,6 +332,11 @@ class TaskStore:
         if view is not None:
             return view
         # 外部任务：库行带 PID 且进程仍活 → 跨进程终止（确认弹窗已在面板层）
+        # P9：get_task 纯读——legacy meta.json 先显式对账入册（零变更零开销）
+        try:
+            _storage.reconcile_tasks(tasks_dir=self._dir)
+        except Exception:
+            pass
         row = _storage.get_task(task_id, tasks_dir=self._dir)
         pid = row.pid if row is not None else None
         if isinstance(pid, int) and _pid_alive(pid):

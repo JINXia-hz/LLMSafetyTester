@@ -20,8 +20,10 @@ from llmsec.storage.catalog import (
     RUN_NAME_RE,
     RUN_TS_FORMAT,
     allocate_runs_dir,
+    finalize_run,
     get_run,
     get_task,
+    load_probes,
     lru_evict_keys,
     predictor_hit,
     predictor_saved,
@@ -33,13 +35,14 @@ from llmsec.storage.catalog import (
     reconcile_runs,
     reconcile_tasks,
     register_run,
+    remove_run,
+    save_probe,
     update_task,
     upsert_task,
     upsert_trial_record,
 )
 from llmsec.storage.ctlstore import (
     append_event,
-    append_workspace_gc,
     clear_ticket,
     clear_tickets_for_plan,
     delete_env_snapshot,
@@ -57,6 +60,7 @@ from llmsec.storage.ctlstore import (
     list_gazette_meta,
     list_workspaces,
     mark_queue_running,
+    pending_queue_plans,
     reset_ctl_plans,
     reset_gazette,
     reset_queue,
@@ -65,30 +69,27 @@ from llmsec.storage.ctlstore import (
     save_env_snapshot,
     save_ticket,
     save_workspace,
-    workspace_gc_log,
+    search_gazette,
 )
-from llmsec.storage.ctlstore import search_gazette as search_gazettes
 from llmsec.storage.db import catalog_db, db_for
 from llmsec.storage.models import Run, Task, Trial
-from llmsec.storage.rstore import backup as backup_results
-from llmsec.storage.rstore import clone_from_run, results_stats
-from llmsec.storage.rstore import close_db as close_results_db
+from llmsec.storage.rstore import backup, clone_from_run, close_db, results_stats
 
 __all__ = [
     "RUN_ARTIFACTS", "RUN_NAME_RE", "RUN_TS_FORMAT",
     "Run", "Task", "Trial",
     "allocate_runs_dir", "catalog_db", "db_for", "extract_report_metrics",
-    "backup_results", "clone_from_run", "close_results_db", "results_stats",
-    "search_gazettes",
+    "backup", "clone_from_run", "close_db", "results_stats", "search_gazette",
     "append_event", "gazette_events", "gazette_meta", "list_gazette_meta", "reset_gazette",
     "save_ctl_plan", "get_ctl_plan", "list_ctl_plans", "reset_ctl_plans",
     "clear_ticket", "clear_tickets_for_plan", "get_ticket", "reset_tickets", "save_ticket",
-    "enqueue_plan", "mark_queue_running", "finish_queue_item", "reset_queue",
+    "enqueue_plan", "mark_queue_running", "finish_queue_item", "pending_queue_plans", "reset_queue",
     "save_workspace", "get_workspace", "list_workspaces", "delete_workspace_row",
-    "append_workspace_gc", "workspace_gc_log",
     "save_env_snapshot", "list_env_snapshots", "get_env_snapshot", "delete_env_snapshot",
     "get_run", "get_task", "query_runs", "query_tasks", "query_trials",
     "reconcile_runs", "reconcile_tasks", "reconcile_predictors", "lru_evict_keys",
     "predictor_hit", "predictor_saved", "upsert_trial_record",
-    "register_run", "rebuild_runs", "update_task", "upsert_task",
+    "save_probe", "load_probes",
+    "register_run", "finalize_run", "remove_run", "rebuild_runs",
+    "update_task", "upsert_task",
 ]

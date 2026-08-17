@@ -213,6 +213,9 @@ def reset_tickets() -> None:
 # Plan 队列（内容落库；worker 协议留内存）
 # ============================================================
 
+_DONE_KEEP = 20  # done 行只作近期审计，超出即清（防无限增长）
+
+
 def enqueue_plan(plan_id: str) -> None:
     with _db.tx() as s:
         if any(r.plan_id == plan_id and r.status == "queued"
@@ -233,6 +236,22 @@ def finish_queue_item(plan_id: str) -> None:
         for r in s.exec(_select(CtlQueueItem).where(CtlQueueItem.plan_id == plan_id)).all():
             r.status = "done"
             s.add(r)
+        done = list(s.exec(_select(CtlQueueItem).where(CtlQueueItem.status == "done")
+                           .order_by(CtlQueueItem.queued_at.desc())).all())
+        for r in done[_DONE_KEEP:]:
+            s.delete(r)
+
+
+def pending_queue_plans() -> list[str]:
+    """重启恢复读侧：queued 状态的 plan（按入队序）。PlanQueue 构造时回填。
+
+    running 状态不回填——worker 崩溃时该 Plan 的执行已不可续（executor 的
+    步骤进度在 ctl_events 里，无重入语义），恢复为排队重跑比静默丢失好。
+    """
+    with _db.session() as s:
+        rows = s.exec(_select(CtlQueueItem).where(CtlQueueItem.status == "queued")
+                      .order_by(CtlQueueItem.queued_at)).all()
+        return [r.plan_id for r in rows]
 
 
 def reset_queue() -> None:
@@ -251,7 +270,7 @@ def save_workspace(info: dict) -> None:
         if row is None:
             row = CtlWorkspace(name=info["name"])
         for k in ("path", "source", "note", "created", "models", "records",
-                  "merged", "merged_at", "merged_to", "gc_log"):
+                  "merged", "merged_at", "merged_to"):
             if k in info:
                 setattr(row, k, info[k])
         s.add(row)
@@ -275,28 +294,8 @@ def delete_workspace_row(name: str) -> dict | None:
         if row is None:
             return None
         d = row.as_dict()
-        d["gc_log"] = list(row.gc_log or [])
         s.delete(row)
         return d
-
-
-def append_workspace_gc(entry: dict) -> None:
-    """gc 审计日志追加（独立于索引项生命周期——删项后日志仍在）。"""
-    with _db.tx() as s:
-        # gc_log 挂在哨兵行 "__gc_log__" 上（索引项删除后审计链保留）
-        row = s.get(CtlWorkspace, "__gc_log__")
-        if row is None:
-            row = CtlWorkspace(name="__gc_log__", created="")
-        log = list(row.gc_log or [])
-        log.append(entry)
-        row.gc_log = log
-        s.add(row)
-
-
-def workspace_gc_log() -> list[dict]:
-    with _db.session() as s:
-        row = s.get(CtlWorkspace, "__gc_log__")
-        return list(row.gc_log or []) if row is not None else []
 
 
 def save_env_snapshot(info: dict) -> None:

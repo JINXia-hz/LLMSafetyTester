@@ -177,6 +177,7 @@ def plan_delete(
             continue
         size = dir_size(run_dir)
         plan.add(run_dir, size=size, kind="run_dir", detail="将软删除到 .trash/")
+        plan.extra.setdefault("run_names", []).append(name)
         if delete_r:
             # 从 runner_report.json 取 target_model，定位 R 列
             report = read_json(run_dir / "runner_report.json") or {}
@@ -217,6 +218,15 @@ def execute_delete(plan: Plan, *, delete_r: bool = False) -> Plan:
                      detail=f"已移到 {dest}" if dest else "失败")
         else:
             done.add(src, size=0, kind="missing", detail="已不存在")
+    # P9 写入口收尾：显式删登记行（此前靠 reconcile 的"目录消失检测"补删，
+    # 查询纯读后该自愈路径不存在了）。best-effort，与软删同一事务粒度。
+    from llmsec.storage import contract as _storage
+
+    for name in plan.extra.get("run_names") or []:
+        try:
+            _storage.remove_run(name)
+        except Exception as e:
+            logger.warning("删登记行失败（%s，reindex 可自愈）: %s", name, e)
     # 删 R 列（阶段 2：单事务 SQL 删除，取代"文件锁 load→remove→save"——
     # _file_lock 与 LockTimeout 从 R 路径退役）
     if delete_r and plan.extra.get("r_models_affected"):

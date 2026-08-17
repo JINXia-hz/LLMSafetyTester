@@ -63,7 +63,7 @@ def _resolve_run_dir(run_name: str) -> Path | None:
     非法名称视为目录不存在（返回 None）；dir_path 取自目录库登记行（登记来源
     已经过扫描校验），不再手工拼路径。
     """
-    # workspace 来源：卫星目录库（<ws>/catalog.db，query_runs 自带对账）
+    # workspace 来源：卫星目录库（<ws>/catalog.db；显式对账采用历史旁路产物）
     if run_name.startswith("ws:"):
         rest = run_name[3:]
         parts = rest.split("/", 1)
@@ -73,6 +73,7 @@ def _resolve_run_dir(run_name: str) -> Path | None:
             return None
         if not ws_dir.is_dir():
             return None
+        reconcile_runs(runs_root=ws_dir)
         rows = query_runs(runs_root=ws_dir)
         if len(parts) == 2:
             row = next((r for r in rows if r.target == parts[1] and r.has_report), None)
@@ -122,7 +123,9 @@ def discover_workspace_runs() -> list[dict]:
     """列出所有 workspace 内含报告的 run（供 list_runs tool 补充历史 run 列表）。
 
     每个 workspace 可能有多个 target 子目录（每个是一个独立 run）——经各自
-    卫星目录库查询（query_runs 自带对账，旧 workspace 无库时首查自动建册）。
+    卫星目录库查询。P9：查询已纯读，旧 workspace 无库/旁路造盘的历史采用由
+    此处的显式对账承担（list/compare 是按需操作，非轮询热路径——与全局侧
+    的 storage reindex 同语义）。
     返回 [{name, workspace, target, ...metrics}]，name 形如 'ws:<ws>/<target>'。
     """
     out = []
@@ -131,6 +134,7 @@ def discover_workspace_runs() -> list[dict]:
     for ws_dir in sorted(WORKSPACES_DIR.iterdir()):
         if not ws_dir.is_dir():
             continue
+        reconcile_runs(runs_root=ws_dir)
         for row in query_runs(runs_root=ws_dir):
             if not row.has_report:
                 continue

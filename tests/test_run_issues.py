@@ -453,7 +453,7 @@ def test_p9_concurrent_save_artifact_no_tmp_leftover(tmp_path):
 def test_p9_concurrent_save_probe_no_lost_entries(tmp_path):
     import llmsec.evaluation.predictors.fingerprint as fp_mod
 
-    probes_file = tmp_path / "probes.json"  # 隔离：不碰真实 output/state/probes.json
+    # P9 表化：probes 落 catalog.db（隔离经 conftest _hermetic_catalog 的 tmp 库）
     n_models = 16
 
     def _work(i):
@@ -461,12 +461,11 @@ def test_p9_concurrent_save_probe_no_lost_entries(tmp_path):
             f"model{i}",
             {f"s{j}": 1500.0 + i + j for j in range(4)},
             [f"s{j}" for j in range(4)],
-            path=probes_file,
         )
 
     with ThreadPoolExecutor(max_workers=8) as ex:
         list(ex.map(_work, range(n_models)))
 
-    models = fp_mod.load_probes(probes_file)
+    models = fp_mod.load_probes()
     assert set(models) == {f"model{i}" for i in range(n_models)}, \
-        "P9: 持锁 read-modify-write 后并发 save_probe 不应丢条目"
+        "P9: 单事务 upsert 下并发 save_probe 不应丢条目"

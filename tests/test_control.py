@@ -305,7 +305,7 @@ class TestMergeStatusClosure:
 # ============================================================
 class TestWorkspace:
     def test_fork_clones_results_db(self, tmp_path, monkeypatch):
-        """fork（P3 库级 clone）：backup_results → <ws>/results.db + 记索引。"""
+        """fork（P3 库级 clone）：backup → <ws>/catalog.db + 记索引。"""
         from control import config
         from control.core import storage as cstorage
         from control.core import workspace as ws
@@ -327,7 +327,7 @@ class TestWorkspace:
         def fake_stats(path):
             return {"models": ["mA"], "records": 1, "observations": 1, "units": 0}
 
-        monkeypatch.setattr(cstorage, "backup_results", fake_backup)
+        monkeypatch.setattr(cstorage, "backup", fake_backup)
         monkeypatch.setattr(cstorage, "results_stats", fake_stats)
 
         info = ws.fork("ws1", source="global", note="test")

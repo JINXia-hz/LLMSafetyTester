@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import threading
 
+import llmsec.core.config as cfg  # P9: TASK_LOG_DIR 动态读后统一 patch cfg
+
 # ============================================================
 # P1: best_overall 不接收 None
 # ============================================================
@@ -239,7 +241,7 @@ def test_spawn_oserror_persists_row_and_advances(tmp_path, monkeypatch):
 
     tm.TASKS.clear()
     log_dir = tmp_path / "logs"
-    monkeypatch.setattr(tm, "TASK_LOG_DIR", log_dir)
+    monkeypatch.setattr(cfg, "TASK_LOG_DIR", log_dir)
     monkeypatch.setattr(cfg, "CATALOG_DB", tmp_path / "catalog.db")
     from llmsec.storage import db as storage_db
     storage_db.close()
@@ -271,7 +273,7 @@ def test_refresh_terminal_advances_queue(tmp_path, monkeypatch):
 
     tm.TASKS.clear()
     log_dir = tmp_path / "logs"
-    monkeypatch.setattr(tm, "TASK_LOG_DIR", log_dir)
+    monkeypatch.setattr(cfg, "TASK_LOG_DIR", log_dir)
     try:
         spawned = []
 

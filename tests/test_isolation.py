@@ -18,7 +18,7 @@ def restore_modules():
         "FEATURE_CACHE_FILE",
         "CLUSTER_RESULT_FILE", "CLUSTER_REPORT_FILE", "CLUSTER_MATRIX_FILE",
         "EMBEDDING_CACHE_FILE", "PREDICTORS_DIR", "STATE_DIR",
-        "SAFE_TWINS_FILE", "TWIN_RESULT_FILE", "LOG_FILE", "ALERTS_FILE",
+        "SAFE_TWINS_FILE", "TWIN_RESULT_FILE", "LOG_FILE",
     ]
     saved = {k: getattr(cfg, k) for k in keys}
     yield
@@ -49,20 +49,20 @@ class TestRebindToWorkdir:
         # 安全孪生
         assert wd / "state" / "safe_twins.jsonl" == cfg.SAFE_TWINS_FILE
         assert wd / "allergy_results.jsonl" == cfg.TWIN_RESULT_FILE
-        # 日志/告警
+        # 日志
         assert wd / "logs" / "llmsec.log" == cfg.LOG_FILE
-        assert wd / "alerts.jsonl" == cfg.ALERTS_FILE
 
     def test_derived_paths_follow_config(self, tmp_path, restore_modules):
         """派生路径助手调用期读 config——重绑后自动指向 work-dir。"""
+        import llmsec.core.config as cfg
         from llmsec.core.isolation import rebind_to_workdir
-        from llmsec.evaluation.predictors.fingerprint import _probes_file
         from llmsec.evaluation.prescreen_ml import _model_path
 
         wd = tmp_path / "wd"
         rebind_to_workdir(wd)
 
-        assert wd / "state" / "probes.json" == _probes_file()
+        # probes 已表化（P9）——指纹随 CATALOG_DB 重绑落 work-dir 卫星库
+        assert wd / "catalog.db" == cfg.CATALOG_DB
         assert wd / "state" / "prescreen_model.joblib" == _model_path()
 
     def test_creates_state_and_predictors_subdirs(self, tmp_path, restore_modules):

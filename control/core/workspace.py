@@ -8,7 +8,6 @@ fork = 「以某个状态为起点，起一个新的隔离 llmsec 工作单元�
   3. work-dir 模式下 runner 把库路径重绑到该目录，全局零污染
 
 索引在目录库 ctl_workspaces 表（P5：原 _index.json + AtomicIndexStore 退役）；
-gc 审计链挂 __gc_log__ 哨兵行，不随索引项删除而丢失。
 """
 
 from __future__ import annotations
@@ -20,11 +19,9 @@ from control.config import LLMSEC_REPO, WORKSPACES_DIR, ensure_workspaces_dir
 from control.core.invoker import run_runner
 from control.core.paths import safe_component
 from control.core.storage import (
-    append_workspace_gc,
     delete_workspace_row,
     get_workspace,
     save_workspace,
-    workspace_gc_log,
 )
 from control.core.storage import (
     list_workspaces as _list_rows,
@@ -57,11 +54,11 @@ def fork(
 
     # 库级 clone（P3：db→json→子进程→复制→json→db 的六步握手删除——经薄契约
     # 直调 rstore.backup / clone_from_run，WAL 安全整库复制含 elo_cache 表）
-    from control.core.storage import backup_results, clone_from_run, results_stats
+    from control.core.storage import backup, clone_from_run, results_stats
     ws_dir.mkdir(parents=True)
     dst = ws_dir / "catalog.db"
     if source == "global":
-        backup_results(dst)
+        backup(dst)
         stats = results_stats(dst)
     elif source.startswith("run:"):
         stats = clone_from_run(source[4:], dst)
@@ -161,8 +158,8 @@ def delete_workspace(name: str) -> dict:
     if ws_dir.exists():
         # Windows：merge/fork 可能打开过该库的引擎句柄，持句柄 rmtree 会 500——先释放
         try:
-            from control.core.storage import close_results_db
-            close_results_db(ws_dir / "catalog.db")
+            from control.core.storage import close_db
+            close_db(ws_dir / "catalog.db")
         except Exception:
             pass
         shutil.rmtree(ws_dir)
@@ -178,14 +175,11 @@ def gc_merged_workspaces(older_than_days: int = 7) -> dict:
       merge 之后仍可能引用 ws 目录（compare 直接 iterdir 不读索引的 merged 标记），
       立即删会造成悬空引用。故 mark_merged 只标记，物理清理由此入口按 merged_at 超期延迟执行。
 
-    审计链保留：被 GC 的 workspace 信息（含 merged_to）记入 ctl_workspaces 的
-    __gc_log__ 哨兵行，供事后追溯，不因物理删除而丢失合并去向。
-
     Args:
         older_than_days: merged_at 距今超过该天数的 workspace 才清理。默认 7 天。
 
     Returns:
-        {cleaned: [...], skipped_fresh: N, gc_log_size: N}
+        {cleaned: [...], skipped_fresh: N, older_than_days: N}
     """
     cutoff = datetime.now() - timedelta(days=older_than_days)
     cleaned = []
@@ -209,26 +203,18 @@ def gc_merged_workspaces(older_than_days: int = 7) -> dict:
         size = _dir_size(ws_dir) if ws_dir.exists() else 0
         if ws_dir.exists():
             try:
-                from control.core.storage import close_results_db
-                close_results_db(ws_dir / "catalog.db")
+                from control.core.storage import close_db
+                close_db(ws_dir / "catalog.db")
             except Exception:
                 pass
             shutil.rmtree(ws_dir, ignore_errors=True)
-        # 审计：精简记录（含 merged_to 去向）挂哨兵行，删索引行
-        append_workspace_gc({
-            "name": name,
-            "merged_at": info["merged_at"],
-            "merged_to": info.get("merged_to"),
-            "source": info.get("source"),
-            "gc_at": datetime.now().isoformat(timespec="seconds"),
-            "size": size,
-        })
+        # P9：gc 审计链（__gc_log__ 哨兵行）删除——只被 len() 消费的写入型
+        # 遥测；合并去向仍可从 ctl_events 的 merge 事件追溯
         delete_workspace_row(name)
         cleaned.append({"name": name, "size": size})
     return {
         "cleaned": cleaned,
         "skipped_fresh": skipped_fresh,
-        "gc_log_size": len(workspace_gc_log()),
         "older_than_days": older_than_days,
     }
 

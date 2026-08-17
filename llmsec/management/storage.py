@@ -316,8 +316,8 @@ def cmd_migrate_control(*, yes: bool = False, json_mode: bool = False) -> int:
     """control 层旧文件一次性导入目录库（P5）。
 
     导入：gazette/*.jsonl + _index.json → ctl_events/ctl_plan_meta；
-    plans/*.json → ctl_plans；workspaces/_index.json → ctl_workspaces（gc_log
-    → 哨兵行）；env_snapshots/_index.json → ctl_env_snapshots。
+    plans/*.json → ctl_plans；workspaces/_index.json → ctl_workspaces；
+    env_snapshots/_index.json → ctl_env_snapshots。
     迁移后源文件改名 .migrated（保留可回滚）。幂等：已导入（表非空或文件
     已 .migrated）自动跳过。
     """
@@ -394,8 +394,6 @@ def cmd_migrate_control(*, yes: bool = False, json_mode: bool = False) -> int:
             for info in idx.get("workspaces", {}).values():
                 ctlstore.save_workspace(info)
                 stats["workspaces"] += 1
-            for entry in idx.get("gc_log", []):
-                ctlstore.append_workspace_gc(entry)
         except (OSError, _json.JSONDecodeError):
             pass
         else:

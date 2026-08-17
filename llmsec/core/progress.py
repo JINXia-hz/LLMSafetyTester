@@ -18,7 +18,7 @@ import os
 import threading
 from datetime import datetime
 
-from llmsec.core.config import TASK_LOG_DIR
+from llmsec.core import config as _config  # TASK_LOG_DIR 调用期动态读（测试可重绑）
 
 _lock = threading.Lock()
 
@@ -39,8 +39,8 @@ def emit_progress(record: dict) -> None:
     )
     try:
         with _lock:
-            TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
-            with open(TASK_LOG_DIR / f"{task_id}.progress.jsonl", "a", encoding="utf-8") as f:
+            _config.TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
+            with open(_config.TASK_LOG_DIR / f"{task_id}.progress.jsonl", "a", encoding="utf-8") as f:
                 f.write(line + "\n")
     except OSError:
         pass

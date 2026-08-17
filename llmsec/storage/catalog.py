@@ -1,16 +1,14 @@
 """storage.catalog — 目录库读写实现（runs / trials / tasks 三张表的 DAO）。
 
 本模块是"发现 run"的**唯一实现**，取代此前的三份目录扫描
-（server/data_query._discover_runs、management/runs.discover_runs、
-control/compare.discover_workspace_runs）与两份字段提取。
+（server/data_query._discover_runs、management/runs.discover_workspace_runs）与两份字段提取。
 
-核心机制——增量对账（reconcile）：
-  目录库是派生索引，真相在文件。查询前先对账：扫描 runs 根的两级目录，
-  凡 run 目录 mtime 与库行不一致（新建/产物更新/消失）即重扫入库。
-  这保证：
-    1. 写入口登记（register_run）失败或进程崩溃不丢可见性（下次查询自愈）；
-    2. 重构前的存量目录在首次查询时自动入册（无需手工迁移）；
-    3. 同秒撞名目录（`<ts>_2` 后缀，RUN_NAME_RE 裂缝）不再不可见。
+核心机制——写入口收尾，查询纯读（P9 所有权翻转）：
+  库行由写入口全生命周期维护：register_run（目录创建）→ finalize_run
+  （报告落盘，metrics/has_*/size 一次写全）→ remove_run（软删/清理）。
+  查询是纯 SELECT——不对账、不扫目录、不抢写锁。
+  reconcile_* 降级为显式恢复工具（storage reindex / verify / migrate-layouts），
+  只服务"手动拷贝/删除目录"这类旁路操作的事后矫正。
 
 布局支持（三种世代 + workdir/workspace 卫星布局）：
   gen3   runs/<ts>/<target>/          产物在 target 子目录
@@ -32,7 +30,7 @@ from llmsec.core import config as _config
 from llmsec.core.io import read_json
 from llmsec.core.results import extract_report_metrics
 from llmsec.storage import db
-from llmsec.storage.models import PredictorCache, Run, Task, Trial, dir_size, run_name
+from llmsec.storage.models import PredictorCache, Probe, Run, Task, Trial, dir_size, run_name
 
 # run 目录命名契约的单一来源（原 management/runs.py 与 data_query 各一份且
 # 带 $ 锚——`_allocate_runs_dir` 产生的 `<ts>_2` 撞名后缀不匹配，同秒第二个
@@ -49,7 +47,6 @@ RUN_ARTIFACTS = (
     "attack_results.jsonl",
     "state.json",
     "allergy.json",
-    "sampler_log.jsonl",
     "cluster_security_analysis.json",
     "cluster_report.json",
 )
@@ -158,8 +155,8 @@ def register_run(run_dir: Path, *, batch: str | None = None, target: str | None 
     """写入口轻登记：per-target run 目录刚创建（尚无产物）时占一行。
 
     作用：进行中的 run 从创建起即可见（junk/监控），同秒撞名目录不再依赖
-    读方扫描发现。产物落盘后的富化（report/metrics/size）由 reconcile 按
-    mtime 自动补齐——登记必须廉价，不能出现在评估热路径上。
+    读方扫描发现。产物落盘后的富化（report/metrics/size）由 finalize_run 在
+    报告生成后一次写全——登记必须廉价，不能出现在评估热路径上。
     """
     run_dir = Path(run_dir)
     batch = batch or run_dir.parent.name
@@ -180,6 +177,18 @@ def register_run(run_dir: Path, *, batch: str | None = None, target: str | None 
         s.merge(row)
 
 
+def finalize_run(run_dir: Path, *, batch: str | None = None, target: str | None = None) -> None:
+    """写入口收尾：报告/产物落盘后把登记行富化一次（metrics/has_*/size/mtime）。
+
+    runner/cli 在报告生成后调用；此前这是 reconcile 每次"查询前对账"存在的
+    理由——现在写入口自己收尾，查询不再扫目录。
+    """
+    run_dir = Path(run_dir)
+    batch = batch or run_dir.parent.name
+    with db.tx() as s:
+        s.merge(_scan_run(run_dir, batch, target))
+
+
 def allocate_runs_dir(base_dir: Path, name: str) -> Path:
     """撞名分配：name 已存在时追加 _2/_3 后缀（原 runner._allocate_runs_dir）。
 
@@ -198,7 +207,7 @@ def allocate_runs_dir(base_dir: Path, name: str) -> Path:
 
 
 def reconcile_runs(runs_root: Path | str | None = None, *, db_path=None, include_empty: bool = False) -> dict:
-    """增量对账：新/变更/消失的 run 目录 ↔ 库行同步。查询前自动调用。
+    """增量对账：新/变更/消失的 run 目录 ↔ 库行同步（显式恢复工具，reindex/verify 用）。
 
     Returns: {"rescanned": n, "removed": n, "adopted": n}
     """
@@ -253,14 +262,15 @@ def query_runs(
     db_path=None,
     has_report: bool | None = None,
     has_artifact: bool | None = None,
-    reconcile: bool = True,
+    reconcile: bool = False,
 ) -> list[Run]:
-    """查询 run 登记（name 倒序，与旧 discover 实现排序一致）。默认先对账。
+    """查询 run 登记（name 倒序，与旧 discover 实现排序一致）。纯读，默认不对账。
 
     消费方口径映射（保持与旧实现输出等价）：
       data_query（只认有报告的）  → has_report=True
       management（含失败 run）    → has_artifact=True
       两者默认 None=不过滤（全部行，含登记未开工的进行中 run）。
+    reconcile=True 仅恢复场景用（reindex/verify 前置）；热路径调用不传。
     """
     root = Path(runs_root) if runs_root is not None else Path(_config.RUNS_DIR)
     dbp = Path(db_path) if db_path is not None else db.db_for(root)
@@ -350,12 +360,22 @@ def lru_evict_keys(max_n: int, *, db_path=None) -> list[str]:
 
 
 def get_task(task_id: str, *, tasks_dir: Path | str | None = None, db_path=None) -> Task | None:
-    """task_id → 登记行（默认先对账 meta.json，外部进程写的任务入册）。"""
+    """task_id → 登记行（纯读）。"""
     dbp = db.catalog_db() if db_path is None else Path(db_path)
-    if tasks_dir is not None or db_path is None:
-        reconcile_tasks(tasks_dir=tasks_dir, db_path=dbp)
     with db.session(dbp) as s:
         return s.get(Task, task_id)
+
+
+def remove_run(name: str, *, db_path=None) -> bool:
+    """删登记行（run 目录被软删/清理后同步库，execute_delete 显式调用）。
+    返回是否删到了。"""
+    dbp = Path(db_path) if db_path is not None else db.catalog_db()
+    with db.tx(dbp) as s:
+        row = s.get(Run, name)
+        if row is None:
+            return False
+        s.delete(row)
+        return True
 
 
 def rebuild_runs(runs_root: Path | str | None = None, *, db_path=None, include_empty: bool = True) -> dict:
@@ -369,7 +389,7 @@ def rebuild_runs(runs_root: Path | str | None = None, *, db_path=None, include_e
 
 
 # ============================================================
-# trials：登记 / 查询（真相源 trials.jsonl 不动）
+# trials：登记 / 查询（db 唯一真相；旧 jsonl 仅一次性导入源）
 # ============================================================
 
 
@@ -417,7 +437,41 @@ def query_trials(study: str | None = None, *, db_path=None) -> list[Trial]:
 
 
 # ============================================================
-# tasks：登记 / 对账 / 查询（跨进程真相仍是 meta.json）
+# probes：模型防御指纹（db 唯一真相；原 state/probes.json 退役）
+# ============================================================
+
+
+def save_probe(model: str, fingerprint: dict, seed_methods: list[str]) -> None:
+    """单模型指纹 upsert（单事务合并——原文件 RMW + 模块锁的跨进程竞态消失）。"""
+    from datetime import datetime
+
+    with db.tx() as s:
+        s.merge(Probe(
+            model=model,
+            fingerprint={m: round(float(e), 2) for m, e in fingerprint.items()},
+            seed_methods=list(seed_methods),
+            n=len(fingerprint),
+            computed_at=datetime.now().isoformat(),
+        ))
+
+
+def load_probes(*, db_path=None) -> dict[str, dict]:
+    """全部指纹 {model: entry}（entry 形状与旧 probes.json 的 models 值一致）。"""
+    dbp = db.catalog_db() if db_path is None else Path(db_path)
+    with db.session(dbp) as s:
+        return {
+            r.model: {
+                "fingerprint": r.fingerprint or {},
+                "seed_methods": r.seed_methods or [],
+                "n": r.n or 0,
+                "computed_at": r.computed_at or "",
+            }
+            for r in s.exec(select(Probe)).all()
+        }
+
+
+# ============================================================
+# tasks：登记 / 查询（db 唯一真相；legacy meta.json 仅对账吸收）
 # ============================================================
 
 
@@ -508,6 +562,11 @@ def reconcile_tasks(tasks_dir: Path | str | None = None, *, db_path=None) -> dic
         except OSError:
             continue
 
+    # 零变更不开写事务（TUI 2s 轮询调本函数——无条件 BEGIN IMMEDIATE 会
+    # 让空闲轮询常年持写锁）
+    if not any(known.get(tid, 0.0) < mtime for tid, mtime in disk.items()):
+        return {"imported": 0, "removed": 0}
+
     imported = 0
     with db.tx(dbp) as s:
         for tid, mtime in disk.items():
@@ -542,12 +601,12 @@ def query_tasks(
     limit: int | None = None,
     db_path=None,
     tasks_dir: Path | str | None = None,
-    reconcile: bool = True,
+    reconcile: bool = False,
 ) -> list[Task]:
-    """查询任务登记（registered_at 倒序）。默认先对账（吸收 legacy meta.json 的变更）。
+    """查询任务登记（registered_at 倒序）。纯读，默认不对账。
 
-    tasks_dir：对账来源目录（默认 config.TASK_LOG_DIR）。TaskStore 等支持
-    注入目录的消费者传入自己的目录，避免对账打到真实 output/tasks。
+    reconcile=True 仅 legacy meta.json 一次性吸收场景（reindex）用。
+    tasks_dir：对账来源目录（默认 config.TASK_LOG_DIR），仅 reconcile 时生效。
     """
     dbp = db.catalog_db() if db_path is None else Path(db_path)
     if reconcile:

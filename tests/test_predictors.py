@@ -554,7 +554,6 @@ def test_no_data_fallback():
 
 # noqa: E402
 
-import tempfile
 from pathlib import Path
 
 from llmsec.evaluation.predictors.fingerprint import (
@@ -632,41 +631,27 @@ def test_fingerprint_and_similarity():
 
 def test_probes_roundtrip_and_donor_similarities():
 
-    """probes.json 存取；donor_similarities 排除自身/无指纹；min_sim 裁掉低/负相似。"""
+    """probes 表存取（P9 表化；隔离经 conftest 的 _hermetic_catalog 自动给每测试独立库）；donor_similarities 排除自身/无指纹；min_sim 裁掉低/负相似。"""
 
-    with tempfile.TemporaryDirectory() as d:
+    save_probe("A", {"s1": 1600, "s2": 1500, "s3": 1700}, ["s1", "s2", "s3"])
 
-        p = Path(d) / "probes.json"
+    save_probe("B", {"s1": 1620, "s2": 1490, "s3": 1710}, ["s1", "s2", "s3"])  # 与 A 高正相关
 
-        save_probe("A", {"s1": 1600, "s2": 1500, "s3": 1700}, ["s1", "s2", "s3"], path=p)
+    save_probe("C", {"s1": 1500, "s2": 1700, "s3": 1450}, ["s1", "s2", "s3"])  # 与 A 负相关
 
-        save_probe("B", {"s1": 1620, "s2": 1490, "s3": 1710}, ["s1", "s2", "s3"], path=p)  # 与 A 高正相关
+    probes = load_probes()
 
-        save_probe("C", {"s1": 1500, "s2": 1700, "s3": 1450}, ["s1", "s2", "s3"], path=p)  # 与 A 负相关
+    assert set(probes.keys()) == {"A", "B", "C"}
 
-        probes = load_probes(p)
+    # 默认 min_sim=0：B(正)保留，C(负)裁掉，A 自身排除
+    sims = donor_similarities("A", probes)
+    assert "A" not in sims
+    assert "B" in sims and sims["B"] > 0.9
+    assert "C" not in sims  # 负相关被 min_sim=0 裁
 
-        assert set(probes.keys()) == {"A", "B", "C"}
-
-
-
-        # 默认 min_sim=0：B(正)保留，C(负)裁掉，A 自身排除
-
-        sims = donor_similarities("A", probes)
-
-        assert "A" not in sims
-
-        assert "B" in sims and sims["B"] > 0.9
-
-        assert "C" not in sims  # 负相关被 min_sim=0 裁
-
-
-
-        # 放开 min_sim → C(负)也出现
-
-        sims_all = donor_similarities("A", probes, min_sim=-1.0)
-
-        assert "C" in sims_all and sims_all["C"] < 0
+    # 放开 min_sim → C(负)也出现
+    sims_all = donor_similarities("A", probes, min_sim=-1.0)
+    assert "C" in sims_all and sims_all["C"] < 0
 
 
 
@@ -676,11 +661,11 @@ def test_probes_roundtrip_and_donor_similarities():
 
 
 
-def _seed_probes(path, models_fps):
+def _seed_probes(models_fps):
 
     for mdl, fp in models_fps.items():
 
-        save_probe(mdl, fp, list(fp.keys()), path=path)
+        save_probe(mdl, fp, list(fp.keys()))
 
 
 
@@ -688,90 +673,76 @@ def _seed_probes(path, models_fps):
 
 def test_blend_sim_weighted_differs_and_first_model_fallback():
 
-    with tempfile.TemporaryDirectory() as d:
+    # P9：probes 表化——指纹经 conftest _hermetic_catalog 的隔离库读写
 
-        probe_path = Path(d) / "probes.json"
+        rng = np.random.default_rng(1)
 
-        # r9/P3-4：fingerprint 已动态读 config.STATE_DIR——改 patch config
-        import llmsec.core.config as mf_cfg
+        methods = [f"m{i}" for i in range(12)]
 
-        orig = mf_cfg.STATE_DIR
+        base = {m: rng.normal(1500, 80) for m in methods}
 
-        mf_cfg.STATE_DIR = probe_path.parent
+        # A 与 base 同模式；C 与 base 反模式（Elo 取负偏移）→ A、C 行为相反
 
-        try:
+        elo_a = {m: base[m] for m in methods}
 
-            rng = np.random.default_rng(1)
+        elo_c = {m: (3000 - base[m]) for m in methods}  # 与 A 负相关
 
-            methods = [f"m{i}" for i in range(12)]
+        # B 暖启动：只测 6 个，模式同 A
 
-            base = {m: rng.normal(1500, 80) for m in methods}
+        R = ResultsMatrix()
 
-            # A 与 base 同模式；C 与 base 反模式（Elo 取负偏移）→ A、C 行为相反
+        for ts, m in enumerate(methods, 1):
 
-            elo_a = {m: base[m] for m in methods}
+            R.upsert(m, "A", round(elo_a[m], 1), ts=ts)
 
-            elo_c = {m: (3000 - base[m]) for m in methods}  # 与 A 负相关
+            R.upsert(m, "C", round(elo_c[m], 1), ts=ts)
 
-            # B 暖启动：只测 6 个，模式同 A
+        for ts, m in enumerate(methods[:6], 1):
 
-            R = ResultsMatrix()
+            R.upsert(m, "B", round(base[m] + rng.normal(0, 5), 1), ts=ts)
 
-            for ts, m in enumerate(methods, 1):
-
-                R.upsert(m, "A", round(elo_a[m], 1), ts=ts)
-
-                R.upsert(m, "C", round(elo_c[m], 1), ts=ts)
-
-            for ts, m in enumerate(methods[:6], 1):
-
-                R.upsert(m, "B", round(base[m] + rng.normal(0, 5), 1), ts=ts)
-
-            feats = _feat(methods + ["untested"], seed=2)
+        feats = _feat(methods + ["untested"], seed=2)
 
 
 
-            seeds = methods[:4]
+        seeds = methods[:4]
 
-            _seed_probes(probe_path, {
+        _seed_probes({
 
-                "A": {s: elo_a[s] for s in seeds},
+            "A": {s: elo_a[s] for s in seeds},
 
-                "B": {s: base[s] + 5 for s in seeds},   # 与 A 高正相关
+            "B": {s: base[s] + 5 for s in seeds},   # 与 A 高正相关
 
-                "C": {s: elo_c[s] for s in seeds},       # 与 B 负相关 → 被 min_sim=0 裁
+            "C": {s: elo_c[s] for s in seeds},       # 与 B 负相关 → 被 min_sim=0 裁
 
-            })
-
-
-
-            bp = BlendPredictor().fit(R, feats, method_catalog=methods + ["untested"])
-
-            assert "B" in bp.unified, "B 有相似 donor(A) 却未建 sim-加权 unified"
-
-            r_b = bp.predict("untested", "B")
-
-            assert r_b["source"] != "fallback"
+        })
 
 
 
-            # sim-加权 unified（B 偏向 A、排除 C）vs 均匀 fallback（A/C 等权平均）应不同
+        bp = BlendPredictor().fit(R, feats, method_catalog=methods + ["untested"])
 
-            u_mean_sim, _ = BlendPredictor._predict_one(bp, bp.unified["B"], "untested", feats["untested"])
+        assert "B" in bp.unified, "B 有相似 donor(A) 却未建 sim-加权 unified"
 
-            u_mean_fb, _ = BlendPredictor._predict_one(bp, bp.unified_fallback, "untested", feats["untested"])
+        r_b = bp.predict("untested", "B")
 
-            assert u_mean_sim is not None and u_mean_fb is not None
+        assert r_b["source"] != "fallback"
 
-            assert abs(u_mean_sim - u_mean_fb) > 1e-5, (
 
-                f"sim-加权 unified 与均匀 universal 预测相同（未生效）: {u_mean_sim} vs {u_mean_fb}"
 
-            )
+        # sim-加权 unified（B 偏向 A、排除 C）vs 均匀 fallback（A/C 等权平均）应不同
 
-        finally:
+        u_mean_sim, _ = BlendPredictor._predict_one(bp, bp.unified["B"], "untested", feats["untested"])
 
-            mf_cfg.STATE_DIR = orig
+        u_mean_fb, _ = BlendPredictor._predict_one(bp, bp.unified_fallback, "untested", feats["untested"])
+
+        assert u_mean_sim is not None and u_mean_fb is not None
+
+        assert abs(u_mean_sim - u_mean_fb) > 1e-5, (
+
+            f"sim-加权 unified 与均匀 universal 预测相同（未生效）: {u_mean_sim} vs {u_mean_fb}"
+
+        )
+
 
 
 
@@ -779,48 +750,34 @@ def test_blend_sim_weighted_differs_and_first_model_fallback():
 
 def test_first_model_falls_back_to_uniform():
 
-    with tempfile.TemporaryDirectory() as d:
+    # P9：probes 表化——不写指纹即无 donor（隔离库由 conftest 提供）
 
-        probe_path = Path(d) / "probes.json"
+        methods = [f"m{i}" for i in range(10)]
 
-        # r9/P3-4：fingerprint 已动态读 config.STATE_DIR——改 patch config
-        import llmsec.core.config as mf_cfg
+        R = ResultsMatrix()
 
-        orig = mf_cfg.STATE_DIR
+        for ts, m in enumerate(methods, 1):
 
-        mf_cfg.STATE_DIR = probe_path.parent
+            R.upsert(m, "solo", 3.0 if ts % 2 else -2.0, ts=ts)
 
-        try:
+        feats = _feat(methods + ["untested"])
 
-            methods = [f"m{i}" for i in range(10)]
+        # 不写任何指纹 → solo 无 donor
 
-            R = ResultsMatrix()
+        bp = BlendPredictor().fit(R, feats, method_catalog=methods + ["untested"])
 
-            for ts, m in enumerate(methods, 1):
+        assert "solo" not in bp.unified, "无 donor 却建了 sim-加权 unified"
 
-                R.upsert(m, "solo", 3.0 if ts % 2 else -2.0, ts=ts)
+        # 单模型 → unified_fallback 跳过（无 pooling 意义，避免与 models[target] 冗余训练）
 
-            feats = _feat(methods + ["untested"])
+        assert bp.unified_fallback is None, "单模型不应训练 unified_fallback（无跨模型池化）"
 
-            # 不写任何指纹 → solo 无 donor
+        assert "solo" in bp.models, "per-model 预测器应已训练"
 
-            bp = BlendPredictor().fit(R, feats, method_catalog=methods + ["untested"])
+        r = bp.predict("untested", "solo")
 
-            assert "solo" not in bp.unified, "无 donor 却建了 sim-加权 unified"
+        assert r["source"] == "model_only", f"单模型应走 model_only，实际 {r['source']}"
 
-            # 单模型 → unified_fallback 跳过（无 pooling 意义，避免与 models[target] 冗余训练）
-
-            assert bp.unified_fallback is None, "单模型不应训练 unified_fallback（无跨模型池化）"
-
-            assert "solo" in bp.models, "per-model 预测器应已训练"
-
-            r = bp.predict("untested", "solo")
-
-            assert r["source"] == "model_only", f"单模型应走 model_only，实际 {r['source']}"
-
-        finally:
-
-            mf_cfg.STATE_DIR = orig
 
 
 # ===== from test_eval_review_predictors.py（评审修复回归：E 组）=====

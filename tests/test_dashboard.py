@@ -150,6 +150,7 @@ def test_state_snapshot_priority(monkeypatch, tmp_path):
 import tempfile
 from pathlib import Path
 
+import llmsec.core.config as cfg  # P9: TASK_LOG_DIR 动态读后统一 patch cfg
 from llmsec.core.caches import SigCache  # r9/P3-5：cluster_viz 缓存已迁 SigCache
 from llmsec.params import ADAPTIVE_BATCH_MAX
 from llmsec.server.routers.tasks import EvaluateRequest
@@ -242,7 +243,7 @@ def test_emit_progress_env_gated():
     from llmsec.core import progress as P
 
     task_id = 'ut-progress-' + str(int(time.time() * 1000))
-    path = P.TASK_LOG_DIR / f"{task_id}.progress.jsonl"
+    path = cfg.TASK_LOG_DIR / f"{task_id}.progress.jsonl"
     if path.exists():
         path.unlink()
 
@@ -346,7 +347,7 @@ def test_evaluate_concurrency_argv(monkeypatch):
         captured['argv'] = list(argv)
         captured['meta'] = kwargs.get('meta')
         return {"id": "fake-eval", "kind": kind, "cmd": " ".join(argv), "argv": list(argv),
-                "status": "queued", "returncode": None, "log_path": task_manager.TASK_LOG_DIR / "fake.log",
+                "status": "queued", "returncode": None, "log_path": cfg.TASK_LOG_DIR / "fake.log",
                 "log_file": None, "started_at": "2026-01-01T00:00:00", "error": None, "proc": None}
 
     monkeypatch.setattr(task_manager, "start_task", fake_start)
@@ -426,7 +427,7 @@ def test_task_stream_progress_events(monkeypatch):
 
     tid = "stream-ut"
     pp = task_manager._progress_path(tid)
-    task_manager.TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    cfg.TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
     pp.write_text(
         json.dumps({"ts": "t1", "phase": "attack", "target": "a", "round": 1, "elo": 1500.0}) + "\n"
         + json.dumps({"ts": "t2", "phase": "attack", "target": "a", "round": 2, "elo": 1505.0}) + "\n",
@@ -434,7 +435,7 @@ def test_task_stream_progress_events(monkeypatch):
     # 终态：生成器首次 while 即发 done 返回（不挂起）
     task_manager.TASKS[tid] = {
         "kind": "evaluate", "argv": ["--targets", "a"], "cmd": "", "status": "success",
-        "returncode": 0, "log_path": task_manager.TASK_LOG_DIR / f"{tid}.log", "log_file": None,
+        "returncode": 0, "log_path": cfg.TASK_LOG_DIR / f"{tid}.log", "log_file": None,
         "started_at": "2026-01-01T00:00:00", "proc": None}
     try:
         r = client.get(f"/api/tasks/{tid}/stream")
@@ -466,6 +467,8 @@ def test_runs_active_marking(monkeypatch, tmp_path):
             "target_model": tgt, "security_level": "safe",
             "attack_phase": {"asr": 0.1}, "allergy": {}, "elo": {}}), encoding="utf-8")
     monkeypatch.setattr(api, "RUNS_DIR", tmp_path)
+    from llmsec.storage import contract as _storage
+    _storage.reconcile_runs(runs_root=tmp_path)  # P9：查询纯读——造盘后显式入册
 
     tid = "evaluate-active-ut"
     TASKS[tid] = {"kind": "evaluate", "status": "running",
@@ -502,6 +505,8 @@ def test_run_row_refresh_on_report_overwrite(monkeypatch, tmp_path):
     (run_dir / "runner_report.json").write_text(json.dumps({
         "target_model": "modelC", "security_level": "safe", "attack_phase": {"asr": 0.10},
         "allergy": {}, "elo": {}}), encoding="utf-8")
+    from llmsec.storage import contract as _storage
+    _storage.reconcile_runs(runs_root=tmp_path)  # P9：查询纯读——造盘后显式入册
     m1 = next(r for r in dq._discover_runs() if r["name"].endswith("modelC"))
     assert m1["asr"] == 0.10
 
@@ -511,6 +516,7 @@ def test_run_row_refresh_on_report_overwrite(monkeypatch, tmp_path):
         "allergy": {}, "elo": {}}), encoding="utf-8")
     st = run_dir.stat()
     os.utime(run_dir, ns=(st.st_mtime_ns + 10_000_000_000,) * 2)  # 规避同刻 mtime
+    _storage.reconcile_runs(runs_root=tmp_path)  # 显式对账吸收覆写
     m2 = next(r for r in dq._discover_runs() if r["name"].endswith("modelC"))
     assert m2["asr"] == 0.55 and m2["security_level"] == "risky", "覆写后对账必须重扫"
     print("✅ 目录库对账失效通过")
@@ -576,7 +582,7 @@ def _fake_task(tid, status, kind="evaluate", **over):
     t = {
         "kind": kind, "cmd": "fake", "argv": ["-c", "pass"],
         "env_override": None, "meta": None, "proc": None,
-        "log_path": Path(task_manager.TASK_LOG_DIR) / f"{tid}.log",
+        "log_path": Path(cfg.TASK_LOG_DIR) / f"{tid}.log",
         "log_file": None, "status": status,
         "started_at": datetime.now().isoformat(), "_task_id": tid,
     }
@@ -686,7 +692,7 @@ def test_zombie_detection_alerts_only_when_stale(monkeypatch):
 
 def test_spawn_failure_marks_task_failed(monkeypatch, tmp_path):
     """Popen 抛 OSError → 任务置 failed 且带 error 文案，不抛出。"""
-    monkeypatch.setattr(task_manager, "TASK_LOG_DIR", tmp_path / "tasks")
+    monkeypatch.setattr(cfg, "TASK_LOG_DIR", tmp_path / "tasks")
 
     def _boom(*a, **kw):
         raise OSError("no such executable")
@@ -700,7 +706,7 @@ def test_spawn_failure_marks_task_failed(monkeypatch, tmp_path):
 
 def test_spawn_env_override_injected(monkeypatch, tmp_path):
     """env_snapshot 的 env_override 注入子进程环境。"""
-    monkeypatch.setattr(task_manager, "TASK_LOG_DIR", tmp_path / "tasks")
+    monkeypatch.setattr(cfg, "TASK_LOG_DIR", tmp_path / "tasks")
     captured = {}
 
     class _FakeProc:
@@ -732,7 +738,7 @@ def test_failed_task_emits_alert(monkeypatch, tmp_path):
 
     calls = []
     monkeypatch.setattr(mon, "alert_task_failed", lambda **kw: calls.append(kw))
-    monkeypatch.setattr(tm, "TASK_LOG_DIR", tmp_path / "tasks")
+    monkeypatch.setattr(cfg, "TASK_LOG_DIR", tmp_path / "tasks")
 
     class _FailProc:
         returncode = 3
@@ -757,7 +763,7 @@ def test_read_full_log_and_progress_edge_cases(tmp_path, monkeypatch):
     """read_full_log/read_progress 对缺失任务、缺失文件、坏行的容错。"""
     from llmsec.server import task_manager as tm
 
-    monkeypatch.setattr(tm, "TASK_LOG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "TASK_LOG_DIR", tmp_path)
 
     assert tm.read_full_log("ghost") == "", '任务不存在返回空串'
     _fake_task("nolog", "success")

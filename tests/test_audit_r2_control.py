@@ -307,6 +307,6 @@ def test_r2_fork_missing_source_raises(monkeypatch, tmp_path):
     def boom(dest):
         raise RuntimeError("R 库不存在")
 
-    monkeypatch.setattr(cstorage, "backup_results", boom)
+    monkeypatch.setattr(cstorage, "backup", boom)
     with pytest.raises(RuntimeError, match="R 库不存在"):
         ws.fork("w", source="global")

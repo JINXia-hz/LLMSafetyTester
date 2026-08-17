@@ -289,7 +289,6 @@ def run_attack_phase(records: list[dict],
                      sampler_gamma: float = SAMPLER_INFOGAIN_GAMMA,
                      coordinate_rounds: int | None = None,
                      coord_min_per_cluster: int = SAMPLER_COORD_MIN_PER_CLUSTER,
-                     sampler_log_file: Path | None = None,
                      cluster_analysis_file: Path | None = None,
                      skip_final_clustering: bool = False,
                      state_file: Path | str | None = None,
@@ -492,10 +491,6 @@ def run_attack_phase(records: list[dict],
           f"(alpha={sampler_alpha}, beta={sampler_beta}, gamma={sampler_gamma}, "
           f"coordinate_rounds={coordinate_rounds})")
 
-    # 采样日志（同 M-11 attack_file 口径：resume 预载已有日志再 append，
-    # 否则结尾整体覆写会销毁上次运行的采样历史）
-    sampler_log: list[dict] = read_jsonl(sampler_log_file) if sampler_log_file else []
-
     # 上一轮防御方 ELO，用于本轮 delta（看板进度箭头/幅度）；首轮/seed 前 None
     prev_elo: float | None = None
 
@@ -696,16 +691,6 @@ def run_attack_phase(records: list[dict],
         # 不在此处 publish_tracker——R 快照模型下，评估期间不写 R，
         # 合并由调用方（runner main）在评估结束后统一执行
 
-        # 记录采样器决策日志
-        sampler_log.append({
-            "round": round_idx,
-            "selected": next_units,
-            "sampler": sampler,
-            "sub_sampler": getattr(sampler_obj, "last_sub_sampler", None),
-            "defender_elo": tracker.get_defender_elo(defender_name),
-            "tested_count": len(tested),
-        })
-
         # 检查收敛：综合轮次 Elo 标准差、相对标准差、覆盖率（单位口径）
         conv = tracker.check_convergence(defender_name, total_methods=n_units, tested_count=len(tested))
         prev_ci_half = conv.get("ci_half")  # 供下一轮 batch 自适应（收敛距离驱动）
@@ -796,10 +781,6 @@ def run_attack_phase(records: list[dict],
     # 保存攻击结果到专用文件（避免 Phase 3 读到旧数据）；去重防续跑重测产生同键重复
     all_results = _dedup_attack_results(all_results)
     write_jsonl(attack_file, all_results)
-
-    # 保存采样器决策日志
-    if sampler_log_file:
-        write_jsonl(sampler_log_file, sampler_log)
 
     boundary = tracker.compute_security_boundary(defender_name)
     ranking = tracker.get_attacker_ranking()

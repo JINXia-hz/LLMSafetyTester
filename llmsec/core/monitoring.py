@@ -3,8 +3,9 @@
 双通道告警：
   1. Webhook：POST JSON 到 LLMSEC_ALERT_WEBHOOK（飞书/钉钉/企业微信/Slack 入站 webhook 均可）。
      非阻塞（线程池提交），失败只 stderr，绝不影响主流程。
-  2. 事件文件：append 写 output/alerts.jsonl（每行一个 JSON 事件，线程锁保护）。
-     零外部依赖，离线可查，看板可消费。
+  2. 日志：logger.warning 落 llmsec.log（RotatingFileHandler 自带轮转）。
+     P9：原 output/alerts.jsonl 事件文件通道删除——代码内零读者（docstring
+     设想的"看板可消费"从未实现），纯写入型遥测。
 
 去抖：同 title 哈希在 _DEDUP_WINDOW 秒内只发一次（防刷屏），内存 dict + 时间戳。
 
@@ -31,6 +32,10 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+from llmsec.core.logging import get_logger
+
+logger = get_logger(__name__)
+
 # ============================================================
 # 常量与配置
 # ============================================================
@@ -50,13 +55,6 @@ _executor_lock = threading.Lock()
 _dedup: dict[str, float] = {}
 _dedup_lock = threading.Lock()
 
-# 事件文件写锁
-_file_lock = threading.Lock()
-
-# alerts.jsonl 轮转阈值（超过则轮转为 .1，与 llmsec.log 的 RotatingFileHandler
-# 同策略）——原先 append-only 无轮转，长期运行只增不减
-_ALERTS_MAX_BYTES = 10 * 1024 * 1024
-
 
 def _min_level() -> int:
     """读取最低告警级别（LLMSEC_ALERT_LEVEL，默认 warning）。"""
@@ -66,13 +64,6 @@ def _min_level() -> int:
 def _webhook_url() -> str:
     """读取 webhook URL（LLMSEC_ALERT_WEBHOOK，空=不启用）。"""
     return os.getenv("LLMSEC_ALERT_WEBHOOK", "").strip()
-
-
-def _alerts_file():
-    """获取告警事件文件路径（惰性，避免 import 期依赖 config）。"""
-    from llmsec.core.config import ALERTS_FILE
-
-    return ALERTS_FILE
 
 
 # ============================================================
@@ -106,29 +97,6 @@ def _should_emit(dedup_key: str) -> bool:
             for k in stale:
                 del _dedup[k]
         return True
-
-
-def _write_event_file(event: dict) -> None:
-    """追加写告警事件到 output/alerts.jsonl（线程锁保护，失败静默）。
-
-    超过 _ALERTS_MAX_BYTES 时轮转为 .1 后缀——轮转在锁内做，避免并发追加截断。
-    """
-    try:
-        path = _alerts_file()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(event, ensure_ascii=False, default=str)
-        with _file_lock:
-            try:
-                if path.stat().st_size > _ALERTS_MAX_BYTES:
-                    rotated = path.with_suffix(path.suffix + ".1")
-                    rotated.unlink(missing_ok=True)
-                    path.replace(rotated)
-            except OSError:
-                pass  # 不存在/被占用：跳过轮转直接追加
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-    except Exception as e:
-        print(f"[monitoring] 写 alerts.jsonl 失败: {e}", file=sys.stderr)
 
 
 def _post_webhook(url: str, payload: dict) -> None:
@@ -190,7 +158,7 @@ def emit_alert(
     *,
     force: bool = False,
 ) -> bool:
-    """发出一条告警（双通道：webhook + 事件文件）。
+    """发出一条告警（双通道：webhook + 日志）。
 
     Args:
         level:   "info" / "warning" / "error"
@@ -224,8 +192,8 @@ def emit_alert(
 
         event = _build_payload(lvl, title, detail, ctx)
 
-        # 通道 1：事件文件（同步写，快且可靠）
-        _write_event_file(event)
+        # 通道 1：日志（同步，人工可 grep llmsec.log）
+        logger.warning("[alert][%s] %s — %s | ctx=%s", lvl, title, detail, ctx)
 
         # 通道 2：webhook（非阻塞，线程池提交）
         url = _webhook_url()

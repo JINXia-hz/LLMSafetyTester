@@ -16,21 +16,12 @@ per-seed Elo 向量即该模型的"防御指纹"。两模型指纹的相关系�
 """
 from __future__ import annotations
 
-import json
-import threading
-from datetime import datetime
-from pathlib import Path
-
 import numpy as np
 
-from llmsec.core import config as _config
 from llmsec.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-def _probes_file():
-    """探针文件路径（r9/P3-4：调用期动态读，work-dir 隔离经 config.STATE_DIR 重绑）。"""
-    return _config.STATE_DIR / "probes.json"
 MIN_COMMON = 3  # 计算相关系数所需的最少公共种子方法
 
 
@@ -60,43 +51,10 @@ def model_similarity(fp_a: dict, fp_b: dict) -> float | None:
     return corr if np.isfinite(corr) else None
 
 
-def load_probes(path: Path | str | None = None) -> dict:
-    """加载 probes.json 的 {model: entry}；缺失/损坏返回 {}。"""
-    p = Path(path) if path else _probes_file()
-    try:
-        if p.exists():
-            data = json.loads(p.read_text(encoding="utf-8"))
-            return data.get("models", {}) if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
-        logger.warning("加载 %s 失败（指纹迁移将忽略历史 donor）: %s", p.name, e)
-    return {}
-
-
-# P9：save_probe 的 read-modify-write 无锁时，并发目标（线程）会互相覆盖指纹。
-# 模块级锁保证同进程线程安全（本次运行是线程并发）；跨进程并发写仍有竞争风险。
-_save_lock = threading.Lock()
-
-
-def save_probe(
-    model: str,
-    fingerprint: dict,
-    seed_methods: list[str],
-    path: Path | str | None = None,
-) -> None:
-    """原子合并：追加/更新一个模型的指纹到 probes.json（同进程线程安全）。"""
-    from llmsec.core.io import write_json
-
-    p = Path(path) if path else _probes_file()
-    with _save_lock:
-        models = load_probes(p)
-        models[model] = {
-            "fingerprint": {m: round(float(e), 2) for m, e in fingerprint.items()},
-            "seed_methods": list(seed_methods),
-            "n": len(fingerprint),
-            "computed_at": datetime.now().isoformat(),
-        }
-        p.parent.mkdir(parents=True, exist_ok=True)
-        write_json(p, {"version": 1, "models": models})
+# P9 表化：probes 存 catalog.db 的 probes 表（经 storage.contract），单事务
+# upsert——原 state/probes.json 的 read-modify-write + 模块锁（跨进程仍有竞态）
+# 退役。work-dir 隔离经 CATALOG_DB 重绑自动生效。
+from llmsec.storage.contract import load_probes, save_probe  # noqa: F401  (re-export)
 
 
 def donor_similarities(

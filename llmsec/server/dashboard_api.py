@@ -95,15 +95,21 @@ async def health():
 
 @app.get("/ready")
 async def ready():
-    """readiness 探针：检查 R 矩阵（唯一真相）可读。
+    """readiness 探针：库可读（COUNT 级轻查询）。
 
-    R 矩阵不存在时返回 503（首次部署/数据未初始化时看板尚未就绪）。
+    R 不存在时返回 503（首次部署/数据未初始化时看板尚未就绪）。
+    P9：原先每次探针全量 load_matrix（整矩阵构建 + quick_check）——
+    探针只需证明 db 可开可查，COUNT 足矣。
     """
     if _config.RESULTS_DB.exists():
         try:
             from llmsec.storage import rstore
-            rstore.load_matrix()  # quick_check 一并探过
-            return JSONResponse({"status": "ready", "results_db": str(_config.RESULTS_DB)})
+            stats = rstore.results_stats()
+            return JSONResponse({
+                "status": "ready",
+                "results_db": str(_config.RESULTS_DB),
+                "observations": stats["observations"],
+            })
         except (OSError, RuntimeError):
             pass
     return JSONResponse({"status": "not_ready", "results_db": str(_config.RESULTS_DB)}, status_code=503)

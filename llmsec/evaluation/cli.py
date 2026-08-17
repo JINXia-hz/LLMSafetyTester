@@ -342,6 +342,12 @@ def main():
     # ---- ELO更新（始终更新；elo 区块仅挂到内存中的 summary，与原版一致） ----
     update_elo(all_results, summary)
 
+    # P9 写入口收尾：汇总已落盘，登记行一次富化（此前靠查询前 reconcile 补）
+    try:
+        _storage.finalize_run(run_dir, batch=run_dir.name, target=None)
+    except Exception as e:
+        logger.warning("目录库收尾失败（不影响评估，reindex 可自愈）: %s", e)
+
     # ---- 终端输出 ----
     print_summary(summary, judge_stats, result_file, summary_file)
 

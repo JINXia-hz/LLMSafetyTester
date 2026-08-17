@@ -122,6 +122,22 @@ def partition_publish_names(names: list[str], declared: set[str]) -> tuple[list[
     return allowed, skipped
 
 
+def _persist_unit_catalog(units: dict) -> None:
+    """P9/A5：把本次装配的评级单位目录落进 R（runits 表）。
+
+    此前 set_unit_catalog 只改永不落盘的内存快照——runits 恒空，merge 的
+    all_units 消费者无数据。与 publish 同分支调用（观测写到哪个 R，
+    单位目录就落到哪个 R；经 config 重绑自动落 work-dir 卫星库）。
+    """
+    if not units:
+        return
+    try:
+        from llmsec.storage import rstore
+        rstore.set_units(sorted(units.keys()))
+    except Exception as e:
+        logger.warning("unit 目录落库失败（不影响评估）: %s", e)
+
+
 def main(argv=None, *, deps=None):
     """统一编排入口。
 
@@ -402,7 +418,6 @@ def main(argv=None, *, deps=None):
                     sampler_gamma=args.sampler_gamma,
                     coordinate_rounds=args.coordinate_rounds,
                     coord_min_per_cluster=args.coord_min_per_cluster,
-                    sampler_log_file=run_dir / "sampler_log.jsonl",
                     cluster_analysis_file=run_dir / "cluster_security_analysis.json",
                     skip_final_clustering=skip_final_clustering,
                     state_file=str(run_dir / "state.json"),
@@ -512,6 +527,13 @@ def main(argv=None, *, deps=None):
                 "allergy": {"fpr": info.get("fpr")},
             })
 
+        # P9 写入口收尾：报告已落盘，登记行一次富化（metrics/has_*/size——
+        # 此前靠查询前 reconcile 补，现查询纯读）。best-effort 同登记。
+        try:
+            _storage.finalize_run(run_dir, batch=runs_dir.name, target=name)
+        except Exception as e:
+            logger.warning("目录库收尾失败（不影响评估，reindex 可自愈）: %s", e)
+
         return tracker, info
 
     # ============================================================
@@ -563,6 +585,7 @@ def main(argv=None, *, deps=None):
     # ============================================================
     if args.work_dir:
         logger.info(f"\n{'='*60}\n  💾 写入 work-dir R（隔离）\n{'='*60}")
+        _persist_unit_catalog(units)
         for name in names:
             tracker = trackers.get(name)
             if tracker is None:
@@ -574,6 +597,7 @@ def main(argv=None, *, deps=None):
                 logger.error(f"  ❌ {name} 写入 R 失败: {e}")
     elif args.publish_global:
         logger.info(f"\n{'='*60}\n  💾 写入全局 R（--publish-global）\n{'='*60}")
+        _persist_unit_catalog(units)
         # 全局 R 防注入：只接受 .env TARGETS 声明的目标（守卫逻辑见
         # partition_publish_names——此前内联在编排流程里不可单测）。
         # work-dir 模式不受此限（隔离实验可任意命名）。load_targets 失败时

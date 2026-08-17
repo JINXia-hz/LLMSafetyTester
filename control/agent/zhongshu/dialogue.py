@@ -69,7 +69,7 @@ def _do_search_history(args: dict) -> str:
       - 相关性排序：intent 命中权重最高(×3)，user_text 次之(×2)，步骤最低(×1)
     """
     from control.agent import gazette
-    from control.core.storage import search_gazettes
+    from control.core.storage import search_gazette
 
     keywords = [k.lower() for k in args.get("keywords", [])]
     recent = args.get("recent", 5)
@@ -77,7 +77,7 @@ def _do_search_history(args: dict) -> str:
         return "（未提供关键词）"
 
     # SQL 候选（OR）：命中的 plan 集合
-    candidates = search_gazettes(keywords, limit=500)
+    candidates = search_gazette(keywords, limit=500)
     plan_ids = list(dict.fromkeys(c["plan_id"] for c in candidates))
     statuses = {g.get("plan_id"): g.get("status", "?")
                 for g in gazette.list_gazettes(recent=500)}

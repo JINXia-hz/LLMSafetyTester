@@ -19,7 +19,7 @@ def sandbox(monkeypatch, tmp_path):
     这是 control router 测试沙盒化的关键：
       - control.config.{OUTPUT_DIR, WORKSPACES_DIR, LLMSEC_REPO, RUNS_DIR} → tmp
       - workspace.py / compare.py 的模块级路径常量 → tmp
-      - storage.backup_results → mock（在 tmp 内落真实迷你 R 库，不经 subprocess）
+      - storage.backup → mock（在 tmp 内落真实迷你 R 库，不经 subprocess）
     这样 fork/list/compare/merge 全在 tmp 下，不碰真实 output/。
     """
     from control import config as ctrl_cfg
@@ -49,7 +49,7 @@ def sandbox(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "CATALOG_DB", out / "state" / "catalog.db")
     (out / "state").mkdir()
 
-    # mock 库级 clone（P3：fork 直调 backup_results，无 subprocess 快照握手）
+    # mock 库级 clone（P3：fork 直调 backup，无 subprocess 快照握手）
     from control.core import storage as cstorage
 
     def fake_backup(dest):
@@ -62,7 +62,7 @@ def sandbox(monkeypatch, tmp_path):
     def fake_stats(path):
         return {"models": ["test_model"], "records": 1, "observations": 1, "units": 0}
 
-    monkeypatch.setattr(cstorage, "backup_results", fake_backup)
+    monkeypatch.setattr(cstorage, "backup", fake_backup)
     monkeypatch.setattr(cstorage, "results_stats", fake_stats)
     return out
 

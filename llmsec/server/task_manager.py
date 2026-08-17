@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from llmsec.core.config import TASK_LOG_DIR
+from llmsec.core import config as _config  # TASK_LOG_DIR 调用期动态读（测试可重绑）
 
 # 子进程 cwd = 仓库根（task_manager.py 位于 llmsec/server/，parents[2] 即仓库根）
 WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
@@ -187,7 +187,7 @@ def _finish(t, status: str, *, returncode: int | None = None) -> None:
 
 def _spawn(task_id: str, t: dict) -> None:
     """启动已入队任务的子进程（打开日志、Popen、置 running）。Popen 失败置 failed。"""
-    TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _config.TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_file = open(t["log_path"], "w", encoding="utf-8")
     try:
         env = os.environ.copy()
@@ -231,7 +231,7 @@ def _advance_queue(kind: str) -> None:
 
 def _progress_path(task_id: str) -> Path:
     """<task_id>.progress.jsonl 路径（与 .log 同目录）。"""
-    return TASK_LOG_DIR / f"{task_id}.progress.jsonl"
+    return _config.TASK_LOG_DIR / f"{task_id}.progress.jsonl"
 
 
 def _persist_task(t: dict, task_id: str, *, pid: int | None = None, status: str | None = None) -> None:
@@ -251,7 +251,7 @@ def _persist_task(t: dict, task_id: str, *, pid: int | None = None, status: str 
         cmd=t.get("cmd"),
         pid=pid if pid is not None else getattr(proc, "pid", None),
         status=status or t.get("status"),
-        log_path=TASK_LOG_DIR / f"{task_id}.log",
+        log_path=_config.TASK_LOG_DIR / f"{task_id}.log",
         started_at=t.get("started_at"), meta=t.get("meta"),
     )
 
@@ -292,7 +292,7 @@ def start_task(
         argv=argv,
         env_override=env_override,
         meta=meta,
-        log_path=TASK_LOG_DIR / f"{task_id}.log",
+        log_path=_config.TASK_LOG_DIR / f"{task_id}.log",
         started_at=datetime.now().isoformat(),
     )
     _evict_tasks()
@@ -336,11 +336,34 @@ def task_view(task_id: str) -> dict | None:
 
 
 def list_tasks() -> list[dict]:
-    """列出全部任务的视图（时间倒序）。"""
-    return [
-        task_view(tid)
-        for tid, _ in sorted(TASKS.items(), reverse=True)
-    ]
+    """列出全部任务的视图（时间倒序）：本进程 TASKS ∪ 目录库行。
+
+    P9/A4：库行是跨进程真相（dashboard 与 MCP server 各持独立 TASKS dict，
+    但共享 catalog.db）——此前只看本进程，MCP 起的任务在网页不可见。
+    本进程视图优先（持有 Popen 可实时刷终态）；库中独有行渲染只读视图。
+    """
+    own = [v for v in (task_view(tid) for tid, _ in sorted(TASKS.items(), reverse=True)) if v]
+    own_ids = {v["id"] for v in own}
+    try:
+        from llmsec.storage import contract as _storage
+        for row in _storage.query_tasks(limit=200):
+            if row.task_id in own_ids:
+                continue
+            own.append({
+                "id": row.task_id,
+                "kind": row.kind,
+                "cmd": row.cmd or "",
+                "status": row.status,
+                "returncode": None,
+                "started_at": row.started_at or "",
+                "log_tail": "",
+                "error": None,
+                "meta": row.meta,
+            })
+    except Exception:
+        pass  # 目录库不可用时退回本进程视图（与旧行为一致）
+    own.sort(key=lambda v: v.get("started_at") or "", reverse=True)
+    return own
 
 
 def read_progress(task_id: str) -> list[dict]:

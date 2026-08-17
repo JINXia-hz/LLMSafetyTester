@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import llmsec.core.config as cfg  # P9: TASK_LOG_DIR 动态读后统一 patch cfg
 from llmsec.core.llm import is_retryable_error, retry_call
 
 
@@ -500,7 +501,7 @@ def test_spawn_injects_pythonunbuffered(monkeypatch, tmp_path):
     # _spawn 实现已统一到 task_manager（tasks.py 只是 HTTP 薄封装），
     # 注入点相应指向 task_manager 命名空间
     monkeypatch.setattr(task_manager.subprocess, 'Popen', _fake_popen)
-    monkeypatch.setattr(task_manager, 'TASK_LOG_DIR', tmp_path)
+    monkeypatch.setattr(cfg, "TASK_LOG_DIR", tmp_path)
     monkeypatch.setattr(task_manager, '_advance_queue', lambda k: None)
 
     t = {

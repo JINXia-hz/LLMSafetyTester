@@ -63,7 +63,10 @@ def iso_output(monkeypatch, tmp_path):
 
 
 def _make_run(runs_dir: Path, ts: str, target: str, *, has_report=True, asr=None, level="inconclusive") -> Path:
-    """在 tmp runs 目录下造一个 run 目录（新布局 ts/target/）。"""
+    """在 tmp runs 目录下造一个 run 目录（新布局 ts/target/）。
+
+    P9：查询纯读——造盘是旁路操作，造完 reconcile 入册（等价 storage reindex），
+    库行才有。"""
     d = runs_dir / ts / target
     d.mkdir(parents=True)
     (d / "attack_results.jsonl").write_text('{"id":"x"}\n', encoding="utf-8")
@@ -75,6 +78,8 @@ def _make_run(runs_dir: Path, ts: str, target: str, *, has_report=True, asr=None
             "elo": {"boundary_elo": 1700},
         }
         write_json(d / "runner_report.json", report)
+    from llmsec.storage import contract as _storage
+    _storage.reconcile_runs()
     return d
 
 
@@ -228,9 +233,9 @@ class TestRunsDelete:
 class TestCaches:
     def test_list_categories_with_sizes(self, iso_output):
         from llmsec.management import caches
-        # 造一个 predictor + 一个 model_state 文件（P8：task_logs 类别已并入 gc-tasks）
+        # 造一个 predictor + 一个 model_state 文件（probes 已表化 P9）
         (cfg.PREDICTORS_DIR / "blend_abc.pkl").write_bytes(b"\x80\x04" * 100)
-        (cfg.STATE_DIR / "probes.json").write_text("{}", encoding="utf-8")
+        (cfg.STATE_DIR / "prescreen_model.joblib").write_bytes(b"\x80\x04")
 
         summaries = caches.all_category_summaries()
         by_name = {s["name"]: s for s in summaries}
@@ -515,12 +520,12 @@ class TestCachesCommands:
         assert plan.extra["kept"] == 1 and plan.extra["total"] == 2
 
     def test_model_state_paths_exact(self, iso_output):
-        """model_state 精确点名 probes.json + prescreen_model.joblib（P8 新类别）。"""
+        """model_state 精确点名 prescreen_model.joblib（probes 已表化 P9）。"""
         from llmsec.management import caches
-        (cfg.STATE_DIR / "probes.json").write_text("{}", encoding="utf-8")
+        (cfg.STATE_DIR / "prescreen_model.joblib").write_bytes(b"\x80\x04")
         (cfg.STATE_DIR / "unrelated.txt").write_text("x", encoding="utf-8")
         s = caches.category_summary("model_state")
-        assert s["file_count"] == 1, f"❌1 只应计 probes.json，实际 {s['file_count']}"
+        assert s["file_count"] == 1, f"❌1 只应计 prescreen_model.joblib，实际 {s['file_count']}"
 
     def test_plan_clean_unknown_category_marked(self, iso_output):
         """未知类别不展开任何路径，标记 unknown_category 且提示。"""

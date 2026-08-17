@@ -1,8 +1,9 @@
 """storage 目录库单元测试（阶段 1 地基）。
 
-覆盖：三世代布局 + 卫星布局发现、同秒撞名可见性（RUN_NAME_RE 裂缝回归）、
-增量对账（无变化零重扫 / 新变更入库 / 消失清理）、线程并发登记、
-work-dir 隔离重绑、tasks/trials 登记、旧 dict 口径超集。
+覆盖：三世代布局 + 卫星布局发现（P9 起查询纯读——造盘后显式 reconcile 入册，
+模拟 reindex 恢复路径）、同秒撞名可见性（RUN_NAME_RE 裂缝回归）、增量对账
+（无变化零重扫 / 消失清理）、写入口生命周期（register 轻登记 → finalize 收尾）、
+线程并发登记、work-dir 隔离重绑、tasks/trials 登记、旧 dict 口径超集。
 """
 
 from __future__ import annotations
@@ -55,6 +56,7 @@ def _mk_run(root: Path, batch: str, target: str | None, *, report: bool = True,
 
 def test_gen3_layout_discovered(iso):
     _mk_run(iso, "2026-08-17_120000", "minimax")
+    contract.reconcile_runs()
     rows = contract.query_runs()
     assert [r.name for r in rows] == ["2026-08-17_120000/minimax"]
     r = rows[0]
@@ -67,6 +69,7 @@ def test_same_second_suffix_visible(iso):
     """RUN_NAME_RE 裂缝回归：`<ts>_2` 撞名目录对发现可见（原正则带 $ 锚漏掉）。"""
     _mk_run(iso, "2026-08-17_120000", "minimax")
     _mk_run(iso, "2026-08-17_120000_2", "qwen")
+    contract.reconcile_runs()
     names = {r.name for r in contract.query_runs()}
     assert "2026-08-17_120000_2/qwen" in names
     assert contract.RUN_NAME_RE.match("2026-08-17_120000_2")
@@ -74,6 +77,7 @@ def test_same_second_suffix_visible(iso):
 
 def test_gen1_flat_layout_discovered(iso):
     _mk_run(iso, "2026-08-06_145558", None, report=False, extra="attack_results.jsonl")
+    contract.reconcile_runs()
     rows = contract.query_runs()
     assert [r.name for r in rows] == ["2026-08-06_145558"]
     assert rows[0].layout == 2 and not rows[0].has_report and rows[0].has_artifact
@@ -97,6 +101,7 @@ def test_workspace_satellite_layout(iso, tmp_path):
     (ws / "minimax" / "runner_report.json").write_text(json.dumps(REPORT), encoding="utf-8")
     (ws / "state" / "results.json").write_text("{}", encoding="utf-8")
 
+    contract.reconcile_runs(ws)
     rows = contract.query_runs(runs_root=ws)
     assert [r.name for r in rows] == ["ws_alpha/minimax"] or [r.name for r in rows] == ["minimax"]
     # batch = 根名（ws_alpha），target = 子目录名
@@ -112,23 +117,27 @@ def test_workspace_satellite_layout(iso, tmp_path):
 
 def test_reconcile_no_change_zero_rescan(iso):
     _mk_run(iso, "2026-08-17_120000", "minimax")
-    contract.query_runs()
+    contract.reconcile_runs()
     st = contract.reconcile_runs()
     assert st == {"rescanned": 0, "removed": 0, "adopted": 0}
 
 
 def test_reconcile_report_arrival_updates(iso):
-    """报告落盘（目录 mtime 变化）后对账自动富化 has_report/metrics。"""
+    """报告落盘后 finalize_run 收尾富化 has_report/metrics（P9：写入口自己收尾，
+    取代查询前对账）。"""
     d = _mk_run(iso, "2026-08-17_120000", "minimax", report=False)
+    contract.reconcile_runs()
     rows = contract.query_runs()
     assert not rows[0].has_report and rows[0].metrics is None
     (d / "runner_report.json").write_text(json.dumps(REPORT), encoding="utf-8")
+    contract.finalize_run(d, batch="2026-08-17_120000", target="minimax")
     rows = contract.query_runs()
     assert rows[0].has_report and rows[0].metrics["asr"] == 0.25
 
 
 def test_reconcile_removes_deleted(iso):
     _mk_run(iso, "2026-08-17_120000", "minimax")
+    contract.reconcile_runs()
     assert contract.query_runs()
     shutil.rmtree(iso / "2026-08-17_120000")
     st = contract.reconcile_runs()
@@ -146,14 +155,15 @@ def test_rebuild_full(iso):
 
 
 def test_register_run_then_reconcile_enriches(iso):
-    """写入口轻登记（无产物）→ 对账不丢行；产物出现后富化。"""
+    """写入口生命周期：register 轻登记（纯读即可见）→ finalize 收尾富化。"""
     d = iso / "2026-08-17_130000" / "minimax"
     d.mkdir(parents=True)
     contract.register_run(d, batch="2026-08-17_130000", target="minimax")
-    rows = contract.query_runs()  # reconcile 不产候选但已知行保留
+    rows = contract.query_runs()  # 纯读即见（register 已落行）
     assert [r.name for r in rows] == ["2026-08-17_130000/minimax"]
     assert not rows[0].has_artifact
     (d / "runner_report.json").write_text(json.dumps(REPORT), encoding="utf-8")
+    contract.finalize_run(d, batch="2026-08-17_130000", target="minimax")
     rows = contract.query_runs()
     assert rows[0].has_report
 
@@ -178,7 +188,7 @@ def test_concurrent_register(iso):
                 d = iso / f"2026-08-17_15000{i}" / f"t{j}"
                 d.mkdir(parents=True, exist_ok=True)
                 (d / "state.json").write_text("{}", encoding="utf-8")
-                contract.query_runs()
+                contract.register_run(d, batch=f"2026-08-17_15000{i}", target=f"t{j}")
         except Exception as e:  # pragma: no cover
             errors.append(e)
 
@@ -200,6 +210,7 @@ def test_workdir_satellite_catalog(tmp_path, monkeypatch):
     d = wd / "minimax"
     d.mkdir(parents=True)
     (d / "runner_report.json").write_text(json.dumps(REPORT), encoding="utf-8")
+    contract.reconcile_runs(wd)
     rows = contract.query_runs(runs_root=wd)
     assert [r.target for r in rows] == ["minimax"]
     assert rows[0].batch == "trial_x"
@@ -222,12 +233,14 @@ def test_tasks_reconcile_lifecycle(iso, tmp_path, monkeypatch):
         }), encoding="utf-8")
 
     write_meta("evaluate-143025-ab12cd", "running")
+    contract.reconcile_tasks()
     rows = contract.query_tasks()
     assert [r.task_id for r in rows] == ["evaluate-143025-ab12cd"]
     assert rows[0].pid == 123 and rows[0].status == "running"
 
     # 状态迁移（meta.json 覆盖写 → mtime 变化 → 对账更新）
     write_meta("evaluate-143025-ab12cd", "success")
+    contract.reconcile_tasks()
     rows = contract.query_tasks()
     assert rows[0].status == "success"
 
@@ -262,6 +275,7 @@ def test_as_dict_superset_of_legacy_implementations(iso):
     """as_dict 必须是旧 management.discover_runs / data_query._discover_runs
     两套 dict 的字段超集（消费方零损失收口的前提）。"""
     _mk_run(iso, "2026-08-17_120000", "minimax")
+    contract.reconcile_runs()
     d = contract.query_runs()[0].as_dict()
     management_keys = {
         "name", "batch", "target", "target_model", "security_level",

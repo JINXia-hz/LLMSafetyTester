@@ -7,7 +7,8 @@
   （elo_cache 已表化进 catalog.db 的 elo_cache 表，指纹自动失效，无需清理类别）
   feature_cluster   output/feature_cache.pkl + cluster_result.pkl + embedding_cache.pkl
                                                        feature/embedding 可重建 / cluster 需重跑
-  model_state       output/state/probes.json + prescreen_model.joblib  可重算/重训
+  model_state       output/state/prescreen_model.joblib       可重训
+  （probes 已表化进 catalog.db 的 probes 表，无需清理类别）
 
 绝不清：catalog.db（runs/trials/tasks/R 观测的统一库）。
 """
@@ -51,9 +52,8 @@ CACHE_CATEGORIES: dict[str, dict] = {
     },
     "model_state": {
         "rebuildable": "automatic",
-        "desc": "模型指纹探测 + 预筛 ML 模型（可重算/重训）",
+        "desc": "预筛 ML 模型（可重训；模型指纹已在 probes 表）",
         "paths": lambda: [
-            (_config.STATE_DIR / "probes.json", False, "probes.json"),
             (_config.STATE_DIR / "prescreen_model.joblib", False, "prescreen_model.joblib"),
         ],
     },

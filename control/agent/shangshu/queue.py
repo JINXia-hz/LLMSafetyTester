@@ -20,14 +20,31 @@ from threading import Lock, Thread
 
 
 class PlanQueue:
-    """Plan 执行队列。单 worker 线程串行执行。"""
+    """Plan 执行队列。单 worker 线程串行执行。
+
+    P9/B2：构造时从 ctl_queue 回填 queued 状态的 Plan（重启恢复——此前
+    只写不读，重启即静默丢队列）。恢复失败退化为空队列，不阻塞启动。"""
 
     def __init__(self) -> None:
-        self._queue: deque[str] = deque()
+        self._queue: deque[str] = deque(self._restore_pending())
         self._running: str | None = None
         self._lock = Lock()
         self._worker: Thread | None = None
         self._cond = threading.Condition(self._lock)
+        if self._queue:
+            # 回填后队列非空——按 submit 同口径预热 worker，否则要等下一次
+            # submit 才有人消费
+            with self._lock:
+                self._ensure_worker()
+                self._cond.notify()
+
+    @staticmethod
+    def _restore_pending() -> list[str]:
+        try:
+            from control.core.storage import pending_queue_plans
+            return pending_queue_plans()
+        except Exception:
+            return []
 
     def submit(self, plan_id: str) -> str:
         """提交 Plan 到队列（内存 deque + ctl_queue 行双记）。

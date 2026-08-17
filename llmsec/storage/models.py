@@ -6,10 +6,12 @@ has_tree/has_cluster）。本模块的表模型是唯一 schema 定义处，``as
 输出旧两套实现的**超集**，消费方（dashboard API / management CLI /
 control / MCP / TUI）零字段损失。
 
-表语义（目录库是**可重建的派生索引**，真相在文件）：
-  - runs：一次评估运行的登记行。真相 = runs 树目录 + 产物文件。
-  - trials：HPO trial 登记。真相 = output/experiments/<study>/trials.jsonl。
-  - tasks：后台任务登记。跨进程真相 = output/tasks/<id>.meta.json（PID 通道）。
+表语义（P9 所有权翻转：db 独占状态，文件只做制品/blob/进程通道）：
+  - runs：评估运行登记。register（创建）→ finalize（报告后富化）→ remove
+    （软删）全生命周期由写入口维护；报告/树/md 等制品仍在 run 目录。
+  - trials：HPO trial 登记。db 唯一真相；旧 trials.jsonl 仅一次性导入源。
+  - tasks：后台任务登记。db 唯一跨进程真相；.log/.progress.jsonl 是日志通道。
+  - probes：模型防御指纹（原 state/probes.json 表化）。
 """
 
 from __future__ import annotations
@@ -164,6 +166,19 @@ class PredictorCache(SQLModel, table=True):
     hits: int = 0
 
 
+class Probe(SQLModel, table=True):
+    """模型防御指纹（P9 表化——原 state/probes.json 的 RMW 文件退役，
+    单事务 upsert 跨进程竞态消失。经 config 重绑自动落 work-dir 卫星库）。"""
+
+    __tablename__ = "probes"
+
+    model: str = Field(primary_key=True)
+    fingerprint: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    seed_methods: list = Field(default_factory=list, sa_column=Column(JSON))
+    n: int = 0
+    computed_at: str = ""
+
+
 # ============================================================
 # control 侧表（P5：control 层数据库化——原 _index.json×3 / gazette jsonl /
 # plans json / 内存 tickets / queue 落库；经 storage.contract 供 control 消费）
@@ -265,7 +280,7 @@ class CtlQueueItem(SQLModel, table=True):
 
 
 class CtlWorkspace(SQLModel, table=True):
-    """workspace 索引（原 workspaces/_index.json；gc_log 作 JSON 数组内嵌）。"""
+    """workspace 索引（原 workspaces/_index.json；P9：gc_log 哨兵行审计链已删）。"""
 
     __tablename__ = "ctl_workspaces"
 
@@ -279,7 +294,6 @@ class CtlWorkspace(SQLModel, table=True):
     merged: bool = False
     merged_at: str | None = None
     merged_to: str | None = None
-    gc_log: list = Field(default_factory=list, sa_column=Column(JSON))
 
     def as_dict(self) -> dict:
         d = {

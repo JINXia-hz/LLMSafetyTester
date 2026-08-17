@@ -238,7 +238,8 @@ def test_task_spec_schema_and_dict_bridge(tmp_path, monkeypatch):
 
     # start_task 产出的必须是 TaskSpec（schema 单一定义处）
     tm.TASKS.clear()
-    monkeypatch.setattr(tm, "TASK_LOG_DIR", tmp_path / "logs")
+    import llmsec.core.config as cfg
+    monkeypatch.setattr(cfg, "TASK_LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(tm.subprocess, "Popen",
                         lambda *a, **kw: SimpleNamespace(
                             pid=1, poll=lambda: None, returncode=None,

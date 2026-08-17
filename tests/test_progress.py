@@ -3,12 +3,14 @@
 import json
 import threading
 
+import llmsec.core.config as cfg  # P9: TASK_LOG_DIR 动态读后统一 patch cfg
+
 
 def test_emit_progress_concurrent(tmp_path, monkeypatch):
     """多线程并发 emit_progress：Lock 保证 20 行完整、不丢不交错。"""
     from llmsec.core import progress as P
 
-    monkeypatch.setattr(P, "TASK_LOG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "TASK_LOG_DIR", tmp_path)
     monkeypatch.setenv("LLMSEC_TASK_ID", "conc-ut")
 
     def worker(i):
@@ -35,7 +37,7 @@ def test_emit_progress_swallows_oserror(tmp_path, monkeypatch):
 
     # TASK_LOG_DIR 指向"文件之下"的路径 → mkdir 抛 NotADirectoryError(OSError 子类)
     (tmp_path / "blocker").write_text("x")
-    monkeypatch.setattr(P, "TASK_LOG_DIR", tmp_path / "blocker" / "sub")
+    monkeypatch.setattr(cfg, "TASK_LOG_DIR", tmp_path / "blocker" / "sub")
     monkeypatch.setenv("LLMSEC_TASK_ID", "err-ut")
     P.emit_progress({"phase": "attack"})  # 不应抛
     print("✅ emit_progress OSError 静默通过")
@@ -43,11 +45,10 @@ def test_emit_progress_swallows_oserror(tmp_path, monkeypatch):
 
 def test_emit_round_progress_writes_file(tmp_path, monkeypatch):
     """_emit_round_progress 落盘字段正确：delta=本轮-prev，progress_pct 与 _convergence_score 同口径。"""
-    from llmsec.core import progress as P
     from llmsec.params import CONV_CI_TARGET
     from llmsec.pipeline.attack_phase import _emit_round_progress
 
-    monkeypatch.setattr(P, "TASK_LOG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "TASK_LOG_DIR", tmp_path)
     monkeypatch.setenv("LLMSEC_TASK_ID", "round-ut")
 
     conv = {"current_elo": 1500.0, "ci_half": 12.0, "coverage": 0.1, "converged": False}

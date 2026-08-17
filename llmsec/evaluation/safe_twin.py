@@ -185,7 +185,7 @@ def generate_safe_twin(attack_prompt: str, client) -> dict | None:
 # core.io.append_jsonl 无锁，并发 append 会产生半写行/重复生成（M9）
 _TWIN_APPEND_LOCK = threading.Lock()
 
-# 轮转阈值（P8：append-only 无轮转只增不减；与 alerts.jsonl 同策略——
+# 轮转阈值（P8：append-only 无轮转只增不减；与 llmsec.log 的 RotatingFileHandler 同策略——
 # 孪生是"生成记录"，最近一份完整轮转足够回溯，超阈值滚动为 .1）
 _TWINS_MAX_BYTES = 10 * 1024 * 1024
 

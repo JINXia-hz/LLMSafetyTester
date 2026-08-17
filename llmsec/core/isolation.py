@@ -31,7 +31,7 @@ REBOUND_PATHS = frozenset({
     "CLUSTER_DIR", "FEATURE_CACHE_FILE", "CLUSTER_RESULT_FILE",
     "EMBEDDING_CACHE_FILE", "CLUSTER_REPORT_FILE", "CLUSTER_MATRIX_FILE",
     "PREDICTORS_DIR", "STATE_DIR", "SAFE_TWINS_FILE", "TWIN_RESULT_FILE",
-    "LOG_FILE", "ALERTS_FILE",
+    "LOG_FILE",
 })
 
 
@@ -46,14 +46,14 @@ def rebind_to_workdir(wd: Path) -> None:
     "冻结模块逐个改属性"的清单（blend/fingerprint/prescreen_ml/safe_twin/
     allergy_phase/clustering.pipeline/results 共 8 处）已删除。
 
-    覆盖的路径（15 个 + 3 个子目录创建）：
-      统一库:          CATALOG_DB（R 观测 + 目录登记 + control 表 + elo 缓存，P7 合一）
+    覆盖的路径（14 个 + 3 个子目录创建）：
+      统一库:          CATALOG_DB（R 观测 + 目录登记 + control 表 + elo/probes，P7/P9）
       聚类/特征:      FEATURE_CACHE_FILE, CLUSTER_RESULT_FILE, CLUSTER_REPORT_FILE,
                       CLUSTER_MATRIX_FILE, EMBEDDING_CACHE_FILE
       预测器:         PREDICTORS_DIR
-      指纹/预筛:      STATE_DIR（probes.json / prescreen_model.joblib 派生）
+      指纹/预筛:      STATE_DIR（prescreen_model.joblib；指纹已表化，随 CATALOG_DB 走）
       安全孪生:       SAFE_TWINS_FILE, TWIN_RESULT_FILE
-      日志/告警:      LOG_FILE（含已挂载文件 handler 的切换）, ALERTS_FILE
+      日志:           LOG_FILE（含已挂载文件 handler 的切换；告警走 logger，P9 无独立文件）
     """
     wd = Path(wd)
     state_dir = wd / "state"
@@ -76,7 +76,6 @@ def rebind_to_workdir(wd: Path) -> None:
     _cfg.SAFE_TWINS_FILE = state_dir / "safe_twins.jsonl"
     _cfg.TWIN_RESULT_FILE = wd / "allergy_results.jsonl"
     _cfg.LOG_FILE = logs_dir / "llmsec.log"
-    _cfg.ALERTS_FILE = wd / "alerts.jsonl"
 
     # 日志文件 handler：get_logger 在 import 期已打开全局 output/logs 的句柄，
     # 重绑 config.LOG_FILE 不影响已挂载的 handler，必须显式切换。

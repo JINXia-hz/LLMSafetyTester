@@ -26,7 +26,6 @@ def restore_r7_isolation():
     saved = {
         "cfg.CLUSTER_MATRIX_FILE": cfg.CLUSTER_MATRIX_FILE,
         "cfg.LOG_FILE": cfg.LOG_FILE,
-        "cfg.ALERTS_FILE": cfg.ALERTS_FILE,
         "cfg.CATALOG_DB": cfg.CATALOG_DB,
     }
     import llmsec.core.logging as logging_mod
@@ -36,7 +35,6 @@ def restore_r7_isolation():
     yield
     cfg.CLUSTER_MATRIX_FILE = saved["cfg.CLUSTER_MATRIX_FILE"]
     cfg.LOG_FILE = saved["cfg.LOG_FILE"]
-    cfg.ALERTS_FILE = saved["cfg.ALERTS_FILE"]
     cfg.CATALOG_DB = saved["cfg.CATALOG_DB"]
     # 引擎缓存按库路径键控，重绑后旧卫星库引擎随手丢弃
     from llmsec.storage import db as storage_db
@@ -65,7 +63,6 @@ class TestRebindCoverage:
         assert wd / "cluster" / "cluster_matrix.csv" == cfg.CLUSTER_MATRIX_FILE
         assert wd / "state" / "safe_twins.jsonl" == cfg.SAFE_TWINS_FILE
         assert wd / "logs" / "llmsec.log" == cfg.LOG_FILE
-        assert wd / "alerts.jsonl" == cfg.ALERTS_FILE
         assert wd / "catalog.db" == cfg.CATALOG_DB  # 目录库卫星化（storage 重构）
 
     def test_export_matrix_writes_workdir(self, tmp_path, restore_r7_isolation):
@@ -138,10 +135,6 @@ class TestRebindCoverage:
             h.flush()
         assert (wd / "logs" / "llmsec.log").exists()
 
-        # 告警：_write_event_file 落 work-dir
-        from llmsec.core import monitoring
-        monitoring._write_event_file({"title": "r7", "level": "warning"})
-        assert (wd / "alerts.jsonl").exists()
 
     def test_explicit_log_file_env_respected(self, tmp_path, restore_r7_isolation, monkeypatch):
         """用户显式设置 LLMSEC_LOG_FILE 时隔离不抢夺日志路径。"""

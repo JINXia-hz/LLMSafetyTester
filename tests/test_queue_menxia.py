@@ -116,6 +116,60 @@ class TestPlanQueue:
             blocker["wait"] = False
         time.sleep(0.3)
 
+    def test_restart_recovers_queued_plans(self, tmp_path, monkeypatch):
+        """P9/B2 重启恢复：ctl_queue 的 queued 行在新 PlanQueue 构造时回填
+        （此前只写不读，重启即静默丢队列）。running 不回填（无重入语义）。"""
+        import threading
+
+        from control.agent.shangshu.queue import PlanQueue
+        from control.core.storage import (
+            enqueue_plan,
+            finish_queue_item,
+            mark_queue_running,
+            pending_queue_plans,
+            reset_queue,
+        )
+
+        reset_queue()
+        enqueue_plan("plan-a")
+        enqueue_plan("plan-b")
+        mark_queue_running("plan-a")   # 崩溃时在跑
+        enqueue_plan("plan-c")
+        assert pending_queue_plans() == ["plan-b", "plan-c"]
+
+        # fake_execute 阻塞到断言完成——worker 构造即开始消费恢复的队列，
+        # 直接读 q._queue 会与 popleft 竞态；按 status() 终态判定
+        released = threading.Event()
+
+        def _fake_execute(plan_id):
+            released.wait(timeout=5)
+
+        monkeypatch.setattr("control.agent.shangshu.executor.execute_plan", _fake_execute)
+
+        q = PlanQueue()  # 模拟重启后新队列
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            st = q.status()
+            if st["running"] == "plan-b" and st["queued"] == ["plan-c"]:
+                break
+            time.sleep(0.05)
+        else:
+            raise AssertionError(f"恢复失败：{q.status()}（queued 行未回填或 running 误回填）")
+
+        released.set()
+        time.sleep(0.3)  # 放行 worker 排空退出
+
+        # done 行滚动清理：finish 超过保留数后旧行删除
+        reset_queue()
+        for i in range(25):
+            enqueue_plan(f"p{i}")
+            mark_queue_running(f"p{i}")
+            finish_queue_item(f"p{i}")
+        from llmsec.storage import ctlstore
+        with ctlstore._db.session() as s:
+            n_done = len(s.exec(ctlstore._select(ctlstore.CtlQueueItem)).all())
+        assert n_done <= 20, f"done 行应滚动清理到 ≤20，实际 {n_done}"
+
 
 # ============================================================
 # 门下省三阶段监控

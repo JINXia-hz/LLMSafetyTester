@@ -90,7 +90,6 @@ def run_study(config: StudyConfig) -> dict:
     """顺序执行整个 study，支持断点续跑。返回汇总。"""
     sdir = study_dir(config.name)
     sdir.mkdir(parents=True, exist_ok=True)
-    trials_path = sdir / "trials.jsonl"
 
     # 把 study 配置落盘到 study 目录（复现 + report 命令读取）。
     # 每次 run 都刷新：源 yaml 改过后续跑仍用旧副本会导致 report 读到过期配置（S-7 残留）
@@ -108,7 +107,8 @@ def run_study(config: StudyConfig) -> dict:
 
     completed = load_trial_records(config.name)  # P4：db 真相（jsonl 已退役）
     seeds = [config.seed_base + i for i in range(config.repeats)]
-    trials_lock = threading.Lock()   # 并发 trial 写 trials.jsonl 的互斥
+    trials_lock = threading.Lock()   # 并发 trial 完成回填（completed 计数互斥）
+    from llmsec.storage import contract as _storage
 
     # fail-fast：无目标可跑时直接报错，不再逐 config 跳过 + 误报"搜索空间已穷尽"空转
     if not _effective_targets(config, config.fixed):
@@ -220,8 +220,9 @@ def run_study(config: StudyConfig) -> dict:
                     rec["search_fp"] = search_fp
                     rec["search_params"] = search_params
                     with trials_lock:
-                        with open(trials_path, "a", encoding="utf-8") as f:
-                            f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+                        # P9/A3：db 唯一写点。此前 jsonl 追加仍活着而库只在空表时
+                        # 一次性导入 → 库对本 session 的新 trial 永久滞后（双真相）。
+                        _storage.upsert_trial_record(config.name, rec)
                         completed.append(rec)
                         ran_any = True
                         if rec.get("status") in ("failed", "timeout", "error"):

@@ -2,13 +2,10 @@
 """core 基础设施测试：io 错误路径（损坏兜底 / 原子写失败 / tmp 清理）+ monitoring 告警评估。
 
 全部离线：monitoring 的 webhook 通道一律 mock（_post_webhook / _get_executor），
-绝不发真实网络请求；告警事件文件经 config.ALERTS_FILE 重定向到 tmp_path。
+绝不发真实网络请求；告警断言走 caplog（P9：事件文件通道已删，日志是主通道）。
 """
 
 from __future__ import annotations
-
-import json
-from pathlib import Path
 
 import pytest
 
@@ -243,11 +240,9 @@ def test_write_csv_empty_and_rows(tmp_path):
 # ============================================================
 @pytest.fixture
 def mon(monkeypatch, tmp_path):
-    """隔离 monitoring 全局状态：清去抖表、重定向事件文件到 tmp、关闭 webhook。"""
+    """隔离 monitoring 全局状态：清去抖表、关闭 webhook（P9：告警走 logger+webhook，无事件文件）。"""
     import llmsec.core.monitoring as monitoring
-    from llmsec.core import config as cfg
 
-    monkeypatch.setattr(cfg, "ALERTS_FILE", tmp_path / "alerts.jsonl")
     monkeypatch.delenv("LLMSEC_ALERT_WEBHOOK", raising=False)
     monkeypatch.delenv("LLMSEC_ALERT_LEVEL", raising=False)
     monkeypatch.setattr(monitoring, "_dedup", {})
@@ -255,30 +250,24 @@ def mon(monkeypatch, tmp_path):
     return monitoring
 
 
-def _events(tmp_path: Path) -> list[dict]:
-    p = tmp_path / "alerts.jsonl"
-    if not p.exists():
-        return []
-    return [json.loads(x) for x in p.read_text(encoding="utf-8").strip().splitlines()]
+def test_emit_alert_logs_warning(mon, caplog):
+    """emit_alert(force) → logger.warning 留痕（P9：事件文件通道已删，日志是主通道）。"""
+    import logging
 
-
-def test_emit_alert_writes_event_file(mon, tmp_path):
-    """emit_alert(force) → 事件同步落盘 alerts.jsonl，字段完整。"""
     ok = mon.emit_alert("error", "磁盘将满", "detail-1", {"task_id": "t-1"}, force=True)
     assert ok is True, "❌1 force 告警应实际发出"
-    evs = _events(tmp_path)
-    assert len(evs) == 1, "❌2 应恰好写 1 条事件"
-    assert evs[0]["level"] == "error" and evs[0]["title"] == "磁盘将满", "❌3 级别/标题应原样"
-    assert evs[0]["context"] == {"task_id": "t-1"} and "ts" in evs[0], "❌4 context/ts 应完整"
+    recs = [r for r in caplog.records if r.levelno >= logging.WARNING and "磁盘将满" in r.message]
+    assert recs, "❌2 告警应写入日志"
+    assert "t-1" in recs[0].message, "❌3 context 标识应进日志"
+    assert len(mon._dedup) == 1, f"❌4 去抖表应恰好 1 条，实际 {len(mon._dedup)}"
 
 
-def test_emit_alert_dedup_by_identity(mon, tmp_path):
+def test_emit_alert_dedup_by_identity(mon):
     """同 title+同一对象在窗口内去抖；不同对象不去抖；force 跳过去抖。"""
     assert mon.emit_alert("warning", "T", context={"task_id": "a"}, force=True) is True, "❌1 首发"
     assert mon.emit_alert("warning", "T", context={"task_id": "a"}) is False, "❌2 同对象应去抖"
     assert mon.emit_alert("warning", "T", context={"task_id": "b"}, force=True) is True, "❌3 不同对象"
     assert mon.emit_alert("warning", "T", context={"task_id": "a"}, force=True) is True, "❌4 force 跳过"
-    assert len(_events(tmp_path)) == 3, "❌5 被去抖的不应落盘"
 
 
 def test_title_hash_uses_identity_fields_only(mon):
@@ -386,15 +375,6 @@ def test_should_emit_prunes_stale_entries(mon):
     assert mon._should_emit("fresh-key") is True, "❌1 未发过的 key 应放行"
     assert "fresh-key" in mon._dedup, "❌2 放行后应记录时间戳"
     assert len(mon._dedup) == 1, f"❌3 过期条目应被清理，实际剩 {len(mon._dedup)}"
-
-
-def test_write_event_file_swallows_errors(mon, monkeypatch, capsys, tmp_path):
-    """事件文件写入失败（父路径被文件挡住）→ 只写 stderr，不抛。"""
-    blocker = tmp_path / "blocker"
-    blocker.write_text("x", encoding="utf-8")
-    monkeypatch.setattr(mon, "_alerts_file", lambda: blocker / "sub" / "alerts.jsonl")
-    mon._write_event_file({"a": 1})  # mkdir 在文件下 → OSError → stderr
-    assert "alerts.jsonl" in capsys.readouterr().err, "❌1 写失败应留痕 stderr"
 
 
 def test_get_executor_lazy_singleton(mon):

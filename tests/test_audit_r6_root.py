@@ -119,15 +119,14 @@ def test_g4_data_query_uses_shared_sig(tmp_path, monkeypatch):
     from llmsec.server import dashboard_api
 
     monkeypatch.setattr(dashboard_api, "RUNS_DIR", tmp_path)
-    import os
     batch = tmp_path / "2026-01-01_000000"
     batch.mkdir()
-    dq._discover_runs()
+    from llmsec.storage import contract as _storage
+    _storage.reconcile_runs(runs_root=tmp_path)  # P9：查询纯读——造盘后显式入册
     t = batch / "gemma"
     t.mkdir()
     (t / "runner_report.json").write_text('{"target_model": "gemma"}', encoding="utf-8")
-    st = batch.stat()
-    os.utime(batch, ns=(st.st_mtime_ns + 10_000_000_000,) * 2)  # 规避同刻 mtime
+    _storage.reconcile_runs(runs_root=tmp_path)
     names = [r["name"] for r in dq._discover_runs()]
     assert "2026-01-01_000000/gemma" in names
 
