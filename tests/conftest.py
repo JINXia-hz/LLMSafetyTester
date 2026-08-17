@@ -157,6 +157,22 @@ def _hermetic_tasks(tmp_path):
         tm.TASKS.clear()
         tm.TASKS.update(saved)
         cfg.TASK_LOG_DIR = saved_tasklog
+        # Plan 队列 worker 收敛：worker 若活过测试（slow/blocking execute 的
+        # 用例），teardown dispose 引擎池时会与它迟来的 finish_queue_item
+        # 落库竞态（CI: Set changed size during iteration）。只在本测试进程
+        # 已加载过 queue 模块时等待（否则不为未用过的队列付 import + 读库）。
+        import sys as _sys
+        import time as _time
+        if "control.agent.shangshu.queue" in _sys.modules:
+            from control.agent.shangshu.queue import get_queue as _get_queue
+
+            q = _get_queue()
+            deadline = _time.time() + 5
+            while _time.time() < deadline:
+                st = q.status()
+                if st["running"] is None and not st["queued"]:
+                    break
+                _time.sleep(0.05)
 
 
 # ============================================================

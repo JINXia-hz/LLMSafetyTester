@@ -142,4 +142,7 @@ filterwarnings = [
     "ignore:invalid value encountered in divide:RuntimeWarning",
     # sklearn KMeans 在退化数据（< n_clusters 个不同点）上的 ConvergenceWarning（预聚类用，无害）
     "ignore:Number of distinct clusters.*found smaller than n_clusters",
+    # SQLAlchemy 2.0.36+ 对 SQLModel 字符串主键（无 Python 侧 default）的一次性
+    # mapper 提示——str 主键恒显式传值（save_probe/register 等），无 NULL 路径
+    "ignore:.*is marked as a member of the primary key.*:sqlalchemy.exc.SAWarning",
 ]

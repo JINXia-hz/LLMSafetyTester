@@ -193,17 +193,29 @@ def tx(db_path: Path | str | None = None) -> Iterator[Session]:
             yield s
 
 
+def _dispose(eng) -> None:
+    """dispose 容错：并发线程恰在 checkin/新建连接时，SQLAlchemy 池的
+    `for conn in self._all_conns` 会抛 Set changed size during iteration
+    （CI 实测：Plan 队列 worker 迟于测试 teardown 醒来再落库）。重试兜死。"""
+    for _ in range(3):
+        try:
+            eng.dispose()
+            return
+        except RuntimeError:
+            time.sleep(0.05)
+
+
 def close(db_path: Path | str | None = None) -> None:
     """释放引擎（测试 / 路径重绑后防旧句柄滞留）。"""
     with _ENGINES_LOCK:
         if db_path is None:
             for pair in _ENGINES.values():
                 for eng in pair.values():
-                    eng.dispose()
+                    _dispose(eng)
             _ENGINES.clear()
             return
         key = str(Path(db_path).resolve())
         pair = _ENGINES.pop(key, None)
         if pair is not None:
             for eng in pair.values():
-                eng.dispose()
+                _dispose(eng)
