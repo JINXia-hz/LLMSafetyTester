@@ -30,7 +30,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from llmsec.core.io import write_json
 from llmsec.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -269,34 +268,18 @@ class ResultsMatrix:
         }
 
     def save(self, filepath: str | Path | None = None) -> Path:
-        """持久化（阶段 2：SQLite 真相 + JSON 导出双格式）。
+        """持久化到 R 真相库（单事务全量覆写；并发安全由 BEGIN IMMEDIATE 保证）。
 
-        - filepath 为 None / 显式 .db：写 R 真相库（config.RESULTS_DB；单事务
-          全量覆写，并发安全由 BEGIN IMMEDIATE 保证——手写文件锁与 .bak 轮转
-          在真相路径退役）。
-        - 其它后缀（.json / .bak …）：写遗留 JSON（快照/分发格式，原子写+.bak）。
+        filepath 缺省 = config.RESULTS_DB。人读 JSON 导出走
+        ``rstore.export_legacy_json``（显式工具，不再是隐式路径路由）。
         """
-        filepath = Path(filepath) if filepath else None
-        if filepath is not None and filepath.suffix != ".db":
-            # allow_nan=False（M12）：导出 JSON 禁止 NaN/Infinity 字面量
-            write_json(filepath, self.to_store_dict(), backup=True, allow_nan=False)
-            return filepath
         from llmsec.storage import rstore  # 函数内导入防环（rstore 反向引用本类）
         return rstore.save_matrix(self, filepath)
 
     @classmethod
     def load(cls, filepath: str | Path | None = None) -> ResultsMatrix:
-        """加载（阶段 2：默认走 SQLite 真相库；非 .db 后缀读遗留 JSON）。
-
-        - filepath 为 None / 显式 .db：读 R 真相库；db 缺失而旁有遗留
-          results.json 时首次自动导入（旧 workspace/全局存量无缝迁移）。
-        - 其它后缀（.json / .bak …）：读遗留 JSON（merge 源/快照；保留 F1
-          损坏处置与 v1 归档语义）。
-        """
-        filepath = Path(filepath) if filepath else None
+        """从 R 真相库全量构建内存矩阵（filepath 缺省 = config.RESULTS_DB）。"""
         from llmsec.storage import rstore  # 函数内导入防环
-        if filepath is not None and filepath.suffix != ".db":
-            return rstore.matrix_from_legacy_json(filepath)
         return rstore.load_matrix(filepath)
 
     # ---------- 诊断 ----------

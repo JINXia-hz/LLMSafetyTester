@@ -115,38 +115,36 @@ def test_f3_read_json_strict_true_raises():
         assert read_json(Path(d) / 'missing.json', default='X', strict=True) == 'X', 'F3: strict=True 文件不存在仍返回 default'
 
 def test_f3_results_matrix_load_corruption_backup():
-    """F1：results.json 损坏时 load 备份残文件 + 尝试 .bak 恢复 + 仍失败则 raise（不返空矩阵）。"""
-    from llmsec.core.io import CorruptedFileError
+    """F1：遗留 json 损坏时 matrix_from_legacy_json 备份残文件 + .bak 恢复 + 仍失败 raise。"""
+    from llmsec.core.io import CorruptedFileError, write_json
+    from llmsec.storage import rstore
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / 'r.json'
         mat = ResultsMatrix()
         mat.upsert('DAN', 'qwen', 3.0, ts=1)
-        mat.save(p)
-        assert p.exists(), 'F3: 正常 save 后文件存在'
-        # 损坏 results.json
+        write_json(p, mat.to_store_dict())
+        assert p.exists(), 'F3: 正常写入后文件存在'
+        # 损坏
         p.write_text('{"version":1,"results":{"DAN":{"qwen":{', encoding='utf-8')
-        # F1：无 .bak 可恢复时 raise（不再返空矩阵）
         try:
-            ResultsMatrix.load(p)
+            rstore.matrix_from_legacy_json(p)
             raised = False
         except CorruptedFileError:
             raised = True
         assert raised, 'F1: 损坏且无 .bak 时应 raise（不返空矩阵防永久数据丢失）'
         corrupt_bak = Path(str(p) + '.corrupt.bak')
-        assert corrupt_bak.exists(), 'F1: 损坏 results.json 已备份为 .corrupt.bak'
+        assert corrupt_bak.exists(), 'F1: 损坏 json 已备份为 .corrupt.bak'
 
     # F1：有 .bak 时从备份恢复
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / 'r.json'
         mat = ResultsMatrix()
         mat.upsert('DAN', 'qwen', 3.0, ts=1)
-        mat.save(p)
+        write_json(p, mat.to_store_dict(), backup=True)
         mat.upsert('DAN2', 'qwen', 5.0, ts=2)
-        mat.save(p)  # 第二次 save → .bak 含第一次的数据（1 条记录）
-        # 损坏主文件
+        write_json(p, mat.to_store_dict(), backup=True)  # .bak 含上一版（1 条）
         p.write_text('{corrupt', encoding='utf-8')
-        mat2 = ResultsMatrix.load(p)
-        # .bak 恢复成功（含第一次 save 的 1 条记录）
+        mat2 = rstore.matrix_from_legacy_json(p)
         assert mat2.n_for_model('qwen') == 1, 'F1: 从 .bak 恢复成功（1 条记录）'
 
 def test_f3_state_load_corruption_no_crash():
@@ -167,27 +165,30 @@ def test_f3_state_load_corruption_no_crash():
 
 def test_f3_from_store_missing_eval_score():
     """R-3: 半残 JSON 缺 eval_score 字段时跳过该记录（不 KeyError 崩溃）。"""
+    from llmsec.storage import rstore
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / 'r.json'
         p.write_text('{"version":2,"units":[],"models":[],"results":{"good":{"qwen":{"eval_score":3.0}},"bad":{"qwen":{"status":"refused"}}}}', encoding='utf-8')
-        mat = ResultsMatrix.load(p)
+        mat = rstore.matrix_from_legacy_json(p)
         assert mat.get('good', 'qwen') is not None, 'F3: 正常记录被加载'
         assert mat.get('bad', 'qwen') is None, 'F3: 缺 eval_score 的记录被跳过（不崩溃）'
 
 def test_f3_round_trip_results_with_backup():
-    """ResultsMatrix.save 用 backup=True，多次 save 后 .bak 是上一版。"""
+    """遗留导出 write_json backup=True：多次导出后 .bak 是上一版。"""
+    from llmsec.core.io import write_json
+    from llmsec.storage import rstore
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / 'r.json'
         mat = ResultsMatrix()
         mat.upsert('A', 'm', 1.0, ts=1)
-        mat.save(p)
+        write_json(p, mat.to_store_dict(), backup=True)
         mat.upsert('B', 'm', 2.0, ts=2)
-        mat.save(p)
+        write_json(p, mat.to_store_dict(), backup=True)
         bak = Path(str(p) + '.bak')
-        assert bak.exists(), 'F3: 二次 save 产生 .bak'
-        mat_bak = ResultsMatrix.load(bak)
+        assert bak.exists(), 'F3: 二次写产生 .bak'
+        mat_bak = rstore.matrix_from_legacy_json(bak)
         assert mat_bak.get('A', 'm') is not None and mat_bak.get('B', 'm') is None, 'F3: .bak 是上一版（仅 A）'
-        mat_new = ResultsMatrix.load(p)
+        mat_new = rstore.matrix_from_legacy_json(p)
         assert mat_new.get('A', 'm') is not None and mat_new.get('B', 'm') is not None, 'F3: 新版含 A+B'
 
 def _snapshot_target_env():

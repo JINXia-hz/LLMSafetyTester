@@ -1,13 +1,12 @@
 """control router 测试：端点冒烟 + chat 兜底 + fork/merge 闭环（全沙盒化）。
 
 所有 fork/merge 操作经 monkeypatch 重定向到 tmp_path，绝不碰真实 output/。
-export_snapshot（走 subprocess）被 mock，避免 subprocess 不受 monkeypatch 影响的问题。
+库级 clone（control.core.storage）被 mock，不经 subprocess。
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,7 +19,7 @@ def sandbox(monkeypatch, tmp_path):
     这是 control router 测试沙盒化的关键：
       - control.config.{OUTPUT_DIR, WORKSPACES_DIR, LLMSEC_REPO, RUNS_DIR} → tmp
       - workspace.py / compare.py 的模块级路径常量 → tmp
-      - invoker.export_snapshot → mock（返回 tmp 内的假快照，不经 subprocess）
+      - storage.backup_results → mock（在 tmp 内落真实迷你 R 库，不经 subprocess）
     这样 fork/list/compare/merge 全在 tmp 下，不碰真实 output/。
     """
     from control import config as ctrl_cfg
@@ -49,20 +48,21 @@ def sandbox(monkeypatch, tmp_path):
     monkeypatch.setattr(merge_mod, "RESULTS_DB", out / "state" / "results.db")
     (out / "state").mkdir()
 
-    # mock export_snapshot：在 tmp 下造假快照（不经 subprocess）
-    def fake_export(source="global", out=None):
-        snap_dir = out if out else (ctrl_cfg.OUTPUT_DIR / "snapshots" / "fake")
-        Path(snap_dir).mkdir(parents=True, exist_ok=True)
-        # 写一个最小 R
-        R = {"version": 2, "units": [], "models": ["test_model"],
-             "results": {"r1": {"test_model": {"eval_score": 1.0, "status": "ok", "ts": 1, "extra": {}}}}}
-        Path(snap_dir, "results.json").write_text(json.dumps(R), encoding="utf-8")
-        return {"snapshot": str(Path(snap_dir).relative_to(ctrl_cfg.OUTPUT_DIR)).replace("\\", "/"),
-                "models": ["test_model"], "records": 1}
+    # mock 库级 clone（P3：fork 直调 backup_results，无 subprocess 快照握手）
+    from control.core import storage as cstorage
 
-    from control.core import invoker
-    monkeypatch.setattr(invoker, "export_snapshot", fake_export)
-    monkeypatch.setattr(ws, "export_snapshot", fake_export)
+    def fake_backup(dest):
+        from llmsec.core.results import ResultsMatrix
+        from llmsec.storage import rstore
+        mat = ResultsMatrix()
+        mat.upsert("r1", "test_model", 1.0, ts=1, status="ok")
+        rstore.save_matrix(mat, path=dest)
+
+    def fake_stats(path):
+        return {"models": ["test_model"], "records": 1, "observations": 1, "units": 0}
+
+    monkeypatch.setattr(cstorage, "backup_results", fake_backup)
+    monkeypatch.setattr(cstorage, "results_stats", fake_stats)
     return out
 
 

@@ -6,6 +6,7 @@
   gc-tasks         终态任务文件软删（task 只增不减的治理入口）+ 同步删库行
   trials           列出 trials 登记行（study 维度）
   migrate-layouts  Gen1/Gen2 扁平 run 物理归一为 Gen3 <ts>/<target>/ 布局
+  backup-r         R 库备份（sqlite3 backup API）——migrate-r 已完成使命退役
 
 所有删除路径一律走 management.common 的软删（.trash 可回滚），dry-run 默认。
 """
@@ -300,111 +301,6 @@ def execute_migrate_layouts(plan: Plan) -> Plan:
 # ============================================================
 # migrate-r / backup-r（阶段 2：R 矩阵 → SQLite）
 # ============================================================
-def _matrix_digests(mat) -> dict:
-    """矩阵三关摘要：总行数 / 逐模型列指纹 / 逐模型时序序列。"""
-    import hashlib
-
-    fps: dict[str, str] = {}
-    seqs: dict[str, list] = {}
-    for model in mat.all_models():
-        payload = mat.column_payload(model, extra_fields=("unit", "round")) or ""
-        fps[model] = hashlib.md5(payload.encode("utf-8")).hexdigest()
-        seqs[model] = [
-            (r.record, r.eval_score, repr(r.ts), r.status, sorted((r.extra or {}).items()))
-            for r in mat.ordered_results(model)
-        ]
-    return {"rows": sum(len(c) for c in mat._r.values()),
-            "units": list(mat.all_units()),
-            "fingerprints": fps, "sequences": seqs}
-
-
-def cmd_migrate_r(*, yes: bool = False, force: bool = False, json_mode: bool = False) -> int:
-    """results.json → results.db 全量搬迁（"搬迁即检测"：三关校验任一不过即回退）。
-
-    三关：总行数相等；逐模型列指纹（record:score:ts:unit:round 的 MD5）相等；
-    ordered_results 时序序列逐条相等。校验通过后额外导出 results.snapshot.json
-    人读快照；原 results.json 原样保留（回滚兜底）。
-    """
-    from llmsec.storage import rstore
-
-    legacy = Path(_config.RESULTS_FILE)
-    dbp = Path(_config.RESULTS_DB)
-    if not legacy.exists():
-        msg = (f"R 库已就绪: {dbp}" if dbp.exists()
-               else f"无可迁移的 {legacy}（首次评估时自动建库）")
-        emit({"ok": True, "detail": msg}, json_mode=json_mode, title="migrate-r")
-        print(msg)
-        return 0
-    if dbp.exists() and not force:
-        try:
-            existing = rstore.load_matrix(dbp)
-            if sum(len(c) for c in existing._r.values()) > 0:
-                msg = (f"R 库已迁移且有数据: {dbp}（如需从 {legacy.name} 重建用 --force；"
-                       "注意会覆盖库内 json 之后新增的观测）")
-                emit({"ok": True, "detail": msg}, json_mode=json_mode, title="migrate-r")
-                print(msg)
-                return 0
-        except RuntimeError:
-            pass  # 库损坏 → 允许从 json 重建
-
-    from llmsec.core.results import ResultsMatrix
-    old = ResultsMatrix.load(legacy)  # 遗留 json 直读
-    old_digest = _matrix_digests(old)
-    if not yes:
-        summary = {"dry_run": True, "rows": old_digest["rows"],
-                   "models": len(old_digest["fingerprints"]),
-                   "units": len(old_digest["units"])}
-        emit(summary, json_mode=json_mode, title="migrate-r (dry-run)")
-        if not json_mode:
-            print(f"将把 {legacy} 迁入 {dbp}：{summary['rows']} 条观测，"
-                  f"{summary['models']} 个模型，{summary['units']} 个单位")
-            print("（dry-run 预览；执行含三关校验 + 导出人读快照）\n确认执行请加 --yes")
-        return 0
-
-    print("执行中...")
-    rstore.save_matrix(old, path=dbp)
-    problems: list[str] = []
-    try:
-        new_digest = _matrix_digests(rstore.load_matrix(dbp))
-        if new_digest["rows"] != old_digest["rows"]:
-            problems.append(f"行数不符: {old_digest['rows']} → {new_digest['rows']}")
-        if new_digest["units"] != old_digest["units"]:
-            problems.append("单位目录不符")
-        for model, fp in old_digest["fingerprints"].items():
-            if new_digest["fingerprints"].get(model) != fp:
-                problems.append(f"列指纹不符: {model}")
-        for model, seq in old_digest["sequences"].items():
-            if new_digest["sequences"].get(model) != seq:
-                problems.append(f"时序序列不符: {model}")
-    except Exception as e:
-        problems.append(f"迁移后读取失败: {e}")
-    if problems:
-        # 回退：释放引擎句柄（Windows 上持句柄删不掉文件）后删 db（含 WAL 伴生件），
-        # 原 json 未动
-        from llmsec.storage import db as storage_db
-        storage_db.close()
-        for suffix in ("", "-wal", "-shm"):
-            p = Path(str(dbp) + suffix)
-            if p.exists():
-                p.unlink()
-        emit({"ok": False, "problems": problems, "rolled_back": True},
-             json_mode=json_mode, title="migrate-r (failed)")
-        for p in problems:
-            print(f"  ✗ {p}")
-        print("已回退（原 results.json 未动）。")
-        return 1
-
-    snapshot = rstore.export_legacy_json(_config.STATE_DIR / "results.snapshot.json")
-    emit({"ok": True, "rows": old_digest["rows"],
-          "models": len(old_digest["fingerprints"]), "db": str(dbp),
-          "snapshot": str(snapshot)},
-         json_mode=json_mode, title="migrate-r")
-    print(f"✓ 迁移完成：{old_digest['rows']} 条观测 → {dbp}")
-    print("✓ 三关校验通过（行数 / 逐模型指纹 / 时序序列）")
-    print(f"✓ 人读快照: {snapshot}（原 {legacy.name} 保留作回滚兜底）")
-    return 0
-
-
 def cmd_backup_r(out: str | None, *, json_mode: bool = False) -> int:
     """R 库备份（sqlite3 backup API，WAL 安全；.bak 轮转的替代）。"""
     from llmsec.storage import rstore

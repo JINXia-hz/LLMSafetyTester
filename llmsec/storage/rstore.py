@@ -69,15 +69,6 @@ class RModel(SQLModel, table=True):
     position: int = 0
 
 
-class RMeta(SQLModel, table=True):
-    """R 库元信息（迁移标记等）。"""
-
-    __tablename__ = "rmeta"
-
-    key: str = Field(primary_key=True)
-    value: str = ""
-
-
 class EloCache(SQLModel, table=True):
     """Elo 派生缓存行（P2：原 elo_cache.json 表化——指纹命中 + 事务 upsert，
     取代文件锁 RMW）。payload 含 _version（schema 漂移即条目作废）。"""
@@ -100,9 +91,8 @@ def results_db() -> Path:
 
 
 def _as_db_path(path: Path | str | None) -> Path:
-    """显式路径 → db 路径：.json 后缀视为遗留源，映射到同名 .db。"""
-    p = Path(path) if path is not None else results_db()
-    return p.with_suffix(".db") if p.suffix == ".json" else p
+    """路径归一：None → 当前进程的 R 真相库（work-dir 隔离经 config 重绑）。"""
+    return Path(path) if path is not None else results_db()
 
 
 def matrix_from_legacy_json(filepath: Path) -> ResultsMatrix:
@@ -163,36 +153,6 @@ def matrix_from_legacy_json(filepath: Path) -> ResultsMatrix:
     return mat
 
 
-def _migrate_legacy(dbp: Path) -> bool:
-    """db 未迁移过而旁有遗留 results.json 时导入（旧 workspace/全局存量）。
-
-    完成标记持久化在 rmeta 表——不能用"db 是否有观测"判定：删除模型列后
-    db 合法地为空，此时不得把旧 json 再导回来（delete-r 后复活已删观测）。
-    """
-    legacy = dbp.with_suffix(".json")
-    if not legacy.exists():
-        return False
-    marker = f"migrated:{legacy.resolve()}"
-    with _db.session(dbp) as s:
-        if s.get(RMeta, marker) is not None:
-            return False
-        if s.exec(_select(Observation)).first() is not None:
-            # db 已有观测但未标记（upsert 先于首次 load 的窗口）——db 为准，
-            # 补标记防止后续 load 用旧 json 全量覆盖这些观测
-            with _db.tx(dbp) as t:
-                t.add(RMeta(key=marker, value=str(legacy.resolve())))
-            return False
-    mat = matrix_from_legacy_json(legacy)
-    n = sum(len(col) for col in mat._r.values())
-    if not n:
-        return False
-    save_matrix(mat, path=dbp)
-    with _db.tx(dbp) as s:
-        s.add(RMeta(key=marker, value=str(legacy.resolve())))
-    logger.info("遗留 results.json 已导入 R 库（%d 条观测）: %s", n, legacy)
-    return True
-
-
 def _quick_check(dbp: Path) -> None:
     """SQLite 完整性快检（替代 .bak/.corrupt.bak 机器）。损坏抛 RuntimeError。"""
     conn = _sqlite3.connect(str(dbp))
@@ -215,12 +175,8 @@ def _quick_check(dbp: Path) -> None:
 def load_matrix(path: Path | str | None = None) -> ResultsMatrix:
     """全量构建内存矩阵（13 处调用点零改动——ResultsMatrix.load 委托此处）。"""
     dbp = _as_db_path(path)
-    legacy = dbp.with_suffix(".json")
-    if not dbp.exists() and not legacy.exists():
-        return ResultsMatrix()  # 空库语义（与旧"文件不存在=空矩阵"一致）
-    _migrate_legacy(dbp)  # 幂等：db 已有数据时 no-op；db 缺而 json 在则导入
     if not dbp.exists():
-        return ResultsMatrix()
+        return ResultsMatrix()  # 空库语义（与旧"文件不存在=空矩阵"一致）
     _quick_check(dbp)
     mat = ResultsMatrix()
     with _db.session(dbp) as s:
@@ -395,6 +351,64 @@ def upsert_elo_cache(model: str, fingerprint: str, payload: dict,
             row.payload = dict(payload)
             row.updated_at = _time.time()
         s.add(row)
+
+
+def close_db(path: Path | str | None = None) -> None:
+    """释放该 R 库的引擎句柄（Windows 上持句柄删不掉文件——delete/gc 前调用）。"""
+    _db.close(_as_db_path(path))
+
+
+def results_stats(path: Path | str | None = None) -> dict:
+    """R 库统计（fork 记索引 / 快照 manifest 用）：{models, records, observations, units}。"""
+    dbp = _as_db_path(path)
+    if not dbp.exists():
+        return {"models": [], "records": 0, "observations": 0, "units": 0}
+    with _db.session(dbp) as s:
+        obs = s.exec(_select(Observation)).all()
+        models = [m.model for m in s.exec(_select(RModel).order_by(RModel.position)).all()]
+        units = s.exec(_select(RUnit)).all()
+        return {"models": models, "records": len({o.record for o in obs}),
+                "observations": len(obs), "units": len(units)}
+
+
+def clone_from_run(run_name: str, dest: Path | str) -> dict:
+    """从 run 的 state.json 重建 R 并落库到 dest（fork 的 run:<name> 源）。
+
+    返回 results_stats(dest)。state.json 是 ELOTracker 快照（history 含每场
+    对局），重建为 record→model→MatchResult；模型名恒从 runner_report 取
+    （ELOTracker.save 不写 defender_name 键）。
+    """
+    from llmsec.core.paths import safe_subpath
+
+    parts = run_name.split("/")
+    run_dir = safe_subpath(Path(_config.RUNS_DIR), *parts)
+    state_path = run_dir / "state.json"
+    if not state_path.exists():
+        # 旧布局
+        state_path = safe_subpath(Path(_config.RUNS_DIR), parts[0]) / "state.json"
+    if not state_path.exists():
+        raise FileNotFoundError(
+            f"run {run_name!r} 无 state.json，无法重建 R。"
+            "（仅 global 源或含 state.json 的 run 可导出）"
+        )
+    state = read_json(state_path) or {}
+    model = read_json(run_dir / "runner_report.json") or {}
+    model = model.get("target_model")
+    mat = ResultsMatrix()
+    for h in state.get("history", []):
+        rec = h.get("record")
+        def_ = h.get("defender") or model
+        if not rec or not def_:
+            continue
+        mat.upsert(
+            record=rec, model=def_,
+            eval_score=float(h.get("eval_score", 0.0)),
+            status=h.get("status", ""),
+            ts=h.get("round"),
+            extra={"unit": h.get("unit"), "round": h.get("round")},
+        )
+    save_matrix(mat, path=dest)
+    return results_stats(dest)
 
 
 def export_legacy_json(out_path: Path | str, path: Path | str | None = None) -> Path:

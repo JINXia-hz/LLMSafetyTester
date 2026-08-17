@@ -133,7 +133,8 @@ def test_r_v1_archived(tmp_path):
     p.write_text(json.dumps({"version": 1, "methods": ["DAN"], "models": ["qwen"],
                              "results": {"DAN": {"qwen": {"eval_score": 3.0}}}}),
                  encoding="utf-8")
-    R = ResultsMatrix.load(p)
+    from llmsec.storage import rstore
+    R = rstore.matrix_from_legacy_json(p)
     assert R.n_for_model("qwen") == 0, "v1 数据不迁移（废弃重建）"
     assert (tmp_path / "results.method-era.bak").exists(), "v1 文件已归档"
     print("✅ R v1 归档废弃通过")

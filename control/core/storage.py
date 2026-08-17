@@ -21,6 +21,9 @@ from llmsec.storage.contract import (
     Run,
     Task,
     Trial,
+    backup_results,
+    clone_from_run,
+    close_results_db,
     extract_report_metrics,
     get_run,
     query_runs,
@@ -29,10 +32,12 @@ from llmsec.storage.contract import (
     reconcile_runs,
     register_run,
     remove_run,
+    results_stats,
 )
 
 __all__ = [
     "RUN_ARTIFACTS", "RUN_NAME_RE", "Run", "Task", "Trial",
+    "backup_results", "clone_from_run", "close_results_db", "results_stats",
     "extract_report_metrics", "get_run", "query_runs", "query_tasks",
     "query_trials", "reconcile_runs", "register_run", "remove_run",
 ]

@@ -236,11 +236,11 @@ def test_r2_invoker_manage_calls_have_timeout(monkeypatch):
 
     monkeypatch.setattr(invoker, "_run", _fake_run)
     invoker.list_runs()
-    invoker.export_snapshot()
+    invoker.list_runs()
     invoker.delete_runs(["x"])
     timeouts = dict(seen)
     assert timeouts.get("runs list") == 120, "M9: list_runs 须带 120s 超时"
-    assert timeouts.get("snapshot export") == 600, "M9: export_snapshot 须带 600s 超时"
+    assert timeouts.get("runs list") == 120, "M9: subprocess 调用须带超时"
     assert timeouts.get("runs delete") == 600, "M9: delete_runs 须带 600s 超时"
 
 
@@ -326,12 +326,17 @@ def test_r2_env_backup_names_unique(monkeypatch, tmp_path):
 # ============================================================
 # M13：fork 快照缺失的错误上下文
 # ============================================================
-def test_r2_fork_missing_snapshot_context(monkeypatch, tmp_path):
+def test_r2_fork_missing_source_raises(monkeypatch, tmp_path):
+    """fork 源异常（如全局 R 库缺失）向上传播——库级 clone 无快照握手可丢上下文。"""
+    from control.core import storage as cstorage
     from control.core import workspace as ws
 
     monkeypatch.setattr(ws, "WORKSPACES_DIR", tmp_path / "ws")
     monkeypatch.setattr(ws, "ensure_workspaces_dir", lambda: None)
-    monkeypatch.setattr(ws, "export_snapshot", lambda source: {})
 
-    with pytest.raises(RuntimeError, match="snapshot"):
+    def boom(dest):
+        raise RuntimeError("R 库不存在")
+
+    monkeypatch.setattr(cstorage, "backup_results", boom)
+    with pytest.raises(RuntimeError, match="R 库不存在"):
         ws.fork("w", source="global")

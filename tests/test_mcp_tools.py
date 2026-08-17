@@ -517,7 +517,7 @@ class TestActionsConfirmFlows:
 
     def test_delete_runs_full_flow_with_r_column(self, iso_out):
         d = make_run(iso_out, "2024-01-01_120000", "model-a")
-        res_file = iso_out / "state" / "results.json"
+        res_file = iso_out / "state" / "results.db"
         seed_results(res_file, "model-a", [("u1", 1.0), ("u2", 2.0)])
 
         prev = actions.delete_runs_preview(["2024-01-01_120000/model-a"], delete_r=True)
@@ -570,11 +570,11 @@ class TestActionsConfirmFlows:
     def test_merge_workspaces_full_flow(self, iso_out, monkeypatch):
         from llmsec.management import merge as merge_mod
 
-        res_file = iso_out / "state" / "results.json"
+        res_file = iso_out / "state" / "results.db"
         monkeypatch.setattr(merge_mod, "RESULTS_DB", res_file.with_suffix(".db"))
         monkeypatch.setattr(merge_mod, "WORKSPACES_DIR", iso_out / "workspaces")
         seed_results(res_file, "m1", [("u0", 1.0)], prefix="global")
-        ws_res = iso_out / "workspaces" / "exp1" / "results.json"
+        ws_res = iso_out / "workspaces" / "exp1" / "results.db"
         seed_results(ws_res, "m1", [("u1", 1.0), ("u2", 0.0)], prefix="ws")
 
         prev = actions.merge_workspaces_preview(["ws:exp1"], target="global")
@@ -668,25 +668,28 @@ class TestEnvSnapshotTools:
 class TestWorkspaceAndSnapshot:
     @pytest.fixture
     def iso_ws(self, monkeypatch, iso_out, tmp_path):
+        import control.core.storage as cstorage
         import control.core.workspace as ws_mod
 
         monkeypatch.setattr(ws_mod, "WORKSPACES_DIR", iso_out / "workspaces")
         monkeypatch.setattr(ws_mod, "LLMSEC_REPO", tmp_path)
 
-        def fake_export(source="global"):
-            snap = iso_out / "snapshots" / "fake"
-            snap.mkdir(parents=True, exist_ok=True)
-            seed_results(snap / "results.json", "m1", [("u1", 1.0)])
-            return {"snapshot": "snapshots/fake", "models": ["m1"], "records": 1}
+        # P3：fork 直调库级 clone——mock backup/stats（不经 subprocess）
+        def fake_backup(dest):
+            seed_results(dest, "m1", [("u1", 1.0)])
 
-        monkeypatch.setattr(ws_mod, "export_snapshot", fake_export)
+        def fake_stats(path):
+            return {"models": ["m1"], "records": 1, "observations": 1, "units": 0}
+
+        monkeypatch.setattr(cstorage, "backup_results", fake_backup)
+        monkeypatch.setattr(cstorage, "results_stats", fake_stats)
         return ws_mod
 
     def test_fork_and_delete_workspace(self, iso_ws):
         info = actions.fork_workspace("exp1", note="隔离实验")
         assert info["name"] == "exp1"
         assert info["records"] == 1
-        assert (iso_ws.WORKSPACES_DIR / "exp1" / "results.json").exists()
+        assert (iso_ws.WORKSPACES_DIR / "exp1" / "results.db").exists()
         assert [w["name"] for w in query.list_workspaces()] == ["exp1"]
 
         dup = actions.fork_workspace("exp1")
@@ -697,8 +700,13 @@ class TestWorkspaceAndSnapshot:
         assert not (iso_ws.WORKSPACES_DIR / "exp1").exists()
         assert "error" in actions.delete_workspace("nope")
 
-    def test_fork_workspace_export_failure(self, iso_ws, monkeypatch):
-        monkeypatch.setattr(iso_ws, "export_snapshot", lambda source="global": {})
+    def test_fork_workspace_source_failure(self, iso_ws, monkeypatch):
+        import control.core.storage as cstorage
+
+        def boom(dest):
+            raise RuntimeError("R 库不存在")
+
+        monkeypatch.setattr(cstorage, "backup_results", boom)
         r = actions.fork_workspace("exp-bad")
         assert "error" in r and "hint" in r
 
@@ -716,7 +724,7 @@ class TestWorkspaceAndSnapshot:
     def test_export_snapshot_tool(self, iso_out, tmp_path, monkeypatch):
         import llmsec.management.snapshot as snap_mod
 
-        res_file = iso_out / "state" / "results.json"
+        res_file = iso_out / "state" / "results.db"
         seed_results(res_file, "m1", [("u1", 1.0)])
         monkeypatch.setattr(snap_mod, "OUTPUT_DIR", iso_out)
         monkeypatch.setattr(snap_mod, "SNAPSHOT_DIR", iso_out / "snapshots")
@@ -724,7 +732,7 @@ class TestWorkspaceAndSnapshot:
         out_dir = iso_out / "snapshots" / "manual"
         r = actions.export_snapshot(source="global", out=str(out_dir))
         assert r["models"] == ["m1"] and r["records"] == 1
-        assert (out_dir / "results.json").exists()
+        assert (out_dir / "results.db").exists()
         assert (out_dir / "manifest.json").exists()
 
         assert "error" in actions.export_snapshot(source="bogus")  # 未知 source

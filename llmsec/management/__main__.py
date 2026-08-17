@@ -95,11 +95,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p_mig.add_argument("--yes", action="store_true", help="确认执行（默认 dry-run）")
     p_mig.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
-    p_mr = stg_sub.add_parser("migrate-r", help="results.json → results.db 全量搬迁（三关校验，不过即回退）")
-    p_mr.add_argument("--yes", action="store_true", help="确认执行（默认 dry-run）")
-    p_mr.add_argument("--force", action="store_true", help="库已有数据时仍从 json 重建（覆盖库内新观测）")
-    p_mr.add_argument("--json", action="store_true", help="结构化 JSON 输出")
-
     p_bk = stg_sub.add_parser("backup-r", help="备份 R 库（sqlite3 backup API，WAL 安全）")
     p_bk.add_argument("out", nargs="?", default=None, help="备份目标路径（默认 output/state/results.backup.<ts>.db）")
     p_bk.add_argument("--json", action="store_true", help="结构化 JSON 输出")
@@ -175,8 +170,6 @@ def main() -> int:
             return storage_mod.cmd_trials(args.study, json_mode=args.json)
         if args.cmd == "migrate-layouts":
             return storage_mod.cmd_migrate_layouts(yes=args.yes, json_mode=args.json)
-        if args.cmd == "migrate-r":
-            return storage_mod.cmd_migrate_r(yes=args.yes, force=args.force, json_mode=args.json)
         if args.cmd == "backup-r":
             return storage_mod.cmd_backup_r(args.out, json_mode=args.json)
 

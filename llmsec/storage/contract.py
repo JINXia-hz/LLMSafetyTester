@@ -38,9 +38,13 @@ from llmsec.storage.catalog import (
 )
 from llmsec.storage.db import catalog_db, db_for
 from llmsec.storage.models import Run, Task, Trial
+from llmsec.storage.rstore import backup as backup_results
+from llmsec.storage.rstore import clone_from_run, results_stats
+from llmsec.storage.rstore import close_db as close_results_db
 
 __all__ = [
     "RUN_ARTIFACTS", "RUN_NAME_RE", "RUN_TS_FORMAT",
+    "backup_results", "clone_from_run", "close_results_db", "results_stats",
     "Run", "Task", "Trial",
     "allocate_runs_dir", "catalog_db", "db_for", "extract_report_metrics",
     "get_run", "get_task", "query_runs", "query_tasks", "query_trials",

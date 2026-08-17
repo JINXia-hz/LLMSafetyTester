@@ -305,9 +305,10 @@ class TestMergeStatusClosure:
 # workspace：fork 编排（mock invoker，验证流程 + 隔离契约）
 # ============================================================
 class TestWorkspace:
-    def test_fork_copies_snapshot_to_workspace(self, tmp_path, monkeypatch):
-        """fork：调 export_snapshot → 复制 results.json → 记索引。"""
+    def test_fork_clones_results_db(self, tmp_path, monkeypatch):
+        """fork（P3 库级 clone）：backup_results → <ws>/results.db + 记索引。"""
         from control import config
+        from control.core import storage as cstorage
         from control.core import workspace as ws
 
         workspaces = tmp_path / "workspaces"
@@ -316,25 +317,25 @@ class TestWorkspace:
         monkeypatch.setattr(config, "LLMSEC_REPO", tmp_path)
         monkeypatch.setattr(ws, "LLMSEC_REPO", tmp_path)
 
-        # mock export_snapshot：造一个临时快照目录
-        def fake_export(source="global", out=None):
-            snap_dir = tmp_path / "output" / "snapshots" / "fake"
-            snap_dir.mkdir(parents=True)
-            (snap_dir / "results.json").write_text(
-                json.dumps({"version": 2, "models": ["mA"], "results": {"r1": {"mA": {"eval_score": 1.0}}}}),
-                encoding="utf-8",
-            )
-            return {"snapshot": "snapshots/fake", "models": ["mA"], "records": 1}
+        # mock 库级 clone：落一个真实可读的迷你 R 库 + 统计
+        def fake_backup(dest):
+            from llmsec.core.results import ResultsMatrix
+            from llmsec.storage import rstore
+            mat = ResultsMatrix()
+            mat.upsert("r1", "mA", 1.0, ts=1)
+            rstore.save_matrix(mat, path=dest)
 
-        monkeypatch.setattr(ws, "export_snapshot", fake_export)
-        # OUTPUT_DIR for snap_path 解析
-        monkeypatch.setattr(config, "OUTPUT_DIR", tmp_path / "output")
+        def fake_stats(path):
+            return {"models": ["mA"], "records": 1, "observations": 1, "units": 0}
+
+        monkeypatch.setattr(cstorage, "backup_results", fake_backup)
+        monkeypatch.setattr(cstorage, "results_stats", fake_stats)
 
         info = ws.fork("ws1", source="global", note="test")
         assert info["name"] == "ws1"
         assert info["models"] == ["mA"]
-        # results.json 复制到 workspace
-        assert (workspaces / "ws1" / "results.json").exists()
+        # results.db 落到 workspace（库级 clone 产物）
+        assert (workspaces / "ws1" / "results.db").exists()
         # 索引记录
         idx = json.loads((workspaces / "_index.json").read_text(encoding="utf-8"))
         assert "ws1" in idx["workspaces"]

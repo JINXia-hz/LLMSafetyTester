@@ -17,7 +17,7 @@ from __future__ import annotations
 import shutil
 
 from control.config import LLMSEC_REPO, WORKSPACES_DIR, ensure_workspaces_dir
-from control.core.invoker import export_snapshot, run_runner
+from control.core.invoker import run_runner
 from control.core.paths import safe_component
 from control.core.store import AtomicIndexStore
 
@@ -50,30 +50,18 @@ def fork(
     if ws_dir.exists():
         raise FileExistsError(f"工作区已存在: {name}（{ws_dir}）")
 
-    # 1. 导出快照（控制层调 llmsec-manage，不碰 R 内部）
-    snap = export_snapshot(source=source)
-    # snap["snapshot"] 是相对 OUTPUT_DIR 的路径（llmsec-manage 用 relative_to(OUTPUT_DIR) 存）。
-    # CLI 输出异常时 json 为空 dict——用 .get 兜底，裸下标会把真实错误（非空输出）
-    # 换成无上下文的 KeyError
-    from control.config import OUTPUT_DIR
-    snap_rel = snap.get("snapshot")
-    if not snap_rel:
-        raise RuntimeError(f"快照导出未返回 snapshot 路径（source={source}）: {snap}")
-    snap_path = OUTPUT_DIR / snap_rel
-    results_src = snap_path / "results.json"
-    if not results_src.exists():
-        raise FileNotFoundError(f"快照缺 results.json: {results_src}")
-
-    # 2. 复制到工作区
+    # 1+2. 库级 clone（P3：db→json→子进程→复制→json→db 的六步握手删除——
+    # 经薄契约直调 rstore.backup / clone_from_run，WAL 安全整库复制含 elo_cache 表）
+    from control.core.storage import backup_results, clone_from_run, results_stats
     ws_dir.mkdir(parents=True)
-    shutil.copy2(results_src, ws_dir / "results.json")
-    # elo_cache 可选复制（global 源才有）
-    elo_src = snap_path / "elo_cache.json"
-    if elo_src.exists():
-        shutil.copy2(elo_src, ws_dir / "elo_cache.json")
-
-    # 3. 清理临时快照目录（快照已内化进工作区）
-    shutil.rmtree(snap_path, ignore_errors=True)
+    dst = ws_dir / "results.db"
+    if source == "global":
+        backup_results(dst)
+        stats = results_stats(dst)
+    elif source.startswith("run:"):
+        stats = clone_from_run(source[4:], dst)
+    else:
+        raise ValueError(f"未知 source: {source!r}（用 'global' 或 'run:<name>'）")
 
     info = {
         "name": name,
@@ -81,8 +69,8 @@ def fork(
         "source": source,
         "note": note,
         "created": _store.now(),
-        "models": snap.get("models", []),
-        "records": snap.get("records", 0),
+        "models": stats["models"],
+        "records": stats["records"],
         "merged": False,            # 是否已 merge 回全局/其他目标（merge 后置 True）
         "merged_at": None,
         "merged_to": None,
@@ -171,6 +159,12 @@ def delete_workspace(name: str) -> dict:
             raise KeyError(f"工作区不存在: {name}")
         ws_dir = safe_component(WORKSPACES_DIR, name)
         if ws_dir.exists():
+            # Windows：merge/fork 可能打开过该库的引擎句柄，持句柄 rmtree 会 500——先释放
+            try:
+                from control.core.storage import close_results_db
+                close_results_db(ws_dir / "results.db")
+            except Exception:
+                pass
             shutil.rmtree(ws_dir)
         return idx["workspaces"].pop(name)
     info = _store.update(_delete)
@@ -223,6 +217,11 @@ def gc_merged_workspaces(older_than_days: int = 7) -> dict:
                 continue  # 索引项名称非法，跳过不删
             size = _dir_size(ws_dir) if ws_dir.exists() else 0
             if ws_dir.exists():
+                try:
+                    from control.core.storage import close_results_db
+                    close_results_db(ws_dir / "results.db")
+                except Exception:
+                    pass
                 shutil.rmtree(ws_dir, ignore_errors=True)
             # 审计：保留精简记录（含 merged_to 合并去向），从主索引移除
             gc_log.append({

@@ -10,7 +10,6 @@
 
 支持三类调用：
   - list_runs():        ``llmsec-manage runs list --json``
-  - export_snapshot():  ``llmsec-manage snapshot export --json``
   - run_runner():       ``python -m llmsec.pipeline.runner --work-dir ... ``
   - manage_delete():    ``llmsec-manage runs delete ... --yes --json``
 """
@@ -124,15 +123,6 @@ def list_runs(*, target: str | None = None, since: str | None = None,
     res = _run(_manage_argv(sub), timeout=120).require_ok()
     data = res.json or {}
     return data.get("runs", []) if isinstance(data, dict) else data
-
-
-def export_snapshot(source: str = "global", *, out: str | None = None) -> dict:
-    """导出 llmsec 快照。返回快照元信息（含 snapshot 路径）。"""
-    sub = ["snapshot", "export", "--source", source, "--json"]
-    if out:
-        sub += ["--out", out]
-    res = _run(_manage_argv(sub), timeout=600).require_ok()
-    return res.json or {}
 
 
 def delete_runs(names: list[str], *, delete_r: bool = False) -> dict:

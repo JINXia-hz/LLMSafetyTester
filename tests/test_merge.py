@@ -28,7 +28,7 @@ def iso_output(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "OUTPUT_DIR", out)
     monkeypatch.setattr(cfg, "STATE_DIR", state)
     monkeypatch.setattr(cfg, "RESULTS_DB", state / "results.db")
-    monkeypatch.setattr(cfg, "RESULTS_FILE", state / "results.json")
+    monkeypatch.setattr(cfg, "RESULTS_FILE", state / "results.db")
 
     from llmsec.management import merge as merge_mod
     monkeypatch.setattr(merge_mod, "RESULTS_DB", state / "results.db")
@@ -50,7 +50,7 @@ class TestMerge:
     def test_plan_detects_new_records(self, iso_output):
         from llmsec.management import merge
         global_R = cfg.RESULTS_DB
-        ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
+        ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.db"
         ws_R.parent.mkdir(parents=True)
         _save_R(global_R, {"mA": [("r1", 1.0), ("r2", 0.5)]})
         _save_R(ws_R, {"mA": [("r1", 1.0), ("r2", 0.5), ("r3", 0.0)]})  # r3 新
@@ -66,7 +66,7 @@ class TestMerge:
     def test_execute_merges_new_records(self, iso_output):
         from llmsec.management import merge
         global_R = cfg.RESULTS_DB
-        ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
+        ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.db"
         ws_R.parent.mkdir(parents=True)
         _save_R(global_R, {"mA": [("r1", 1.0)]})
         _save_R(ws_R, {"mA": [("r2", 0.5)], "mB": [("r1", 0.0)]})
@@ -80,7 +80,7 @@ class TestMerge:
     def test_dry_run_does_not_write(self, iso_output):
         from llmsec.management import merge
         global_R = cfg.RESULTS_DB
-        ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
+        ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.db"
         ws_R.parent.mkdir(parents=True)
         _save_R(global_R, {"mA": [("r1", 1.0)]})
         _save_R(ws_R, {"mA": [("r2", 0.5)]})
@@ -92,7 +92,7 @@ class TestMerge:
     def test_models_filter(self, iso_output):
         from llmsec.management import merge
         global_R = cfg.RESULTS_DB
-        ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
+        ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.db"
         ws_R.parent.mkdir(parents=True)
         _save_R(global_R, {})
         _save_R(ws_R, {"mA": [("r1", 1.0)], "mB": [("r2", 0.5)]})
@@ -106,8 +106,8 @@ class TestMerge:
         """两个 ws 合并到 global，各自的新记录都进。"""
         from llmsec.management import merge
         global_R = cfg.RESULTS_DB
-        ws1 = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
-        ws2 = cfg.OUTPUT_DIR / "workspaces" / "ws2" / "results.json"
+        ws1 = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.db"
+        ws2 = cfg.OUTPUT_DIR / "workspaces" / "ws2" / "results.db"
         ws1.parent.mkdir(parents=True)
         ws2.parent.mkdir(parents=True)
         _save_R(global_R, {})
@@ -122,8 +122,8 @@ class TestMerge:
     def test_merge_to_workspace_target(self, iso_output):
         """target=ws:<name>：合并进另一个工作区（分支融合）。"""
         from llmsec.management import merge
-        ws1 = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
-        ws2 = cfg.OUTPUT_DIR / "workspaces" / "ws2" / "results.json"
+        ws1 = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.db"
+        ws2 = cfg.OUTPUT_DIR / "workspaces" / "ws2" / "results.db"
         ws1.parent.mkdir(parents=True)
         ws2.parent.mkdir(parents=True)
         _save_R(ws1, {"mA": [("r1", 1.0)]})
@@ -141,7 +141,7 @@ class TestMerge:
         workdir = tmp_path / "some-workdir"
         workdir.mkdir()
         _save_R(global_R, {})
-        _save_R(workdir / "results.json", {"mA": [("r1", 1.0)]})
+        _save_R(workdir / "results.db", {"mA": [("r1", 1.0)]})
 
         merge.execute_merge([str(workdir)], "global")
         R = ResultsMatrix.load(global_R)
@@ -151,7 +151,7 @@ class TestMerge:
         """同 record+model：source 覆盖 target（upsert 语义）。"""
         from llmsec.management import merge
         global_R = cfg.RESULTS_DB
-        ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
+        ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.db"
         ws_R.parent.mkdir(parents=True)
         _save_R(global_R, {"mA": [("r1", 1.0)]})       # 旧分 1.0
         _save_R(ws_R, {"mA": [("r1", 0.2)]})            # 新分 0.2
@@ -166,7 +166,7 @@ class TestMergeCLI:
     def test_cli_merge_dry_run_json(self, iso_output, capsys, monkeypatch):
         from llmsec.management import __main__ as cli
         global_R = cfg.RESULTS_DB
-        ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
+        ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.db"
         ws_R.parent.mkdir(parents=True)
         _save_R(global_R, {"mA": [("r1", 1.0)]})
         _save_R(ws_R, {"mA": [("r2", 0.5)]})

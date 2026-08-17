@@ -117,47 +117,23 @@ def test_full_round_trip_fingerprint_equal(iso):
 # 遗留 json 自迁移
 # ============================================================
 
-def test_legacy_json_auto_import(iso):
-    """db 缺而 json 在：首次 load 自动导入；导入后标记，json 重写不复活。"""
-    legacy = cfg.RESULTS_FILE
+def test_no_implicit_json_migration(iso):
+    """P3：隐式 json 自迁移已删——db 缺失时 load 返回空，旁边的 json 不再被吃。
+
+    遗留 json 的显式工具：matrix_from_legacy_json（读）/ export_legacy_json（写）。
+    """
     mat = ResultsMatrix()
     mat.upsert("r1", "m", 1.0, ts=1)
-    mat.save(legacy)  # 显式 .json → 遗留格式
-    assert not cfg.RESULTS_DB.exists()
+    from llmsec.core.io import write_json
+    write_json(cfg.RESULTS_FILE, mat.to_store_dict())  # 手写遗留 json（db 仍缺）
+    assert cfg.RESULTS_FILE.exists() and not cfg.RESULTS_DB.exists()
 
-    R = ResultsMatrix.load(cfg.RESULTS_DB)  # db 路径 → 触发导入
-    assert R.n_for_model("m") == 1
-    assert cfg.RESULTS_DB.exists()
+    R = ResultsMatrix.load()  # db 缺 → 空，不隐式导入
+    assert R.all_models() == []
 
-    # json 后续变化不再影响 db（导入一次性）
-    legacy.write_text('{"version":2,"units":[],"models":[],"results":{"r9":{"m":{"eval_score":9.0}}}}',
-                      encoding="utf-8")
-    R2 = ResultsMatrix.load(cfg.RESULTS_DB)
-    assert R2.n_for_model("m") == 1 and R2.get("r9", "m") is None
-
-
-def test_delete_model_not_resurrected_by_legacy(iso):
-    """删除列后 db 合法为空——旁边的旧 json 不得把观测复活（迁移标记钉住）。"""
-    mat = ResultsMatrix()
-    mat.upsert("r1", "mA", 1.0, ts=1)
-    mat.upsert("r2", "mB", 2.0, ts=2)
-    mat.save(cfg.RESULTS_FILE)
-    ResultsMatrix.load(cfg.RESULTS_DB)  # 触发导入（含标记）
-
-    n = rstore.remove_models(["mA", "mB"])
-    assert n == 2
-    R = ResultsMatrix.load(cfg.RESULTS_DB)
-    assert R.all_models() == []  # 删空后不被 json 复活
-
-
-def test_json_path_load_stays_legacy(iso):
-    """显式 .json 路径永远走遗留读取（merge 源/快照），不建 db。"""
-    mat = ResultsMatrix()
-    mat.upsert("r1", "m", 1.0, ts=1)
-    mat.save(cfg.RESULTS_FILE)
-    R = ResultsMatrix.load(cfg.RESULTS_FILE)
-    assert R.n_for_model("m") == 1
-    assert not cfg.RESULTS_DB.exists()
+    # 显式读取：matrix_from_legacy_json
+    R2 = rstore.matrix_from_legacy_json(cfg.RESULTS_FILE)
+    assert R2.n_for_model("m") == 1
 
 
 # ============================================================

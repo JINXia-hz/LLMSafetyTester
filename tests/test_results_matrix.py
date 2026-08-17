@@ -43,8 +43,10 @@ def test_results_matrix_roundtrip():
     mat.upsert("DAN", "qwen", 3.0, status="fully_compliant", ts=1, extra={"len": 42})
     mat.upsert("rot13", "qwen", -1.0, ts=2)
     with tempfile.TemporaryDirectory() as d:
-        p = mat.save(Path(d) / "r.json")
+        p = mat.save(Path(d) / "r.db")
         mat2 = ResultsMatrix.load(p)
+        from llmsec.storage import db as storage_db
+        storage_db.close(p)  # Windows：释放句柄，TemporaryDirectory 才能清理
     assert mat2.get("DAN", "qwen").eval_score == 3.0, "round-trip eval_score 丢失"
     assert mat2.get("DAN", "qwen").status == "fully_compliant", "round-trip status 丢失"
     assert mat2.get("DAN", "qwen").extra.get("len") == 42, "round-trip extra 丢失"

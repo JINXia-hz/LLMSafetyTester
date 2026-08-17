@@ -39,6 +39,7 @@ def iso_output(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "RUNS_DIR", runs)
     monkeypatch.setattr(cfg, "PREDICTORS_DIR", predictors)
     monkeypatch.setattr(cfg, "TASK_LOG_DIR", tasks)
+    monkeypatch.setattr(cfg, "RESULTS_DB", state / "results.db")
     monkeypatch.setattr(cfg, "RESULTS_FILE", state / "results.json")
     monkeypatch.setattr(cfg, "FEATURE_CACHE_FILE", out / "feature_cache.pkl")
     monkeypatch.setattr(cfg, "CLUSTER_RESULT_FILE", out / "cluster_result.pkl")
@@ -51,8 +52,6 @@ def iso_output(monkeypatch, tmp_path):
     from llmsec.management import snapshot
     monkeypatch.setattr(snapshot, "SNAPSHOT_DIR", snapshots)
     monkeypatch.setattr(snapshot, "OUTPUT_DIR", out)
-    # snapshot 的路径绑定走模块级常量，一并隔离
-    monkeypatch.setattr(snapshot, "RUNS_DIR", runs)
     # runs 模块的 RUNS_DIR
     from llmsec.management import runs as runs_mod
     monkeypatch.setattr(runs_mod, "RUNS_DIR", runs)
@@ -269,7 +268,7 @@ class TestCaches:
 # ============================================================
 class TestSnapshot:
     def test_export_global_self_contained(self, iso_output):
-        """global 快照含 results.json + manifest，且 R 内容与源一致。"""
+        """global 快照含 results.db + manifest，且 R 内容与源一致。"""
         from llmsec.management import snapshot
         R = ResultsMatrix()
         R.upsert("r1", "modelA", 1.0, ts=1)
@@ -278,21 +277,21 @@ class TestSnapshot:
 
         info = snapshot.export_snapshot("global")
         snap_dir = cfg.OUTPUT_DIR / info["snapshot"]
-        assert (snap_dir / "results.json").exists()
+        assert (snap_dir / "results.db").exists()
         assert (snap_dir / "manifest.json").exists()
         # manifest 结构
         m = read_json(snap_dir / "manifest.json")
         assert m["source"] == "global"
         assert set(m["results"]["models"]) == {"modelA", "modelB"}
-        assert m["results"]["results_total"] == 2
+        assert m["results"]["observations"] == 2
         # 快照 R 内容与源一致（自包含）
-        R2 = ResultsMatrix.load(snap_dir / "results.json")
+        R2 = ResultsMatrix.load(snap_dir / "results.db")
         assert R2.n_for_model("modelA") == 1
         assert R2.get("r2", "modelB") is not None
 
     def test_export_can_seed_fork_workdir(self, iso_output, tmp_path):
-        """快照 results.json 复制到新 work-dir 后能被 ResultsMatrix.load 读回
-        （模拟控制层 fork：复制快照 → 新 work-dir）。"""
+        """快照 results.db 复制到新 work-dir 后能被 ResultsMatrix.load 读回
+        （fork 语义自包含；生产路径 workspace.fork 已直调库级 clone）。"""
         from llmsec.management import snapshot
         R = ResultsMatrix()
         R.upsert("r1", "modelA", 1.0, ts=1)
@@ -305,14 +304,14 @@ class TestSnapshot:
         work_dir = tmp_path / "fork_env"
         work_dir.mkdir()
         import shutil
-        shutil.copy2(snap_dir / "results.json", work_dir / "results.json")
+        shutil.copy2(snap_dir / "results.db", work_dir / "results.db")
 
         # 新工作区的 R 可独立加载，与全局隔离
-        R_fork = ResultsMatrix.load(work_dir / "results.json")
+        R_fork = ResultsMatrix.load(work_dir / "results.db")
         assert R_fork.n_for_model("modelA") == 1
         # 在 fork 里增删不影响全局
         R_fork.upsert("r3", "modelA", 2.0, ts=3)
-        R_fork.save(work_dir / "results.json")
+        R_fork.save(work_dir / "results.db")
         R_global = ResultsMatrix.load()
         assert R_global.get("r3", "modelA") is None  # 全局未受污染
 
@@ -383,7 +382,7 @@ class TestSnapshotSources:
         info = snapshot.export_snapshot("run:2026-08-11_120000/modelA", out=out_dir)
         assert info["models"] == ["modelA"], "❌1 重建 R 应只有 modelA 列"
         assert info["records"] == 2, "❌2 r1/r2 入 R，缺 record 条目应跳过"
-        R2 = ResultsMatrix.load(out_dir / "results.json")
+        R2 = ResultsMatrix.load(out_dir / "results.db")
         assert R2.get("r1", "modelA").eval_score == 1.5, "❌4 快照 R 内容应与 history 一致"
         m = read_json(out_dir / "manifest.json")
         assert "state.json 重建" in m["source_desc"], "❌5 manifest 应标注来源描述"
@@ -428,10 +427,8 @@ class TestSnapshotSources:
         """相对 out 锚到 OUTPUT_DIR：校验与写盘同锚点，不落 CWD、不在 manifest 阶段崩。
 
         回归：原实现校验按 OUTPUT_DIR 解析、写盘按 CWD 解析——相对 out 先把
-        results.json 写到 output/ 之外，再在 relative_to(OUTPUT_DIR) 处 ValueError。
+        快照写到 output/ 之外，再在 relative_to(OUTPUT_DIR) 处 ValueError。
         """
-        import tarfile
-
         from llmsec.management import snapshot
         R = ResultsMatrix()
         R.upsert("r1", "modelA", 1.0, ts=1)
@@ -440,42 +437,31 @@ class TestSnapshotSources:
 
         info = snapshot.export_snapshot("global", out=Path("relsnap"))
         assert info["snapshot"] == "relsnap", f"❌1 snapshot 应为 output 内相对路径: {info['snapshot']}"
-        assert (cfg.OUTPUT_DIR / "relsnap" / "results.json").exists(), "❌2 应落盘到 OUTPUT_DIR/relsnap"
+        assert (cfg.OUTPUT_DIR / "relsnap" / "results.db").exists(), "❌2 应落盘到 OUTPUT_DIR/relsnap"
         assert not (tmp_path / "relsnap").exists(), "❌3 CWD 下不得出现快照目录（写盘锚点漂移回归）"
 
-        # 相对 .tar.gz 同样锚定
-        info2 = snapshot.export_snapshot("global", out=Path("rel.tar.gz"))
-        archive = cfg.OUTPUT_DIR / "rel.tar.gz"
-        assert archive.exists(), "❌4 相对 tar 名应锚到 OUTPUT_DIR"
-        assert not (tmp_path / "rel.tar.gz").exists(), "❌5 tar 不得写进 CWD"
-        with tarfile.open(archive) as tar:
-            assert "results.json" in [p.split("/")[-1] for p in tar.getnames()]
-        assert info2["snapshot"] == "rel.tar.gz"
+        # 相对路径子目录同样锚定（tar.gz 打包分支已随 P3 删除——备份用 backup-r）
+        info2 = snapshot.export_snapshot("global", out=Path("sub/inner"))
+        assert (cfg.OUTPUT_DIR / "sub" / "inner" / "results.db").exists(), "❌4 子目录同样锚定"
+        assert not (tmp_path / "sub").exists(), "❌5 不得写进 CWD"
+        assert info2["snapshot"].replace("\\", "/") == "sub/inner"
 
-    def test_export_tar_gz_self_contained(self, iso_output, tmp_path):
-        """.tar.gz 输出：打包 results/manifest，staging 清理，tar 可解出可用 R。"""
-        import tarfile
-
+    def test_snapshot_is_fresh_db_copy(self, iso_output):
+        """快照 results.db 是源的独立副本：源后续写入不渗入快照（backup 语义，
+        取代已删除的 tar.gz 打包分支）。"""
         from llmsec.management import snapshot
         R = ResultsMatrix()
         R.upsert("r1", "modelA", 1.0, ts=1)
         R.save()
+        snapshot.export_snapshot("global", out=cfg.OUTPUT_DIR / "snapdb")
+        snap = cfg.OUTPUT_DIR / "snapdb" / "results.db"
+        assert snap.exists() and (cfg.OUTPUT_DIR / "snapdb" / "manifest.json").exists()
 
-        archive = cfg.OUTPUT_DIR / "snap.tar.gz"
-        snapshot.export_snapshot("global", out=archive)
-        assert archive.exists(), "❌1 应产出 tar.gz"
-        staging = cfg.OUTPUT_DIR / ".snapshot_staging"
-        assert not staging.exists() or not any(staging.iterdir()), "❌3 staging 应已清理"
-
-        ex = tmp_path / "extracted"
-        ex.mkdir()
-        with tarfile.open(archive) as tar:
-            tar.extractall(ex)
-        names = [p.name for p in ex.rglob("*")]
-        assert {"results.json", "manifest.json"} <= set(names), \
-            f"❌4 包内缺文件: {names}"
-        R2 = ResultsMatrix.load(next(p for p in ex.rglob("results.json")))
-        assert R2.n_for_model("modelA") == 1, "❌5 tar 内 R 应可直接加载"
+        R.upsert("r2", "modelA", 9.0, ts=2)
+        R.save()
+        R2 = ResultsMatrix.load(snap)
+        assert R2.get("r2", "modelA") is None, "快照是导出时点的独立副本"
+        assert R2.n_for_model("modelA") == 1
 
     def test_cmd_export_return_codes(self, iso_output, capsys):
         """cmd_export：未知源 / 无 state.json 的 run 返回 1；成功（json/人读）返回 0。"""
