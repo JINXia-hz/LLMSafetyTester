@@ -18,14 +18,13 @@ import json
 import sys
 
 from llmsec.clustering import (
-    CLUSTER_MATRIX_FILE,
-    CLUSTER_REPORT_FILE,
     compute_method_reactions,
     learn_supervised_weights,
     load_and_extract,
     run_hdbscan_clustering,
 )
 from llmsec.clustering.space import build_feature_matrix
+from llmsec.core import config as _config  # 路径调用期动态读（work-dir 隔离兼容）
 from llmsec.core.config import OUTPUT_DIR
 from llmsec.core.io import read_jsonl
 from llmsec.core.logging import setup_console
@@ -136,8 +135,8 @@ def main():
         if len(members) <= 8:
             logger.info(f"      → {', '.join(members)}")
 
-    logger.info(f"\n  📁 报告: {CLUSTER_REPORT_FILE}")
-    logger.info(f"  📁 矩阵: {CLUSTER_MATRIX_FILE}")
+    logger.info(f"\n  📁 报告: {_config.CLUSTER_REPORT_FILE}")
+    logger.info(f"  📁 矩阵: {_config.CLUSTER_MATRIX_FILE}")
     logger.info(f"{'='*60}")
 
 

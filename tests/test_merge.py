@@ -31,7 +31,7 @@ def iso_output(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "RESULTS_FILE", state / "results.db")
 
     from llmsec.management import merge as merge_mod
-    monkeypatch.setattr(merge_mod, "RESULTS_DB", state / "results.db")
+    monkeypatch.setattr(cfg, "RESULTS_DB", state / "results.db")
     monkeypatch.setattr(merge_mod, "WORKSPACES_DIR", out / "workspaces")
     monkeypatch.setattr(merge_mod, "OUTPUT_DIR", out)
     return out

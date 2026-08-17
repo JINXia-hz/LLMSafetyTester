@@ -45,7 +45,8 @@ def sandbox(monkeypatch, tmp_path):
     from llmsec.management import merge as merge_mod
     monkeypatch.setattr(merge_mod, "WORKSPACES_DIR", out / "workspaces")
     monkeypatch.setattr(merge_mod, "OUTPUT_DIR", out)
-    monkeypatch.setattr(merge_mod, "RESULTS_DB", out / "state" / "results.db")
+    import llmsec.core.config as cfg
+    monkeypatch.setattr(cfg, "RESULTS_DB", out / "state" / "results.db")
     (out / "state").mkdir()
 
     # mock 库级 clone（P3：fork 直调 backup_results，无 subprocess 快照握手）

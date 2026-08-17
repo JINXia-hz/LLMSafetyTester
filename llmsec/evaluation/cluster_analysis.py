@@ -21,11 +21,8 @@ import joblib
 import numpy as np
 
 from llmsec.clustering import parse_cluster_id
-from llmsec.core.config import (
-    CLUSTER_REPORT_FILE,
-    CLUSTER_RESULT_FILE,
-    CLUSTER_SECURITY_ANALYSIS_FILE,
-)
+from llmsec.core import config as _config  # 重绑常量调期动态读（work-dir 兼容）
+from llmsec.core.config import CLUSTER_SECURITY_ANALYSIS_FILE
 from llmsec.core.io import read_json, write_json
 from llmsec.core.logging import get_logger
 from llmsec.evaluation.elo import ELOTracker
@@ -46,7 +43,7 @@ logger = get_logger(__name__)
 def load_cluster_artifacts(path: Path | str | None = None) -> dict | None:
     """加载聚类产物 pickle（cluster_result.pkl，完整 schema）。"""
     if path is None:
-        path = CLUSTER_RESULT_FILE
+        path = _config.CLUSTER_RESULT_FILE
     path = Path(path)
     if not path.exists():
         return None
@@ -62,7 +59,7 @@ def load_cluster_artifacts(path: Path | str | None = None) -> dict | None:
 def load_cluster_report(path: Path | str | None = None) -> dict | None:
     """加载 cluster_report.json。"""
     if path is None:
-        path = CLUSTER_REPORT_FILE
+        path = _config.CLUSTER_REPORT_FILE
     return read_json(path)
 
 

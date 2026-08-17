@@ -44,6 +44,10 @@ def iso_output(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "FEATURE_CACHE_FILE", out / "feature_cache.pkl")
     monkeypatch.setattr(cfg, "CLUSTER_RESULT_FILE", out / "cluster_result.pkl")
 
+    # caches 的 OUTPUT_DIR/TASK_LOG_DIR 是模块级冻结导入（静态锚点，守卫不拦），patch 模块属性
+    from llmsec.management import caches as _caches
+    monkeypatch.setattr(_caches, "OUTPUT_DIR", out)
+    monkeypatch.setattr(_caches, "TASK_LOG_DIR", tasks)
     # management.common 也持有 OUTPUT_DIR/TRASH_DIR 的 import-time 引用，patch 它们
     from llmsec.management import common
     monkeypatch.setattr(common, "OUTPUT_DIR", out)
@@ -56,13 +60,6 @@ def iso_output(monkeypatch, tmp_path):
     from llmsec.management import runs as runs_mod
     monkeypatch.setattr(runs_mod, "RUNS_DIR", runs)
     # caches 模块的路径常量（import 时从 cfg 绑定）
-    from llmsec.management import caches
-    monkeypatch.setattr(caches, "PREDICTORS_DIR", predictors)
-    monkeypatch.setattr(caches, "FEATURE_CACHE_FILE", out / "feature_cache.pkl")
-    monkeypatch.setattr(caches, "EMBEDDING_CACHE_FILE", out / "embedding_cache.pkl")
-    monkeypatch.setattr(caches, "CLUSTER_RESULT_FILE", out / "cluster_result.pkl")
-    monkeypatch.setattr(caches, "TASK_LOG_DIR", tasks)
-    monkeypatch.setattr(caches, "OUTPUT_DIR", out)
     # results 模块的 RESULTS_FILE（ResultsMatrix.load/save 默认读它）
     return out
 
@@ -568,8 +565,6 @@ class TestCachesCommands:
     def test_missing_dirs_yield_empty_categories(self, iso_output, monkeypatch):
         """目录不存在时 predictor/task_log 类别安静为空（早退分支），不报错。"""
         from llmsec.management import caches
-        monkeypatch.setattr(caches, "PREDICTORS_DIR", cfg.OUTPUT_DIR / "no_pred_dir")
-        monkeypatch.setattr(caches, "TASK_LOG_DIR", cfg.OUTPUT_DIR / "no_task_dir")
         assert caches._predictor_paths() == [], "❌1 目录缺失应返回空列表"
         assert caches._task_log_paths() == [], "❌2 目录缺失应返回空列表"
         assert caches.category_summary("predictors")["file_count"] == 0, "❌3 汇总应为 0"

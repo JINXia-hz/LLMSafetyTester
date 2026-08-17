@@ -11,8 +11,9 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
+from llmsec.core import config as _config  # 重绑常量调期动态读
 from llmsec.core.caches import SigCache
-from llmsec.core.config import ATTACKS_DIR, CLUSTER_RESULT_FILE, OUTPUT_DIR
+from llmsec.core.config import ATTACKS_DIR, OUTPUT_DIR
 from llmsec.core.io import read_json
 from llmsec.core.logging import get_logger
 
@@ -210,10 +211,10 @@ def _load_tree_artifacts() -> dict | None:
     （叶索引不对应全量方法）时返回 None——树图/切层视图对这些情形降级。"""
     import joblib
 
-    if not CLUSTER_RESULT_FILE.exists():
+    if not _config.CLUSTER_RESULT_FILE.exists():
         return None
     try:
-        artifacts = joblib.load(CLUSTER_RESULT_FILE)
+        artifacts = joblib.load(_config.CLUSTER_RESULT_FILE)
     except Exception as _e:
         logger.warning("降级: %s", _e)
         return None
@@ -441,8 +442,8 @@ async def api_threats(run: str | None = None):
     units: dict = {}
     try:
         import joblib
-        if CLUSTER_RESULT_FILE.exists():
-            units = (joblib.load(CLUSTER_RESULT_FILE).get("units") or {})
+        if _config.CLUSTER_RESULT_FILE.exists():
+            units = (joblib.load(_config.CLUSTER_RESULT_FILE).get("units") or {})
     except Exception as _e:
         logger.warning("降级: %s", _e)
     upsets = tree.get("upsets", {})
@@ -477,8 +478,8 @@ async def api_elo(run: str | None = None):
     def _load_units() -> dict:
         try:
             import joblib
-            if CLUSTER_RESULT_FILE.exists():
-                return joblib.load(CLUSTER_RESULT_FILE).get("units") or {}
+            if _config.CLUSTER_RESULT_FILE.exists():
+                return joblib.load(_config.CLUSTER_RESULT_FILE).get("units") or {}
         except Exception as _e:
             logger.warning("降级: %s", _e)
         return {}

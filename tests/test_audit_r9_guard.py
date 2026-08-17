@@ -42,45 +42,16 @@ def test_prescreen_input_matches_training_constant(monkeypatch):
     assert seen and all(len(t) <= PREVIEW_RESPONSE for t in seen)
 
 
-# ---- P3-2：冻结导入 AST 守卫 ----
+# ---- P3-2：冻结导入 AST 守卫（P6：拦截集 = isolation.REBOUND_PATHS，白名单清零）----
 
-# 既有冻结消费方白名单（= 当前隔离模型覆盖/容忍的集合）。
-# P3-4 逐模块迁移为 `_config.X` 动态读后从此清单删除；清空之日即
-# isolation 的"冻结模块重绑清单"可整体删除之时。
-_FROZEN_IMPORT_ALLOWLIST = {
-    "llmsec/core/__init__.py",
-    "llmsec/core/progress.py",
-    "llmsec/clustering/__init__.py",
-    "llmsec/clustering/cli.py",
-    "llmsec/clustering/features.py",
-    "llmsec/attacks/generate.py",
-    "llmsec/attacks/harmbench.py",
-    "llmsec/evaluation/cli.py",
-    "llmsec/evaluation/cluster_analysis.py",
-    "llmsec/experiments/study.py",
-    "llmsec/management/caches.py",
-    "llmsec/management/merge.py",
-    "llmsec/management/runs.py",
-    "llmsec/management/snapshot.py",
-    "llmsec/management/common.py",
-    "llmsec/pipeline/runner.py",
-    "llmsec/server/dashboard_api.py",
-    "llmsec/server/task_manager.py",
-    "llmsec/server/routers/cluster_viz.py",
-    "llmsec/server/routers/hpo.py",
-    "llmsec/server/routers/tasks.py",
-    "llmsec/server/routers/data_query.py",
-    "llmsec/tui/task_store.py",
-}
-
-# 路径常量命名约定：以 _FILE / _DIR / _ROOT / _DB 结尾。
-# _DB：storage 重构引入的 SQLite 路径常量（CATALOG_DB，阶段 2 的 RESULTS_DB）——
-# 同样必须调期动态读（work-dir 隔离把 CATALOG_DB 重绑到卫星库）。
-_PATH_NAME_SUFFIXES = ("_FILE", "_DIR", "_ROOT", "_DB")
+# 单一来源：isolation 实际重绑的常量集 == 守卫拦截集，两处不再漂移。
+# 静态锚点（PROJECT_ROOT/OUTPUT_DIR/RUNS_DIR/TASK_LOG_DIR/ATTACKS_DIR...）永不
+# 重绑，冻结导入无害、不拦。
+from llmsec.core.isolation import REBOUND_PATHS as _REBOUND_PATHS
 
 
 def _frozen_path_imports(tree: ast.Ast, rel: str) -> list[str]:
-    """返回该模块顶层 import 的冻结路径常量名。"""
+    """返回该模块顶层 import 的冻结重绑常量名。"""
     names: list[str] = []
     for node in tree.body:  # 只查模块顶层（函数内调用期导入 = 动态读，合法）
         if not isinstance(node, ast.ImportFrom):
@@ -94,12 +65,16 @@ def _frozen_path_imports(tree: ast.Ast, rel: str) -> list[str]:
         if not is_config:
             continue
         for alias in node.names:
-            if alias.name.endswith(_PATH_NAME_SUFFIXES):
+            if alias.name in _REBOUND_PATHS:
                 names.append(alias.name)
     return names
 
 
-def test_no_new_frozen_path_constant_imports():
+def test_no_frozen_rebound_path_imports():
+    """重绑常量（REBOUND_PATHS）禁止任何顶层冻结导入——白名单已清零。
+
+    全部消费方已迁移 `import llmsec.core.config as _config` + 调期动态读。
+    """
     root = Path(__file__).resolve().parent.parent / "llmsec"
     offenders: list[str] = []
     for py in sorted(root.rglob("*.py")):
@@ -110,32 +85,12 @@ def test_no_new_frozen_path_constant_imports():
             offenders.append(f"{rel}: <syntax error>")
             continue
         frozen = _frozen_path_imports(tree, rel)
-        if frozen and rel not in _FROZEN_IMPORT_ALLOWLIST:
+        if frozen:
             offenders.append(f"{rel}: {sorted(set(frozen))}")
     assert not offenders, (
-        "发现白名单之外的路径常量冻结导入（work-dir 隔离将被静默绕过）。\n"
+        "发现重绑路径常量的顶层冻结导入（work-dir 隔离将被静默绕过）。\n"
         "改法：消费处改为 `import llmsec.core.config as _config` + 调期 "
-        "`_config.XXX_FILE`（hdb.py/cold_start.py 已示范），并把该模块从本测试"
-        "白名单中移除。\n" + "\n".join(offenders))
-
-
-def test_frozen_allowlist_has_no_stale_entries():
-    """P3-4 迁移推进的伴生守卫：模块迁完就应从白名单删除，防清单腐化。
-
-    （迁移期间的中间态——模块已改动态读但白名单未删——会在下次全量跑时
-    被本测试点名，提示收缩。）
-    """
-    root = Path(__file__).resolve().parent.parent / "llmsec"
-    stale: list[str] = []
-    for rel in _FROZEN_IMPORT_ALLOWLIST:
-        p = root.parent / rel
-        if not p.exists():
-            stale.append(f"{rel} (文件不存在)")
-            continue
-        tree = ast.parse(p.read_text(encoding="utf-8"))
-        if not _frozen_path_imports(tree, rel):
-            stale.append(f"{rel} (已无冻结导入，应从白名单删除)")
-    assert not stale, "冻结导入白名单存在过期条目：\n" + "\n".join(stale)
+        "`_config.XXX_FILE`。\n" + "\n".join(offenders))
 
 
 # ============================================================

@@ -17,14 +17,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from llmsec.core.config import (
-    CLUSTER_RESULT_FILE,
-    EMBEDDING_CACHE_FILE,
-    FEATURE_CACHE_FILE,
-    OUTPUT_DIR,
-    PREDICTORS_DIR,
-    TASK_LOG_DIR,
-)
+from llmsec.core import config as _config  # 重绑常量调期动态读（work-dir 兼容）
+from llmsec.core.config import OUTPUT_DIR, TASK_LOG_DIR
 from llmsec.core.logging import get_logger
 from llmsec.management.common import (
     Plan,
@@ -69,9 +63,9 @@ CACHE_CATEGORIES: dict[str, dict] = {
         "rebuildable": "feature/embedding 自动重建 / cluster 需重跑",
         "desc": "特征缓存 + embedding 缓存 + 聚类产物",
         "paths": lambda: [
-            (FEATURE_CACHE_FILE, False, "feature_cache.pkl"),
-            (EMBEDDING_CACHE_FILE, False, "embedding_cache.pkl"),
-            (CLUSTER_RESULT_FILE, False, "cluster_result.pkl"),
+            (_config.FEATURE_CACHE_FILE, False, "feature_cache.pkl"),
+            (_config.EMBEDDING_CACHE_FILE, False, "embedding_cache.pkl"),
+            (_config.CLUSTER_RESULT_FILE, False, "cluster_result.pkl"),
         ],
     },
     "task_logs": {
@@ -83,10 +77,10 @@ CACHE_CATEGORIES: dict[str, dict] = {
 
 
 def _predictor_paths(*, legacy_only: bool = False) -> list[tuple[Path, bool, str]]:
-    if not PREDICTORS_DIR.exists():
+    if not _config.PREDICTORS_DIR.exists():
         return []
     out = []
-    for p in PREDICTORS_DIR.glob("*.pkl"):
+    for p in _config.PREDICTORS_DIR.glob("*.pkl"):
         if legacy_only and not _is_legacy_predictor(p.name):
             continue
         out.append((p, False, p.name))
@@ -224,8 +218,8 @@ def plan_prune_predictors(max_n: int) -> Plan:
     自动控制 predictors 体积的手段；被误删的活缓存代价 = 下次重训。
     """
     plan = Plan(action="prune", dry_run=True)
-    pkls = sorted(PREDICTORS_DIR.glob("*.pkl"), key=lambda p: p.stat().st_mtime, reverse=True) \
-        if PREDICTORS_DIR.exists() else []
+    pkls = sorted(_config.PREDICTORS_DIR.glob("*.pkl"), key=lambda p: p.stat().st_mtime, reverse=True) \
+        if _config.PREDICTORS_DIR.exists() else []
     for p in pkls[max_n:]:
         plan.add(p, size=dir_size(p), kind="cache_file", detail=f"LRU 淘汰（保留最新 {max_n}）")
     plan.extra["kept"] = min(len(pkls), max_n)

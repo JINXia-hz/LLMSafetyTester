@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from llmsec.core import config as _config  # 重绑常量调期动态读
 from llmsec.core.caches import SigCache
-from llmsec.core.config import CLUSTER_RESULT_FILE
 from llmsec.core.logging import get_logger
 from llmsec.core.seed import get_global_seed as _get_seed
 from llmsec.server.routers.data_query import _load_state, _load_tree_artifacts
@@ -58,14 +58,14 @@ def _compute_projection(method: str) -> dict:
     import joblib
     import numpy as np
 
-    if not CLUSTER_RESULT_FILE.exists():
+    if not _config.CLUSTER_RESULT_FILE.exists():
         return {"available": False}
 
-    mtime = CLUSTER_RESULT_FILE.stat().st_mtime
+    mtime = _config.CLUSTER_RESULT_FILE.stat().st_mtime
 
     def _load() -> dict:
         try:
-            artifacts = joblib.load(CLUSTER_RESULT_FILE)
+            artifacts = joblib.load(_config.CLUSTER_RESULT_FILE)
         except Exception:
             return {"available": False}
 
@@ -220,7 +220,7 @@ def _compute_cut(k: int) -> dict:
     if k < 2 or k > n:
         raise HTTPException(status_code=400, detail=f"k 必须在 [2, {n}] 内")
 
-    mtime = CLUSTER_RESULT_FILE.stat().st_mtime
+    mtime = _config.CLUSTER_RESULT_FILE.stat().st_mtime
 
     def _load() -> dict:
         from scipy.cluster.hierarchy import fcluster

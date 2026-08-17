@@ -25,7 +25,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from control.api import router as control_router
-from llmsec.core.config import RESULTS_DB, RUNS_DIR
+from llmsec.core import config as _config
+from llmsec.core.config import RUNS_DIR
 from llmsec.core.logging import get_logger
 from llmsec.server import task_manager
 from llmsec.server.routers import cluster_viz, data_query, hpo, tasks
@@ -98,14 +99,14 @@ async def ready():
 
     R 矩阵不存在时返回 503（首次部署/数据未初始化时看板尚未就绪）。
     """
-    if RESULTS_DB.exists():
+    if _config.RESULTS_DB.exists():
         try:
             from llmsec.storage import rstore
             rstore.load_matrix()  # quick_check 一并探过
-            return JSONResponse({"status": "ready", "results_db": str(RESULTS_DB)})
+            return JSONResponse({"status": "ready", "results_db": str(_config.RESULTS_DB)})
         except (OSError, RuntimeError):
             pass
-    return JSONResponse({"status": "not_ready", "results_db": str(RESULTS_DB)}, status_code=503)
+    return JSONResponse({"status": "not_ready", "results_db": str(_config.RESULTS_DB)}, status_code=503)
 
 
 # ============================================================

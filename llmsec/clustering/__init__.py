@@ -44,12 +44,6 @@ from llmsec.clustering.tree import (
     select_knee,
     sweep_candidates,
 )
-from llmsec.core.config import (
-    CLUSTER_MATRIX_FILE,
-    CLUSTER_REPORT_FILE,
-    CLUSTER_RESULT_FILE,
-    FEATURE_CACHE_FILE,
-)
 
 
 def parse_cluster_id(cid) -> int:

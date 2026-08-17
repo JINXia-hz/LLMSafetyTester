@@ -49,7 +49,7 @@ def iso_out(monkeypatch, tmp_path):
     monkeypatch.setattr(common_mod, "OUTPUT_DIR", out)
     monkeypatch.setattr(common_mod, "TRASH_DIR", out / ".trash")
     monkeypatch.setattr(runs_mod, "RUNS_DIR", out / "runs")
-    monkeypatch.setattr(runs_mod, "RESULTS_DB", res_file.with_suffix(".db"))
+    monkeypatch.setattr(cfg, "RESULTS_DB", res_file.with_suffix(".db"))
     monkeypatch.setattr(compare_mod, "RUNS_DIR", out / "runs")
     monkeypatch.setattr(compare_mod, "WORKSPACES_DIR", out / "workspaces")
 
@@ -438,10 +438,10 @@ class TestQueryPlansAndGazettes:
         assert query.list_workspaces() == []
 
     def test_get_cluster_report(self, monkeypatch, iso_out):
-        import llmsec.evaluation.cluster_analysis as ca
+        import llmsec.core.config as cfg
 
         f = iso_out / "cluster_report.json"
-        monkeypatch.setattr(ca, "CLUSTER_REPORT_FILE", f)
+        monkeypatch.setattr(cfg, "CLUSTER_REPORT_FILE", f)
 
         assert query.get_cluster_report() is None  # 未跑过聚类
         f.write_text(json.dumps({"n_clusters": 3}), encoding="utf-8")
@@ -563,10 +563,11 @@ class TestActionsConfirmFlows:
         assert not (tasks_dir / "a.progress.jsonl").exists()
 
     def test_merge_workspaces_full_flow(self, iso_out, monkeypatch):
+        import llmsec.core.config as cfg
         from llmsec.management import merge as merge_mod
 
         res_file = iso_out / "state" / "results.db"
-        monkeypatch.setattr(merge_mod, "RESULTS_DB", res_file.with_suffix(".db"))
+        monkeypatch.setattr(cfg, "RESULTS_DB", res_file.with_suffix(".db"))
         monkeypatch.setattr(merge_mod, "WORKSPACES_DIR", iso_out / "workspaces")
         seed_results(res_file, "m1", [("u0", 1.0)], prefix="global")
         ws_res = iso_out / "workspaces" / "exp1" / "results.db"

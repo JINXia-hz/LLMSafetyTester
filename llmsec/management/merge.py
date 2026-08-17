@@ -18,7 +18,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from llmsec.core.config import OUTPUT_DIR, RESULTS_DB
+from llmsec.core import config as _config
+from llmsec.core.config import OUTPUT_DIR
 from llmsec.core.logging import get_logger
 from llmsec.core.paths import safe_component
 from llmsec.core.results import ResultsMatrix
@@ -46,7 +47,7 @@ def _resolve_results_path(spec: str) -> Path:
     相对穿越路径；绝对路径（如 pytest tmp_path）允许通过。
     """
     if spec == "global":
-        return RESULTS_DB
+        return _config.RESULTS_DB
     if spec.startswith("ws:"):
         # spec[3:] 外部可控，走 safe_component 防越界
         return safe_component(WORKSPACES_DIR, spec[3:]) / "results.db"

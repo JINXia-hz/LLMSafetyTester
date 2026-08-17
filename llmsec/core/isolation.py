@@ -22,6 +22,19 @@ from llmsec.core.logging import get_logger
 logger = get_logger(__name__)
 
 
+# work-dir 隔离实际重绑的路径常量集（单一来源）：
+#  - isolation 重绑的就是这些；
+#  - tests/test_audit_r9_guard 的冻结导入守卫只拦这个集合（PROJECT_ROOT/
+#    OUTPUT_DIR 等静态锚点不拦——它们永不重绑，冻结导入无害）。
+REBOUND_PATHS = frozenset({
+    "RESULTS_DB", "RESULTS_FILE", "CATALOG_DB",
+    "CLUSTER_DIR", "FEATURE_CACHE_FILE", "CLUSTER_RESULT_FILE",
+    "EMBEDDING_CACHE_FILE", "CLUSTER_REPORT_FILE", "CLUSTER_MATRIX_FILE",
+    "PREDICTORS_DIR", "STATE_DIR", "SAFE_TWINS_FILE", "TWIN_RESULT_FILE",
+    "LOG_FILE", "ALERTS_FILE",
+})
+
+
 def rebind_to_workdir(wd: Path) -> None:
     """把全部产物路径重绑到 work-dir（在调用进程内生效）。
 
