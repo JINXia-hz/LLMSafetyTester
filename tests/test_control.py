@@ -334,7 +334,7 @@ class TestWorkspace:
         assert info["name"] == "ws1"
         assert info["models"] == ["mA"]
         # results.db 落到 workspace（库级 clone 产物）
-        assert (workspaces / "ws1" / "results.db").exists()
+        assert (workspaces / "ws1" / "catalog.db").exists()
         # 索引行（P5：ctl_workspaces 表）
         from control.core.storage import get_workspace
         assert get_workspace("ws1") is not None

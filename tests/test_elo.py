@@ -445,8 +445,7 @@ from llmsec.evaluation.predictors.blend import load_or_fit_blend_predictor
 
 def _setup(tmp_path, monkeypatch):
 
-    monkeypatch.setattr(_results_cfg, "RESULTS_DB", tmp_path / "results.db")
-    monkeypatch.setattr(_results_cfg, "RESULTS_FILE", tmp_path / "results.json")
+    monkeypatch.setattr(_results_cfg, "CATALOG_DB", tmp_path / "catalog.db")
 
 
 def test_publish_and_derive(tmp_path, monkeypatch):

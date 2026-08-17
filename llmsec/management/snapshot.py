@@ -50,7 +50,7 @@ def export_snapshot(
         out_dir = out
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    dst = out_dir / "results.db"
+    dst = out_dir / "catalog.db"
     if source == "global":
         rstore.backup(dst)
         stats = rstore.results_stats(dst)

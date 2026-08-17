@@ -3,7 +3,7 @@
 fork = 「以某个状态为起点，起一个新的隔离 llmsec 工作单元」。
 
 流程（P3 库级 clone + P5 表化索引）：
-  1. 经薄契约 rstore.backup / clone_from_run → workspaces/<name>/results.db
+  1. 经薄契约 rstore.backup / clone_from_run → workspaces/<name>/catalog.db
   2. （可选）run_runner(work_dir=<该 workspace>) → 起一个隔离工作单元
   3. work-dir 模式下 runner 把库路径重绑到该目录，全局零污染
 
@@ -59,7 +59,7 @@ def fork(
     # 直调 rstore.backup / clone_from_run，WAL 安全整库复制含 elo_cache 表）
     from control.core.storage import backup_results, clone_from_run, results_stats
     ws_dir.mkdir(parents=True)
-    dst = ws_dir / "results.db"
+    dst = ws_dir / "catalog.db"
     if source == "global":
         backup_results(dst)
         stats = results_stats(dst)
@@ -162,7 +162,7 @@ def delete_workspace(name: str) -> dict:
         # Windows：merge/fork 可能打开过该库的引擎句柄，持句柄 rmtree 会 500——先释放
         try:
             from control.core.storage import close_results_db
-            close_results_db(ws_dir / "results.db")
+            close_results_db(ws_dir / "catalog.db")
         except Exception:
             pass
         shutil.rmtree(ws_dir)
@@ -210,7 +210,7 @@ def gc_merged_workspaces(older_than_days: int = 7) -> dict:
         if ws_dir.exists():
             try:
                 from control.core.storage import close_results_db
-                close_results_db(ws_dir / "results.db")
+                close_results_db(ws_dir / "catalog.db")
             except Exception:
                 pass
             shutil.rmtree(ws_dir, ignore_errors=True)

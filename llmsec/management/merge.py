@@ -5,7 +5,7 @@ workspace / run 的观测合并进全局 R 或另一工作区，用本模块显�
 
 语义：
     sources (多个) → target (一个)
-    sources: "global" | "ws:<name>" | 任意含 results.db 的目录路径
+    sources: "global" | "ws:<name>" | 任意含 catalog.db（统一库）的目录路径
     target:  "global" | "ws:<name>"
     --models: 只合并指定 model 列（默认 source 的全部 model）
 
@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from llmsec.core import config as _config
 from llmsec.core.config import OUTPUT_DIR
 from llmsec.core.logging import get_logger
 from llmsec.core.paths import safe_component
@@ -33,12 +32,17 @@ WORKSPACES_DIR = OUTPUT_DIR / "workspaces"
 # ============================================================
 # 源/目标解析
 # ============================================================
+def _catalog_db() -> Path:
+    from llmsec.storage.contract import catalog_db
+    return catalog_db()
+
+
 def _resolve_results_path(spec: str) -> Path:
-    """把源/目标描述符解析为 R 库（results.db）的绝对路径。
+    """把源/目标描述符解析为统一库（catalog.db）的绝对路径。
 
     spec 形式：
-      "global"         → output/state/results.db
-      "ws:<name>"      → output/workspaces/<name>/results.db（name 走校验防穿越）
+      "global"         → output/state/catalog.db（统一库）
+      "ws:<name>"      → output/workspaces/<name>/catalog.db（name 走校验防穿越）
       其他 .db         → 视为文件路径
       其他             → 视为目录，取其下 results.db
 
@@ -47,17 +51,17 @@ def _resolve_results_path(spec: str) -> Path:
     相对穿越路径；绝对路径（如 pytest tmp_path）允许通过。
     """
     if spec == "global":
-        return _config.RESULTS_DB
+        return _catalog_db()
     if spec.startswith("ws:"):
         # spec[3:] 外部可控，走 safe_component 防越界
-        return safe_component(WORKSPACES_DIR, spec[3:]) / "results.db"
+        return safe_component(WORKSPACES_DIR, spec[3:]) / "catalog.db"
     p = Path(spec)
     # 拒绝相对穿越（.. 段）；绝对路径与正常相对路径放行
     if not p.is_absolute() and any(part == ".." for part in p.parts):
         raise ValueError(f"路径越界（含 .. 段）: {spec!r}")
     if p.suffix == ".db":
         return p
-    return p / "results.db"
+    return p / "catalog.db"
 
 
 def _load_R(path: Path) -> ResultsMatrix:

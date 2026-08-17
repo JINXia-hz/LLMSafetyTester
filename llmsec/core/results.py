@@ -14,8 +14,8 @@ schema v2（簇粒度）：
   由 extra.unit 标注，Elo 回放时按它聚合（evaluation.elo.derive_elo）。
 
 存储布局（2026-08 数据库重构阶段 2）：
-  真相 = output/state/results.db（SQLite，storage.rstore 后端；work-dir 隔离
-  时重绑到 <wd>/results.db）。并发写由单事务（BEGIN IMMEDIATE）保证——
+  R 观测存于统一库 output/state/catalog.db 的 observations 表（P7：与目录
+  登记同库同事务域；work-dir 卫星库 <wd>/catalog.db）。并发写由单事务保证——
   此前的手写文件锁 RMW、.bak/.corrupt.bak 轮转机器已退役（F-3/F1/B1 的
   语义由 SQLite 事务与 quick_check 承接）。
   显式 .json 路径的 save/load = 遗留 JSON 快照格式（人读友好的导出产物，
@@ -270,7 +270,7 @@ class ResultsMatrix:
     def save(self, filepath: str | Path | None = None) -> Path:
         """持久化到 R 真相库（单事务全量覆写；并发安全由 BEGIN IMMEDIATE 保证）。
 
-        filepath 缺省 = config.RESULTS_DB。人读 JSON 导出走
+        filepath 缺省 = 统一库（storage.db.catalog_db）。人读 JSON 导出走
         ``rstore.export_legacy_json``（显式工具，不再是隐式路径路由）。
         """
         from llmsec.storage import rstore  # 函数内导入防环（rstore 反向引用本类）
@@ -278,7 +278,7 @@ class ResultsMatrix:
 
     @classmethod
     def load(cls, filepath: str | Path | None = None) -> ResultsMatrix:
-        """从 R 真相库全量构建内存矩阵（filepath 缺省 = config.RESULTS_DB）。"""
+        """从统一库全量构建内存矩阵（filepath 缺省 = storage.db.catalog_db）。"""
         from llmsec.storage import rstore  # 函数内导入防环
         return rstore.load_matrix(filepath)
 

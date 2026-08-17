@@ -19,8 +19,7 @@ from llmsec.storage import rstore
 
 @pytest.fixture()
 def iso(tmp_path, monkeypatch):
-    monkeypatch.setattr(cfg, "RESULTS_DB", tmp_path / "results.db")
-    monkeypatch.setattr(cfg, "RESULTS_FILE", tmp_path / "results.json")
+    monkeypatch.setattr(cfg, "CATALOG_DB", tmp_path / "catalog.db")
     storage_db.close()
     yield tmp_path
     storage_db.close()
@@ -59,7 +58,7 @@ def test_concurrent_upserts_no_lost_updates(iso):
     for t in threads:
         t.join()
     assert not errors
-    R = ResultsMatrix.load(cfg.RESULTS_DB)
+    R = ResultsMatrix.load(cfg.CATALOG_DB)
     for w in range(4):
         assert R.n_for_model(f"m{w}") == 25
 
@@ -68,7 +67,7 @@ def test_upsert_overwrite_same_record_keeps_value(iso):
     """同 (record, model) 重复 upsert：末值为准（旧 upsert 语义）。"""
     rstore.upsert_observations([MatchResult("r1", "m", 1.0, ts=1)])
     rstore.upsert_observations([MatchResult("r1", "m", 3.0, ts=2)])
-    R = ResultsMatrix.load(cfg.RESULTS_DB)
+    R = ResultsMatrix.load(cfg.CATALOG_DB)
     assert R.get("r1", "m").eval_score == 3.0
     assert R.n_for_model("m") == 1
 
@@ -85,8 +84,8 @@ def test_ts_type_fidelity(iso):
     mat.upsert("c", "m", 3.0, ts="t5")       # str
     mat.upsert("e", "m", 5.0, ts=5, extra={"unit": "u", "round": 2})
     fp_before = mat.column_payload("m", extra_fields=("unit", "round"))
-    mat.save(cfg.RESULTS_DB)
-    back = ResultsMatrix.load(cfg.RESULTS_DB)
+    mat.save(cfg.CATALOG_DB)
+    back = ResultsMatrix.load(cfg.CATALOG_DB)
     assert back.column_payload("m", extra_fields=("unit", "round")) == fp_before
     assert type(back.get("a", "m").ts) is int
     assert type(back.get("b", "m").ts) is float
@@ -105,8 +104,8 @@ def test_full_round_trip_fingerprint_equal(iso):
     fps = {m: mat.column_payload(m, extra_fields=("unit", "round")) for m in mat.all_models()}
     seqs = {m: [(r.record, r.eval_score, repr(r.ts)) for r in mat.ordered_results(m)]
             for m in mat.all_models()}
-    mat.save(cfg.RESULTS_DB)
-    back = ResultsMatrix.load(cfg.RESULTS_DB)
+    mat.save(cfg.CATALOG_DB)
+    back = ResultsMatrix.load(cfg.CATALOG_DB)
     for m in fps:
         assert back.column_payload(m, extra_fields=("unit", "round")) == fps[m]
         assert [(r.record, r.eval_score, repr(r.ts)) for r in back.ordered_results(m)] == seqs[m]
@@ -125,14 +124,15 @@ def test_no_implicit_json_migration(iso):
     mat = ResultsMatrix()
     mat.upsert("r1", "m", 1.0, ts=1)
     from llmsec.core.io import write_json
-    write_json(cfg.RESULTS_FILE, mat.to_store_dict())  # 手写遗留 json（db 仍缺）
-    assert cfg.RESULTS_FILE.exists() and not cfg.RESULTS_DB.exists()
+    legacy = cfg.STATE_DIR / "results.json" if hasattr(cfg, "STATE_DIR") else iso / "results.json"
+    write_json(legacy, mat.to_store_dict())  # 手写遗留 json（db 仍缺）
+    assert legacy.exists() and not cfg.CATALOG_DB.exists()
 
     R = ResultsMatrix.load()  # db 缺 → 空，不隐式导入
     assert R.all_models() == []
 
     # 显式读取：matrix_from_legacy_json
-    R2 = rstore.matrix_from_legacy_json(cfg.RESULTS_FILE)
+    R2 = rstore.matrix_from_legacy_json(legacy)
     assert R2.n_for_model("m") == 1
 
 
@@ -141,18 +141,18 @@ def test_no_implicit_json_migration(iso):
 # ============================================================
 
 def test_corrupt_db_raises_quick_check(iso):
-    cfg.RESULTS_DB.write_bytes(b"not a sqlite file at all")
+    cfg.CATALOG_DB.write_bytes(b"not a sqlite file at all")
     with pytest.raises(RuntimeError, match="完整性校验失败"):
-        ResultsMatrix.load(cfg.RESULTS_DB)
+        ResultsMatrix.load(cfg.CATALOG_DB)
 
 
 def test_backup_and_restore(iso):
     mat = ResultsMatrix()
     mat.upsert("r1", "m", 1.0, ts=1)
-    mat.save(cfg.RESULTS_DB)
+    mat.save(cfg.CATALOG_DB)
     dest = rstore.backup(iso / "backup.db")
     assert dest.exists()
     storage_db.close()  # 释放引擎句柄（Windows 上 unlink 需要）
-    cfg.RESULTS_DB.unlink()
+    cfg.CATALOG_DB.unlink()
     restored = rstore.load_matrix(dest)
     assert restored.n_for_model("m") == 1

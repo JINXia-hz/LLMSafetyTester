@@ -15,7 +15,7 @@ def restore_modules():
     """测试后恢复所有被重绑的 config 属性（isolation 是进程内副作用，须清理）。"""
     import llmsec.core.config as cfg
     keys = [
-        "RESULTS_FILE", "FEATURE_CACHE_FILE",
+        "FEATURE_CACHE_FILE",
         "CLUSTER_RESULT_FILE", "CLUSTER_REPORT_FILE", "CLUSTER_MATRIX_FILE",
         "EMBEDDING_CACHE_FILE", "PREDICTORS_DIR", "STATE_DIR",
         "SAFE_TWINS_FILE", "TWIN_RESULT_FILE", "LOG_FILE", "ALERTS_FILE",
@@ -35,8 +35,7 @@ class TestRebindToWorkdir:
         wd = tmp_path / "wd"
         rebind_to_workdir(wd)
 
-        # 权威/派生存储
-        assert wd / "results.json" == cfg.RESULTS_FILE
+        # 统一库（P7：R 观测 + 目录登记 + control 表同库）
         # 聚类/特征（2026-08 storage 重构：统一归 cluster/ 子目录）
         assert wd / "cluster" == cfg.CLUSTER_DIR
         assert wd / "cluster" / "feature_cache.pkl" == cfg.FEATURE_CACHE_FILE
@@ -83,7 +82,7 @@ class TestRebindToWorkdir:
 
         wd = tmp_path / "wd"
         checked = [
-            cfg.RESULTS_FILE, cfg.FEATURE_CACHE_FILE,
+            cfg.FEATURE_CACHE_FILE,
             cfg.CLUSTER_RESULT_FILE, cfg.CLUSTER_REPORT_FILE, cfg.PREDICTORS_DIR,
             cfg.SAFE_TWINS_FILE, cfg.TWIN_RESULT_FILE,
         ]

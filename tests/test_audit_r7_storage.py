@@ -136,7 +136,7 @@ class TestResultsMatrixLoad:
 
         from llmsec.core.results import ResultsMatrix
 
-        dbp = tmp_path / "results.db"
+        dbp = tmp_path / "catalog.db"
         dbp.write_bytes(b"this is definitely not a sqlite database")
         with pytest.raises(RuntimeError, match="完整性校验失败"):
             ResultsMatrix.load(dbp)
@@ -209,12 +209,12 @@ class TestEloCacheTable:
         import llmsec.evaluation.elo_access as ea
         from llmsec.core.results import ResultsMatrix
 
-        monkeypatch.setattr(cfg, "RESULTS_DB", tmp_path / "results.db")
+        monkeypatch.setattr(cfg, "CATALOG_DB", tmp_path / "catalog.db")
 
         mat = ResultsMatrix(units=["u1", "u2"], models=["m1", "m2"])
         mat.upsert("r1", "m1", 2.0, status="fully_compliant", extra={"unit": "u1"})
         mat.upsert("r2", "m2", -1.0, status="refused", extra={"unit": "u2"})
-        mat.save(cfg.RESULTS_DB)
+        mat.save(cfg.CATALOG_DB)
 
         from llmsec.storage import rstore
 

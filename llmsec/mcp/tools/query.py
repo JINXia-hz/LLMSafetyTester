@@ -133,16 +133,17 @@ def assess_run_findings(run_name: str) -> dict[str, Any]:
 def get_results_summary() -> dict[str, Any]:
     """读取 R 矩阵（results.json）的概要信息。
 
-    R 矩阵是 llmsec 的唯一真相——所有模型的评估观测都存在这里。
+    所有模型的评估观测（统一库 observations 表）。
 
     Returns:
         {models, records, total_observations} 概要；R 不存在或空时返回相应提示。
     """
-    from llmsec.core.config import RESULTS_DB
     from llmsec.core.results import ResultsMatrix
+    from llmsec.storage.contract import catalog_db as _catalog_db
 
     def _do() -> dict[str, Any]:
-        if not RESULTS_DB.exists():
+        results_db = _catalog_db()  # 调期解析（work-dir/测试重绑兼容）
+        if not results_db.exists():
             return {"models": [], "records": 0, "total_observations": 0, "note": "R 库不存在，尚无评估数据"}
         R = ResultsMatrix.load()
         models = R.all_models()
@@ -152,10 +153,10 @@ def get_results_summary() -> dict[str, Any]:
             "models": sorted(models),
             "records": n_records,
             "total_observations": total,
-            "results_db": str(RESULTS_DB),
+            "results_db": str(results_db),
         }
 
-    return _try(_do, error_hint="results.json 可能损坏，检查 output/state/results.json")
+    return _try(_do, error_hint="统一库可能损坏，检查 output/state/catalog.db")
 
 
 def elo_ranking(model: str) -> list[dict[str, Any]]:
@@ -212,10 +213,10 @@ def _elo_derive(model: str, extract_fn) -> Any:
     经 elo_access.elo_tracker_for 获取按列指纹缓存的 ELOTracker，避免每次工具调用
     都全量 ResultsMatrix.load() + derive_elo。回退保证：缓存层异常时回退到直接派生。
     """
-    from llmsec.core.config import RESULTS_DB
+    from llmsec.storage.contract import catalog_db as _catalog_db
 
     def _do() -> Any:
-        if not RESULTS_DB.exists():
+        if not _catalog_db().exists():
             return {"error": "R 库不存在，尚无评估数据", "model": model}
         tracker = None
         try:

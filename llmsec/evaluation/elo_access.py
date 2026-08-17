@@ -7,14 +7,14 @@ evaluation.elo_access — Elo 派生访问层（R-cutover 的读取统一入口�
     R → derive_elo(R, model) → ELOTracker（ratings / ground truth / 收敛轨迹）
 
 本模块负责：
-  1. elo_state_for(model)：返回某模型的派生 Elo 状态（命中 results.db 的
+  1. elo_state_for(model)：返回某模型的派生 Elo 状态（命中统一库的
      elo_cache 行且指纹一致则直接返回；否则从 R 重算并写行）。report /
      dashboard 经此读取。
   2. publish_tracker(tracker, model)：评估结束后把 live tracker 的结果写入 R，
      并把**完整**派生状态（含 live run 的收敛轨迹）发布到缓存行。
 
 缓存失效以"模型列内容指纹"为准——R 中该模型列变动即作废对应行。
-P2：缓存自 elo_cache.json 迁入 results.db 的 elo_cache 表（rstore 事务 upsert，
+P2：缓存自 elo_cache.json 迁入统一库的 elo_cache 表（rstore 事务 upsert，
 文件锁 RMW / _load_cache / _save_cache 退役）。
 """
 

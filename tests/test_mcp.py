@@ -159,7 +159,6 @@ class TestActionsWithConfirm:
         (out / "runs").mkdir(parents=True)
         (out / "state").mkdir(parents=True)
         monkeypatch.setattr(cfg, "OUTPUT_DIR", out)
-        monkeypatch.setattr(cfg, "RESULTS_FILE", out / "state" / "results.json")
         monkeypatch.setattr(common, "OUTPUT_DIR", out)
 
         confirm_mod.clear()

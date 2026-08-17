@@ -51,13 +51,11 @@ RUNS_DIR = OUTPUT_DIR / "runs"
 # per-run 快照在 runs/<ts>/state.json，per-target 快照在 state__<name>.json。
 SAFE_TWINS_FILE = STATE_DIR / "safe_twins.jsonl"
 
-# 结果矩阵（多模型唯一真相）+ 派生缓存目录
-# R 真相 = results.db（SQLite，storage.rstore 后端；阶段 2 起 results.json 只是
-# 导出快照格式）。work-dir 隔离时重绑到 <wd>/results.db（见 core/isolation.py）。
-RESULTS_DB = STATE_DIR / "results.db"
-RESULTS_FILE = STATE_DIR / "results.json"          # 遗留快照格式（导出/对账用）
+# R 观测表与目录库同文件（P7 统一库：一个库、一个事务域——"R 唯一真相"的
+# 层级叙事是文件模拟时代防丢观测的产物，库化后 R 只是普通表组）。
+# work-dir 卫星库重绑见 core/isolation.py（CATALOG_DB）。
 PREDICTORS_DIR = OUTPUT_DIR / "predictors"          # 统一/每模型 ridge 预测器
-# Elo 派生缓存 = results.db 的 elo_cache 表（P2 表化，常量已删）
+# Elo 派生缓存 = 统一库的 elo_cache 表（P2 表化，常量已删）
 
 # 目录库（SQLite：runs/trials/tasks 登记索引，llmsec/storage/ 唯一读写方）。
 # 可重建的派生索引——删库后 `llmsec-manage storage reindex` 全量重建。

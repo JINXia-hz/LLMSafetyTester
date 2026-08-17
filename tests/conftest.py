@@ -81,14 +81,11 @@ def _hermetic_catalog(tmp_path):
     from llmsec.storage import db as storage_db
 
     saved_catalog = cfg.CATALOG_DB
-    saved_results_db = cfg.RESULTS_DB
     cfg.CATALOG_DB = tmp_path / "catalog.db"
-    cfg.RESULTS_DB = tmp_path / "results.db"
     try:
         yield
     finally:
         cfg.CATALOG_DB = saved_catalog
-        cfg.RESULTS_DB = saved_results_db
         storage_db.close()
 
 

@@ -27,7 +27,7 @@ logger = get_logger(__name__)
 #  - tests/test_audit_r9_guard 的冻结导入守卫只拦这个集合（PROJECT_ROOT/
 #    OUTPUT_DIR 等静态锚点不拦——它们永不重绑，冻结导入无害）。
 REBOUND_PATHS = frozenset({
-    "RESULTS_DB", "RESULTS_FILE", "CATALOG_DB",
+    "CATALOG_DB",
     "CLUSTER_DIR", "FEATURE_CACHE_FILE", "CLUSTER_RESULT_FILE",
     "EMBEDDING_CACHE_FILE", "CLUSTER_REPORT_FILE", "CLUSTER_MATRIX_FILE",
     "PREDICTORS_DIR", "STATE_DIR", "SAFE_TWINS_FILE", "TWIN_RESULT_FILE",
@@ -47,8 +47,7 @@ def rebind_to_workdir(wd: Path) -> None:
     allergy_phase/clustering.pipeline/results 共 8 处）已删除。
 
     覆盖的路径（15 个 + 3 个子目录创建）：
-      权威/派生存储:  RESULTS_DB, RESULTS_FILE, CATALOG_DB（卫星目录库）
-                                          （elo 派生缓存随 results.db 走，P2 表化）
+      统一库:          CATALOG_DB（R 观测 + 目录登记 + control 表 + elo 缓存，P7 合一）
       聚类/特征:      FEATURE_CACHE_FILE, CLUSTER_RESULT_FILE, CLUSTER_REPORT_FILE,
                       CLUSTER_MATRIX_FILE, EMBEDDING_CACHE_FILE
       预测器:         PREDICTORS_DIR
@@ -65,8 +64,6 @@ def rebind_to_workdir(wd: Path) -> None:
 
     # 唯一重绑点：config 模块属性（全部消费方调用期动态读）
     import llmsec.core.config as _cfg
-    _cfg.RESULTS_DB = wd / "results.db"
-    _cfg.RESULTS_FILE = wd / "results.json"
     _cfg.CATALOG_DB = wd / "catalog.db"
     _cfg.CLUSTER_DIR = wd / "cluster"
     _cfg.FEATURE_CACHE_FILE = wd / "cluster" / "feature_cache.pkl"

@@ -39,17 +39,16 @@ def iso_out(monkeypatch, tmp_path):
     out = tmp_path / "output"
     (out / "runs").mkdir(parents=True)
     (out / "state").mkdir(parents=True)
-    res_file = out / "state" / "results.json"
+    res_file = out / "state" / "catalog.db"
 
     monkeypatch.setattr(cfg, "OUTPUT_DIR", out)
-    monkeypatch.setattr(cfg, "RESULTS_DB", res_file.with_suffix(".db"))
-    monkeypatch.setattr(cfg, "RESULTS_FILE", res_file)
+    monkeypatch.setattr(cfg, "CATALOG_DB", res_file)
     monkeypatch.setattr(cfg, "RUNS_DIR", out / "runs")
     monkeypatch.setattr(cfg, "TASK_LOG_DIR", out / "tasks")
     monkeypatch.setattr(common_mod, "OUTPUT_DIR", out)
     monkeypatch.setattr(common_mod, "TRASH_DIR", out / ".trash")
     monkeypatch.setattr(runs_mod, "RUNS_DIR", out / "runs")
-    monkeypatch.setattr(cfg, "RESULTS_DB", res_file.with_suffix(".db"))
+    monkeypatch.setattr(cfg, "CATALOG_DB", res_file)
     monkeypatch.setattr(compare_mod, "RUNS_DIR", out / "runs")
     monkeypatch.setattr(compare_mod, "WORKSPACES_DIR", out / "workspaces")
 
@@ -244,13 +243,13 @@ class TestQueryResultsAndElo:
         assert "note" in r  # results.json 不存在提示
 
     def test_get_results_summary_with_data(self, iso_out):
-        seed_results(iso_out / "state" / "results.db", "m-x",
+        seed_results(iso_out / "state" / "catalog.db", "m-x",
                      [("u1", 1.0), ("u2", 0.0)])
         r = query.get_results_summary()
         assert r["models"] == ["m-x"]
         assert r["records"] == 2
         assert r["total_observations"] == 2
-        assert r["results_db"].endswith("results.db")
+        assert r["results_db"].endswith("catalog.db")
 
     def test_elo_tools_missing_results_file(self, iso_out):
         err = query.elo_ranking("m-elo")
@@ -259,7 +258,7 @@ class TestQueryResultsAndElo:
         assert "error" in query.elo_find_surprises("m-elo")
 
     def test_elo_ranking_and_boundary(self, iso_out):
-        seed_results(iso_out / "state" / "results.db", "m-elo",
+        seed_results(iso_out / "state" / "catalog.db", "m-elo",
                      [("u-win", 5.0), ("u-loss", 0.0)])
 
         ranking = query.elo_ranking("m-elo")
@@ -273,7 +272,7 @@ class TestQueryResultsAndElo:
         assert "converged" in boundary and "methods_above_boundary" in boundary
 
     def test_elo_find_surprises_both_directions(self, iso_out):
-        seed_results(iso_out / "state" / "results.db", "m-elo",
+        seed_results(iso_out / "state" / "catalog.db", "m-elo",
                      [("u-win", 5.0), ("u-loss", 0.0)])
         r = query.elo_find_surprises("m-elo")
         assert {w["attacker"] for w in r["weakness"]} == {"u-win"}  # 低分攻击成功
@@ -281,7 +280,7 @@ class TestQueryResultsAndElo:
 
     def test_elo_suggest_next_pairing(self, iso_out):
         # 用独立模型名 + 不同分数，避免与相邻用例命中同一列指纹的进程内 tracker 缓存
-        seed_results(iso_out / "state" / "results.db", "m-pair",
+        seed_results(iso_out / "state" / "catalog.db", "m-pair",
                      [("p1", 3.0), ("p2", 7.0)])
         pairs = query.elo_suggest_next_pairing("m-pair", n=5)
         assert 1 <= len(pairs) <= 5
@@ -289,7 +288,7 @@ class TestQueryResultsAndElo:
         assert {p["attacker"] for p in pairs} == {"p1", "p2"}
 
     def test_elo_unknown_model_returns_empty(self, iso_out):
-        seed_results(iso_out / "state" / "results.db", "m-real", [("u1", 1.0)])
+        seed_results(iso_out / "state" / "catalog.db", "m-real", [("u1", 1.0)])
         assert query.elo_ranking("m-ghost") == []
 
 
@@ -512,7 +511,7 @@ class TestActionsConfirmFlows:
 
     def test_delete_runs_full_flow_with_r_column(self, iso_out):
         d = make_run(iso_out, "2024-01-01_120000", "model-a")
-        res_file = iso_out / "state" / "results.db"
+        res_file = iso_out / "state" / "catalog.db"
         seed_results(res_file, "model-a", [("u1", 1.0), ("u2", 2.0)])
 
         prev = actions.delete_runs_preview(["2024-01-01_120000/model-a"], delete_r=True)
@@ -566,11 +565,11 @@ class TestActionsConfirmFlows:
         import llmsec.core.config as cfg
         from llmsec.management import merge as merge_mod
 
-        res_file = iso_out / "state" / "results.db"
-        monkeypatch.setattr(cfg, "RESULTS_DB", res_file.with_suffix(".db"))
+        res_file = iso_out / "state" / "catalog.db"
+        monkeypatch.setattr(cfg, "CATALOG_DB", res_file)
         monkeypatch.setattr(merge_mod, "WORKSPACES_DIR", iso_out / "workspaces")
         seed_results(res_file, "m1", [("u0", 1.0)], prefix="global")
-        ws_res = iso_out / "workspaces" / "exp1" / "results.db"
+        ws_res = iso_out / "workspaces" / "exp1" / "catalog.db"
         seed_results(ws_res, "m1", [("u1", 1.0), ("u2", 0.0)], prefix="ws")
 
         prev = actions.merge_workspaces_preview(["ws:exp1"], target="global")
@@ -685,7 +684,7 @@ class TestWorkspaceAndSnapshot:
         info = actions.fork_workspace("exp1", note="隔离实验")
         assert info["name"] == "exp1"
         assert info["records"] == 1
-        assert (iso_ws.WORKSPACES_DIR / "exp1" / "results.db").exists()
+        assert (iso_ws.WORKSPACES_DIR / "exp1" / "catalog.db").exists()
         assert [w["name"] for w in query.list_workspaces()] == ["exp1"]
 
         dup = actions.fork_workspace("exp1")
@@ -722,7 +721,7 @@ class TestWorkspaceAndSnapshot:
     def test_export_snapshot_tool(self, iso_out, tmp_path, monkeypatch):
         import llmsec.management.snapshot as snap_mod
 
-        res_file = iso_out / "state" / "results.db"
+        res_file = iso_out / "state" / "catalog.db"
         seed_results(res_file, "m1", [("u1", 1.0)])
         monkeypatch.setattr(snap_mod, "OUTPUT_DIR", iso_out)
         monkeypatch.setattr(snap_mod, "SNAPSHOT_DIR", iso_out / "snapshots")
@@ -730,7 +729,7 @@ class TestWorkspaceAndSnapshot:
         out_dir = iso_out / "snapshots" / "manual"
         r = actions.export_snapshot(source="global", out=str(out_dir))
         assert r["models"] == ["m1"] and r["records"] == 1
-        assert (out_dir / "results.db").exists()
+        assert (out_dir / "catalog.db").exists()
         assert (out_dir / "manifest.json").exists()
 
         assert "error" in actions.export_snapshot(source="bogus")  # 未知 source

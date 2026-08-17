@@ -86,8 +86,12 @@ class EloCache(SQLModel, table=True):
 # ============================================================
 
 def results_db() -> Path:
-    """当前进程的 R 真相库路径（调期动态读——work-dir 隔离经 config 重绑）。"""
-    return Path(_config.RESULTS_DB)
+    """R 观测表所在的库路径（P7 统一库：与目录库同一文件 catalog.db）。
+
+    保留函数名作为语义入口（R 域的默认库），实现委托 catalog_db——
+    work-dir 卫星库里 observations 与 runs/tasks 行同库。
+    """
+    return _db.catalog_db()
 
 
 def _as_db_path(path: Path | str | None) -> Path:

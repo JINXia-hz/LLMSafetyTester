@@ -39,8 +39,7 @@ def iso_output(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "RUNS_DIR", runs)
     monkeypatch.setattr(cfg, "PREDICTORS_DIR", predictors)
     monkeypatch.setattr(cfg, "TASK_LOG_DIR", tasks)
-    monkeypatch.setattr(cfg, "RESULTS_DB", state / "results.db")
-    monkeypatch.setattr(cfg, "RESULTS_FILE", state / "results.json")
+    monkeypatch.setattr(cfg, "CATALOG_DB", state / "catalog.db")
     monkeypatch.setattr(cfg, "FEATURE_CACHE_FILE", out / "feature_cache.pkl")
     monkeypatch.setattr(cfg, "CLUSTER_RESULT_FILE", out / "cluster_result.pkl")
 
@@ -274,7 +273,7 @@ class TestSnapshot:
 
         info = snapshot.export_snapshot("global")
         snap_dir = cfg.OUTPUT_DIR / info["snapshot"]
-        assert (snap_dir / "results.db").exists()
+        assert (snap_dir / "catalog.db").exists()
         assert (snap_dir / "manifest.json").exists()
         # manifest 结构
         m = read_json(snap_dir / "manifest.json")
@@ -282,7 +281,7 @@ class TestSnapshot:
         assert set(m["results"]["models"]) == {"modelA", "modelB"}
         assert m["results"]["observations"] == 2
         # 快照 R 内容与源一致（自包含）
-        R2 = ResultsMatrix.load(snap_dir / "results.db")
+        R2 = ResultsMatrix.load(snap_dir / "catalog.db")
         assert R2.n_for_model("modelA") == 1
         assert R2.get("r2", "modelB") is not None
 
@@ -301,14 +300,14 @@ class TestSnapshot:
         work_dir = tmp_path / "fork_env"
         work_dir.mkdir()
         import shutil
-        shutil.copy2(snap_dir / "results.db", work_dir / "results.db")
+        shutil.copy2(snap_dir / "catalog.db", work_dir / "catalog.db")
 
         # 新工作区的 R 可独立加载，与全局隔离
-        R_fork = ResultsMatrix.load(work_dir / "results.db")
+        R_fork = ResultsMatrix.load(work_dir / "catalog.db")
         assert R_fork.n_for_model("modelA") == 1
         # 在 fork 里增删不影响全局
         R_fork.upsert("r3", "modelA", 2.0, ts=3)
-        R_fork.save(work_dir / "results.db")
+        R_fork.save(work_dir / "catalog.db")
         R_global = ResultsMatrix.load()
         assert R_global.get("r3", "modelA") is None  # 全局未受污染
 
@@ -379,7 +378,7 @@ class TestSnapshotSources:
         info = snapshot.export_snapshot("run:2026-08-11_120000/modelA", out=out_dir)
         assert info["models"] == ["modelA"], "❌1 重建 R 应只有 modelA 列"
         assert info["records"] == 2, "❌2 r1/r2 入 R，缺 record 条目应跳过"
-        R2 = ResultsMatrix.load(out_dir / "results.db")
+        R2 = ResultsMatrix.load(out_dir / "catalog.db")
         assert R2.get("r1", "modelA").eval_score == 1.5, "❌4 快照 R 内容应与 history 一致"
         m = read_json(out_dir / "manifest.json")
         assert "state.json 重建" in m["source_desc"], "❌5 manifest 应标注来源描述"
@@ -434,12 +433,12 @@ class TestSnapshotSources:
 
         info = snapshot.export_snapshot("global", out=Path("relsnap"))
         assert info["snapshot"] == "relsnap", f"❌1 snapshot 应为 output 内相对路径: {info['snapshot']}"
-        assert (cfg.OUTPUT_DIR / "relsnap" / "results.db").exists(), "❌2 应落盘到 OUTPUT_DIR/relsnap"
+        assert (cfg.OUTPUT_DIR / "relsnap" / "catalog.db").exists(), "❌2 应落盘到 OUTPUT_DIR/relsnap"
         assert not (tmp_path / "relsnap").exists(), "❌3 CWD 下不得出现快照目录（写盘锚点漂移回归）"
 
         # 相对路径子目录同样锚定（tar.gz 打包分支已随 P3 删除——备份用 backup-r）
         info2 = snapshot.export_snapshot("global", out=Path("sub/inner"))
-        assert (cfg.OUTPUT_DIR / "sub" / "inner" / "results.db").exists(), "❌4 子目录同样锚定"
+        assert (cfg.OUTPUT_DIR / "sub" / "inner" / "catalog.db").exists(), "❌4 子目录同样锚定"
         assert not (tmp_path / "sub").exists(), "❌5 不得写进 CWD"
         assert info2["snapshot"].replace("\\", "/") == "sub/inner"
 
@@ -451,7 +450,7 @@ class TestSnapshotSources:
         R.upsert("r1", "modelA", 1.0, ts=1)
         R.save()
         snapshot.export_snapshot("global", out=cfg.OUTPUT_DIR / "snapdb")
-        snap = cfg.OUTPUT_DIR / "snapdb" / "results.db"
+        snap = cfg.OUTPUT_DIR / "snapdb" / "catalog.db"
         assert snap.exists() and (cfg.OUTPUT_DIR / "snapdb" / "manifest.json").exists()
 
         R.upsert("r2", "modelA", 9.0, ts=2)

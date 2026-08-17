@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from llmsec.core import config as _config
 from llmsec.core.config import RUNS_DIR
 from llmsec.core.io import read_json
 from llmsec.core.logging import get_logger
@@ -26,6 +25,7 @@ from llmsec.management.common import (
     print_table,
     soft_rmtree,
 )
+from llmsec.storage.contract import catalog_db as _catalog_db
 
 logger = get_logger(__name__)
 
@@ -190,11 +190,11 @@ def plan_delete(
                         r_rows_total += n
                         plan.extra.setdefault("r_models", []).append(model)
                         plan.add(
-                            _config.RESULTS_DB, size=0, kind="r_column",
+                            _catalog_db(), size=0, kind="r_column",
                             detail=f"将从 R 删除 model={model} 的 {n} 条观测",
                         )
                 except Exception as e:
-                    plan.add(_config.RESULTS_DB, size=0, kind="r_error", detail=f"读 R 失败: {e}")
+                    plan.add(_catalog_db(), size=0, kind="r_error", detail=f"读 R 失败: {e}")
     plan.extra["r_models_affected"] = sorted(r_models_affected)
     plan.extra["r_rows_total"] = r_rows_total
     return plan
