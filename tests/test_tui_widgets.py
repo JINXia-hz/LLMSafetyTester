@@ -1,8 +1,8 @@
-"""tests for llmsec.tui.widgets + llmsec.tui.panels.common — TUI 组件层。
+"""tests for llmsec.tui.widgets + llmsec.tui.views — TUI 组件层（v4 控制台范式）。
 
 TermBox 的纯渲染逻辑（未挂载直接调 render/_blink，不依赖事件循环）；
-ConfirmScreen/LogModal/TableModal 与 refresh_task_table 用 App.run_test 离线
-驱动（毫秒级、无网络，不算 e2e——沿用 test_tui_app.py 的 asyncio.run 手法）。
+LogModal 与 refresh_task_table 用 App.run_test 离线驱动（毫秒级、无网络，
+不算 e2e——沿用 asyncio.run 手法）。
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, RichLog, Static
 
-from llmsec.tui.panels.common import kind_label, refresh_task_table, short_cmd, task_summary
 from llmsec.tui.render import C_DIM, EvalProgressState
-from llmsec.tui.task_store import TaskSnapshot
-from llmsec.tui.widgets import ConfirmScreen, LogModal, TableModal, TermBox
+from llmsec.tui.task_store import TaskSnapshot, kind_label, short_cmd, task_summary
+from llmsec.tui.views import refresh_task_table
+from llmsec.tui.widgets import LogModal, TermBox
 
 
 # ============================================================
@@ -31,9 +31,19 @@ def _ev_state(target: str = "模型A", rnd: int = 2, max_rounds: int = 5, **kw) 
     """一个运行中的 evaluate 状态（单目标一条记录）。"""
     st = EvalProgressState("t-1")
     st.apply_record(
-        {"phase": "attack", "target": target, "round": rnd, "max_rounds": max_rounds,
-         "elo": 1500 + rnd, "delta": 10.0, "ci_half": 30.0, "progress_pct": 20 * rnd,
-         "converged": False, "ts": "2026-08-15T10:00:00", **kw}
+        {
+            "phase": "attack",
+            "target": target,
+            "round": rnd,
+            "max_rounds": max_rounds,
+            "elo": 1500 + rnd,
+            "delta": 10.0,
+            "ci_half": 30.0,
+            "progress_pct": 20 * rnd,
+            "converged": False,
+            "ts": "2026-08-15T10:00:00",
+            **kw,
+        }
     )
     st.set_running(True)
     return st
@@ -44,11 +54,23 @@ def _hpo_state(n_trials: int = 4, configs_total: int = 4) -> EvalProgressState:
     st = EvalProgressState("h-1")
     for i in range(n_trials):
         st.apply_record(
-            {"phase": "hpo", "trial_done": i + 1, "trial_total_est": 10,
-             "configs_done": i + 1, "configs_total": configs_total,
-             "best_metric": 5.0 - i * 0.5, "metric_name": "conv_rounds", "direction": "minimize",
-             "last": {"target": "模型A", "seed": i, "status": "success" if i % 2 == 0 else "failed",
-                      "value": 5.0 - i * 0.5, "params": {"K_FACTOR": 16}}}
+            {
+                "phase": "hpo",
+                "trial_done": i + 1,
+                "trial_total_est": 10,
+                "configs_done": i + 1,
+                "configs_total": configs_total,
+                "best_metric": 5.0 - i * 0.5,
+                "metric_name": "conv_rounds",
+                "direction": "minimize",
+                "last": {
+                    "target": "模型A",
+                    "seed": i,
+                    "status": "success" if i % 2 == 0 else "failed",
+                    "value": 5.0 - i * 0.5,
+                    "params": {"K_FACTOR": 16},
+                },
+            }
         )
     st.set_running(True)
     return st
@@ -67,14 +89,7 @@ class _ModalApp(App):
 
 
 async def _wait_until(pilot, cond, tries: int = 25) -> None:
-    """有界等待条件成立（每次迭代排空一轮消息队列 + 让出真实时间片）。
-
-    全量套件冷启动时 worker 高负载可能让 dismiss 消息晚到一拍，
-    单次 pause 不足以观察终态；有界轮询消除该时序抖动。
-    超时必须抛错：静默返回会让失败推迟到后续步骤、报出误导性错误
-    （如 click 的 NoMatches 实际是屏从未弹出）；pause() 只推进消息队列
-    不保证真实时间，慢机上还需 sleep 让后台线程有机会完成。
-    """
+    """有界等待条件成立（pause 只推进消息队列不保证真实时间，慢机需让出时间片）。"""
     for _ in range(tries):
         if cond():
             return
@@ -91,7 +106,7 @@ class TestTermBoxRender:
         lines = _box_plains(TermBox())
         assert lines[0].count("●") == 3  # 标题栏三点
         assert "任务" in lines[0]  # 默认标题
-        assert lines[2] == "（选择上方任务查看实时进度）"
+        assert lines[2] == "（无任务进度）"
 
     def test_show_updates_title_and_evaluate_body(self):
         box = TermBox()
@@ -159,54 +174,8 @@ class TestTermBoxBlink:
 
 
 # ============================================================
-# ConfirmScreen / LogModal / TableModal — run_test 离线驱动
+# LogModal — cat 命令的查看器（run_test 离线驱动）
 # ============================================================
-class TestConfirmScreen:
-    def test_escape_dismisses_false(self):
-        results: list[bool | None] = []
-
-        async def _run() -> None:
-            app = _ModalApp()
-            async with app.run_test() as pilot:
-                app.push_screen(ConfirmScreen("确定取消？"), results.append)
-                await pilot.pause()
-                assert isinstance(app.screen, ConfirmScreen)
-                await pilot.press("escape")
-                await _wait_until(pilot, lambda: not isinstance(app.screen, ConfirmScreen))
-                assert not isinstance(app.screen, ConfirmScreen)
-
-        asyncio.run(_run())
-        assert results == [False]
-
-    def test_yes_button_dismisses_true(self):
-        results: list[bool | None] = []
-
-        async def _run() -> None:
-            app = _ModalApp()
-            async with app.run_test() as pilot:
-                app.push_screen(ConfirmScreen("确定取消？"), results.append)
-                await pilot.pause()
-                await pilot.click("#confirm-yes")
-                await pilot.pause()
-
-        asyncio.run(_run())
-        assert results == [True]
-
-    def test_no_button_dismisses_false(self):
-        results: list[bool | None] = []
-
-        async def _run() -> None:
-            app = _ModalApp()
-            async with app.run_test() as pilot:
-                app.push_screen(ConfirmScreen("确定取消？"), results.append)
-                await pilot.pause()
-                await pilot.click("#confirm-no")
-                await pilot.pause()
-
-        asyncio.run(_run())
-        assert results == [False]
-
-
 class TestLogModal:
     def test_writes_text_and_escapes(self):
         results: list = []
@@ -227,6 +196,20 @@ class TestLogModal:
         asyncio.run(_run())
         assert results == [None]
 
+    def test_q_also_closes(self):
+        results: list = []
+
+        async def _run() -> None:
+            app = _ModalApp()
+            async with app.run_test() as pilot:
+                app.push_screen(LogModal("日志 · t-1", "x"), results.append)
+                await pilot.pause()
+                await pilot.press("q")
+                await _wait_until(pilot, lambda: results)
+
+        asyncio.run(_run())
+        assert results == [None]
+
     def test_empty_text_placeholder(self):
         async def _run() -> None:
             app = _ModalApp()
@@ -241,28 +224,8 @@ class TestLogModal:
         asyncio.run(_run())
 
 
-class TestTableModal:
-    def test_columns_rows_and_escape(self):
-        results: list = []
-
-        async def _run() -> None:
-            app = _ModalApp()
-            async with app.run_test() as pilot:
-                app.push_screen(TableModal("对比", ["指标", "a", "b"], [["ASR", "10%", "20%"]]), results.append)
-                await pilot.pause()
-                table = app.screen.query_one("#modal-table", DataTable)
-                assert len(table.columns) == 3
-                assert table.row_count == 1
-                assert table.get_row(list(table.rows)[0]) == ["ASR", "10%", "20%"]
-                await pilot.press("escape")
-                await _wait_until(pilot, lambda: results)
-
-        asyncio.run(_run())
-        assert results == [None]
-
-
 # ============================================================
-# panels.common — 纯函数
+# task_store 展示助手 — 纯函数
 # ============================================================
 class TestKindLabel:
     def test_known_and_unknown(self):
@@ -305,8 +268,7 @@ class TestTaskSummary:
         assert task_summary(snap) == "s.yaml"
 
     def test_fallback_to_cmd(self):
-        snap = TaskSnapshot(id="t", kind="evaluate", status="external",
-                            cmd="run --target 模型A", meta=None)
+        snap = TaskSnapshot(id="t", kind="evaluate", status="external", cmd="run --target 模型A", meta=None)
         assert task_summary(snap) == "模型A"
 
     def test_nothing_available(self):
@@ -314,12 +276,12 @@ class TestTaskSummary:
 
 
 # ============================================================
-# refresh_task_table — DataTable 重建 + 选中保持（run_test 挂载 DataTable）
+# refresh_task_table（views）— DataTable 重建 + 选中保持
 # ============================================================
 class _TableApp(App):
     def compose(self) -> ComposeResult:
         table = DataTable()
-        # refresh_task_table 只加行不加列；列由宿主面板 compose 预置（与 TasksPanel 一致）
+        # refresh_task_table 只加行不加列；列由宿主预置（与 TaskLiveScreen 一致）
         table.add_columns("任务", "状态", "进度", "开始", "来源", "命令")
         yield table
 
@@ -336,10 +298,19 @@ def _with_table(fn) -> None:
     asyncio.run(_run())
 
 
-def _snap(sid: str = "evaluate-101010-ab12cd", *, state=None, owned=False, cmd="", meta=None,
-           status="external") -> TaskSnapshot:
-    return TaskSnapshot(id=sid, kind=sid.split("-", 1)[0], status=status, cmd=cmd,
-                        started_at="2026-08-15T10:00:01", owned=owned, state=state, meta=meta)
+def _snap(
+    sid: str = "evaluate-101010-ab12cd", *, state=None, owned=False, cmd="", meta=None, status="external"
+) -> TaskSnapshot:
+    return TaskSnapshot(
+        id=sid,
+        kind=sid.split("-", 1)[0],
+        status=status,
+        cmd=cmd,
+        started_at="2026-08-15T10:00:01",
+        owned=owned,
+        state=state,
+        meta=meta,
+    )
 
 
 class TestRefreshTaskTable:

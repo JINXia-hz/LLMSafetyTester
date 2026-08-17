@@ -19,14 +19,14 @@ from rich.cells import cell_len
 from rich.text import Text
 
 # ---- 配色（暗色主题进度窗口）----
-C_TEXT = "#E7DFC8"    # 牙白：主体文字
-C_DIM = "#9A8F76"     # 暗：次要文字/idle 行
-C_GOLD = "#D9B45C"    # 戗金：填充条/active 提示符/描金
-C_SAFE = "#7E9478"    # 石绿：done 标记/完成态
-C_WARN = "#C0492B"    # 朱：失败 trial
-C_UP = "#9CB58E"      # delta 上涨
-C_DOWN = "#D89A82"    # delta 下跌
-C_MUTED = "#AC9F83"   # 空槽/状态字
+C_TEXT = "#E7DFC8"  # 牙白：主体文字
+C_DIM = "#9A8F76"  # 暗：次要文字/idle 行
+C_GOLD = "#D9B45C"  # 戗金：填充条/active 提示符/描金
+C_SAFE = "#7E9478"  # 石绿：done 标记/完成态
+C_WARN = "#C0492B"  # 朱：失败 trial
+C_UP = "#9CB58E"  # delta 上涨
+C_DOWN = "#D89A82"  # delta 下跌
+C_MUTED = "#AC9F83"  # 空槽/状态字
 
 STYLE_EMPTY = f"dim {C_MUTED}"  # 盲文空槽（web 端 opacity .4 的等价物）
 
@@ -353,7 +353,9 @@ def hpo_lines(state: EvalProgressState, recent: int = 4) -> list[Text]:
     arrow = "↑" if rec.get("direction") == "maximize" else "↓"
 
     head = Text("❯ ", style=C_GOLD)
-    head.append(f"config {c_done}/{c_tot if c_tot is not None else '?'} · trial {t_done}/{t_tot if t_tot is not None else '?'}")
+    head.append(
+        f"config {c_done}/{c_tot if c_tot is not None else '?'} · trial {t_done}/{t_tot if t_tot is not None else '?'}"
+    )
     if rec.get("best_metric") is not None:
         head.append(f" · 最佳 {rec.get('metric_name') or ''}={fmt_num(rec['best_metric'], 3)} ")
         head.append(f"({arrow}更佳)", style=f"dim {C_MUTED}")
@@ -364,11 +366,7 @@ def hpo_lines(state: EvalProgressState, recent: int = 4) -> list[Text]:
 
     lines = [head, bar]
     # 目标值 sparkline：成功 trial 的 value 归一化，最优值字符描金
-    ok = [
-        tr
-        for tr in state.hpo_trials
-        if tr.get("status") == "success" and isinstance(tr.get("value"), (int, float))
-    ]
+    ok = [tr for tr in state.hpo_trials if tr.get("status") == "success" and isinstance(tr.get("value"), (int, float))]
     if len(ok) >= 2:
         trend = Text("    ", style=C_TEXT)
         trend.append("趋势 ", style=f"dim {C_MUTED}")

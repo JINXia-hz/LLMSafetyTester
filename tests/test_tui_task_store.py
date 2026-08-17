@@ -19,17 +19,29 @@ def _write(path, text: str) -> None:
 
 def _ev_line(tg, rnd, **kw):
     return json.dumps(
-        {"ts": f"2026-08-15T10:00:{rnd:02d}", "phase": "attack", "target": tg, "round": rnd,
-         "max_rounds": 5, "elo": 1500 + rnd, "delta": 10.0, "ci_half": 40.0,
-         "progress_pct": 20 * rnd, "converged": False, **kw},
+        {
+            "ts": f"2026-08-15T10:00:{rnd:02d}",
+            "phase": "attack",
+            "target": tg,
+            "round": rnd,
+            "max_rounds": 5,
+            "elo": 1500 + rnd,
+            "delta": 10.0,
+            "ci_half": 40.0,
+            "progress_pct": 20 * rnd,
+            "converged": False,
+            **kw,
+        },
         ensure_ascii=False,
     )
 
 
 class TestRefreshDetached:
     def test_scan_evaluate_task(self, tmp_path):
-        _write(tmp_path / "evaluate-101010-ab12cd.progress.jsonl",
-               _ev_line("模型A", 1) + "\n" + _ev_line("模型A", 2) + "\n")
+        _write(
+            tmp_path / "evaluate-101010-ab12cd.progress.jsonl",
+            _ev_line("模型A", 1) + "\n" + _ev_line("模型A", 2) + "\n",
+        )
         _write(tmp_path / "evaluate-101010-ab12cd.log", "line1\nline2\n")
         store = TaskStore(log_dir=tmp_path)
         snaps, dirty = store.refresh()
@@ -71,17 +83,23 @@ class TestRefreshDetached:
         assert snaps[0].state.targets["A"]["round"] == 2
 
     def test_corrupt_line_skipped(self, tmp_path):
-        _write(tmp_path / "evaluate-101010-ab12cd.progress.jsonl",
-               "not json\n" + _ev_line("A", 1) + "\n")
+        _write(tmp_path / "evaluate-101010-ab12cd.progress.jsonl", "not json\n" + _ev_line("A", 1) + "\n")
         store = TaskStore(log_dir=tmp_path)
         snaps, _ = store.refresh()
         assert "A" in snaps[0].state.targets
 
     def test_hpo_task_replay(self, tmp_path):
-        rec = {"phase": "hpo", "trial_done": 1, "trial_total_est": 10, "configs_done": 1,
-               "configs_total": 4, "best_metric": 5.0, "metric_name": "conv_rounds",
-               "direction": "minimize",
-               "last": {"target": "A", "seed": 0, "status": "success", "value": 5.0, "params": {}}}
+        rec = {
+            "phase": "hpo",
+            "trial_done": 1,
+            "trial_total_est": 10,
+            "configs_done": 1,
+            "configs_total": 4,
+            "best_metric": 5.0,
+            "metric_name": "conv_rounds",
+            "direction": "minimize",
+            "last": {"target": "A", "seed": 0, "status": "success", "value": 5.0, "params": {}},
+        }
         _write(tmp_path / "hpo-111111-aabbcc.progress.jsonl", json.dumps(rec) + "\n")
         store = TaskStore(log_dir=tmp_path)
         snaps, _ = store.refresh()
@@ -119,10 +137,17 @@ class TestOwnedMeta:
 
         tid = "evaluate-101010-meta01"
         tm.TASKS[tid] = {
-            "kind": "evaluate", "cmd": "", "argv": [], "env_override": None,
+            "kind": "evaluate",
+            "cmd": "",
+            "argv": [],
+            "env_override": None,
             "meta": {"targets": ["模型A", "模型B"], "max_rounds": 5},
-            "proc": None, "log_path": tmp_path / f"{tid}.log", "log_file": None,
-            "status": "queued", "started_at": "2026-08-15T10:00:00", "_task_id": tid,
+            "proc": None,
+            "log_path": tmp_path / f"{tid}.log",
+            "log_file": None,
+            "status": "queued",
+            "started_at": "2026-08-15T10:00:00",
+            "_task_id": tid,
         }
         store = TaskStore(log_dir=tmp_path)
         snaps, _ = store.refresh()
@@ -138,7 +163,9 @@ class TestStartHpo:
         import llmsec.server.task_manager as tm
 
         calls = []
-        monkeypatch.setattr(tm, "start_task", lambda kind, argv, **kw: calls.append((kind, argv)) or {"id": "hpo-x", "status": "queued"})
+        monkeypatch.setattr(
+            tm, "start_task", lambda kind, argv, **kw: calls.append((kind, argv)) or {"id": "hpo-x", "status": "queued"}
+        )
         return calls
 
     def test_nonexistent_file(self, tmp_path, monkeypatch):
@@ -220,17 +247,23 @@ class TestFormSources:
 
 
 class TestExternalMeta:
-    """meta.json 感知的外部任务：真实状态 / PID 探活 / 跨进程取消。"""
+    """外部任务可见性：库行（P4 真相）+ legacy meta.json 经对账吸收 / PID 探活 / 跨进程取消。"""
 
     def _write_meta(self, tmp_path, tid, **over):
         import json as _json
 
-        meta = {"id": tid, "kind": "evaluate", "cmd": "-m x", "argv": ["-m", "x"],
-                "meta": {"targets": ["模型A"], "max_rounds": 5},
-                "started_at": "2026-08-15T10:00:00", "pid": None, "status": "running"}
+        meta = {
+            "id": tid,
+            "kind": "evaluate",
+            "cmd": "-m x",
+            "argv": ["-m", "x"],
+            "meta": {"targets": ["模型A"], "max_rounds": 5},
+            "started_at": "2026-08-15T10:00:00",
+            "pid": None,
+            "status": "running",
+        }
         meta.update(over)
-        (tmp_path / f"{tid}.meta.json").write_text(
-            _json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        (tmp_path / f"{tid}.meta.json").write_text(_json.dumps(meta, ensure_ascii=False), encoding="utf-8")
         return meta
 
     def test_meta_running_alive_pid(self, tmp_path):
@@ -281,26 +314,26 @@ class TestExternalMeta:
         out = TaskStore(log_dir=tmp_path).cancel("evaluate-101010-fff")
         assert "error" in out
 
-    def test_task_manager_persists_meta_lifecycle(self, tmp_path, monkeypatch):
-        """task_manager 落盘 meta：queued（无 pid）→ running（带 pid）→ 终态回写。"""
-        import json as _json
+    def test_task_manager_persists_task_lifecycle(self, tmp_path, monkeypatch):
+        """task_manager 落库（P4：库行即真相）：running（带 pid）→ 终态回写。"""
         import time as _time
 
+        import llmsec.core.config as cfg
         import llmsec.server.task_manager as tm
+        from llmsec.storage import contract as _storage
 
         monkeypatch.setattr(tm, "TASK_LOG_DIR", tmp_path)
-        # 子进程须活过 start_task 返回（目录库镜像首调含 ORM import/建引擎的
-        # 固定开销），否则 meta.json 在测试读取前已被终态回写覆盖
+        # 子进程须活过 start_task 返回（首次含 ORM import/建引擎固定开销）
         view = tm.start_task("metauto", ["-c", "import time; time.sleep(0.5)"], meta={"targets": ["A"]})
         tid = view["id"]
-        m1 = _json.loads((tmp_path / f"{tid}.meta.json").read_text(encoding="utf-8"))
-        assert m1["status"] == "running" and isinstance(m1["pid"], int)
-        assert m1["meta"] == {"targets": ["A"]} and m1["kind"] == "metauto"
+        row = _storage.get_task(tid, db_path=cfg.CATALOG_DB)  # 显式 db_path：跳过对账
+        assert row.status == "running" and isinstance(row.pid, int)
+        assert row.meta == {"targets": ["A"]} and row.kind == "metauto"
         deadline = _time.time() + 15
         while _time.time() < deadline:
             tm.list_tasks()  # 驱动 _refresh_task_status（生产中由 TUI 2s 轮询驱动）
-            m = _json.loads((tmp_path / f"{tid}.meta.json").read_text(encoding="utf-8"))
-            if m["status"] == "success":
+            row = _storage.get_task(tid, db_path=cfg.CATALOG_DB)
+            if row.status == "success":
                 break
             _time.sleep(0.1)
-        assert m["status"] == "success", f"终态未回写: {m}"
+        assert row.status == "success", f"终态未回写: {row.status}"

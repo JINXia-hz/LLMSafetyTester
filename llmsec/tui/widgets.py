@@ -1,17 +1,18 @@
-"""llmsec.tui.widgets — TUI 复用组件。
+"""llmsec.tui.widgets — TUI 复用组件（v4 控制台范式）。
 
 TermBox 对应 web 端 .progress-box（「真·终端窗口」：标题栏三点 + 主体行），
-ConfirmScreen/LogModal/TableModal 是各面板共用的小模态。
+供 top 直播视图使用；LogModal 是 cat 命令的全屏文本查看器（日志/报告）。
+v1-v3 面板范式的 ConfirmScreen/TableModal/HelpModal 随交互重构移除——
+写操作确认改为 rm/clean 的 preview+confirm 两步，帮助改为 help 命令。
 """
 
 from __future__ import annotations
 
 from rich.console import Group, RenderableType
 from rich.text import Text
-from textual import on
 from textual.binding import Binding
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Label, RichLog, Static
+from textual.widgets import Label, RichLog, Static
 
 from llmsec.tui.render import (
     C_DIM,
@@ -60,46 +61,19 @@ class TermBox(Static):
         header.append("● ", style=C_SAFE)
         header.append(f"  {self._title}", style=f"dim {C_DIM}")
         if self._state is None:
-            body = [Text("（选择上方任务查看实时进度）", style=f"dim {C_DIM}")]
+            body = [Text("（无任务进度）", style=f"dim {C_DIM}")]
         else:
             body = progress_lines(self._state, cursor_on=self._cursor_on, recent=self._recent)
         return Group(header, Text(), *body)
 
 
-class ConfirmScreen(ModalScreen[bool]):
-    """确认模态：标题栏风格的小对话框，dismiss(True/False)。"""
-
-    BINDINGS = [Binding("escape", "dismiss_no", "取消", show=False)]
-
-    def __init__(self, text: str, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self._text = text
-
-    def compose(self):
-        from textual.containers import Horizontal, Vertical
-
-        with Vertical(classes="modal-box", id="confirm-box"):
-            yield Label(self._text, id="confirm-text")
-            with Horizontal(classes="modal-buttons"):
-                yield Button("确定", variant="error", id="confirm-yes")
-                yield Button("取消", variant="default", id="confirm-no")
-
-    def action_dismiss_no(self) -> None:
-        self.dismiss(False)
-
-    @on(Button.Pressed, "#confirm-yes")
-    def _yes(self) -> None:
-        self.dismiss(True)
-
-    @on(Button.Pressed, "#confirm-no")
-    def _no(self) -> None:
-        self.dismiss(False)
-
-
 class LogModal(ModalScreen[None]):
-    """只读长文本查看（任务完整日志）。"""
+    """只读长文本查看（cat tasks/<id> 的完整日志 / cat runs/<名> 的报告）。"""
 
-    BINDINGS = [Binding("escape", "dismiss_none", "关闭", show=False)]
+    BINDINGS = [
+        Binding("escape", "dismiss_none", "关闭", show=False),
+        Binding("q", "dismiss_none", "关闭", show=False),
+    ]
 
     def __init__(self, title: str, text: str, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -113,49 +87,6 @@ class LogModal(ModalScreen[None]):
     def on_mount(self) -> None:
         log = self.query_one("#modal-log", RichLog)
         log.write(self._text or "（空）")
-
-    def action_dismiss_none(self) -> None:
-        self.dismiss(None)
-
-
-class TableModal(ModalScreen[None]):
-    """只读表格查看（对比报告 / ELO 榜等）。columns 为列名列表，rows 为行列表。"""
-
-    BINDINGS = [Binding("escape", "dismiss_none", "关闭", show=False)]
-
-    def __init__(self, title: str, columns: list, rows: list[list], **kwargs) -> None:
-        super().__init__(**kwargs)
-        self._title = title
-        self._columns = columns
-        self._rows = rows
-
-    def compose(self):
-        yield Label(self._title, classes="modal-title")
-        yield DataTable(id="modal-table", cursor_type="row", zebra_stripes=True)
-
-    def on_mount(self) -> None:
-        table = self.query_one("#modal-table", DataTable)
-        table.add_columns(*self._columns)
-        for row in self._rows:
-            table.add_row(*row)
-
-    def action_dismiss_none(self) -> None:
-        self.dismiss(None)
-
-
-class HelpModal(ModalScreen[None]):
-    """全局键位速查（? 呼出）。"""
-
-    BINDINGS = [Binding("escape", "dismiss_none", "关闭", show=False)]
-
-    def compose(self):
-        yield Label("键位速查", classes="modal-title")
-        yield RichLog(id="help-log", markup=False, wrap=True, highlight=False)
-
-    def on_mount(self) -> None:
-        from llmsec.tui.app import HELP_TEXT
-
-        self.query_one("#help-log", RichLog).write(HELP_TEXT)
 
     def action_dismiss_none(self) -> None:
         self.dismiss(None)
