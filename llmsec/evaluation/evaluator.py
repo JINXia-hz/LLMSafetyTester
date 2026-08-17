@@ -437,7 +437,10 @@ def update_elo(all_results: list[dict], summary: dict,
     summary["elo"] = {
         "summary": elo_summary,
         "security_boundary": elo_boundary,
-        "defender_elo": elo_boundary.get("defender_elo", 1500),
+        # r7/L-5：compute_security_boundary 的两个返回分支都恒含 defender_elo，
+        # 直取键——.get(..., 1500) 的默认值是死分支，且 1500 硬编码会在
+        # 调整 INITIAL_ELO 时静默漂移
+        "defender_elo": elo_boundary["defender_elo"],
         "upsets": tracker.find_upsets(min_elo_gap=0),
     }
 

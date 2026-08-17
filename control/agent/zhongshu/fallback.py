@@ -1,4 +1,4 @@
-"""control.agent.loop — 最小对话循环（人机互动中间者）。
+"""control.agent.zhongshu.fallback — 最小对话循环（人机互动中间者，原 agent/loop.py）。
 
 设计为「可扩展的中间者」：
   - 当前：基于规则的意图解析（中文/英文关键词 → tool 调用）。

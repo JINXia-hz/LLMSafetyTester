@@ -25,7 +25,6 @@ from control.agent.menxia.block import (
     clear_block,
     get_block,
     issue_block,
-    list_pending_blocks,
     reset_blocks,
 )
 from control.agent.menxia.listener import (
@@ -48,7 +47,7 @@ __all__ = [
     "assess_step",
     # 封驳令管理
     "BlockTicket", "issue_block", "get_block", "clear_block",
-    "clear_all_for_plan", "approve_block", "list_pending_blocks", "reset_blocks",
+    "clear_all_for_plan", "approve_block", "reset_blocks",
     # 事后审查
     "review_run", "read_report", "assess_findings", "render_digest", "get_thresholds",
 ]

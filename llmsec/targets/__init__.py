@@ -28,6 +28,9 @@ from llmsec.targets.pcap import (
     PcapJudgeTargetClient,
     build_pcap_log,
     build_pcap_payload,
+    pcap_judge_url,
+    pcap_model_version,
+    pcap_prompt_key,
 )
 
 __all__ = [
@@ -47,6 +50,9 @@ __all__ = [
     "PCAP_JUDGE_URL",
     "PCAP_MODEL_VERSION",
     "PCAP_PROMPT_KEY",
+    "pcap_judge_url",
+    "pcap_model_version",
+    "pcap_prompt_key",
     "build_pcap_log",
     "build_pcap_payload",
 ]

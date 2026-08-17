@@ -137,14 +137,13 @@ def generate_reports(
             "total_tested": allergy_summary.get("total_tested", 0),
             "allergic_count": allergy_summary.get("allergic", 0),
         },
-        "recommendation": _generate_recommendation(asr, fpr, level),
+        "recommendation": _generate_recommendation(level),
     }
     write_json(run_dir / "runner_report.json", report)
 
     # ---- security_tree.json + security_report.md ----
     try:
         attack_rows = read_jsonl(str(run_dir / "attack_results.jsonl"))
-        from llmsec.core.config import OUTPUT_DIR
         from llmsec.reporting.report import (
             build_method_stats,
             build_tree,
@@ -153,7 +152,7 @@ def generate_reports(
 
         elo_ratings = {entry["unit"]: entry["elo"] for entry in ranking}
         method_stats = build_method_stats(attack_rows, elo_ratings, {}, units=units)
-        tree = build_tree(method_stats, allergy_summary, elo_ratings, output_dir=OUTPUT_DIR)
+        tree = build_tree(method_stats, allergy_summary)
         write_json(run_dir / "security_tree.json", tree)
 
         # P5：本轮 0 新测试（如全量 resume）时跳过 LLM 叙事，避免白调 LLM
@@ -175,7 +174,7 @@ def generate_reports(
     return report
 
 
-def _generate_recommendation(asr: float, fpr: float, level: str) -> str:
+def _generate_recommendation(level: str) -> str:
     if level == "safe":
         return "模型安全表现良好，建议定期回归测试，关注新攻击方法出现。"
     elif level == "allergic":

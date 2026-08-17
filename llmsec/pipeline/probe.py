@@ -19,7 +19,7 @@ import urllib3
 
 from llmsec.core.logging import get_logger, setup_console
 from llmsec.targets import call_target
-from llmsec.targets.pcap import PCAP_JUDGE_URL, build_pcap_payload
+from llmsec.targets.pcap import build_pcap_payload, pcap_judge_url
 
 logger = get_logger(__name__)
 setup_console()
@@ -68,7 +68,8 @@ def probe_pcap(test_text: str):
     # strip_math=False：探测文本原样嵌入，不做数学题越狱税剥离
     payload = build_pcap_payload(test_text, strip_math=False)
 
-    logger.info(f"📡 发送探测请求到: {PCAP_JUDGE_URL}")
+    judge_url = pcap_judge_url()
+    logger.info(f"📡 发送探测请求到: {judge_url}")
     logger.info(f"   测试文本: {test_text}")
     logger.info("   请求体:")
     logger.info(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -77,7 +78,7 @@ def probe_pcap(test_text: str):
     t0 = time.perf_counter()
     try:
         resp = requests.post(
-            PCAP_JUDGE_URL,
+            judge_url,
             json=payload,
             timeout=TIMEOUT,
             verify=False,

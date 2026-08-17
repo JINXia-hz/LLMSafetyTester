@@ -65,7 +65,7 @@ def _dist_matrix(coords: np.ndarray):
     return np.sqrt(d2)
 
 def test_f2_weights_take_effect():
-    from llmsec.clustering.space import build_whitened_space, transform_to_space
+    from llmsec.clustering.space import build_whitened_space
     feats = _toy_features()
     methods = sorted(feats.keys())
     d = 6
@@ -77,10 +77,6 @@ def test_f2_weights_take_effect():
     assert diff > 0.001, f'F2: 加权显著改变聚类度量（max diff={diff:.4f}，修复前 ≈1e-7）'
     ones = build_whitened_space(feats, methods, feature_weights=np.ones(d))
     assert ones['coords'].shape == plain['coords'].shape and np.allclose(ones['coords'], plain['coords'], atol=1e-10), 'F2: 全 1 权重与不加权完全一致'
-    xp = transform_to_space(plain, feats, methods)
-    xw = transform_to_space(weighted, feats, methods)
-    tdiff = float(np.abs(_dist_matrix(xp) - _dist_matrix(xw)).max())
-    assert tdiff > 0.001, f'F2: transform_to_space 加权同样生效（max diff={tdiff:.4f}）'
     X = np.array([feats[m]['textual'] for m in methods])
     assert np.allclose(weighted['x_mean'], X.mean(axis=0), atol=1e-10), 'F2: x_mean 基于未加权特征（加权在标准化之后）'
 

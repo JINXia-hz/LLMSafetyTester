@@ -117,8 +117,8 @@ def _patch_main_runtime(monkeypatch, tmp_path, captured):
     # main() 的 work_dir 分支会直接改模块属性（不经 monkeypatch），
     # 先登记原值，teardown 时由 monkeypatch 恢复，避免污染其它测试
     import llmsec.core.config as cfg
-    import llmsec.core.results as res
-    for mod, name in ((res, "RESULTS_FILE"), (cfg, "ELO_CACHE_FILE"),
+    # r9/P3-4：results.RESULTS_FILE 已动态读，快照清单只剩 config 属性
+    for mod, name in ((cfg, "RESULTS_FILE"), (cfg, "ELO_CACHE_FILE"),
                       (cfg, "FEATURE_CACHE_FILE"), (cfg, "CLUSTER_RESULT_FILE")):
         monkeypatch.setattr(mod, name, getattr(mod, name))
     return str(attack_file)
@@ -276,7 +276,8 @@ def test_m8_allergy_all_api_failure_fpr_none(tmp_path, monkeypatch):
                                         "target_refused": False})
     monkeypatch.setattr(alp, "get_or_create_twin",
                         lambda name, rec, cache, client: f"safe variant of {name}")
-    monkeypatch.setattr(alp, "SAFE_TWINS_FILE", tmp_path / "safe_twins.jsonl")
+    import llmsec.core.config as _alp_cfg
+    monkeypatch.setattr(_alp_cfg, "SAFE_TWINS_FILE", tmp_path / "safe_twins.jsonl")
     monkeypatch.setattr(alp, "API_DELAY", 0)
 
     tracker = ELOTracker()

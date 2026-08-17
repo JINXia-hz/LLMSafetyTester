@@ -225,9 +225,9 @@ def test_p3_inject_uses_stable_full_catalog(tmp_path, monkeypatch):
 
 def test_p3_blend_cache_hit_skips_refit(tmp_path, monkeypatch):
     """真实缓存路径：同 R/features/catalog 第二次调用命中 pkl，不再 fit。"""
+    import llmsec.core.config as _blend_cfg
     import llmsec.evaluation.predictors.blend as blend_mod
-
-    monkeypatch.setattr(blend_mod, "PREDICTORS_DIR", tmp_path)
+    monkeypatch.setattr(_blend_cfg, "PREDICTORS_DIR", tmp_path)
 
     _, R, features = _blend_ready_tracker_and_r()
     catalog = sorted(features.keys())

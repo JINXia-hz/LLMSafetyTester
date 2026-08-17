@@ -151,7 +151,7 @@ def execute_merge(
                 for record, res in col.items():
                     target_R.upsert(record, model, res.eval_score, res.status, res.ts, dict(res.extra))
                 merged_counts[model] = merged_counts.get(model, 0) + len(col)
-        target_R.save(target_path, _locked=True)
+        target_R.save(target_path)  # _file_lock 线程内重入（r8），锁内嵌套安全
 
     done = Plan(action="merge", dry_run=False)
     done.extra["target"] = target

@@ -36,7 +36,7 @@ from llmsec.clustering.posterior import (
     learn_supervised_weights,
     reaction_validation,
 )
-from llmsec.clustering.space import build_feature_matrix, build_whitened_space, transform_to_space
+from llmsec.clustering.space import build_feature_matrix, build_whitened_space
 from llmsec.clustering.tree import (
     candidate_ks,
     cut_tree,
@@ -80,7 +80,7 @@ __all__ = [
     # posterior
     "compute_method_reactions", "learn_supervised_weights", "reaction_validation",
     # space / tree
-    "build_feature_matrix", "build_whitened_space", "transform_to_space",
+    "build_feature_matrix", "build_whitened_space",
     "cut_tree", "candidate_ks", "sweep_candidates", "select_knee", "log_growth_k0",
     # 簇 ID 解析
     "parse_cluster_id",

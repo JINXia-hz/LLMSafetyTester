@@ -102,8 +102,8 @@ def test_h4_build_tree_inconclusive_when_data_insufficient():
     results = [{'method': 'm1', 'is_harmful': True, 'harm_type': 'test', 'category': 'x'}, {'method': 'm1', 'is_harmful': False, 'harm_type': 'test', 'category': 'x'}, {'method': 'm2', 'is_harmful': False, 'harm_type': 'test', 'category': 'x'}]
     method_stats = build_method_stats(results, {}, {})
     allergy_data = {'summary': {'false_positive_rate': 0.0}}
-    with tempfile.TemporaryDirectory() as td:
-        tree = build_tree(method_stats, allergy_data, {}, output_dir=td)
+    with tempfile.TemporaryDirectory():
+        tree = build_tree(method_stats, allergy_data)
     level = tree.get('overall', {}).get('security_level', '')
     assert level == 'inconclusive', f'H4: 数据不足时 level=inconclusive（实得 {level}，total_tests=3<{PORTRAIT_MIN_TESTED}）'
 
@@ -113,8 +113,8 @@ def test_h4_build_tree_inconclusive_when_confidence_low():
     results = [{'method': f'm{i}', 'is_harmful': False, 'harm_type': 'test', 'category': 'x'} for i in range(10)]
     method_stats = build_method_stats(results, {}, {})
     allergy_data = {'summary': {'false_positive_rate': 0.0}}
-    with tempfile.TemporaryDirectory() as td:
-        tree = build_tree(method_stats, allergy_data, {}, output_dir=td)
+    with tempfile.TemporaryDirectory():
+        tree = build_tree(method_stats, allergy_data)
     level = tree.get('overall', {}).get('security_level', '')
     assert level == 'inconclusive', f'H4: 无 tracker 时即使 ASR=0 也 inconclusive（confidence 不足，实得 {level}）'
 

@@ -52,6 +52,7 @@ def test_window_exceeds_ranking():
 # 2. safe_twin.generate_all_twins 缺键防护：缺可选键填默认、缺 id/prompt 跳过该条。
 import json
 
+import llmsec.core.config as cfg_mod
 import llmsec.evaluation.safe_twin as safe_twin
 import llmsec.pipeline.allergy_phase as allergy_phase
 
@@ -84,7 +85,7 @@ def _run_phase(monkeypatch, tmp_path, content):
     monkeypatch.setattr(allergy_phase, "call_target",
                         lambda prompt: {"error": None, "content": content, "meta": {}})
     monkeypatch.setattr(allergy_phase, "API_DELAY", 0)
-    monkeypatch.setattr(allergy_phase, "SAFE_TWINS_FILE", tmp_path / "safe_twins.jsonl")
+    monkeypatch.setattr(cfg_mod, "SAFE_TWINS_FILE", tmp_path / "safe_twins.jsonl")
     return allergy_phase.run_allergy_phase(
         {"m1": {"id": "x1", "prompt": "p", "category": "c", "method": "m1"}},
         twin_client=None, judge=_FakeJudge(), tracker=_FakeTracker(),
@@ -112,8 +113,8 @@ def _setup_twin_files(monkeypatch, tmp_path, records):
         encoding="utf-8",
     )
     twin_file = tmp_path / "safe_twins.jsonl"
-    monkeypatch.setattr(safe_twin, "INPUT_FILE", attack_file)
-    monkeypatch.setattr(safe_twin, "SAFE_TWINS_FILE", twin_file)
+    monkeypatch.setattr(safe_twin, "_default_input_file", lambda: attack_file)
+    monkeypatch.setattr(cfg_mod, "SAFE_TWINS_FILE", twin_file)
     monkeypatch.setattr(safe_twin, "API_DELAY", 0)
     monkeypatch.setattr(safe_twin, "create_openai_client", lambda **kw: object())
     monkeypatch.setattr(safe_twin, "generate_safe_twin",

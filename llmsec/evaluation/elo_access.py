@@ -92,8 +92,11 @@ def elo_state_for(model: str) -> dict:
         "attacker_pred_std": dict(tracker.attacker_pred_std),
         "n": len(tracker.ground_truth_methods),
     }
-    cache[model] = entry
-    _save_cache(cache)
+    # L-4：缓存 RMW 纳入文件锁（重算在锁外、提交在锁内；锁内重读防并发覆盖丢条目）
+    with _file_lock(config.ELO_CACHE_FILE, strict=False):
+        cache = _load_cache()
+        cache[model] = entry
+        _save_cache(cache)
     return entry
 
 
@@ -193,7 +196,7 @@ def publish_tracker(tracker: ELOTracker, model: str) -> None:
     # 各自 upsert 自己的子集、各自 save → 后写者覆盖先写者。
     # B1：publish_tracker 维持 strict=False（放行）——评估观测在内存 tracker 里，
     # 锁超时抛异常会中断评估主循环、永久丢失整场评估观测，比罕见并发损坏代价更大。
-    # 注：save(_locked=True) 复用此锁，不会因 strict=True 二次失败。
+    # 注：_file_lock 已支持线程内重入（r8），锁内 load/save 直接嵌套调用即可。
     with _file_lock(config.RESULTS_FILE, strict=False):
         R = ResultsMatrix.load()
         # 镜像 history → R（按 defender 归属，防跨模型错记）。
@@ -214,22 +217,25 @@ def publish_tracker(tracker: ELOTracker, model: str) -> None:
                     status=raw_status,
                     extra=extra,
                 )
-        R.save(_locked=True)  # 已在锁内，跳过 save 的内部锁防重入死锁
+        R.save()  # _file_lock 线程内重入，锁内嵌套 save 安全
 
     fp = _model_fingerprint(R, model)
     # M-2：ratings/ground_truth 用 R 派生态（同键多次观测以末值为准），
     # 不直接拷 live tracker 的累积态
     derived = derive_elo(R, model)
-    cache = _load_cache()
-    cache[model] = {
-        "fingerprint": fp,
-        "attacker_ratings": dict(derived.attacker_ratings),
-        "defender_ratings": dict(derived.defender_ratings),
-        "ground_truth": {m: dict(g) for m, g in derived.predictor.ground_truth.items()},
-        "round_defender_elos": {k: v for k, v in tracker._round_defender_elos.items()},
-        "defender_match_count": {k: v for k, v in tracker._defender_match_count.items()},
-        "attacker_pred_std": dict(tracker.attacker_pred_std),
-        "n": len(derived.ground_truth_methods),
-    }
-    _save_cache(cache)
+    # L-4：缓存 RMW 纳入文件锁（锁内重读防并发后写者整文件覆盖先写者丢条目；
+    # 锁顺序恒 RESULTS→ELO_CACHE，与 elo_state_for 一致，无死锁）
+    with _file_lock(config.ELO_CACHE_FILE, strict=False):
+        cache = _load_cache()
+        cache[model] = {
+            "fingerprint": fp,
+            "attacker_ratings": dict(derived.attacker_ratings),
+            "defender_ratings": dict(derived.defender_ratings),
+            "ground_truth": {m: dict(g) for m, g in derived.predictor.ground_truth.items()},
+            "round_defender_elos": {k: v for k, v in tracker._round_defender_elos.items()},
+            "defender_match_count": {k: v for k, v in tracker._defender_match_count.items()},
+            "attacker_pred_std": dict(tracker.attacker_pred_std),
+            "n": len(derived.ground_truth_methods),
+        }
+        _save_cache(cache)
 

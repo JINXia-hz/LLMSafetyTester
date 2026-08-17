@@ -21,7 +21,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from control.agent import gazette
 from control.agent.bus import (
-    ALL,
     KIND_PLAN_DONE,
     KIND_PLAN_PROGRESS,
     KIND_STEP_BLOCKED,
@@ -30,6 +29,7 @@ from control.agent.bus import (
     KIND_STEP_START,
     SHANGSHU,
     notify,
+        notify_routed,
 )
 from control.agent.shangshu import capabilities as caps_mod
 from control.agent.shangshu import plan as plan_mod
@@ -121,9 +121,9 @@ def execute_plan(
                          detail={"step_stats": stats, "duration_s": round(
                              (plan.finished - (plan.started or plan.created)), 1)})
 
-    notify(KIND_PLAN_DONE, from_dept=SHANGSHU, to_dept=ALL,
-           plan_id=plan.id, intent=plan.intent, session_id=plan.session_id,
-           steps=_steps_summary(plan))
+    notify_routed(KIND_PLAN_DONE, from_dept=SHANGSHU,
+                  plan_id=plan.id, intent=plan.intent, session_id=plan.session_id,
+                  steps=_steps_summary(plan))
     _notify_progress(plan, on_progress)
     return plan
 
@@ -137,9 +137,9 @@ def _execute_step(step: Step, plan: Plan, on_progress: ProgressCallback | None) 
         gazette.append_event(plan.id, gazette.EV_STEP_FAILED, SHANGSHU,
                              step_id=step.id, session_id=plan.session_id, intent=plan.intent,
                              detail={"capability": step.capability, "error": step.error})
-        notify(KIND_STEP_FAILED, from_dept=SHANGSHU, plan_id=plan.id,
-               intent=plan.intent, session_id=plan.session_id,
-               step_id=step.id, capability=step.capability, error=step.error)
+        notify_routed(KIND_STEP_FAILED, from_dept=SHANGSHU, plan_id=plan.id,
+                      intent=plan.intent, session_id=plan.session_id,
+                      step_id=step.id, capability=step.capability, error=step.error)
         return
 
     # 1. 文牍记 + 总线通知 step_start（collect_replies：门下省在同步派发中
@@ -149,11 +149,11 @@ def _execute_step(step: Step, plan: Plan, on_progress: ProgressCallback | None) 
                          step_id=step.id, session_id=plan.session_id, intent=plan.intent,
                          detail={"capability": step.capability, "description": step.description,
                                  "args": step.args})
-    replies = notify(KIND_STEP_START, from_dept=SHANGSHU, plan_id=plan.id,
-                     intent=plan.intent, session_id=plan.session_id,
-                     step_id=step.id, capability=step.capability, args=step.args,
-                     risk_level=cap.risk_level, description=step.description,
-                     collect_replies=True)
+    replies = notify_routed(KIND_STEP_START, from_dept=SHANGSHU, plan_id=plan.id,
+                            intent=plan.intent, session_id=plan.session_id,
+                            step_id=step.id, capability=step.capability, args=step.args,
+                            risk_level=cap.risk_level, description=step.description,
+                            collect_replies=True)
 
     # 2. 门下省裁决直收（按 plan/step 双重匹配，防其他订阅者的无关返回值混入）
     block_msg = next(
@@ -168,9 +168,9 @@ def _execute_step(step: Step, plan: Plan, on_progress: ProgressCallback | None) 
         gazette.append_event(plan.id, gazette.EV_STEP_BLOCKED, SHANGSHU,
                              step_id=step.id, session_id=plan.session_id, intent=plan.intent,
                              detail={"capability": step.capability, "ticket": block_msg})
-        notify(KIND_STEP_BLOCKED, from_dept=SHANGSHU, plan_id=plan.id,
-               intent=plan.intent, session_id=plan.session_id,
-               step_id=step.id, capability=step.capability, ticket=block_msg)
+        notify_routed(KIND_STEP_BLOCKED, from_dept=SHANGSHU, plan_id=plan.id,
+                      intent=plan.intent, session_id=plan.session_id,
+                      step_id=step.id, capability=step.capability, ticket=block_msg)
         return
 
     # 3. 执行
@@ -187,9 +187,9 @@ def _execute_step(step: Step, plan: Plan, on_progress: ProgressCallback | None) 
                              detail={"capability": step.capability,
                                      "result_digest": _result_digest(step.result),
                                      "duration_s": duration})
-        notify(KIND_STEP_DONE, from_dept=SHANGSHU, plan_id=plan.id,
-               intent=plan.intent, session_id=plan.session_id,
-               step_id=step.id, capability=step.capability, result=step.result)
+        notify_routed(KIND_STEP_DONE, from_dept=SHANGSHU, plan_id=plan.id,
+                      intent=plan.intent, session_id=plan.session_id,
+                      step_id=step.id, capability=step.capability, result=step.result)
     except Exception as e:
         step.status = S_FAILED
         step.error = f"{type(e).__name__}: {e}"

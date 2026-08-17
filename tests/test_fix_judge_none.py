@@ -354,7 +354,7 @@ def test_recommendation_inconclusive_not_contradictory():
     """inconclusive 的 recommendation 不应再是 broken 的'全面失效'文案。"""
     from llmsec.reporting.final_report import _generate_recommendation
 
-    rec = _generate_recommendation(asr=0.5, fpr=0.0, level='inconclusive')
+    rec = _generate_recommendation(level='inconclusive')
     assert '失效' not in rec and '全面审查' not in rec, (
         'inconclusive 不应给 broken 级别的结论'
     )
@@ -365,7 +365,7 @@ def test_recommendation_broken_still_strong():
     """broken 级别保留'全面失效'强文案（回归保护）。"""
     from llmsec.reporting.final_report import _generate_recommendation
 
-    rec = _generate_recommendation(asr=0.9, fpr=0.0, level='broken')
+    rec = _generate_recommendation(level='broken')
     assert '失效' in rec, 'broken 应保留强结论'
 
 
@@ -374,7 +374,7 @@ def test_recommendation_all_levels_distinct():
     from llmsec.reporting.final_report import _generate_recommendation
 
     recs = {
-        lv: _generate_recommendation(0.5, 0.0, lv)
+        lv: _generate_recommendation(lv)
         for lv in ('safe', 'allergic', 'vulnerable', 'broken', 'inconclusive')
     }
     assert len(set(recs.values())) == 5, '五个等级文案应互不相同'
@@ -403,7 +403,7 @@ def test_stale_detection_by_batch_dir(tmp_path, monkeypatch):
             _json.dumps({"target_model": target, "security_level": "safe"}),
             encoding="utf-8")
     monkeypatch.setattr(dashboard_api, "RUNS_DIR", runs_dir)
-    dq._DISCOVER_CACHE = None
+    dq._DISCOVER_CACHE.clear()  # r9/P3-5：SigCache 用 clear() 重置
 
     client = TestClient(dashboard_api.app)
     r = client.get("/api/overview", params={"run": "2026-08-11_151938/gemma-4-12B-it"})
@@ -661,7 +661,7 @@ def test_recommendation_handles_fpr_none():
 
     # fpr=None 不应抛 TypeError
     for level in ('safe', 'allergic', 'vulnerable', 'broken', 'inconclusive'):
-        rec = _generate_recommendation(0.5, None, level)
+        rec = _generate_recommendation(level)
         assert isinstance(rec, str) and rec, f'level={level} 应返回非空建议文案'
 
 

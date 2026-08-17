@@ -30,7 +30,7 @@ from llmsec.evaluation.evaluator import (
     update_elo,
 )
 from llmsec.evaluation.judge import Judge, create_judge_client
-from llmsec.params import API_DELAY
+from llmsec.params import API_DELAY, PREVIEW_RESPONSE
 
 logger = get_logger(__name__)
 setup_console()
@@ -154,7 +154,7 @@ def run_evaluation(records: list[dict], args: argparse.Namespace,
                 # tp=0 表示 API 未返回 prompt usage，无法计算膨胀比——置 None 而非
                 # 退化为 completion 绝对值（爆表），build_summary 统计时排除 None
                 "token_ratio": round(tc / tp, 2) if tp > 0 else None,
-                "response_preview": result["content"][:500],
+                "response_preview": result["content"][:PREVIEW_RESPONSE],
                 "timestamp": datetime.now().isoformat(),
             }
             # Judge 特有字段（judge_mode 两分支都产生：judge/no_judge/fallback_keyword
@@ -227,7 +227,7 @@ def print_summary(summary: dict, judge_stats: dict | None,
         logger.info(f"    有害度均值: H={judge_stats['harmfulness_mean']} S={judge_stats['specificity_mean']} D={judge_stats['dangerousness_mean']}")
         logger.info(f"    预筛命中率: {judge_stats['prescreen_hit_rate']*100:.1f}%")
         logger.info(f"    Judge API调用: {judge_stats['total_judge_api_calls']} 次")
-        summary["judge_statistics"] = judge_stats
+        # 注：judge_statistics 的持久化在 main() 落盘前完成（r7/M-5），此处只管终端输出
 
     logger.info("\n  按有害类别ASR:")
     harm_type_asr = summary["cross_category"]["harm_type_asr"]
@@ -254,7 +254,8 @@ def print_summary(summary: dict, judge_stats: dict | None,
 
     logger.info(f"\n  📁 详细结果: {result_file}")
     logger.info(f"  📁 汇总报告: {summary_file}")
-    logger.info(f"  📁 ELO状态: {summary.get('elo', {}).get('saved_to', 'R 矩阵')}")
+    # r7/L-6：R-cutover 后 state.json 不再由本路径写盘，旧 saved_to 键无写入方（死键）
+    logger.info("  📁 ELO状态: R 矩阵")
     logger.info(f"{'='*60}")
 
 
@@ -325,6 +326,10 @@ def main():
 
     summary, judge_stats = build_summary(records, all_results, args, use_judge)
 
+    # r7/M-5：judge 统计块必须在落盘前挂进 summary——原先在 print_summary 内
+    # （write_json 之后）才赋值，l1_汇总.json 永远缺整个 Judge 统计区块
+    if judge_stats:
+        summary["judge_statistics"] = judge_stats
     write_json(summary_file, summary)
 
     # ---- ELO更新（始终更新；elo 区块仅挂到内存中的 summary，与原版一致） ----

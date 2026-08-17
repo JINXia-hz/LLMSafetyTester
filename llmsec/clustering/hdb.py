@@ -21,7 +21,6 @@ HDBSCAN 聚类主管线（post-test，整个测试流程结束后运行）。
     report = run_hdbscan_clustering(features, meta, feature_weights=w, reactions=reactions)
 """
 
-import hashlib
 import json
 from datetime import datetime
 
@@ -51,8 +50,8 @@ logger = get_logger(__name__)
 
 # Ward/auto-k 抽样子集规模上限（O(n²) 距离阵内存防护；超过即分层抽样 + 最近质心归并）
 _WARD_SAMPLE_CAP = 3000
-def _method_set_hash(methods: list[str]) -> str:
-    return hashlib.md5(",".join(sorted(set(methods))).encode("utf-8")).hexdigest()
+# r7：方法集指纹哈希统一从 core.units 导入（原为与 cold_start 重复的本地实现）
+from llmsec.core.units import method_set_hash  # noqa: E402
 
 
 def compute_cluster_labels(
@@ -256,7 +255,7 @@ def run_hdbscan_clustering(
 
     # 4. 命名（关键层各簇 + 密度视图各簇；噪声组固定命名为稀疏区）
     cluster_names = auto_name_clusters(labels, features, meta, meta.get("method_prompts", {}))
-    cluster_names = ai_rename_clusters(cluster_names, labels, features, meta, meta.get("method_prompts", {}))
+    cluster_names = ai_rename_clusters(cluster_names, labels, meta.get("method_prompts", {}))
     flat_names = auto_name_clusters(flat_labels, features, meta, meta.get("method_prompts", {}))
     if -1 in flat_names:
         flat_names[-1] = "稀疏区（低密度噪声）"
@@ -346,7 +345,7 @@ def run_hdbscan_clustering(
             "top_ks": top_ks,
             "candidate_sweep": sweep,
             "reaction_validation": report.get("reaction_validation"),
-            "method_set_hash": _method_set_hash(methods),
+            "method_set_hash": method_set_hash(methods),
             "hdbscan_report": report,
             "generated_at": report["generated_at"],
         }

@@ -32,11 +32,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from llmsec.params import MAX_ROUNDS_LIMIT
+from llmsec.params import SAMPLERS as _SAMPLERS  # r7：单源（params.SAMPLERS）
 
 # task_manager 经模块属性引用（测试 monkeypatch 拦截 start_task 的既有范式）
 from llmsec.server import task_manager
 
-_SAMPLERS = ("gap", "infogain", "coordinate", "hybrid")
 _PHASES = ("all", "1", "2")
 
 

@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -76,15 +77,14 @@ def _refresh_task_status(t: dict) -> None:
         # 进程仍活着：检查僵尸态（超时无产出）
         _check_zombie(t)
         return
-    t["status"] = "success" if rc == 0 else "failed"
+    status = "success" if rc == 0 else "failed"
     t["returncode"] = rc
     log_file = t.get("log_file")
     if log_file is not None:
         log_file.close()
         t["log_file"] = None
-    _persist_meta(t, t.get("_task_id", ""))  # 终态回写（外部进程可见）
     # 失败告警（监控设施故障不影响状态机）
-    if t["status"] == "failed":
+    if status == "failed":
         try:
             from llmsec.core.monitoring import alert_task_failed
 
@@ -97,7 +97,8 @@ def _refresh_task_status(t: dict) -> None:
             )
         except Exception:
             pass
-    _advance_queue(t["kind"])
+    # r8/病根5：终态迁移统一走 _finish（置状态 + 落盘 + 推进队列）
+    _finish(t, status)
 
 
 def _check_zombie(t: dict) -> None:
@@ -131,6 +132,59 @@ def _check_zombie(t: dict) -> None:
         pass
 
 
+@dataclass
+class TaskSpec:
+    """任务对象的唯一 schema 定义（r9/P3-6）。
+
+    此前任务是 start_task 内联的裸 dict，测试只能照抄 10 键结构手搓。
+    保留 dict 风格访问桥（__getitem__/__setitem__/get）——存量读点
+    （task_view/_finish/告警/tui）与既有测试零改动；新代码一律用属性访问。
+    """
+
+    task_id: str
+    kind: str
+    cmd: str
+    argv: list
+    env_override: dict | None = None
+    meta: dict | None = None
+    proc: object | None = None
+    log_path: Path = None
+    log_file: object | None = None
+    status: str = "queued"
+    started_at: str = ""
+    spawned_at: object | None = None
+    returncode: int | None = None
+    error: str | None = None
+
+    @property
+    def _task_id(self) -> str:  # 告警/僵尸检测的既有引用名
+        return self.task_id
+
+    def __getitem__(self, key):        # dict 桥：存量读点
+        return getattr(self, key)
+
+    def __setitem__(self, key, value):  # dict 桥：存量写点（t["status"] = ...）
+        setattr(self, key, value)
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+
+def _finish(t, status: str, *, returncode: int | None = None) -> None:
+    """终态迁移统一入口（r8/病根5）：置状态 + 落盘 meta + 推进同 kind 队列。
+
+    队列推进原先散落在各个迁移点（刷新终态/取消 running/取消 queued/spawn 失败），
+    新增迁移路径漏调 _advance_queue 会让 queued 任务永久搁浅（r7/M-9 的病根）；
+    统一入口后"离开 running/queued 即推进"成为结构保证。调用方先完成自己的
+    清理（终止进程、关日志句柄）再调本函数。
+    """
+    t["status"] = status
+    if returncode is not None:
+        t["returncode"] = returncode
+    _persist_meta(t, t.get("_task_id", ""))
+    _advance_queue(t["kind"])
+
+
 def _spawn(task_id: str, t: dict) -> None:
     """启动已入队任务的子进程（打开日志、Popen、置 running）。Popen 失败置 failed。"""
     TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -152,9 +206,11 @@ def _spawn(task_id: str, t: dict) -> None:
         )
     except OSError as e:
         log_file.close()
-        t["status"] = "failed"
         t["returncode"] = -1
         t["error"] = f"任务启动失败: {e}"
+        # r8/病根5：终态迁移统一走 _finish（置状态 + 落盘 + 推进队列——
+        # 原先此分支既不落盘 meta 也不推进，queued 任务会永久搁浅）
+        _finish(t, "failed")
         return
     t["proc"] = proc
     t["log_file"] = log_file
@@ -240,19 +296,16 @@ def start_task(
         _refresh_task_status(t)
 
     task_id = f"{kind}-{datetime.now().strftime('%H%M%S')}-{uuid.uuid4().hex[:6]}"
-    TASKS[task_id] = {
-        "kind": kind,
-        "cmd": " ".join(argv),
-        "argv": argv,
-        "env_override": env_override,
-        "meta": meta,
-        "proc": None,
-        "log_path": TASK_LOG_DIR / f"{task_id}.log",
-        "log_file": None,
-        "status": "queued",
-        "started_at": datetime.now().isoformat(),
-        "_task_id": task_id,  # 供告警/僵尸检测引用
-    }
+    TASKS[task_id] = TaskSpec(
+        task_id=task_id,
+        kind=kind,
+        cmd=" ".join(argv),
+        argv=argv,
+        env_override=env_override,
+        meta=meta,
+        log_path=TASK_LOG_DIR / f"{task_id}.log",
+        started_at=datetime.now().isoformat(),
+    )
     _evict_tasks()
     _advance_queue(kind)
     _persist_meta(TASKS[task_id], task_id)  # queued 状态先落盘（尚无 pid）
@@ -352,8 +405,9 @@ def cancel_task(task_id: str) -> dict | None:
     if t["status"] not in ("running", "queued"):
         return None  # 已结束
     if t["status"] == "queued":
-        t["status"] = "cancelled"
-        _persist_meta(t, task_id)
+        # r8/病根5：终态迁移统一走 _finish（取消排队也要推进同 kind 队列，
+        # 否则剩余 queued 任务永久搁浅——r7/M-9 修复的口径）
+        _finish(t, "cancelled")
         return task_view(task_id)
     proc: subprocess.Popen = t["proc"]
     proc.terminate()
@@ -362,12 +416,9 @@ def cancel_task(task_id: str) -> dict | None:
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
-    t["status"] = "cancelled"
-    t["returncode"] = proc.returncode
     log_file = t.get("log_file")
     if log_file is not None:
         log_file.close()
         t["log_file"] = None
-    _persist_meta(t, task_id)
-    _advance_queue(t["kind"])
+    _finish(t, "cancelled", returncode=proc.returncode)
     return task_view(task_id)

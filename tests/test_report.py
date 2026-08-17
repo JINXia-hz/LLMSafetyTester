@@ -61,10 +61,9 @@ def test_h9_mutual_exclusion():
 
 def test_f4_elo_tracker_from_R_not_state(tmp_path, monkeypatch):
     """F4：_load_elo_tracker 始终从 R 派生，不读 state.json 快照（tmp 隔离，不碰全局 R）。"""
-    import llmsec.core.results as results_mod
+    import llmsec.core.config as _results_cfg
     import llmsec.evaluation.elo_access as ea
-
-    monkeypatch.setattr(results_mod, 'RESULTS_FILE', tmp_path / 'results.json')
+    monkeypatch.setattr(_results_cfg, 'RESULTS_FILE', tmp_path / 'results.json')
     monkeypatch.setattr(ea, 'active_model', lambda: 'model_r')
     # 写一个 state.json（哨兵值仅存于此），_load_elo_tracker 不应读它
     state_dir = tmp_path / 'state'

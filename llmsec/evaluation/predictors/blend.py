@@ -24,7 +24,8 @@ import math
 
 import numpy as np
 
-from llmsec.core.config import INITIAL_ELO, PREDICTORS_DIR
+from llmsec.core import config as _config
+from llmsec.core.config import INITIAL_ELO  # r9/P3-4：PREDICTORS_DIR 调用期动态读
 from llmsec.core.io import load_artifact, save_artifact
 from llmsec.core.logging import get_logger
 from llmsec.core.results import ResultsMatrix
@@ -394,7 +395,7 @@ def load_or_fit_blend_predictor(
     未命中或加载失败则重新 fit 并缓存。R/方法清单不变时免去重复训练。"""
     catalog = list(method_catalog) if method_catalog else list(features.keys())
     key = BlendPredictor.cache_key(results, catalog, features)
-    cache_path = PREDICTORS_DIR / f"{key}.pkl"
+    cache_path = _config.PREDICTORS_DIR / f"{key}.pkl"
 
     cached = BlendPredictor.load(cache_path)
     if cached is not None:

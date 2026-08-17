@@ -23,12 +23,14 @@ from pathlib import Path
 
 import numpy as np
 
-from llmsec.core.config import STATE_DIR
+from llmsec.core import config as _config
 from llmsec.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-PROBES_FILE = STATE_DIR / "probes.json"
+def _probes_file():
+    """探针文件路径（r9/P3-4：调用期动态读，work-dir 隔离经 config.STATE_DIR 重绑）。"""
+    return _config.STATE_DIR / "probes.json"
 MIN_COMMON = 3  # 计算相关系数所需的最少公共种子方法
 
 
@@ -60,7 +62,7 @@ def model_similarity(fp_a: dict, fp_b: dict) -> float | None:
 
 def load_probes(path: Path | str | None = None) -> dict:
     """加载 probes.json 的 {model: entry}；缺失/损坏返回 {}。"""
-    p = Path(path) if path else PROBES_FILE
+    p = Path(path) if path else _probes_file()
     try:
         if p.exists():
             data = json.loads(p.read_text(encoding="utf-8"))
@@ -84,7 +86,7 @@ def save_probe(
     """原子合并：追加/更新一个模型的指纹到 probes.json（同进程线程安全）。"""
     from llmsec.core.io import write_json
 
-    p = Path(path) if path else PROBES_FILE
+    p = Path(path) if path else _probes_file()
     with _save_lock:
         models = load_probes(p)
         models[model] = {

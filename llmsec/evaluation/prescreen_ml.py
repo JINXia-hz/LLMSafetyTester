@@ -19,13 +19,15 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 
-from llmsec.core.config import OUTPUT_DIR, STATE_DIR
+from llmsec.core import config as _config  # r9/P3-4：路径调用期动态读
 from llmsec.core.logging import get_logger
 from llmsec.params import PRESCREEN_ML_C, PRESCREEN_ML_MIN_TRAIN, PRESCREEN_ML_THRESHOLD
 
 logger = get_logger(__name__)
 
-MODEL_PATH = STATE_DIR / "prescreen_model.joblib"
+def _model_path():
+    """预筛模型路径（r9/P3-4：调用期动态读，work-dir 隔离经 config.STATE_DIR 重绑）。"""
+    return _config.STATE_DIR / "prescreen_model.joblib"
 # M-41：训练样本下限集中定义于 params.py（PRESCREEN_ML_MIN_TRAIN）
 
 # 模块级模型缓存（首次 predict 时加载，后续复用）
@@ -38,10 +40,10 @@ def _load_model() -> Pipeline | None:
     global _model, _model_loaded
     if not _model_loaded:
         _model_loaded = True
-        if MODEL_PATH.exists():
+        if _model_path().exists():
             try:
-                _model = joblib.load(MODEL_PATH)
-                logger.info("预筛模型已加载: %s", MODEL_PATH)
+                _model = joblib.load(_model_path())
+                logger.info("预筛模型已加载: %s", _model_path())
             except Exception as e:
                 logger.warning("预筛模型加载失败，回退关键词: %s", e)
                 _model = None
@@ -159,7 +161,7 @@ def train() -> dict:
     labels: list[int] = []
     run_ids: list[str] = []  # 每条样本所属 run（时间序留出评估用）
 
-    runs_base = OUTPUT_DIR.joinpath("runs")
+    runs_base = _config.OUTPUT_DIR.joinpath("runs")
     for p in sorted(runs_base.rglob("attack_results*.jsonl")):
         # run_key = runs/ 下的顶层目录名（时间戳会话），跨多目标子目录归一到同一次 run
         try:
@@ -222,8 +224,8 @@ def train() -> dict:
     oos = _chronological_holdout_eval(texts, labels, run_ids, pipe)
 
     # 存模型
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    joblib.dump(pipe, MODEL_PATH)
+    _config.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(pipe, _model_path())
 
     # 全局缓存失效（下次 predict 重新加载）
     global _model_loaded
@@ -244,7 +246,7 @@ def train() -> dict:
     result = {
         "n_samples": n, "n_refusals": n_refusals, "n_attacks": n_attacks,
         "trained": True, "cv_accuracy": round(float(scores.mean()), 3),
-        "model_path": str(MODEL_PATH),
+        "model_path": str(_model_path()),
     }
     if oos is not None:
         result["oos"] = oos

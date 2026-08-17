@@ -25,6 +25,15 @@ def unit_fingerprint(members: list[str]) -> str:
     return f"c_{digest[:10]}"
 
 
+def method_set_hash(methods: list[str]) -> str:
+    """方法集合指纹 hash（判断攻击集是否变化）。
+
+    r7：原 hdb._method_set_hash 与 cold_start._compute_method_set_hash 为
+    逐字节重复实现，统一到本定义处（改哈希口径只动这一处）。
+    """
+    return hashlib.md5(",".join(sorted(set(methods))).encode("utf-8")).hexdigest()
+
+
 def build_units(
     labels: dict[str, int],
     method_records: dict[str, dict],

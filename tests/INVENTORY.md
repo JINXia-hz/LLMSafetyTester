@@ -1,21 +1,29 @@
 # 测试清单（自动生成，勿手改）
 
-> 由 `scripts/gen_test_inventory.py` 生成于 2026-08-16T12:07:50；
+> 由 `scripts/gen_test_inventory.py` 生成于 2026-08-17T00:34:19；
 > CI 会校验本文件与实际收集结果一致（`--check`），过期即失败。
 > 本地刷新：`python scripts/gen_test_inventory.py`。
 
-合计 **57** 个文件 / **908** 个用例（含 parametrize 展开；
+合计 **65** 个文件 / **969** 个用例（含 parametrize 展开；
 含默认排除的 real_api/e2e 用例——它们需手动 `pytest -m real_api` / `-m e2e` 触发）。
 
 | 测试文件 | 用例数 |
 |---|---|
 | tests/test_allergy.py | 8 |
 | tests/test_audit_r1_high.py | 17 |
-| tests/test_audit_r2_control.py | 15 |
+| tests/test_audit_r2_control.py | 14 |
 | tests/test_audit_r3_llmsec.py | 7 |
 | tests/test_audit_r4_cleanup.py | 5 |
 | tests/test_audit_r6_root.py | 8 |
-| tests/test_clustering.py | 19 |
+| tests/test_audit_r7_cleanup.py | 8 |
+| tests/test_audit_r7_eval.py | 6 |
+| tests/test_audit_r7_high.py | 2 |
+| tests/test_audit_r7_isolation.py | 5 |
+| tests/test_audit_r7_server.py | 12 |
+| tests/test_audit_r7_storage.py | 12 |
+| tests/test_audit_r8_rootfix.py | 11 |
+| tests/test_audit_r9_guard.py | 9 |
+| tests/test_clustering.py | 17 |
 | tests/test_control.py | 40 |
 | tests/test_control_router.py | 10 |
 | tests/test_core_infra.py | 27 |
@@ -32,11 +40,11 @@
 | tests/test_gazette.py | 4 |
 | tests/test_generators.py | 10 |
 | tests/test_hpo_router.py | 6 |
-| tests/test_isolation.py | 3 |
+| tests/test_isolation.py | 4 |
 | tests/test_jailbreak_tax.py | 8 |
 | tests/test_launch.py | 27 |
 | tests/test_management.py | 34 |
-| tests/test_mcp.py | 32 |
+| tests/test_mcp.py | 30 |
 | tests/test_mcp_tools.py | 61 |
 | tests/test_merge.py | 9 |
 | tests/test_pipeline_review.py | 10 |

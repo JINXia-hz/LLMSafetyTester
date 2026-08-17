@@ -33,9 +33,9 @@ def _replace_with_retry(tmp: Path, path: Path, attempts: int = 8) -> None:
     """os.replace + Windows 瞬时占用重试（write_jsonl / write_json / save_artifact 共用）。
 
     Windows 上并发 replace 同一目标会抛 PermissionError（WinError 5，目标被另一
-    线程/进程的 replace 或杀软/索引器瞬时占用）。指数退避 20ms→2.5s 共 8 次
-    （总预算 ~5s）——实测高负载并发套件下固定 5×50ms（250ms）仍可能耗尽。
-    非瞬时原因重试耗尽后照常抛出，由调用方清理 tmp。
+    线程/进程的 replace 或杀软/索引器瞬时占用）。指数退避 20ms→640ms 上限，
+    8 次尝试共 7 次睡眠（总预算 ~1.9s）——实测高负载并发套件下固定 5×50ms
+    （250ms）仍可能耗尽。非瞬时原因重试耗尽后照常抛出，由调用方清理 tmp。
     """
     delay = 0.02
     for attempt in range(attempts):
@@ -141,21 +141,41 @@ def read_json(path, default=None, *, strict: bool = False):
     """读取单个 JSON 对象。
 
     - 文件不存在 → 返回 default（无论 strict）
-    - 解析失败：
+    - 解析失败（JSONDecodeError，内容损坏/半写）：
       - strict=False（默认，向后兼容；适用于可丢弃缓存）：返回 default
       - strict=True（权威存储用）：抛 CorruptedFileError，让调用方备份+告警
+    - PermissionError（Windows 瞬时占用：杀软/索引器/并发 replace）：
+      指数退避重试；耗尽后 strict 上抛、非 strict 返回 default
+    - 其他 OSError（磁盘/权限模式等）：**不是文件损坏**——strict 上抛原异常
+      （调用方不得把完好文件备份成 .corrupt.bak 回退旧数据），非 strict 返回 default
     """
     path = Path(path)
     if not path.exists():
         return default
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        if strict:
-            raise CorruptedFileError(path, e) from e
-        logger.warning("读取 %s 失败（静默返回 default）: %s", path, e)
-        return default
+    delay = 0.02
+    for attempt in range(6):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError as e:
+            if strict:
+                raise CorruptedFileError(path, e) from e
+            logger.warning("读取 %s 解析失败（静默返回 default）: %s", path, e)
+            return default
+        except PermissionError as e:
+            if attempt == 5:
+                if strict:
+                    raise
+                logger.warning("读取 %s 失败（静默返回 default）: %s", path, e)
+                return default
+            time.sleep(delay)
+            delay = min(delay * 2, 0.32)
+        except OSError as e:
+            if strict:
+                raise
+            logger.warning("读取 %s 失败（静默返回 default）: %s", path, e)
+            return default
+    return default  # 不可达（循环必 return/raise），为类型检查器保留
 
 
 def _json_numpy_default(obj):
@@ -203,7 +223,10 @@ def write_json(
         except OSError as e:
             logger.warning("备份 %s -> %s 失败: %s", path, bak, e)
     if atomic:
-        tmp = path.with_suffix(path.suffix + ".tmp")
+        # tmp 名带 pid/tid 后缀（对齐 write_jsonl/save_artifact）：同进程两线程
+        # 并发写同一文件（如 MCP 线程池并发触发的 elo_cache 写）固定名互踩。
+        # with_name 而非 with_suffix：兼容 ".env" 这类空后缀点文件
+        tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}")
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(obj, f, ensure_ascii=False, indent=indent,
@@ -231,7 +254,11 @@ def load_artifact(path, default=None, *, strict: bool = False):
     """joblib.load 一个 artifact。
 
     - 文件不存在 → 返回 default
-    - 加载失败：strict=False 返回 default；strict=True 抛 CorruptedFileError
+    - OSError（权限/占用/磁盘等瞬时 IO 错误）：**不是损坏**——strict 上抛原异常、
+      非 strict 返回 default（r8/病根4：与 read_json 的 M-4 分类口径对齐，
+      IO 错误不得伪装成 CorruptedFileError 触发"损坏"处置路径）
+    - 其他异常（UnpicklingError/EOFError 等内容损坏）：strict 抛 CorruptedFileError；
+      非 strict 返回 default
     """
     path = Path(path)
     if not path.exists():
@@ -239,6 +266,11 @@ def load_artifact(path, default=None, *, strict: bool = False):
     try:
         import joblib
         return joblib.load(path)
+    except OSError as e:
+        if strict:
+            raise
+        logger.warning("加载 artifact %s 失败（IO 错误，静默返回 default）: %s", path, e)
+        return default
     except Exception as e:
         if strict:
             raise CorruptedFileError(path, e) from e

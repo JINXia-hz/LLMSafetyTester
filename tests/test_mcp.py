@@ -132,20 +132,6 @@ class TestConfirmMechanism:
         r = confirm_mod.confirm("nonexistent_token")
         assert r["status"] == "expired_or_already_confirmed"
 
-    def test_peek_does_not_consume(self):
-        token = confirm_mod.issue("test", {"items": 5}, lambda: "done")
-        info = confirm_mod.peek(token)
-        assert info is not None
-        assert info["action"] == "test"
-        assert info["summary"]["items"] == 5
-
-        # peek 不消费，confirm 仍可用
-        r = confirm_mod.confirm(token)
-        assert r["status"] == "executed"
-
-    def test_peek_nonexistent(self):
-        assert confirm_mod.peek("nope") is None
-
     def test_ttl_expiry(self):
         # 手动构造一个过期条目
         import time

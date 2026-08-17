@@ -32,10 +32,10 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from llmsec.core import config as _config  # r9/P3-4：路径调用期动态读
 from llmsec.core.config import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
-    OUTPUT_DIR,
     GeneratorConfig,
 )
 from llmsec.core.io import iter_jsonl, read_json, read_jsonl, write_json
@@ -179,7 +179,7 @@ def load_allergy(output_dir) -> dict:
 def load_prompt_metadata() -> dict[str, dict]:
     """加载所有prompt JSONL，建立 id→metadata 映射。"""
     metadata = {}
-    search_dirs = [OUTPUT_DIR, OUTPUT_DIR / "attacks"]
+    search_dirs = [_config.OUTPUT_DIR, _config.OUTPUT_DIR / "attacks"]
     for search_dir in search_dirs:
         if not search_dir.exists():
             continue
@@ -196,7 +196,7 @@ def load_prompt_metadata() -> dict[str, dict]:
 # 方法注册表 — 统一索引
 # ============================================================
 def build_method_registry(method_stats: dict[str, dict], elo_ratings: dict,
-                          results: list[dict], metadata: dict) -> dict:
+                          results: list[dict]) -> dict:
     """构建统一方法注册表，method名 → {elo, prompt_ids, category, ...}"""
     registry = {}
     method_prompts = defaultdict(list)
@@ -314,15 +314,13 @@ def _load_elo_tracker() -> ELOTracker | None:
 
 
 def build_tree(method_stats: dict[str, dict], allergy_data: dict,
-               elo_ratings: dict, tax_info: dict | None = None,
-               output_dir=None) -> dict:
+               tax_info: dict | None = None) -> dict:
     """
     构建多维树形安全画像。
 
     tax_info: 可选，runner 的越狱税聚合块（含 baseline 对比），
               透传进 overall.jailbreak_tax 供报告/前端展示。
-    output_dir: 可选，输出目录；用于定位 state/state.json 计算 ELO 边界，
-                缺省时从 R 矩阵派生。
+    （r7：ELO 边界恒从 R 矩阵派生，旧的 elo_ratings/output_dir 参数已删。）
 
     返回:
     {
@@ -823,7 +821,7 @@ def generate_fallback_report(tree: dict) -> str:
 # ============================================================
 def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="层级报告生成器")
-    parser.add_argument("--output-dir", type=str, default=str(OUTPUT_DIR),
+    parser.add_argument("--output-dir", type=str, default=str(_config.OUTPUT_DIR),
                         help="输出目录")
     return parser.parse_args(argv)
 
@@ -854,7 +852,7 @@ def main():
     method_stats = build_method_stats(results, elo_ratings, metadata)
     logger.info(f"   聚合为 {len(method_stats)} 种攻击方法")
 
-    tree = build_tree(method_stats, allergy_data, elo_ratings, output_dir=output_dir)
+    tree = build_tree(method_stats, allergy_data)
 
     # 保存树数据
     tree_path = Path(output_dir) / "security_tree.json"
@@ -862,7 +860,7 @@ def main():
     logger.info(f"📁 树形数据: {tree_path}")
 
     # 生成方法注册表
-    registry = build_method_registry(method_stats, elo_ratings, results, metadata)
+    registry = build_method_registry(method_stats, elo_ratings, results)
     registry_path = Path(output_dir) / "method_registry.json"
     write_json(registry_path, registry)
     logger.info(f"📁 方法注册表: {registry_path}")

@@ -15,11 +15,11 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from llmsec.core.config import RUNS_DIR
+from llmsec.core.config import RESULTS_FILE, RUNS_DIR
 from llmsec.core.io import read_json
 from llmsec.core.logging import get_logger
 from llmsec.core.paths import safe_subpath
-from llmsec.core.results import RESULTS_FILE, ResultsMatrix, _file_lock, extract_report_metrics
+from llmsec.core.results import ResultsMatrix, _file_lock, extract_report_metrics
 from llmsec.management.common import (
     Plan,
     dir_size,
@@ -287,7 +287,7 @@ def execute_delete(plan: Plan, *, delete_r: bool = False) -> Plan:
                 total = 0
                 for model in plan.extra["r_models_affected"]:
                     total += R.remove_model(model)
-                R.save(_locked=True)
+                R.save()  # _file_lock 线程内重入（r8），锁内嵌套安全
             done.extra["r_rows_removed"] = total
             logger.info("已从 R 删除 %d 条观测（models=%s）", total, plan.extra["r_models_affected"])
         except Exception as e:

@@ -19,17 +19,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from llmsec.mcp.tools import _try
+
 
 # ============================================================
 # 辅助
 # ============================================================
-def _try(fn, *, error_hint: str = "") -> Any:
-    try:
-        return fn()
-    except Exception as e:
-        return {"error": f"{type(e).__name__}: {e}", "hint": error_hint}
-
-
 def _launch_error(e: Any) -> dict[str, Any]:
     """LaunchError → MCP 工具的错误 dict 约定（fastmcp 工具不抛异常）。"""
     return {"error": str(e), "hint": getattr(e, "hint", "") or ""}

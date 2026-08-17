@@ -45,14 +45,18 @@ class TaskSnapshot:
 
 
 def _tail_text(path: Path, limit: int = 4000) -> str:
-    """读文件尾部 limit 字符（与 task_view 的 4KB tail 同口径）。"""
+    """读文件尾部 limit 字符（与 task_view 的 4KB tail 同口径）。
+
+    r7/M-12：seek 距离用 limit 而非硬编码 4096——原先 full_log 传
+    limit=2_000_000 也只能读到固定 4KB，"完整日志"对外部任务恒被截断。
+    """
     if not path.exists():
         return ""
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
-            f.seek(max(0, size - 4096))
+            f.seek(max(0, size - limit))
             return f.read().decode("utf-8", errors="replace")[-limit:]
     except OSError:
         return ""

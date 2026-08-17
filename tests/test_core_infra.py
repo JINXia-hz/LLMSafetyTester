@@ -39,13 +39,18 @@ def test_read_json_corrupted_lenient_vs_strict(tmp_path):
 
 
 def test_read_json_directory_oserror_path(tmp_path):
-    """路径是目录：open 抛 OSError → 非 strict 返回 default，strict 转 CorruptedFileError。"""
-    from llmsec.core.io import CorruptedFileError, read_json
+    """路径是目录：open 抛 OSError → 非 strict 返回 default，strict 原样上抛 OSError。
+
+    r7/M-4 契约变更：IO 错误（权限/占用/目录）不再伪装成 CorruptedFileError——
+    "损坏"专指内容解析失败（半写/非法 JSON），混同会让完好文件被误判触发
+    .corrupt.bak 回退旧数据。详见 tests/test_audit_r7_storage.py。
+    """
+    from llmsec.core.io import read_json
 
     d = tmp_path / "dir.json"
     d.mkdir()
     assert read_json(d, "fb") == "fb", "❌1 目录路径非 strict 应静默返回 default"
-    with pytest.raises(CorruptedFileError):
+    with pytest.raises(OSError):
         read_json(d, strict=True)
 
 

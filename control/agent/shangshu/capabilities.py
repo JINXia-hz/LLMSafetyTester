@@ -55,17 +55,21 @@ def _h_run_evaluation(args: dict) -> dict:
     from control.config import OUTPUT_DIR, WORKSPACES_DIR
     from control.core import env_snapshot
     from control.core.invoker import run_runner
+    from control.core.paths import safe_component
 
     ws = args.get("workspace")
     if ws:
-        work_dir = WORKSPACES_DIR / ws
+        # r7/M-8：workspace/work_dir_name 来自 LLM 生成的 Plan args（外部可控），
+        # 与 fork/delete_workspace/env_snapshot 同口径走 safe_component 防穿越——
+        # 不校验时 "ws=../x" 可把隔离评估的 --work-dir 指到 workspaces 之外
+        work_dir = safe_component(WORKSPACES_DIR, ws)
         if not work_dir.exists():
             raise FileNotFoundError(f"工作区不存在: {ws}")
     else:
         import time
         import uuid
         wname = args.get("work_dir_name") or f"eval_{int(time.time())}.{uuid.uuid4().hex[:6]}"
-        work_dir = OUTPUT_DIR / "eval_runs" / wname
+        work_dir = safe_component(OUTPUT_DIR / "eval_runs", wname)
         work_dir.mkdir(parents=True, exist_ok=True)
 
     env_override = None

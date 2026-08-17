@@ -33,7 +33,6 @@ def iso_out(monkeypatch, tmp_path):
     """
     from control.core import compare as compare_mod
     from llmsec.core import config as cfg
-    from llmsec.core import results as results_mod
     from llmsec.management import common as common_mod
     from llmsec.management import runs as runs_mod
 
@@ -47,7 +46,6 @@ def iso_out(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "RUNS_DIR", out / "runs")
     monkeypatch.setattr(cfg, "ELO_CACHE_FILE", out / "state" / "elo_cache.json")
     monkeypatch.setattr(cfg, "TASK_LOG_DIR", out / "tasks")
-    monkeypatch.setattr(results_mod, "RESULTS_FILE", res_file)
     monkeypatch.setattr(common_mod, "OUTPUT_DIR", out)
     monkeypatch.setattr(common_mod, "TRASH_DIR", out / ".trash")
     monkeypatch.setattr(runs_mod, "RUNS_DIR", out / "runs")

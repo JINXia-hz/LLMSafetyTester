@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from llmsec.core.caches import SigCache
 from llmsec.core.config import CLUSTER_RESULT_FILE
 from llmsec.core.logging import get_logger
 from llmsec.core.seed import get_global_seed as _get_seed
@@ -18,18 +19,11 @@ router = APIRouter()
 # ============================================================
 # 聚类特征空间投影（PCA / t-SNE，按需计算 + 缓存）
 # ============================================================
-# 缓存大小上限：超出时按插入顺序淘汰最旧条目，防长期运行内存单调增长
-_CACHE_MAX_SIZE = 64
-
-_PROJECTION_CACHE: dict[tuple[str, float], dict] = {}
+# r9/P3-5：缓存迁 core.caches.SigCache（线程安全 + 上限淘汰统一实现；
+# 此前手写 dict + 锁的淘汰路径在 to_thread 并发下出过竞态，r8/P2）
+_PROJECTION_CACHE = SigCache(maxsize=64)
+_CUT_CACHE = SigCache(maxsize=64)
 _PROJECTION_BLOCKS = ("textual", "embedding", "technique", "intent")
-
-
-def _cache_put(cache: dict, key, value) -> None:
-    """写入缓存并维护 _CACHE_MAX_SIZE 上限（dict 保序，弹掉头一个即最旧条目）。"""
-    cache[key] = value
-    while len(cache) > _CACHE_MAX_SIZE:
-        cache.pop(next(iter(cache)))
 
 
 def _build_feature_matrix(features: dict, methods: list[str]):
@@ -59,104 +53,110 @@ def _build_feature_matrix(features: dict, methods: list[str]):
     return np.array(rows, dtype=np.float64)
 
 
+def _compute_projection(method: str) -> dict:
+    """投影计算（同步 worker——TSNE/PCA 秒级耗时，必须离开事件循环线程）。"""
+    import joblib
+    import numpy as np
+
+    if not CLUSTER_RESULT_FILE.exists():
+        return {"available": False}
+
+    mtime = CLUSTER_RESULT_FILE.stat().st_mtime
+
+    def _load() -> dict:
+        try:
+            artifacts = joblib.load(CLUSTER_RESULT_FILE)
+        except Exception:
+            return {"available": False}
+
+        features = artifacts.get("features", {})
+        labels = artifacts.get("labels", {})
+        cluster_names = artifacts.get("cluster_names", {})
+        gt_methods = set(artifacts.get("ground_truth_methods", []))
+        if not features:
+            return {"available": False}
+
+        methods = sorted(features.keys())
+        n = len(methods)
+        X = _build_feature_matrix(features, methods)
+        X = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-8)
+
+        result: dict = {"available": True, "method": method, "n": n}
+        if n < 2:
+            coords = np.zeros((n, 2))
+        elif method == "pca":
+            from sklearn.decomposition import PCA
+
+            pca = PCA(n_components=2, random_state=_SEED)
+            coords = pca.fit_transform(X)
+            result["explained_variance"] = [
+                round(float(r), 4) for r in pca.explained_variance_ratio_
+            ]
+        else:
+            from sklearn.manifold import TSNE
+
+            # sklearn 要求 perplexity < n，小样本自适应收缩
+            perplexity = max(1, min(30, (n - 1) // 3))
+            tsne = TSNE(n_components=2, perplexity=perplexity, init="pca", random_state=_SEED)
+            coords = tsne.fit_transform(X)
+            result["perplexity"] = perplexity
+
+        state = _load_state()
+        ratings = state.get("attacker_ratings", {})
+
+        # 评级键 = unit_id：method → unit 反查（units 表随聚类产物持久化）
+        method_to_unit = {}
+        for uid, u in (artifacts.get("units") or {}).items():
+            for mem in u.get("members", []):
+                method_to_unit[mem] = uid
+
+        points = []
+        for i, m in enumerate(methods):
+            cid = labels.get(m, -1)
+            try:
+                cid = int(cid)
+            except (TypeError, ValueError):
+                cid = -1
+            uid = method_to_unit.get(m)
+            points.append({
+                "method": m,
+                "unit": uid,
+                "x": round(float(coords[i, 0]), 4),
+                "y": round(float(coords[i, 1]), 4),
+                "cluster": cid,
+                "cluster_name": cluster_names.get(str(cid), f"簇{cid}"),
+                "tested": uid in gt_methods if uid else False,
+                "elo": round(ratings[uid], 1) if uid and uid in ratings else None,
+            })
+
+        result["points"] = points
+        return result
+
+    # r9/P3-5：SigCache（key=method, sig=artifacts mtime）——线程安全 + 上限淘汰
+    return _PROJECTION_CACHE.get(method, mtime, _load)
+
+
 @router.get("/api/cluster-projection")
 async def api_cluster_projection(method: str = "pca"):
     """
     对聚类 artifacts 中的高维特征做 2D 投影（PCA / t-SNE），供分布散点图使用。
     结果按 (method, artifacts mtime) 缓存。
+
+    r7/M-11：TSNE/PCA 与 joblib 反序列化是秒级 CPU 计算，放 asyncio.to_thread——
+    直接跑在事件循环线程会阻塞全部并发请求（含 SSE 心跳）。
     """
-    import joblib
-    import numpy as np
+    import asyncio
 
     if method not in ("pca", "tsne"):
         raise HTTPException(status_code=400, detail=f"不支持的投影方法: {method!r}")
-    if not CLUSTER_RESULT_FILE.exists():
-        return {"available": False}
-
-    mtime = CLUSTER_RESULT_FILE.stat().st_mtime
-    cache_key = (method, mtime)
-    if cache_key in _PROJECTION_CACHE:
-        return _PROJECTION_CACHE[cache_key]
-
-    try:
-        artifacts = joblib.load(CLUSTER_RESULT_FILE)
-    except Exception:
-        return {"available": False}
-
-    features = artifacts.get("features", {})
-    labels = artifacts.get("labels", {})
-    cluster_names = artifacts.get("cluster_names", {})
-    gt_methods = set(artifacts.get("ground_truth_methods", []))
-    if not features:
-        return {"available": False}
-
-    methods = sorted(features.keys())
-    n = len(methods)
-    X = _build_feature_matrix(features, methods)
-    X = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-8)
-
-    result: dict = {"available": True, "method": method, "n": n}
-    if n < 2:
-        coords = np.zeros((n, 2))
-    elif method == "pca":
-        from sklearn.decomposition import PCA
-
-        pca = PCA(n_components=2, random_state=_SEED)
-        coords = pca.fit_transform(X)
-        result["explained_variance"] = [
-            round(float(r), 4) for r in pca.explained_variance_ratio_
-        ]
-    else:
-        from sklearn.manifold import TSNE
-
-        # sklearn 要求 perplexity < n，小样本自适应收缩
-        perplexity = max(1, min(30, (n - 1) // 3))
-        tsne = TSNE(n_components=2, perplexity=perplexity, init="pca", random_state=_SEED)
-        coords = tsne.fit_transform(X)
-        result["perplexity"] = perplexity
-
-    state = _load_state()
-    ratings = state.get("attacker_ratings", {})
-
-    # 评级键 = unit_id：method → unit 反查（units 表随聚类产物持久化）
-    method_to_unit = {}
-    for uid, u in (artifacts.get("units") or {}).items():
-        for mem in u.get("members", []):
-            method_to_unit[mem] = uid
-
-    points = []
-    for i, m in enumerate(methods):
-        cid = labels.get(m, -1)
-        try:
-            cid = int(cid)
-        except (TypeError, ValueError):
-            cid = -1
-        uid = method_to_unit.get(m)
-        points.append({
-            "method": m,
-            "unit": uid,
-            "x": round(float(coords[i, 0]), 4),
-            "y": round(float(coords[i, 1]), 4),
-            "cluster": cid,
-            "cluster_name": cluster_names.get(str(cid), f"簇{cid}"),
-            "tested": uid in gt_methods if uid else False,
-            "elo": round(ratings[uid], 1) if uid and uid in ratings else None,
-        })
-
-    result["points"] = points
-    _cache_put(_PROJECTION_CACHE, cache_key, result)
-    return result
+    return await asyncio.to_thread(_compute_projection, method)
 
 
 # ============================================================
 # 聚类层次树（树图 + 任意层切割）
 # ============================================================
-_CUT_CACHE: dict[tuple[int, float], dict] = {}
-
-
-@router.get("/api/cluster-tree")
-async def api_cluster_tree():
-    """返回层次树的树图坐标（scipy dendrogram 的 icoord/dcoord）与 auto-k 信息。"""
+def _compute_tree() -> dict:
+    """树图计算（同步 worker：dendrogram + joblib 反序列化）。"""
     artifacts = _load_tree_artifacts()
     if artifacts is None:
         return {"available": False}
@@ -198,10 +198,19 @@ async def api_cluster_tree():
     }
 
 
-@router.get("/api/cluster-cut")
-async def api_cluster_cut(k: int):
-    """在层次树上切出 k 个簇（fcluster O(n)），返回该层簇结构与命名。"""
+@router.get("/api/cluster-tree")
+async def api_cluster_tree():
+    """返回层次树的树图坐标（scipy dendrogram 的 icoord/dcoord）与 auto-k 信息。
 
+    r7/M-11：dendrogram 与 artifacts 反序列化放 to_thread，不阻塞事件循环。
+    """
+    import asyncio
+
+    return await asyncio.to_thread(_compute_tree)
+
+
+def _compute_cut(k: int) -> dict:
+    """切割计算（同步 worker：fcluster + auto_name_clusters 的 TF-IDF 命名）。"""
     artifacts = _load_tree_artifacts()
     if artifacts is None:
         return {"available": False}
@@ -212,54 +221,64 @@ async def api_cluster_cut(k: int):
         raise HTTPException(status_code=400, detail=f"k 必须在 [2, {n}] 内")
 
     mtime = CLUSTER_RESULT_FILE.stat().st_mtime
-    cache_key = (k, mtime)
-    if cache_key in _CUT_CACHE:
-        return _CUT_CACHE[cache_key]
 
-    from scipy.cluster.hierarchy import fcluster
+    def _load() -> dict:
+        from scipy.cluster.hierarchy import fcluster
 
-    from llmsec.clustering.pipeline import auto_name_clusters
+        from llmsec.clustering.pipeline import auto_name_clusters
 
-    Z = artifacts["linkage"]
-    methods = sorted(labels.keys())
-    raw = fcluster(Z, t=k, criterion="maxclust")
-    cut_labels = {m: int(c) - 1 for m, c in zip(methods, raw)}
+        Z = artifacts["linkage"]
+        methods = sorted(labels.keys())
+        raw = fcluster(Z, t=k, criterion="maxclust")
+        cut_labels = {m: int(c) - 1 for m, c in zip(methods, raw)}
 
-    names = auto_name_clusters(
-        cut_labels,
-        artifacts.get("features", {}),
-        artifacts.get("meta", {}),
-        artifacts.get("meta", {}).get("method_prompts", {}),
-    )
+        names = auto_name_clusters(
+            cut_labels,
+            artifacts.get("features", {}),
+            artifacts.get("meta", {}),
+            artifacts.get("meta", {}).get("method_prompts", {}),
+        )
 
-    clusters: dict[int, list[str]] = {}
-    for m, cid in cut_labels.items():
-        clusters.setdefault(cid, []).append(m)
+        clusters: dict[int, list[str]] = {}
+        for m, cid in cut_labels.items():
+            clusters.setdefault(cid, []).append(m)
 
-    state = _load_state()
-    ratings = state.get("attacker_ratings", {})
-    # 评级键 = unit_id：method → unit 反查（任意 k 层切割的成员仍是 method）
-    method_to_unit = {}
-    for uid, u in (artifacts.get("units") or {}).items():
-        for mem in u.get("members", []):
-            method_to_unit[mem] = uid
+        state = _load_state()
+        ratings = state.get("attacker_ratings", {})
+        # 评级键 = unit_id：method → unit 反查（任意 k 层切割的成员仍是 method）
+        method_to_unit = {}
+        for uid, u in (artifacts.get("units") or {}).items():
+            for mem in u.get("members", []):
+                method_to_unit[mem] = uid
 
-    result = {
-        "available": True,
-        "k": k,
-        "clusters": [
-            {
-                "id": cid,
-                "name": names.get(cid, f"簇{cid}"),
-                "size": len(members),
-                "members": sorted(members),
-                "mean_elo": (
-                    round(sum(ratings.get(method_to_unit.get(m), 1500.0) for m in members) / len(members), 1)
-                    if members else None
-                ),
-            }
-            for cid, members in sorted(clusters.items())
-        ],
-    }
-    _cache_put(_CUT_CACHE, cache_key, result)
-    return result
+        return {
+            "available": True,
+            "k": k,
+            "clusters": [
+                {
+                    "id": cid,
+                    "name": names.get(cid, f"簇{cid}"),
+                    "size": len(members),
+                    "members": sorted(members),
+                    "mean_elo": (
+                        round(sum(ratings.get(method_to_unit.get(m), 1500.0) for m in members) / len(members), 1)
+                        if members else None
+                    ),
+                }
+                for cid, members in sorted(clusters.items())
+            ],
+        }
+
+    # r9/P3-5：SigCache（key=k, sig=artifacts mtime）
+    return _CUT_CACHE.get(k, mtime, _load)
+
+
+@router.get("/api/cluster-cut")
+async def api_cluster_cut(k: int):
+    """在层次树上切出 k 个簇（fcluster O(n)），返回该层簇结构与命名。
+
+    r7/M-11：auto_name_clusters 含 TF-IDF 拟合，放 to_thread 不阻塞事件循环。
+    """
+    import asyncio
+
+    return await asyncio.to_thread(_compute_cut, k)

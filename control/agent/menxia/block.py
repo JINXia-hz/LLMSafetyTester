@@ -75,12 +75,6 @@ def approve_block(plan_id: str, step_id: str) -> bool:
     return clear_block(plan_id, step_id)
 
 
-def list_pending_blocks() -> list[dict]:
-    """列出所有待确认封驳（供前端展示）。"""
-    with _LOCK:
-        return [t.to_dict() for t in _TICKETS.values()]
-
-
 def reset_blocks() -> None:
     """清空所有封驳（测试用）。"""
     with _LOCK:

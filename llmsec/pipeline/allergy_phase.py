@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from llmsec.core.config import SAFE_TWINS_FILE
+from llmsec.core import config as _config  # r9/P3-4：孪生库路径调用期动态读
 from llmsec.core.io import iter_jsonl, write_json
 from llmsec.core.logging import get_logger
 from llmsec.core.text import strip_math_tax
@@ -36,7 +36,7 @@ from llmsec.evaluation.safe_twin import (
     judge_allergic,
     make_twin_entry,
 )
-from llmsec.params import API_DELAY, MAX_TWIN_WINDOW, MIN_TWIN_WINDOW
+from llmsec.params import API_DELAY, MAX_TWIN_WINDOW, MIN_TWIN_WINDOW, PREVIEW_PROMPT, PREVIEW_RESPONSE
 from llmsec.targets import call_target, set_active_target
 
 logger = get_logger(__name__)
@@ -177,7 +177,7 @@ def run_allergy_phase(method_records: dict[str, dict],
 
     # M9：并行前主线程一次性预载已有孪生（worker 内并发扫文件+append 有竞态）
     twin_cache = {}
-    for t in iter_jsonl(SAFE_TWINS_FILE):
+    for t in iter_jsonl(_config.SAFE_TWINS_FILE):
         if t.get("method") and t.get("safe_prompt"):
             twin_cache[t["method"]] = t["safe_prompt"]
     allergy_results = []
@@ -258,11 +258,11 @@ def run_allergy_phase(method_records: dict[str, dict],
         allergy_results.append({
             "method": method_name,
             "elo": tracker.get_attacker_elo(method_name),
-            "safe_prompt": safe_prompt[:200],
+            "safe_prompt": safe_prompt[:PREVIEW_PROMPT],
             "is_allergic": is_allergic,
             "judge_level": judge_level,
             "judge_failed": judge_failed,
-            "response_preview": content[:500],
+            "response_preview": content[:PREVIEW_RESPONSE],
         })
         sym = "🤧" if is_allergic else "✅"
         logger.info(f"     {sym} {method_name[:35]} (ELO={tracker.get_attacker_elo(method_name):.0f}) "

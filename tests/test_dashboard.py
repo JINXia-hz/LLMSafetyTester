@@ -150,8 +150,8 @@ def test_state_snapshot_priority(monkeypatch, tmp_path):
 import tempfile
 from pathlib import Path
 
+from llmsec.core.caches import SigCache  # r9/P3-5：cluster_viz 缓存已迁 SigCache
 from llmsec.params import ADAPTIVE_BATCH_MAX
-from llmsec.server.routers.cluster_viz import _CACHE_MAX_SIZE, _cache_put
 from llmsec.server.routers.tasks import EvaluateRequest
 from llmsec.server.task_manager import _refresh_task_status
 
@@ -206,12 +206,13 @@ def test_start_task_refreshes_before_409():
             real['log_path'].unlink(missing_ok=True)
 
 def test_cache_eviction():
-    cache: dict = {}
-    for i in range(_CACHE_MAX_SIZE + 10):
-        _cache_put(cache, ('k', i), i)
-    assert len(cache) == _CACHE_MAX_SIZE, f'M8: 缓存大小被压在上限 {_CACHE_MAX_SIZE}'
-    assert ('k', 0) not in cache and ('k', 9) not in cache, 'M8: 最旧的 10 条已按插入顺序淘汰'
-    assert cache.get(('k', _CACHE_MAX_SIZE + 9)) == _CACHE_MAX_SIZE + 9, 'M8: 最新条目保留'
+    """M8 语义在 r9 SigCache 上延续：上限淘汰最旧、最新保留。"""
+    cache = SigCache(maxsize=64)
+    for i in range(74):
+        cache.get(f'k{i}', 1, lambda i=i: i)   # 74 个不同 key 驱动上限淘汰
+    assert len(cache._data) == 64, 'M8: 缓存大小被压在上限 64'
+    assert 'k0' not in cache._data and 'k9' not in cache._data, 'M8: 最旧的 10 条已按插入顺序淘汰'
+    assert cache.get('k73', 1, lambda: -1) == 73, 'M8: 最新条目保留'
 
 def test_batch_limit_matches_params():
     from pydantic import ValidationError

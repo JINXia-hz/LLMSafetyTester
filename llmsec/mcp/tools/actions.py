@@ -18,18 +18,12 @@ from __future__ import annotations
 from typing import Any
 
 from llmsec.mcp import confirm as confirm_mod
+from llmsec.mcp.tools import _try
 
 
 # ============================================================
 # 辅助
 # ============================================================
-def _try(fn, *, error_hint: str = "") -> Any:
-    try:
-        return fn()
-    except Exception as e:
-        return {"error": f"{type(e).__name__}: {e}", "hint": error_hint}
-
-
 def _validate_merge_spec(spec: str, *, is_target: bool = False) -> str:
     """校验 merge 的 source/target 描述符，防 LLM 传外部路径穿越。
 

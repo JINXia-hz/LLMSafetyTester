@@ -20,10 +20,9 @@ from control.agent.bus import (
     KIND_STEP_FAILED,
     KIND_STEP_START,
     MENXIA,
-    ZHONGSHU,
     BusMessage,
     get_bus,
-    notify,
+    notify_routed,
 )
 from control.agent.menxia.block import (
     get_block,
@@ -151,8 +150,8 @@ def _on_plan_drafted(msg: BusMessage) -> None:
         return  # 无异常，不报告
 
     report = "门下省拟案审查：" + "；".join(findings)
-    notify(KIND_REVIEW, from_dept=MENXIA, to_dept=ZHONGSHU,
-           plan_id=plan_id, intent=msg.intent, session_id=msg.session_id,
+    notify_routed(KIND_REVIEW, from_dept=MENXIA,
+                  plan_id=plan_id, intent=msg.intent, session_id=msg.session_id,
            type="draft_review", findings=findings, report=report)
 
 
@@ -176,8 +175,8 @@ def _on_plan_approved(msg: BusMessage) -> None:
         return  # 无高危步骤，不报告
 
     report = f"此计划含 {high_risk} 个高危步骤。执行时门下省将逐一封驳确认。"
-    notify(KIND_REVIEW, from_dept=MENXIA, to_dept=ZHONGSHU,
-           plan_id=plan_id, intent=msg.intent, session_id=msg.session_id,
+    notify_routed(KIND_REVIEW, from_dept=MENXIA,
+                  plan_id=plan_id, intent=msg.intent, session_id=msg.session_id,
            type="approval_review", high_risk_count=high_risk, report=report)
 
 
@@ -221,14 +220,14 @@ def _on_step_start(msg: BusMessage) -> dict | None:
     # 已有封驳令且未被清除 → 保持封驳
     existing = get_block(plan_id, step_id)
     if existing is not None:
-        notify(KIND_BLOCK, from_dept=MENXIA, plan_id=plan_id,
-               intent=msg.intent, session_id=msg.session_id,
+        notify_routed(KIND_BLOCK, from_dept=MENXIA, plan_id=plan_id,
+                      intent=msg.intent, session_id=msg.session_id,
                step_id=step_id, ticket=existing.to_dict())
         return existing.to_dict()
 
     ticket = issue_block(plan_id, step_id, capability_name, risk_level, assessment)
-    notify(KIND_BLOCK, from_dept=MENXIA, plan_id=plan_id,
-           intent=msg.intent, session_id=msg.session_id,
+    notify_routed(KIND_BLOCK, from_dept=MENXIA, plan_id=plan_id,
+                  intent=msg.intent, session_id=msg.session_id,
            step_id=step_id, ticket=ticket.to_dict())
     return ticket.to_dict()
 
@@ -266,8 +265,8 @@ def _on_plan_done(msg: BusMessage) -> None:
     if not reviews:
         return
 
-    notify(KIND_REVIEW, from_dept=MENXIA, to_dept=ZHONGSHU,
-           plan_id=plan_id, intent=msg.intent, session_id=msg.session_id,
+    notify_routed(KIND_REVIEW, from_dept=MENXIA,
+                  plan_id=plan_id, intent=msg.intent, session_id=msg.session_id,
            reviews=reviews)
 
 
@@ -286,8 +285,8 @@ def _try_review(run_name: str) -> dict | None:
 
 def _on_step_failed(msg: BusMessage) -> None:
     """步骤失败，呈递异常简报到中书省面板。"""
-    notify(KIND_REVIEW, from_dept=MENXIA, to_dept=ZHONGSHU,
-           plan_id=msg.plan_id, intent=msg.intent, session_id=msg.session_id,
+    notify_routed(KIND_REVIEW, from_dept=MENXIA,
+                  plan_id=msg.plan_id, intent=msg.intent, session_id=msg.session_id,
            step_id=msg.payload.get("step_id", ""),
            capability=msg.payload.get("capability", ""),
            error=msg.payload.get("error", ""),

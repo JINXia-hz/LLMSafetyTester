@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
+from llmsec.core.caches import SigCache
 from llmsec.core.config import ATTACKS_DIR, CLUSTER_RESULT_FILE, OUTPUT_DIR
 from llmsec.core.io import read_json
 from llmsec.core.logging import get_logger
@@ -20,7 +21,8 @@ logger = get_logger(__name__)
 
 router = APIRouter()
 
-RUN_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{6}$")
+# r7：与 management/runs.py 的重复定义收敛为单源导入
+from llmsec.management.runs import RUN_NAME_RE  # noqa: E402
 
 
 def _runs_dir() -> Path:
@@ -190,7 +192,8 @@ _RUN_META_CACHE: dict[str, tuple[tuple[float, int] | None, dict]] = {}
 #   - batch 目录**内部**新增 target 子目录 → 只改该 batch_dir 的 mtime——只看顶层
 #     会漏掉多目标 run 中靠后完成的目标（/api/runs 长期看不到新报告），故必须逐 batch stat。
 # 逐 batch stat 的开销远小于全量重扫（后者还要读每个 run 的报告）。
-_DISCOVER_CACHE: tuple[tuple, list[dict]] | None = None
+# r9/P3-5：单槽签名缓存（sig = runs 目录签名），SigCache 统一实现
+_DISCOVER_CACHE = SigCache(maxsize=1)
 
 
 
@@ -222,17 +225,12 @@ def _file_sig(path: Path) -> tuple[float, int] | None:
 
 def _discover_runs_cached() -> list[dict]:
     """_discover_runs 的进程内缓存版。签名失效才重扫，首屏 4 次调用共享同一结果。"""
-    global _DISCOVER_CACHE
     runs_dir = _runs_dir()
     sig = _dir_sig(runs_dir)
     if sig is None:
         return _discover_runs()  # runs_dir 不存在/迭代中被删，直接扫（返回空）
-    if _DISCOVER_CACHE and _DISCOVER_CACHE[0] == sig:
-        # 缓存命中：返回副本，避免调用方 mutate 污染缓存（/api/runs 会 r.update(...)）
-        return [dict(r) for r in _DISCOVER_CACHE[1]]
-    runs = _discover_runs()
-    _DISCOVER_CACHE = (sig, runs)
-    return [dict(r) for r in runs]
+    # 副本语义保留：避免调用方 mutate 污染缓存（/api/runs 会 r.update(...)）
+    return [dict(r) for r in _DISCOVER_CACHE.get((), sig, _discover_runs)]
 
 
 def _run_meta(run_dir: Path) -> dict:
@@ -601,13 +599,21 @@ async def api_elo(run: str | None = None):
 
     # 评级键 = unit_id（簇指纹）；簇名/规模取自聚类产物的 units 表
     # （独立于 _load_tree_artifacts——树图降级不影响 units 查询）
+    # r7/M-11：joblib.load 可能反序列化全量特征矩阵，放 to_thread 不阻塞事件循环
     units: dict = {}
-    try:
-        import joblib
-        if CLUSTER_RESULT_FILE.exists():
-            units = (joblib.load(CLUSTER_RESULT_FILE).get("units") or {})
-    except Exception as _e:
-        logger.warning("降级: %s", _e)
+
+    def _load_units() -> dict:
+        try:
+            import joblib
+            if CLUSTER_RESULT_FILE.exists():
+                return joblib.load(CLUSTER_RESULT_FILE).get("units") or {}
+        except Exception as _e:
+            logger.warning("降级: %s", _e)
+        return {}
+
+    import asyncio
+
+    units = await asyncio.to_thread(_load_units)
 
     ranking = [
         {
@@ -741,8 +747,8 @@ async def api_model(run: str | None = None):
 
 # /api/attack-sets 行数缓存：按 (文件名, mtime+size) 失效。
 # 攻击集是用户上传的静态文件（读多写少），逐行计数开销大（实测 attacks/ 共 37MB），
-# 文件不变时复用上次计数。模式同 _RUN_META_CACHE。
-_ATTACK_SET_CACHE: dict[str, tuple[tuple[float, int], int]] = {}
+# 文件不变时复用上次计数。（r9/P3-5：SigCache 统一实现）
+_ATTACK_SET_CACHE = SigCache(maxsize=128)
 
 
 def _attack_set_records(p: Path) -> int:
@@ -752,9 +758,6 @@ def _attack_set_records(p: Path) -> int:
         sig = (st.st_mtime, st.st_size)
     except OSError:
         return 0
-    cached = _ATTACK_SET_CACHE.get(p.name)
-    if cached and cached[0] == sig:
-        return cached[1]
     n_records = 0
     try:
         with open(p, encoding="utf-8") as f:
@@ -763,8 +766,7 @@ def _attack_set_records(p: Path) -> int:
                     n_records += 1
     except OSError:
         pass
-    _ATTACK_SET_CACHE[p.name] = (sig, n_records)
-    return n_records
+    return _ATTACK_SET_CACHE.get(p.name, sig, lambda: n_records)
 
 
 @router.get("/api/attack-sets")
@@ -804,15 +806,60 @@ class AddTargetRequest(BaseModel):
     api_key: str
 
 
+def _env_lock():
+    """跨进程 .env 写锁（r7/M-10）。
+
+    看板 / control 层 env_snapshot / MCP actions 可能并发读-改-写同一 .env：
+    无锁时两个并发 RMW 互相覆盖丢 key、并发 add 算出相同 TARGET_<N> 索引互覆。
+    基于 filelock（项目核心依赖），与 control.core.locks.cross_process_lock 同机制。
+    """
+    from filelock import FileLock
+
+    from llmsec.core.config import PROJECT_ROOT
+    return FileLock(str(PROJECT_ROOT / ".env.lock"), timeout=10.0)
+
+
+def _env_quote(value: str) -> str:
+    """dotenv 值引号规则（r7/M-10，与 control/core/env_snapshot._serialize_env 一致）。
+
+    含空格/#/换行或为空时加双引号，否则裸写——不加引号的 `#` 会被 dotenv 当注释
+    截断、空值会被当"未设置"。
+    """
+    value = value.strip()
+    if any(c in value for c in (" ", "#", "\n")) or not value:
+        return f'"{value}"'
+    return value
+
+
+def _backup_env_pre_write(env_path) -> None:
+    """r7/M-10：真正的写前备份（旧内容，回滚用）→ .env 同目录 .env.bak。
+
+    原实现唯一的"备份"发生在覆写**之后**（备的是新内容），旧内容永不可恢复。
+    另保留写后 OUTPUT_DIR/.env.bak 拷贝（docker entrypoint 从该处恢复最新配置，
+    语义不同不能合并）。
+    """
+    import shutil
+
+    if env_path.exists():
+        try:
+            shutil.copy2(env_path, env_path.with_name(env_path.name + ".bak"))
+        except OSError:
+            pass
+
+
 @router.post("/api/targets/add")
 async def api_targets_add(req: AddTargetRequest):
     """「+」加目标：把新目标追加到 .env（TARGET_<N>_* 四件套 + 加入 TARGETS 列表）。
 
-    写前先备份 .env→.env.bak；原子写（保留原有注释/格式，只更新 TARGETS 行 + 追加四件套）。
+    r7/M-10：整段读-改-写持跨进程锁（防并发 add 算出相同 TARGET_<N> 互覆）；
+    写前备份旧内容到 .env.bak（回滚用）；值按 dotenv 规则加引号；原子写
+    （保留原有注释/格式，只更新 TARGETS 行 + 追加四件套）。
     api_key 写入 .env（gitignored），响应绝不回显明文。
     """
     import re
     import shutil
+
+    from filelock import Timeout as FileLockTimeout
 
     from llmsec.core.config import PROJECT_ROOT
     name = req.name.strip()
@@ -821,58 +868,65 @@ async def api_targets_add(req: AddTargetRequest):
     env_path = PROJECT_ROOT / ".env"
     if env_path.is_dir():
         raise HTTPException(500, ".env 是目录而非文件——通常是 Docker 挂载了不存在的 .env 导致（请先在宿主机 cp .env.example .env）")
-    # 读（.env 不存在 → 自动新建）
-    if env_path.exists():
-        try:
-            lines = env_path.read_text(encoding="utf-8").splitlines()
-        except OSError as e:
-            raise HTTPException(500, f"读取 .env 失败: {e}")
-    else:
-        lines = []
 
-    # 找已用最大 TARGET_<N>_ 索引 + 现有 TARGETS 列表
-    used_n = []
-    targets_line_idx = None
-    targets_names = []
-    for i, ln in enumerate(lines):
-        s = ln.strip()
-        if s.startswith("TARGETS="):
-            targets_line_idx = i
-            targets_names = [x.strip() for x in s[len("TARGETS="):].split(",") if x.strip()]
-        m = re.match(r"^TARGET_(\d+)_NAME\s*=", ln)
-        if m:
-            used_n.append(int(m.group(1)))
-    if name in targets_names:
-        raise HTTPException(400, f"目标名 {name!r} 已存在于 TARGETS")
-    next_n = (max(used_n) + 1) if used_n else 1
-    model = (req.model.strip() or name)
-
-    # 更新 TARGETS 行
-    new_targets_val = ",".join(targets_names + [name])
-    if targets_line_idx is not None:
-        lines[targets_line_idx] = f"TARGETS={new_targets_val}"
-    else:
-        lines.append(f"TARGETS={new_targets_val}")
-
-    # 追加四件套
-    block = [
-        "",
-        f"# ---- 看板新增目标 {name}（TARGET_{next_n}） ----",
-        f"TARGET_{next_n}_NAME={name}",
-        f"TARGET_{next_n}_MODEL={model}",
-        f"TARGET_{next_n}_BASE_URL={req.base_url.strip()}",
-        f"TARGET_{next_n}_API_KEY={req.api_key.strip()}",
-    ]
-    lines.extend(block)
-
-    # 原子写。注意 .env 是点文件（suffix 为空串），with_suffix 会生成 ".env.env.tmp"，
-    # 必须用 with_name 拼接（与 _update_env_vars 的写法一致）。
-    tmp = env_path.with_name(env_path.name + ".tmp")
     try:
-        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        tmp.replace(env_path)
-    except OSError as e:
-        raise HTTPException(500, f"写入 .env 失败: {e}")
+        with _env_lock():
+            # 读（.env 不存在 → 自动新建）
+            if env_path.exists():
+                try:
+                    lines = env_path.read_text(encoding="utf-8").splitlines()
+                except OSError as e:
+                    raise HTTPException(500, f"读取 .env 失败: {e}")
+            else:
+                lines = []
+
+            # 找已用最大 TARGET_<N>_ 索引 + 现有 TARGETS 列表
+            used_n = []
+            targets_line_idx = None
+            targets_names = []
+            for i, ln in enumerate(lines):
+                s = ln.strip()
+                if s.startswith("TARGETS="):
+                    targets_line_idx = i
+                    targets_names = [x.strip() for x in s[len("TARGETS="):].split(",") if x.strip()]
+                m = re.match(r"^TARGET_(\d+)_NAME\s*=", ln)
+                if m:
+                    used_n.append(int(m.group(1)))
+            if name in targets_names:
+                raise HTTPException(400, f"目标名 {name!r} 已存在于 TARGETS")
+            next_n = (max(used_n) + 1) if used_n else 1
+            model = (req.model.strip() or name)
+
+            # 更新 TARGETS 行
+            new_targets_val = ",".join(targets_names + [name])
+            if targets_line_idx is not None:
+                lines[targets_line_idx] = f"TARGETS={new_targets_val}"
+            else:
+                lines.append(f"TARGETS={new_targets_val}")
+
+            # 追加四件套（值按 dotenv 规则加引号）
+            block = [
+                "",
+                f"# ---- 看板新增目标 {name}（TARGET_{next_n}） ----",
+                f"TARGET_{next_n}_NAME={_env_quote(name)}",
+                f"TARGET_{next_n}_MODEL={_env_quote(model)}",
+                f"TARGET_{next_n}_BASE_URL={_env_quote(req.base_url)}",
+                f"TARGET_{next_n}_API_KEY={_env_quote(req.api_key)}",
+            ]
+            lines.extend(block)
+
+            # 写前备份旧内容（回滚用），然后原子写。
+            # 注意 .env 是点文件（suffix 为空串），with_suffix 会生成 ".env.env.tmp"，
+            # 必须用 with_name 拼接（与 _update_env_vars 的写法一致）。
+            _backup_env_pre_write(env_path)
+            tmp = env_path.with_name(env_path.name + ".tmp")
+            try:
+                tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                tmp.replace(env_path)
+            except OSError as e:
+                raise HTTPException(500, f"写入 .env 失败: {e}")
+    except FileLockTimeout:
+        raise HTTPException(503, "另一个 .env 写入正在进行，请稍后重试")
 
     # 重新加载 env 到当前进程（load_targets 会 load_env，但显式 set 更新本进程 os.environ）
     import os
@@ -885,7 +939,8 @@ async def api_targets_add(req: AddTargetRequest):
     os.environ[f"TARGET_{next_n}_API_KEY"] = req.api_key.strip()
     load_env()
 
-    # 持久化到 output 卷（docker 重启后 entrypoint 从此恢复 .env）
+    # 持久化到 output 卷（docker 重启后 entrypoint 从此恢复 .env——此处是
+    # 新内容的持久化，与写前回滚备份是两个不同语义）
     try:
         from llmsec.core.config import OUTPUT_DIR
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -900,47 +955,57 @@ async def api_targets_add(req: AddTargetRequest):
 # 环境参数配置（连接配置：默认 TARGET / GENERATOR / JUDGE）
 # ============================================================
 def _update_env_vars(updates: dict) -> None:
-    """更新 .env 中指定 KEY=VALUE（存在则替换，不存在则追加）；先备份 .env.bak，原子写。
+    """更新 .env 中指定 KEY=VALUE（存在则替换，不存在则追加）。
 
-    供 /api/env PUT 与未来其它 .env 写入复用。注意：只更新传入的 key，其余行/注释原样保留。
+    r7/M-10：整段读-改-写持跨进程锁；写前备份旧内容到 .env.bak（回滚用）；
+    值按 dotenv 规则加引号；原子写。注意：只更新传入的 key，其余行/注释原样保留。
     """
     import os
     import shutil
+
+    from filelock import Timeout as FileLockTimeout
 
     from llmsec.core.config import PROJECT_ROOT
     env_path = PROJECT_ROOT / ".env"
     if env_path.is_dir():
         raise HTTPException(500, ".env 是目录而非文件——通常是 Docker 挂载了不存在的 .env 导致（请先在宿主机 cp .env.example .env）")
-    if env_path.exists():
-        try:
-            lines = env_path.read_text(encoding="utf-8").splitlines()
-        except OSError as e:
-            raise HTTPException(500, f"读取 .env 失败: {e}")
-    else:
-        lines = []  # .env 不存在 → 自动新建（下方追加逻辑填充内容）
 
-    keys = set(updates.keys())
-    found: set[str] = set()
-    for i, ln in enumerate(lines):
-        s = ln.lstrip()
-        for k in keys:
-            if s.startswith(k + "="):
-                lines[i] = f"{k}={updates[k]}"
-                found.add(k)
-                break
-    for k in keys - found:
-        lines.append(f"{k}={updates[k]}")
-
-    tmp = env_path.with_name(env_path.name + ".tmp")
     try:
-        tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        tmp.replace(env_path)
-    except OSError as e:
-        raise HTTPException(500, f"写入 .env 失败: {e}")
-    for k, v in updates.items():
-        os.environ[k] = v
+        with _env_lock():
+            if env_path.exists():
+                try:
+                    lines = env_path.read_text(encoding="utf-8").splitlines()
+                except OSError as e:
+                    raise HTTPException(500, f"读取 .env 失败: {e}")
+            else:
+                lines = []  # .env 不存在 → 自动新建（下方追加逻辑填充内容）
 
-    # 持久化到 output 卷（docker 重启后 entrypoint 从此恢复 .env）
+            keys = set(updates.keys())
+            found: set[str] = set()
+            for i, ln in enumerate(lines):
+                s = ln.lstrip()
+                for k in keys:
+                    if s.startswith(k + "="):
+                        lines[i] = f"{k}={_env_quote(updates[k])}"
+                        found.add(k)
+                        break
+            for k in keys - found:
+                lines.append(f"{k}={_env_quote(updates[k])}")
+
+            _backup_env_pre_write(env_path)
+            tmp = env_path.with_name(env_path.name + ".tmp")
+            try:
+                tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                tmp.replace(env_path)
+            except OSError as e:
+                raise HTTPException(500, f"写入 .env 失败: {e}")
+    except FileLockTimeout:
+        raise HTTPException(503, "另一个 .env 写入正在进行，请稍后重试")
+
+    for k, v in updates.items():
+        os.environ[k] = v.strip()
+
+    # 持久化到 output 卷（docker 重启后 entrypoint 从此恢复 .env——新内容）
     try:
         from llmsec.core.config import OUTPUT_DIR
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

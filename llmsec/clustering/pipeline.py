@@ -19,7 +19,7 @@ from collections import Counter, defaultdict
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-from llmsec.core import CLUSTER_MATRIX_FILE
+from llmsec.core import config as _config  # r9/P3-4：矩阵路径调用期动态读
 from llmsec.core.logging import get_logger
 from llmsec.core.text import extract_json_block
 
@@ -151,14 +151,13 @@ def auto_name_clusters(
 def ai_rename_clusters(
     cluster_names: dict[int, str],
     labels: dict[str, int],
-    features: dict,
-    meta: dict,
     method_prompts: dict[str, str],
 ) -> dict[int, str]:
     """LLM 把技术名润色为简短中文人话标签；离线/失败时原样返回技术名。
 
     一次调用覆盖所有簇（省 API）。用 GENERATOR_* 配置（同攻击生成模型）。
     仅在主聚类（hdb.py）调用；dashboard 交互重切走 auto_name_clusters 技术名。
+    （r7：删除从未使用的 features/meta 形参。）
     """
     if not cluster_names:
         return cluster_names
@@ -337,4 +336,4 @@ def _export_matrix(labels: dict[str, int], features: dict, meta: dict):
                 # technique 等多标签块按整数写，其余保留 6 位小数
                 row[name] = int(v) if block == "technique" else round(v, 6)
         rows.append(row)
-    write_csv(CLUSTER_MATRIX_FILE, rows)
+    write_csv(_config.CLUSTER_MATRIX_FILE, rows)

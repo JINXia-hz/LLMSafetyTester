@@ -11,6 +11,18 @@ from __future__ import annotations
 
 from typing import Any
 
+
+def _try(fn, *, error_hint: str = "") -> Any:
+    """工具函数体的统一异常包装：返回 {"error", "hint"} 而非抛出。
+
+    r7：原在 actions/tasks/query 三处逐字重复，上提到包级单源。
+    """
+    try:
+        return fn()
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {e}", "hint": error_hint}
+
+
 from llmsec.mcp.tools import actions, compute, query, tasks
 
 

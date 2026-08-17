@@ -44,6 +44,7 @@ from llmsec.params import (
     ADAPTIVE_BATCH_MIN,
     API_DELAY,
     CONV_CI_TARGET,
+    PREVIEW_RESPONSE,
     SAMPLER_COORD_MIN_PER_CLUSTER,
     SAMPLER_HYBRID_EXPLORE_ROUNDS,
     SAMPLER_INFOGAIN_ALPHA,
@@ -225,7 +226,7 @@ def _build_attack_row(rec: dict, result: dict, round_idx: int, phase: str,
         "judge_dangerousness": result.get("judge_dangerousness", 1),
         "is_harmful": result.get("is_harmful", False),
         "is_refusal": result.get("is_refusal", False),
-        "response_preview": result.get("content", "")[:500],
+        "response_preview": result.get("content", "")[:PREVIEW_RESPONSE],
         # 预筛可观测性：透传 prescreen_result（refusal/empty/None）与 Judge 调用数。
         # 否则 attack_results.jsonl 看不出预筛省了多少 API，prescreen_hit_rate 恒为 0。
         "prescreen_result": result.get("prescreen_result"),

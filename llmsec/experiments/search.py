@@ -98,7 +98,7 @@ class BayesianSearch(SearchEngine):
         trial = self._study.ask()
         params = {}
         for name in self._param_order:
-            params[name] = _suggest(self._study, trial, name, self.config.space[name])
+            params[name] = _suggest(trial, name, self.config.space[name])
         self._pending[self._key(params)].append(trial)  # 入队（支持重复参数）
         return params
 
@@ -165,7 +165,7 @@ def _sample(spec: FactorSpec, rng: random.Random):
     return rng.uniform(lo, hi)
 
 
-def _suggest(study, trial, name: str, spec: FactorSpec):
+def _suggest(trial, name: str, spec: FactorSpec):
     if spec.type == "categorical":
         return trial.suggest_categorical(name, spec.choices or [None])
     if spec.type == "int":

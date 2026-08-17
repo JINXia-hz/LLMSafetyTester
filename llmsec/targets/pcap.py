@@ -27,12 +27,29 @@ load_env()
 
 # ============================================================
 # 配置（与原 targets.py 一致：env 覆盖，内网地址为默认值）
-# 注意：以下常量是 import 期固化的默认值；实际使用处（建客户端/发请求）
-# 会重新读 env，保证 dashboard 等长跑进程运行期改 os.environ 也生效。
+# r9/P3-3：函数是唯一取值源（调用期读 env，长跑进程运行期改 os.environ 即生效）；
+# 模块常量只是 import 期快照（BASE_PAYLOAD 模板等 import 期构造物使用，
+# M11 测试钉住"常量不被运行期污染"）。运行期敏感的消费方一律调函数。
 # ============================================================
-PCAP_JUDGE_URL = os.getenv("PCAP_JUDGE_URL", "")
-PCAP_MODEL_VERSION = os.getenv("PCAP_MODEL_VERSION", "unknown")
-PCAP_PROMPT_KEY = os.getenv("PCAP_PROMPT_KEY", "")
+def pcap_judge_url() -> str:
+    """PCAP judge 端点（调用期读 env）。"""
+    return os.getenv("PCAP_JUDGE_URL", "")
+
+
+def pcap_model_version() -> str:
+    """PCAP 判读模型版本（调用期读 env；pcap 模式的防御方名 = 此值）。"""
+    return os.getenv("PCAP_MODEL_VERSION", "unknown")
+
+
+def pcap_prompt_key() -> str:
+    """PCAP judge 的 prompt key（调用期读 env）。"""
+    return os.getenv("PCAP_PROMPT_KEY", "")
+
+
+# import 期快照（仅供 BASE_PAYLOAD 等模板构造；运行期取值请用上面的函数）
+PCAP_JUDGE_URL = pcap_judge_url()
+PCAP_MODEL_VERSION = pcap_model_version()
+PCAP_PROMPT_KEY = pcap_prompt_key()
 
 REQUEST_TIMEOUT = 90.0   # PCAP 判读较慢
 from llmsec.params import API_MAX_RETRIES, TARGET_RETRY_DELAY  # noqa: E402
@@ -95,9 +112,9 @@ def build_pcap_payload(prompt_text: str, strip_math: bool = True) -> dict:
     # env 惰性读取：model/prompt_key 以模块常量为默认，运行期改 os.environ 生效
     # （注意整体替换 model_config，避免就地修改 BASE_PAYLOAD 的共享子 dict）
     payload["model_config"] = {
-        "version_name": os.getenv("PCAP_MODEL_VERSION", PCAP_MODEL_VERSION),
+        "version_name": pcap_model_version(),
     }
-    payload["pcap_judge_prompt_key"] = os.getenv("PCAP_PROMPT_KEY", PCAP_PROMPT_KEY)
+    payload["pcap_judge_prompt_key"] = pcap_prompt_key()
     payload["log"] = build_pcap_log(prompt_text, strip_math=strip_math)
     return payload
 
@@ -117,7 +134,7 @@ class PcapJudgeTargetClient(TargetClient):
         max_retries: int = API_MAX_RETRIES,
     ):
         # env 惰性读取：url 缺省时以模块常量为默认，长跑进程运行期改 env 生效
-        self.url = url or os.getenv("PCAP_JUDGE_URL", PCAP_JUDGE_URL)
+        self.url = url or pcap_judge_url()
         self.timeout = timeout
         self.max_retries = max_retries
 

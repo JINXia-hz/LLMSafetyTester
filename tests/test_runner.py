@@ -23,7 +23,8 @@ def _setup(tmp_path, monkeypatch):
     monkeypatch.setattr(alp, "call_target",
                         lambda prompt: {"error": None, "content": "ok response from target model", "target_refused": False})
     # 孪生缓存重定向到 tmp，避免读/写全局 output/state/safe_twins.jsonl
-    monkeypatch.setattr(alp, "SAFE_TWINS_FILE", tmp / "safe_twins.jsonl")
+    import llmsec.core.config as _alp_cfg
+    monkeypatch.setattr(_alp_cfg, "SAFE_TWINS_FILE", tmp / "safe_twins.jsonl")
     monkeypatch.setattr(ap, "evaluate_single",
                         lambda prompt, ea, judge, use_judge=True: {
                             "content": "ok", "math_score": None, "actual_answer": None,

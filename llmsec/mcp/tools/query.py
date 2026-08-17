@@ -19,16 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-
-# ============================================================
-# 辅助：统一错误包装（返回结构化 dict 而非抛异常）
-# ============================================================
-def _try(fn, *, error_hint: str = "") -> Any:
-    """执行 fn()，出错时返回 {"error": ..., "hint": ...}。"""
-    try:
-        return fn()
-    except Exception as e:
-        return {"error": f"{type(e).__name__}: {e}", "hint": error_hint}
+from llmsec.mcp.tools import _try
 
 
 # ============================================================

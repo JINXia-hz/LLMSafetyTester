@@ -22,10 +22,11 @@ from textual.widgets import (
 )
 from textual.widgets.selection_list import Selection
 
+from llmsec.params import SAMPLERS
 from llmsec.tui.panels.common import TaskTablePanel
 from llmsec.tui.task_store import TaskSnapshot, TaskStore, attack_files
 
-_SAMPLERS = ("hybrid", "gap", "infogain", "coordinate")
+_SAMPLERS = ("hybrid", *(s for s in SAMPLERS if s != "hybrid"))  # r7：单源派生，hybrid 默认置顶
 
 
 class TasksPanel(TaskTablePanel):

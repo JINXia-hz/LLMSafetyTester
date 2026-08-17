@@ -17,7 +17,6 @@
 """
 from __future__ import annotations
 
-import threading
 import time
 from pathlib import Path
 
@@ -195,33 +194,10 @@ def test_r2_store_load_corrupt_self_heals(tmp_path):
 
 
 # ============================================================
-# M7：block._TICKETS 并发
 # ============================================================
-def test_r2_block_list_pending_concurrent_no_crash():
-    from control.agent.menxia import block
-
-    block.reset_blocks()
-    stop = threading.Event()
-    errors: list[str] = []
-
-    def _lister():
-        while not stop.is_set():
-            try:
-                block.list_pending_blocks()
-            except RuntimeError as e:
-                errors.append(str(e))
-
-    t = threading.Thread(target=_lister)
-    t.start()
-    try:
-        for i in range(300):
-            block.issue_block("p", f"s{i}", "cap", "high",
-                              {"summary": "x", "detail": "y"})
-    finally:
-        stop.set()
-        t.join(timeout=5)
-        block.reset_blocks()
-    assert not errors, f"M7: 并发迭代 _TICKETS 崩溃: {errors[:2]}"
+# M7：block._TICKETS 并发（r7：list_pending_blocks 无生产调用方已删，
+#     本测试随之移除——封驳令的并发安全由 issue/approve/clear 的锁覆盖）
+# ============================================================
 
 
 # ============================================================
@@ -231,8 +207,9 @@ def test_r2_thresholds_cache_ttl(monkeypatch):
     from control.agent.menxia import review
     from control.core import invoker
 
-    review._THRESHOLDS_CACHE = {"stale": True}
-    review._THRESHOLDS_CACHED_AT = time.time() - 3600  # 1 小时前，早已过期
+    # r9/P3-5：TTLCache——预置一个已过期的值（_at 置 1 小时前）
+    review._THRESHOLDS_CACHE._value = {"stale": True}
+    review._THRESHOLDS_CACHE._at = time.time() - 3600  # 1 小时前，早已过期
 
     def _fake_run(argv, *, timeout=None, **kw):
         return invoker.InvokeResult(argv=argv, returncode=0, json={"fresh": True})
@@ -242,8 +219,7 @@ def test_r2_thresholds_cache_ttl(monkeypatch):
         th = review.get_thresholds()
         assert th == {"fresh": True}, "M8: TTL 过期后应重新获取阈值（此前永不过期）"
     finally:
-        review._THRESHOLDS_CACHE = None
-        review._THRESHOLDS_CACHED_AT = 0.0
+        review._THRESHOLDS_CACHE.clear()
 
 
 # ============================================================

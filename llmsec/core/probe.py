@@ -91,11 +91,20 @@ def probe_target(name: str, cfg) -> dict:
     ids = None
     try:
         if backend == "pcap_judge":
+            # r7/M-3：pcap 后端实际评估端点是 PCAP_JUDGE_URL（create_target_client
+            # 对 pcap 完全忽略 cfg），探活必须探同一端点——探 cfg.base_url
+            # （OpenAI 型地址）时探活结论与评估所用端点根本不是同一个
+            from llmsec.targets.pcap import pcap_judge_url
+            _pcap_url = pcap_judge_url()
+            if not _pcap_url:
+                return {"name": name, "model": cfg.model, "reachable": False,
+                        "latency_ms": None,
+                        "error": "PCAP_JUDGE_URL 未配置", "warning": None}
             import requests
             import urllib3
             urllib3.disable_warnings()
             t0 = time.time()
-            r = requests.get(cfg.base_url, timeout=5, verify=False)
+            r = requests.get(_pcap_url, timeout=5, verify=False)
             r.raise_for_status()
             latency = round((time.time() - t0) * 1000)
         else:

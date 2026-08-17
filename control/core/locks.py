@@ -1,7 +1,7 @@
 """control.core.locks — 跨进程文件锁（control 层共享原语）。
 
-隔离边界约束（control/__init__.py）：control 层绝不 import llmsec 内部 API，
-故不能复用 llmsec/core/results.py 的 _file_lock。本模块基于环境已安装的
+边界说明（r7 修正）：control 层不复用 llmsec/core/results.py 的 _file_lock
+（那是 results.json 专用的 msvcrt/fcntl 手写锁），本模块基于环境已安装的
 filelock 包（比手写 msvcrt/fcntl 更可靠——处理了锁文件清理、线程内重入、
 Windows LockFileEx 边界），提供语义一致的跨进程文件锁。
 

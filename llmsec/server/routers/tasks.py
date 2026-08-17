@@ -16,7 +16,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from llmsec.core.config import ATTACKS_DIR
-from llmsec.params import ADAPTIVE_BATCH_MAX, DEFAULT_BATCH_SIZE, DEFAULT_MAX_ROUNDS, MAX_ROUNDS_LIMIT
+from llmsec.params import ADAPTIVE_BATCH_MAX, DEFAULT_BATCH_SIZE, DEFAULT_MAX_ROUNDS, MAX_ROUNDS_LIMIT, SAMPLERS
 from llmsec.server import task_manager
 from llmsec.server.task_manager import (
     TASKS,
@@ -41,7 +41,7 @@ class EvaluateRequest(BaseModel):
     input: str = "l1.jsonl"
     batch_size: int = Field(default=min(DEFAULT_BATCH_SIZE, ADAPTIVE_BATCH_MAX), ge=1, le=ADAPTIVE_BATCH_MAX)
     max_rounds: int = Field(default=DEFAULT_MAX_ROUNDS, ge=1, le=MAX_ROUNDS_LIMIT)
-    sampler: str = Field(default="hybrid", pattern="^(gap|infogain|coordinate|hybrid)$")
+    sampler: str = Field(default="hybrid", pattern="^(" + "|".join(SAMPLERS) + ")$")
     # 采样器权重（None = 用 params 默认值，不传 --xxx 旗标给 runner）
     sampler_alpha: float | None = None
     sampler_beta: float | None = None

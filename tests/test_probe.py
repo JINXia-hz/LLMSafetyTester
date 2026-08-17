@@ -72,7 +72,7 @@ def test_probe_pcap_json_and_error_branches(monkeypatch, caplog):
     import llmsec.pipeline.probe as pb
 
     monkeypatch.setattr(pb, "build_pcap_payload", lambda text, strip_math: {"q": text})
-    monkeypatch.setattr(pb, "PCAP_JUDGE_URL", "http://fake-judge")
+    monkeypatch.setattr(pb, "pcap_judge_url", lambda: "http://fake-judge")
 
     # 正常 JSON 响应
     monkeypatch.setattr(pb.requests, "post",

@@ -176,9 +176,11 @@ def generate(
             attack_prompt = attack_prompt.encode("utf-8", errors="replace").decode("utf-8")
 
             # 选择混淆方法：启用时按轮询取，否则 raw
+            # r7/L-2：轮换基数与 template_idx 相同（idx*variants+v）——只用 v 时
+            # 默认 --variants 1 下恒为 b64，四种混淆多样性为 0，与 --obfuscate 文案不符
             obf_method = "raw"
             if obfuscate:
-                obf_method = obfuscations[v % len(obfuscations)]
+                obf_method = obfuscations[(idx * variants + v) % len(obfuscations)]
                 attack_prompt = apply_obfuscation(attack_prompt, obf_method)
 
             record_id = f"hb-{behavior_id}-{v:02d}"

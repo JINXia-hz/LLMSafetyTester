@@ -490,8 +490,8 @@ def test_load_artifacts_prefers_cluster_result():
 
 # ===== from test_elo_access.py =====
 
+import llmsec.core.config as _results_cfg
 import llmsec.core.config as cfg
-import llmsec.core.results as results_mod
 from llmsec.core.results import ResultsMatrix
 from llmsec.evaluation import elo_access as ea
 from llmsec.evaluation.predictors.blend import load_or_fit_blend_predictor
@@ -499,7 +499,7 @@ from llmsec.evaluation.predictors.blend import load_or_fit_blend_predictor
 
 def _setup(tmp_path, monkeypatch):
 
-    monkeypatch.setattr(results_mod, "RESULTS_FILE", tmp_path / "results.json")
+    monkeypatch.setattr(_results_cfg, "RESULTS_FILE", tmp_path / "results.json")
 
     monkeypatch.setattr(cfg, "ELO_CACHE_FILE", tmp_path / "elo_cache.json")
 
@@ -595,9 +595,9 @@ def test_blend_predictor_cache_reuse(tmp_path, monkeypatch):
 
     _setup(tmp_path, monkeypatch)
 
-    import llmsec.evaluation.predictors.blend as bp_mod
 
-    monkeypatch.setattr(bp_mod, "PREDICTORS_DIR", tmp_path / "predictors")
+    import llmsec.core.config as _bp_cfg
+    monkeypatch.setattr(_bp_cfg, "PREDICTORS_DIR", tmp_path / "predictors")
 
     R = ResultsMatrix()
 

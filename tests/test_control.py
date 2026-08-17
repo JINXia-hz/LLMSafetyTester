@@ -572,7 +572,7 @@ class TestReview:
     def test_get_thresholds_from_cli(self, monkeypatch):
         """阈值经 CLI 获取（不复制），mock invoker 验证。"""
         from control.agent.menxia import review
-        review._THRESHOLDS_CACHE = None  # 清缓存
+        review._THRESHOLDS_CACHE.clear()  # 清缓存（r9/P3-5：TTLCache）
         from control.core import invoker
         monkeypatch.setattr(invoker, "_run", lambda argv: type("R", (), {
             "ok": True, "json": {"PORTRAIT_ASR_SAFE": 0.3, "ALLERGY_FPR_SAFE": 0.05},
@@ -580,7 +580,7 @@ class TestReview:
         })())
         th = review.get_thresholds()
         assert th["PORTRAIT_ASR_SAFE"] == 0.3
-        review._THRESHOLDS_CACHE = None  # 清理
+        review._THRESHOLDS_CACHE.clear()  # 清理（r9/P3-5：TTLCache）
 
     def test_review_run_returns_structure(self, tmp_path, monkeypatch):
         """review_run 完整流程（mock 读报告）。"""
@@ -596,7 +596,7 @@ class TestReview:
         (d / "runner_report.json").write_text(json.dumps(report), encoding="utf-8")
         monkeypatch.setattr(config, "RUNS_DIR", runs)
         monkeypatch.setattr(cmp, "RUNS_DIR", runs)
-        review._THRESHOLDS_CACHE = None
+        review._THRESHOLDS_CACHE.clear()
         result = review.review_run("2026-08-11_120000/modelA", use_llm=False)
         assert "error" not in result
         assert result["summary"]

@@ -7,7 +7,7 @@ def test_predict_fallback_no_model(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ps, "_model_loaded", False)
     monkeypatch.setattr(ps, "_model", None)
-    monkeypatch.setattr(ps, "MODEL_PATH", tmp_path / "nonexistent.joblib")  # 不存在 → _load_model 返回 None
+    monkeypatch.setattr(ps, "_model_path", lambda: tmp_path / "nonexistent.joblib")  # 不存在 → _load_model 返回 None
 
     assert ps.predict("   ") == "empty", "空白输入 → empty"
     benign = "The model gave a helpful, detailed answer about machine learning concepts. " * 3
@@ -17,9 +17,9 @@ def test_predict_fallback_no_model(monkeypatch, tmp_path):
 
 def test_train_insufficient_data(monkeypatch, tmp_path):
     """数据 < MIN_TRAIN_SAMPLES（300）时拒绝训练，返回 trained=False。"""
+    import llmsec.core.config as ps_cfg
     from llmsec.evaluation import prescreen_ml as ps
-
-    monkeypatch.setattr(ps, "OUTPUT_DIR", tmp_path)  # 无 runs/ → 0 标注样本
+    monkeypatch.setattr(ps_cfg, "OUTPUT_DIR", tmp_path)  # 无 runs/ → 0 标注样本
     res = ps.train()
     assert res["trained"] is False
     assert res["n_samples"] == 0
@@ -48,13 +48,14 @@ def _write_run_results(runs_dir, run_id, n_refusal, n_attack, start=0):
 
 def test_train_class_imbalance_rejected(monkeypatch, tmp_path):
     """样本量足够但一类 <20 → 拒绝训练（reason=类别不平衡）。"""
+    import llmsec.core.config as ps_cfg
     from llmsec.evaluation import prescreen_ml as ps
 
     runs = tmp_path / "runs"
     _write_run_results(runs, "r1", n_refusal=5, n_attack=320)
-    monkeypatch.setattr(ps, "OUTPUT_DIR", tmp_path)
-    monkeypatch.setattr(ps, "MODEL_PATH", tmp_path / "model.joblib")
-    monkeypatch.setattr(ps, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(ps_cfg, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(ps, "_model_path", lambda: tmp_path / "model.joblib")
+    monkeypatch.setattr(ps_cfg, "STATE_DIR", tmp_path)
     res = ps.train()
     assert res["trained"] is False
     assert res["reason"] == "类别不平衡"
@@ -65,6 +66,7 @@ def test_train_full_path_and_predict(monkeypatch, tmp_path):
     """足量均衡数据 → 训练成功落盘；predict 用模型判 refusal，良性文本仍交 Judge。"""
     import json
 
+    import llmsec.core.config as ps_cfg
     from llmsec.evaluation import prescreen_ml as ps
 
     runs = tmp_path / "runs"
@@ -76,10 +78,10 @@ def test_train_full_path_and_predict(monkeypatch, tmp_path):
     bad.write_text("not-json\n" + json.dumps({"response_preview": "x", "is_refusal": True}) + "\n\n",
                    encoding="utf-8")
 
-    monkeypatch.setattr(ps, "OUTPUT_DIR", tmp_path)
-    monkeypatch.setattr(ps, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(ps_cfg, "OUTPUT_DIR", tmp_path)
+    monkeypatch.setattr(ps_cfg, "STATE_DIR", tmp_path)
     model_path = tmp_path / "model.joblib"
-    monkeypatch.setattr(ps, "MODEL_PATH", model_path)
+    monkeypatch.setattr(ps, "_model_path", lambda: model_path)
     monkeypatch.setattr(ps, "_model_loaded", False)
     monkeypatch.setattr(ps, "_model", None)
 
@@ -107,7 +109,7 @@ def test_load_model_corrupt_file_falls_back(monkeypatch, tmp_path):
 
     bad = tmp_path / "model.joblib"
     bad.write_bytes(b"\x00\x01 not a joblib file")
-    monkeypatch.setattr(ps, "MODEL_PATH", bad)
+    monkeypatch.setattr(ps, "_model_path", lambda: bad)
     monkeypatch.setattr(ps, "_model_loaded", False)
     monkeypatch.setattr(ps, "_model", None)
     assert ps._load_model() is None, "损坏模型应回退 None"

@@ -46,6 +46,24 @@ KIND_BLOCK = "block"                      # 门下省封驳令（附 ticket）
 KIND_PLAN_APPROVED = "plan_approved"      # 用户准奏
 KIND_PLAN_REJECTED = "plan_rejected"      # 用户驳回
 
+# r8/病根2：kind → 接收部门的**声明式路由表**。发布方一律走 notify_routed()，
+# 不再在调用点手写 to_dept——H-2 的教训：emit 点写错部门名（to_dept=SHANGSHU 而
+# 唯一订阅方是 MENXIA）时 bus 的 to_dept in (dept, ALL) 过滤永不匹配，订阅方
+# 静默失联、无任何报错。路由集中在此处后，发布点不可能再拼错部门。
+KIND_ROUTES: dict[str, str] = {
+    KIND_PLAN_DRAFTED: ALL,       # 门下省（订阅）+ 面板存档
+    KIND_PLAN_PROGRESS: ALL,      # 面板/进度回调存档
+    KIND_PLAN_DONE: ALL,          # 门下省（订阅，事后审查）
+    KIND_STEP_START: MENXIA,      # 请求-应答：门下省同步返回封驳裁决
+    KIND_STEP_DONE: ALL,
+    KIND_STEP_BLOCKED: ALL,
+    KIND_STEP_FAILED: ALL,        # 门下省（订阅，异常呈递）
+    KIND_REVIEW: ZHONGSHU,        # 门下省 → 中书省面板展示
+    KIND_BLOCK: ALL,              # 封驳令归档（票据本体走 block store）
+    KIND_PLAN_APPROVED: ALL,      # 门下省（订阅，准奏阶段风险评估）
+    KIND_PLAN_REJECTED: ALL,
+}
+
 
 @dataclass
 class BusMessage:
@@ -187,3 +205,28 @@ def notify(
         plan_id=plan_id, intent=intent, session_id=session_id,
     )
     return get_bus().publish(msg, collect_replies=collect_replies)
+
+
+def notify_routed(
+    kind: str,
+    *,
+    from_dept: str,
+    plan_id: str | None = None,
+    intent: str | None = None,
+    session_id: str | None = None,
+    collect_replies: bool = False,
+    **payload,
+) -> list | None:
+    """按 KIND_ROUTES 路由表发布消息（r8/病根2：发布点不再手写 to_dept）。
+
+    生产代码一律用本函数；notify() 保留给测试/特殊场景（显式指定接收方）。
+    kind 不在路由表中时抛 KeyError——新 kind 必须先在表里登记路由，
+    避免拼错 kind 静默广播。
+    """
+    if kind not in KIND_ROUTES:
+        raise KeyError(f"未登记路由的消息 kind: {kind!r}（请先在 bus.KIND_ROUTES 登记）")
+    return notify(
+        kind, from_dept=from_dept, to_dept=KIND_ROUTES[kind],
+        plan_id=plan_id, intent=intent, session_id=session_id,
+        collect_replies=collect_replies, **payload,
+    )

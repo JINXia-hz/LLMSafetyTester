@@ -85,3 +85,33 @@ def get_logger(name: str) -> logging.Logger:
 
         _root_configured = True
     return logging.getLogger(name if name.startswith("llmsec") else f"llmsec.{name}")
+
+
+def rebind_log_file(new_path) -> None:
+    """把已挂载的文件 handler 切换到 new_path（work-dir 隔离用）。
+
+    get_logger 在首次调用（通常是模块 import 期）就打开全局 output/logs 的
+    RotatingFileHandler——事后重绑 config.LOG_FILE 不影响已打开的句柄。
+    本函数关闭并移除现有文件 handler，改挂 new_path（格式/滚动策略不变）。
+    """
+    import logging
+    from logging.handlers import RotatingFileHandler
+    from pathlib import Path
+
+    root = logging.getLogger("llmsec")
+    for h in list(root.handlers):
+        if isinstance(h, RotatingFileHandler):
+            h.close()
+            root.removeHandler(h)
+    try:
+        new_path = Path(new_path)
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = RotatingFileHandler(
+            new_path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+        )
+        fh.setFormatter(logging.Formatter(_FORMAT, datefmt=_DATEFMT))
+        root.addHandler(fh)
+    except Exception:
+        import sys
+
+        print(f"[logging] 日志文件切换失败 ({new_path})，保持仅控制台输出", file=sys.stderr)

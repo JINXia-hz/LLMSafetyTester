@@ -188,34 +188,3 @@ def build_whitened_space(
         "damp": damp,
         "feature_weights": feature_weights,
     }
-
-
-def transform_to_space(space: dict, features: dict, methods: list[str]) -> np.ndarray:
-    """把新方法投影到已构建的白化空间（用于可视化新增点，不参与聚类定义）。"""
-    if space["vt"] is None or space["n_dims"] == 0:
-        return np.zeros((len(methods), 0))
-    X = build_feature_matrix(features, methods)
-    fw = space.get("feature_weights")
-    # 对齐训练时的特征维度
-    d_train = space["x_mean"].shape[0]
-    if X.shape[1] < d_train:
-        X = np.pad(X, ((0, 0), (0, d_train - X.shape[1])))
-    elif X.shape[1] > d_train:
-        X = X[:, :d_train]
-    X_scaled = (X - space["x_mean"]) / space["x_std"]
-    # 与 build_whitened_space 一致：加权在标准化之后（F2 修复）
-    if fw is not None and X.shape[1] == len(fw):
-        X_scaled = X_scaled * np.asarray(fw, dtype=np.float64)
-    # 新点 PC 得分 = X @ V_kᵀ；按训练时的 damp/λw 做相同的阻尼白化。
-    # M-29 修正：训练 coords = U·scale_train（scale_train = (S/√n)^(1-damp)·(√n·S/√(S²+λw))^damp），
-    # 而 X@Vᵀ = U·S（PC 得分），故 transform 的 scale 应为 scale_train / S =
-    # (1/√n)^(1-damp)·(√n/√(S²+λw))^damp。原实现漏除了 S，每列多一个因子 Sᵢ，
-    # 致 transform 与训练 coords 偏差（实测最大 4.31）。
-    n_train = max(space["coords"].shape[0], 1)
-    S = space["singular_values"][: space["n_dims"]]
-    # 旧工件无 damp 字段时兜底与 build_whitened_space 默认一致（不白化）
-    damp = space.get("damp", 0.0)
-    raw_scale = np.full_like(S, 1.0 / np.sqrt(n_train))  # 1/√n
-    white_scale = np.sqrt(n_train) / np.sqrt(S**2 + space["lambda_w"])
-    scale = (raw_scale ** (1 - damp)) * (white_scale ** damp)
-    return (X_scaled @ space["vt"].T) * scale

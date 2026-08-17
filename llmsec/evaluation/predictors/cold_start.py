@@ -54,6 +54,7 @@ from llmsec.core.config import INITIAL_ELO
 from llmsec.core.io import save_artifact, write_json
 from llmsec.core.logging import get_logger
 from llmsec.core.seed import get_global_seed as _global_seed
+from llmsec.core.units import method_set_hash
 from llmsec.evaluation.predictors.active_learning import greedy_d_optimal
 from llmsec.evaluation.predictors.svd_ridge import EloPredictorModel
 from llmsec.params import (
@@ -164,6 +165,9 @@ class ColdStartPredictor:
         # M-4：优先读 cluster_result.pkl——labels 只存在于此文件；feature_cache.pkl 含
         # features 但无 labels。原顺序先读 feature_cache，重启后 cluster_id 恒 -1、
         # get_status() 显示 n_clusters=0。cluster_result 缺失才回退 feature_cache 取 features。
+        # r7：同一文件只反序列化一次（原先 artifacts 命中 cluster_result 后仍为两个
+        # 元信息键再完整 load 一遍，大 n 下双倍启动开销）
+        cr_meta: dict | None = None
         for p in (cluster_result_file, feature_cache_file):
             if p.exists():
                 try:
@@ -171,20 +175,23 @@ class ColdStartPredictor:
                     a.pop("dist_matrix", None)  # 丢弃训练期完整距离矩阵，省内存
                     if "features" in a:
                         self.artifacts = a
+                        if p == cluster_result_file:
+                            cr_meta = a
                         break
                 except Exception as e:
                     logger.warning("加载 %s 失败: %s", p.name, e)
 
         # 拟合元信息从聚类结果文件恢复（决定是否触发重聚类）
-        if cluster_result_file.exists():
+        if cr_meta is None and cluster_result_file.exists():
             try:
-                cr = joblib.load(cluster_result_file)
-                self.last_fit_gt_count = int(
-                    cr.get("ground_truth_count", self.last_fit_gt_count)
-                )
-                self.last_fit_at = cr.get("generated_at", self.last_fit_at)
+                cr_meta = joblib.load(cluster_result_file)
             except Exception:
-                pass
+                cr_meta = None
+        if cr_meta is not None:
+            self.last_fit_gt_count = int(
+                cr_meta.get("ground_truth_count", self.last_fit_gt_count)
+            )
+            self.last_fit_at = cr_meta.get("generated_at", self.last_fit_at)
 
     def _save_artifacts(self):
         """保存先验特征缓存到 feature_cache.pkl（仅 feature_cache 形态，原子写）。"""
@@ -824,10 +831,9 @@ class ColdStartPredictor:
 # ============================================================
 # 模块级辅助函数
 # ============================================================
-def _compute_method_set_hash(methods: list[str]) -> str:
-    """计算方法集合的指纹 hash，用于判断攻击集是否发生变化。"""
-    content = ",".join(sorted(set(methods)))
-    return hashlib.md5(content.encode("utf-8")).hexdigest()
+# r7：与 hdb.py 的重复实现统一到 core.units.method_set_hash；
+# 保留本别名供模块内调用方与 attack_phase 的既有导入
+_compute_method_set_hash = method_set_hash
 
 
 # ============================================================

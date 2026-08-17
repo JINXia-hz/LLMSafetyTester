@@ -47,9 +47,9 @@ def issue(action: str, summary: dict[str, Any], execute_fn: Any, *, args_repr: s
     Returns:
         confirm_token 字符串。
     """
-    _gc()
     token = secrets.token_urlsafe(8)
     with _LOCK:
+        _gc()  # M-7：_gc 迭代/修改 _PENDING，必须持锁调用（见 _gc docstring）
         _PENDING[token] = _Pending(
             action=action, summary=summary, execute_fn=execute_fn, args_repr=args_repr
         )
@@ -77,27 +77,13 @@ def confirm(token: str) -> dict[str, Any]:
     return {"status": "executed", "result": result}
 
 
-def peek(token: str) -> dict[str, Any] | None:
-    """查看某 token 的摘要（不消费、不执行）。供 agent 回顾预览内容。
-
-    token 不存在或过期返回 None。
-    """
-    _gc()
-    with _LOCK:
-        p = _PENDING.get(token)
-        if p is None:
-            return None
-        return {
-            "action": p.action,
-            "summary": p.summary,
-            "args_repr": p.args_repr,
-            "age_seconds": round(time.time() - p.created, 1),
-            "ttl_seconds": _TTL_SECONDS,
-        }
-
-
 def _gc() -> None:
-    """清除过期条目（调用方需持锁或在锁外调用均可，内部用 lock 保护）。"""
+    """清除过期条目。M-7：**调用方必须已持有 _LOCK**。
+
+    _gc 迭代并修改 _PENDING；锁外调用与 confirm 的持锁 pop 并发会抛
+    "dictionary changed size during iteration"（threading.Lock 不可重入，
+    不能由 _gc 自己加锁——confirm 在持锁状态下调用它）。
+    """
     now = time.time()
     expired = [t for t, p in _PENDING.items() if now - p.created > _TTL_SECONDS]
     for t in expired:

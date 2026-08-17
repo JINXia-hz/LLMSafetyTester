@@ -28,13 +28,10 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+from llmsec.core import config as _config  # r9/P3-4：路径常量调用期动态读
 from llmsec.core.config import (
-    ATTACK_SET_L1_FILE,
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
-    OUTPUT_DIR,
-    SAFE_TWINS_FILE,
-    TWIN_RESULT_FILE,
     GeneratorConfig,
     TargetConfig,
     resolve_defender_name,
@@ -56,6 +53,8 @@ from llmsec.params import (
     API_RETRY_DELAY,
     MIN_TWIN_WINDOW,
     PORTRAIT_ASR_SAFE,
+    PREVIEW_PROMPT,
+    PREVIEW_RESPONSE,
     TWIN_SEVERITY_FPR_MED,
 )
 from llmsec.params import (
@@ -86,7 +85,9 @@ TARGET_MODEL = _TARGET_CONFIG.model
 # M-35：复用 core.config.resolve_defender_name（与 evaluator/runner 同一解析口径）。
 DEFENDER_NAME = resolve_defender_name(TARGET_MODEL)
 
-INPUT_FILE = ATTACK_SET_L1_FILE
+# r9/P3-4：缺省输入路径调用期动态读（原 import 期冻结）
+def _default_input_file():
+    return _config.ATTACK_SET_L1_FILE
 # TWIN_RESULT_FILE 由 core.config 统一定义（见 import）；
 # 过敏报告改为按模型分文件（allergy__{model}.json，见 _allergy_report_file），
 # 避免换模型重跑时全局单文件互相覆盖。
@@ -103,7 +104,7 @@ def _allergy_report_file(model: str):
     """按模型分的过敏报告路径：allergy__{model}.json（模型名中的路径分隔符等
     非法字符替换为下划线）。换模型重跑各自落盘，不再互相覆盖（S-3 残留修复）。"""
     safe = re.sub(r"[^\w.-]", "_", model)
-    return OUTPUT_DIR / f"allergy__{safe}.json"
+    return _config.OUTPUT_DIR / f"allergy__{safe}.json"
 
 
 def _asr_from_results(model: str) -> float | None:
@@ -188,7 +189,7 @@ _TWIN_APPEND_LOCK = threading.Lock()
 def append_twin_entry(entry: dict) -> None:
     """向 SAFE_TWINS_FILE 追加一条安全孪生（线程安全，M9）。"""
     with _TWIN_APPEND_LOCK:
-        append_jsonl(SAFE_TWINS_FILE, entry)
+        append_jsonl(_config.SAFE_TWINS_FILE, entry)
 
 
 def make_twin_entry(rec: dict, original_id, clean_prompt: str, twin: dict) -> dict:
@@ -200,7 +201,7 @@ def make_twin_entry(rec: dict, original_id, clean_prompt: str, twin: dict) -> di
         "category": rec.get("category", "unknown"),  # M-36：category/harm_type 可选（README），用 .get 防缺键崩溃
         "method": rec.get("method", "unknown"),
         "harm_type": normalize_harm_type(rec.get("harm_type", "other")),
-        "original_prompt": clean_prompt[:300],
+        "original_prompt": clean_prompt[:PREVIEW_PROMPT],
         "safe_prompt": twin["safe_prompt"],
         "replacement": twin["replacement"],
     }
@@ -208,8 +209,8 @@ def make_twin_entry(rec: dict, original_id, clean_prompt: str, twin: dict) -> di
 
 def generate_all_twins():
     """批量生成所有攻击prompt的安全孪生。"""
-    input_file = INPUT_FILE
-    twin_file = SAFE_TWINS_FILE
+    input_file = _default_input_file()
+    twin_file = _config.SAFE_TWINS_FILE
 
     if not Path(input_file).exists():
         logger.error(f"❌ 攻击集不存在: {input_file}")
@@ -223,7 +224,7 @@ def generate_all_twins():
         logger.info(f"📋 已有 {len(done_ids)} 条安全孪生，将跳过\n")
 
     client = create_openai_client(api_key=SAFE_TWIN_API_KEY, base_url=SAFE_TWIN_BASE_URL)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(_config.OUTPUT_DIR, exist_ok=True)
 
     success = 0
     skip = 0
@@ -296,16 +297,23 @@ def judge_allergic(judge, safe_prompt: str, content: str) -> "tuple[bool, bool, 
     return judge_result["is_refusal"] or keyword_refused, keyword_refused, judge_result
 
 
-def evaluate_allergy():
-    """用安全孪生攻击目标模型，判断是否过敏。"""
-    twin_file = SAFE_TWINS_FILE
+def evaluate_allergy(*, twins=None, client=None, judge=None, result_file=None):
+    """用安全孪生攻击目标模型，判断是否过敏。
 
-    if not Path(twin_file).exists():
-        logger.error(f"❌ 安全孪生集不存在: {twin_file}")
-        logger.info("   请先运行 safe_twin.py (不加 --evaluate)")
-        sys.exit(1)
+    r9/P3-7：显式参数（此前零参数 + 9 个模块全局，测试需 monkeypatch 6 处）。
+    - twins：待测孪生列表；None 时从 SAFE_TWINS_FILE 读（CLI 语义）
+    - client：目标模型客户端；None 时按 .env TARGET_* 构造
+    - judge：Judge 实例；None 时 create_judge_client() 构造
+    - result_file：结果落盘路径；None 时用 TWIN_RESULT_FILE
+    """
+    twin_file = _config.SAFE_TWINS_FILE
 
-    twins = read_jsonl(twin_file)
+    if twins is None:
+        if not Path(twin_file).exists():
+            logger.error(f"❌ 安全孪生集不存在: {twin_file}")
+            logger.info("   请先运行 safe_twin.py (不加 --evaluate)")
+            sys.exit(1)
+        twins = read_jsonl(twin_file)
 
     logger.info(f"📋 将测试 {len(twins)} 条安全孪生\n")
 
@@ -314,17 +322,18 @@ def evaluate_allergy():
     # 跳过、上一个模型的 FPR 被安到当前模型头上（历史 entry 无 model 字段的视为他模型，排除）
     # M-29：键统一为 DEFENDER_NAME（pcap 模式为 PCAP_MODEL_VERSION），与 R 矩阵列名、
     # 画像 ASR 派生口径一致；原用 TARGET_MODEL 会导致 pcap 模式下 FPR 与 ASR 查不同列。
-    model_results = [r for r in read_jsonl(TWIN_RESULT_FILE)
+    model_results = [r for r in read_jsonl(result_file or _config.TWIN_RESULT_FILE)
                      if r.get("model") == DEFENDER_NAME]
     done_ids = {r["original_id"] for r in model_results if "original_id" in r}
     if done_ids:
         logger.info(f"📋 已有 {len(done_ids)} 条本模型过敏测试结果，将跳过\n")
 
-    client = create_openai_client(api_key=TARGET_API_KEY, base_url=TARGET_BASE_URL, timeout=_TARGET_CONFIG.timeout)
+    if client is None:
+        client = create_openai_client(api_key=TARGET_API_KEY, base_url=TARGET_BASE_URL,
+                                      timeout=_TARGET_CONFIG.timeout)
+    if judge is None:
+        judge = Judge(create_judge_client())
     tested = 0
-
-    judge_client = create_judge_client()
-    judge = Judge(judge_client)
 
     for _i, twin in enumerate(twins):
         oid = twin["original_id"]
@@ -354,7 +363,17 @@ def evaluate_allergy():
             continue
 
         # 过敏判定（M-33 共享口径，见 judge_allergic）
-        is_allergic, keyword_refused, judge_result = judge_allergic(judge, safe_prompt, content)
+        # r7/M-6：Judge 故障（4xx 立即抛 / 重试耗尽）降级关键词判定——try 只包住
+        # 目标模型调用是不够的，单条 Judge 故障不得崩掉整个评估循环
+        # （对齐 allergy_phase._eval_allergy 与 evaluator 的 H-6 口径）
+        try:
+            is_allergic, keyword_refused, judge_result = judge_allergic(judge, safe_prompt, content)
+        except Exception as e:
+            logger.warning(f"⚠ {oid} Judge故障，降级关键词判定: {e}")
+            keyword_refused = any(kw.lower() in content.lower() for kw in FAST_REFUSAL_PATTERNS)
+            is_allergic = keyword_refused
+            judge_result = {"is_refusal": keyword_refused, "is_harmful": False,
+                            "compliance_level": "N/A"}
         is_refusal = judge_result["is_refusal"]
 
         entry = {
@@ -362,15 +381,15 @@ def evaluate_allergy():
             "model": DEFENDER_NAME,  # S-3/M-29：按防御方名隔离，与 R 矩阵列名一致
             "method": twin["method"],
             "harm_type": twin["harm_type"],
-            "safe_prompt": safe_prompt[:500],
-            "response_preview": content[:300],
+            "safe_prompt": safe_prompt[:PREVIEW_PROMPT],
+            "response_preview": content[:PREVIEW_RESPONSE],
             "keyword_refused": keyword_refused,
             "judge_is_refusal": is_refusal,
             "judge_is_harmful": judge_result["is_harmful"],
             "judge_level": judge_result["compliance_level"],
             "is_allergic": is_allergic,
         }
-        append_jsonl(TWIN_RESULT_FILE, entry)
+        append_jsonl(result_file or _config.TWIN_RESULT_FILE, entry)
 
         sym = "🤧" if is_allergic else "✅"
         # 进度口径含断点续跑的历史已完成数（done_ids），不再从 1 重计
@@ -381,7 +400,7 @@ def evaluate_allergy():
         time.sleep(API_DELAY)
 
     # 重新读取过敏结果做汇总（S-3：仅本模型，避免跨模型张冠李戴）
-    all_allergy = [r for r in read_jsonl(TWIN_RESULT_FILE)
+    all_allergy = [r for r in read_jsonl(result_file or _config.TWIN_RESULT_FILE)
                    if r.get("model") == DEFENDER_NAME]
 
     # FPR 分子分母同口径：均统计全量结果文件（修复原 本次refused/历史总数 的口径错配，
@@ -456,7 +475,7 @@ def evaluate_allergy():
     if "security_portrait" in report:
         logger.info(f"  安全画像: {report['security_portrait']['portrait']}")
     logger.info(f"\n  📁 孪生集: {twin_file}")
-    logger.info(f"  📁 过敏结果: {TWIN_RESULT_FILE}")
+    logger.info(f"  📁 过敏结果: {_config.TWIN_RESULT_FILE}")
     logger.info(f"  📁 过敏报告: {report_file}")
     logger.info(f"{'='*60}")
 

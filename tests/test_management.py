@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from llmsec.core import config as cfg
-from llmsec.core import results as res_mod
 from llmsec.core.io import read_json, write_json
 from llmsec.core.results import ResultsMatrix
 
@@ -69,7 +68,6 @@ def iso_output(monkeypatch, tmp_path):
     monkeypatch.setattr(caches, "TASK_LOG_DIR", tasks)
     monkeypatch.setattr(caches, "OUTPUT_DIR", out)
     # results 模块的 RESULTS_FILE（ResultsMatrix.load/save 默认读它）
-    monkeypatch.setattr(res_mod, "RESULTS_FILE", state / "results.json")
     return out
 
 

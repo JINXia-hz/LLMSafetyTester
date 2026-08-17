@@ -44,7 +44,7 @@ from llmsec.core.config import (
     GeneratorConfig,
     TargetConfig,
 )
-from llmsec.core.io import read_jsonl, write_json
+from llmsec.core.io import read_json, read_jsonl, write_json
 from llmsec.core.logging import setup_console
 from llmsec.core.seed import get_global_seed
 from llmsec.evaluation import ELOTracker, Judge, create_judge_client
@@ -62,7 +62,6 @@ from llmsec.params import (
 )
 from llmsec.pipeline.allergy_phase import run_allergy_phase
 from llmsec.pipeline.attack_phase import _quick_precluster, run_attack_phase
-from llmsec.targets import PCAP_JUDGE_URL, PCAP_MODEL_VERSION
 
 logger = get_logger(__name__)
 setup_console()
@@ -132,7 +131,18 @@ def partition_publish_names(names: list[str], declared: set[str]) -> tuple[list[
     return allowed, skipped
 
 
-def main():
+def main(argv=None, *, deps=None):
+    """统一编排入口。
+
+    r9/P3-7：argv/deps 注入点（原 argparse 读 sys.argv + 内部硬构客户端，
+    离线测试需 monkeypatch ~10 处）。deps 可携带：
+      - judge：Judge 实例（缺省 create_judge_client() 构造）
+      - twin_client：孪生生成客户端（缺省按 GENERATOR_* 构造）
+      - reporter：报告生成函数（缺省 llmsec.reporting.final_report.generate_reports）
+    """
+    from types import SimpleNamespace
+
+    deps = deps or SimpleNamespace()
     parser = argparse.ArgumentParser(description="统一编排器 — 自适应安全评估流水线")
     parser.add_argument("--phase", type=str, default="all",
                         choices=["all", "1", "2"],
@@ -189,7 +199,7 @@ def main():
                         help="禁用批内并行求值（等价 --concurrency 0，串行）")
     parser.add_argument("--target-concurrency", type=_positive_int, default=1,
                         help="多目标并发数（默认 1=串行，必须 >= 1；总并发 API = target_concurrency × concurrency）")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # work_dir 实验模式强制跑满预算：ci_half@固定预算可比性要求每个 trial 同预算
     if args.work_dir:
@@ -240,9 +250,13 @@ def main():
     # 初始化客户端（twin_client 仅 Phase 2 过敏检测使用，不跑 Phase 2 就不构造）
     do_phase1 = args.phase in ("all", "1")
     do_phase2 = args.phase in ("all", "2")
-    twin_client = OpenAI(api_key=GENERATOR_API_KEY, base_url=GENERATOR_BASE_URL) if do_phase2 else None
-    judge_client = create_judge_client()
-    judge = Judge(judge_client)
+    twin_client = getattr(deps, "twin_client", None)
+    if twin_client is None and do_phase2:
+        twin_client = OpenAI(api_key=GENERATOR_API_KEY, base_url=GENERATOR_BASE_URL)
+    judge = getattr(deps, "judge", None)
+    if judge is None:
+        judge = Judge(create_judge_client())
+    reporter = getattr(deps, "reporter", None)
 
     # ---- 确定目标列表 ----
     from llmsec.targets import available_targets
@@ -287,13 +301,17 @@ def main():
         tcfg = declared_targets.get(single)
         t_url = tcfg.base_url if tcfg else TARGET_BASE_URL
         t_model = tcfg.model if tcfg else TARGET_MODEL
+        # r7/L-10：backend 也按该目标自己的声明取（target_backend），
+        # 不用全局 TARGET_TYPE——--target 指向 pcap/local 目标时日志误导
+        from llmsec.targets import pcap_judge_url, pcap_model_version, target_backend
+        t_backend = target_backend(single)
         target_desc = {
-            "pcap_judge": f"PCAP Judge @ {PCAP_JUDGE_URL} (模型: {PCAP_MODEL_VERSION})",
+            "pcap_judge": f"PCAP Judge @ {pcap_judge_url()} (模型: {pcap_model_version()})",
             "local_sim": f"本地模拟 @ {t_url} (模型: {t_model})",
             "openai": f"OpenAI @ {t_url} (模型: {t_model})",
-        }.get(TARGET_TYPE, f"{TARGET_TYPE} @ {t_url} (模型: {t_model})")
+        }.get(t_backend, f"{t_backend} @ {t_url} (模型: {t_model})")
         logger.info(f"🎯 攻击目标: {single} → {target_desc}")
-        logger.info(f"   模式: {TARGET_TYPE}")
+        logger.info(f"   模式: {t_backend}")
 
     # ---- 1. 快照：R + 特征（运行前一次性获取，运行期间不读不写 R）----
     from llmsec.core.results import ResultsMatrix
@@ -301,27 +319,48 @@ def main():
     catalog = list(method_records.keys())
     R_snapshot = ResultsMatrix.load()
     _feat_tracker = ELOTracker()
-    _feat_tracker.predictor.fit_features(records)
+    # r7/L-1：先尝试复用磁盘特征缓存（_should_refresh_features 同口径判定：
+    # 缓存缺失/方法集变化/特征配置指纹变化/--refresh-features 才重提）。
+    # 原先无条件 fit_features 会把带新时间戳的 artifacts 分给每个目标 tracker，
+    # attack_phase 的"♻️ 复用特征缓存"分支经 runner 永不可达，且每个 run/
+    # HPO trial 子进程都全量重算特征并覆写缓存。
+    from llmsec.core.config import FEATURE_CACHE_FILE
+    from llmsec.core.io import load_artifact
+    from llmsec.pipeline.attack_phase import _should_refresh_features
+    cached_artifacts = load_artifact(FEATURE_CACHE_FILE)
+    _feat_tracker.predictor.artifacts = cached_artifacts if isinstance(cached_artifacts, dict) else {}
+    if _should_refresh_features(_feat_tracker.predictor, method_records,
+                                force=args.refresh_features):
+        _feat_tracker.predictor.fit_features(records)
     features = _feat_tracker.predictor.artifacts.get("features", {})
 
     # 评级单位（簇）在 runner 层只装配一次（输入同一份 features，结果确定），
     # 多目标共享——避免每个目标的 run_attack_phase 内各自 embedding/聚类。
     # 必须在目标线程启动前完成（主线程串行预计算）。
-    units = None
-    if do_phase1:
-        from llmsec.core.units import assemble_units
+    # H-1：装配不能只限 Phase 1——`--phase 2` 独立运行（work-dir 模式恢复既有
+    # state.json）时，state 里的 attacker_ratings 键是 unit_id，过敏候选也取自
+    # unit 排行榜；若此时 units=None 回退 method 名键空间，候选全部 miss →
+    # FPR 恒为"未测"。unit_id 对同攻击集+同特征配置确定性稳定（core.units），
+    # phase 2 独立装配可复现 phase 1 的键。
+    from llmsec.core.units import assemble_units, build_unit_proxy_records
 
-        pre_labels = _quick_precluster(_feat_tracker, sorted(catalog))
-        if not pre_labels:
-            # 聚类不可用：每方法自成一个 unit（粒度退化但流程一致）
-            pre_labels = {m: i for i, m in enumerate(sorted(catalog))}
-        method_pool: dict[str, list[dict]] = {}
-        for r in records:
-            method_pool.setdefault(r["method"], []).append(r)
-        units = assemble_units(pre_labels, method_records, method_pool,
-                               _feat_tracker.predictor.artifacts)
-        logger.info(f"  🧭 评级单位: {len(units)} 簇（一次装配，多目标共享）")
-    R_snapshot.set_unit_catalog(sorted(units.keys()) if units else catalog)
+    pre_labels = _quick_precluster(_feat_tracker, sorted(catalog))
+    if not pre_labels:
+        # 聚类不可用：每方法自成一个 unit（粒度退化但流程一致）
+        pre_labels = {m: i for i, m in enumerate(sorted(catalog))}
+    method_pool: dict[str, list[dict]] = {}
+    for r in records:
+        method_pool.setdefault(r["method"], []).append(r)
+    units = assemble_units(pre_labels, method_records, method_pool,
+                           _feat_tracker.predictor.artifacts)
+    logger.info(f"  🧭 评级单位: {len(units)} 簇（一次装配，多目标共享）")
+    R_snapshot.set_unit_catalog(sorted(units.keys()))
+    if do_phase1:
+        # r8/病根1：把 unit 代理记录（键=unit_id，值=medoid prompt 记录）随 run 落盘。
+        # `--phase 2` 独立运行的过敏键空间以此文件为准——聚类的确定性重推导
+        # 在特征配置变更/缓存漂移时会产出不同 unit_id 集合，候选将再度全部
+        # miss → FPR 静默失效（H-1 的深层病根）。
+        write_json(runs_dir / "units.json", build_unit_proxy_records(units))
 
     concurrency = args.concurrency
     target_concurrency = min(args.target_concurrency, len(names))
@@ -412,8 +451,19 @@ def main():
             from llmsec.core.units import build_unit_proxy_records
             from llmsec.pipeline.allergy_phase import adaptive_twin_window
             # 过敏检测同样以簇为单位：候选取自 unit 排行榜，孪生 prompt 用 unit 代理
-            # 记录（medoid prompt）
-            _allergy_recs = build_unit_proxy_records(units) if units else method_records
+            # 记录（medoid prompt）。
+            # r8/病根1：键空间优先取 phase 1 落盘的 units.json（与 state.json 的
+            # attacker_ratings 键严格同源）；仅无该文件时才退回确定性重推导
+            _allergy_recs = None
+            _units_file = runs_dir / "units.json"
+            if _units_file.exists():
+                _cached_units = read_json(_units_file)
+                if isinstance(_cached_units, dict) and _cached_units:
+                    _allergy_recs = _cached_units
+                    logger.info(f"  🧭 Phase 2 单位表: 从 {_units_file} 恢复 "
+                                f"{len(_allergy_recs)} 簇（与 state.json 同源）")
+            if _allergy_recs is None:
+                _allergy_recs = build_unit_proxy_records(units) if units else method_records
             n_window = adaptive_twin_window(
                 boundary, len(_allergy_recs), user_window=args.twin_window)
             allergy_file = run_dir / "allergy.json"
@@ -436,8 +486,10 @@ def main():
             logger.warning(f"  ⚠ {name} state 落盘失败", exc_info=True)
 
         try:
-            from llmsec.reporting.final_report import generate_reports
-            generate_reports(
+            _reporter = reporter
+            if _reporter is None:
+                from llmsec.reporting.final_report import generate_reports as _reporter
+            _reporter(
                 run_dir=run_dir,
                 tracker=tracker,
                 defender_name=name,

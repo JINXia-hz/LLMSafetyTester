@@ -63,8 +63,11 @@ def _search_history_schema() -> dict:
 # 阶段 2 优化：消除每次 search_history 重复读 jsonl 全文 + 逐行 json.loads 的开销。
 # 数据天然小（每 plan ~60 字符），缓存让"多次搜索"零 I/O 成本；未来文牍增长到数百时
 # 叠加 2-gram 倒排索引进一步加速（当前规模缓存已足够，索引暂不引入）。
-_GAZETTE_TEXT_CACHE: tuple[float, dict[str, dict]] | None = None
-_GAZETTE_CACHE_LOCK = __import__("threading").Lock()
+# r9/P3-5：SigCache 单槽签名缓存（sig = _index.json (mtime, size)），
+# 线程安全由缓存助手保证（executor 线程池并发搜索不再互踩）
+from llmsec.core.caches import SigCache
+
+_GAZETTE_TEXT_CACHE = SigCache(maxsize=1)
 
 
 def _load_gazette_texts() -> dict[str, dict]:
@@ -73,17 +76,14 @@ def _load_gazette_texts() -> dict[str, dict]:
     Returns:
         {plan_id: {intent, user_text, steps_text, steps_desc, stats, status, idx_entry}}
     """
-    global _GAZETTE_TEXT_CACHE
     from control.agent import gazette
     from control.core.fsig import file_sig
 
-    with _GAZETTE_CACHE_LOCK:  # 多线程（executor 线程池回调）并发搜索时不重复重建/互踩
-        sig = file_sig(gazette.index_path())
-        if sig is None:
-            sig = 0.0
-        if _GAZETTE_TEXT_CACHE and _GAZETTE_TEXT_CACHE[0] == sig:
-            return _GAZETTE_TEXT_CACHE[1]
+    sig = file_sig(gazette.index_path())
+    if sig is None:
+        sig = 0.0
 
+    def _load() -> dict[str, dict]:
         texts: dict[str, dict] = {}
         for g in gazette.list_gazettes(recent=500):
             pid = g.get("plan_id", "")
@@ -121,8 +121,9 @@ def _load_gazette_texts() -> dict[str, dict]:
                 "steps_desc": steps_desc[:5],
                 "step_stats": stats,
             }
-        _GAZETTE_TEXT_CACHE = (sig, texts)
         return texts
+
+    return _GAZETTE_TEXT_CACHE.get((), sig, _load)
 
 
 def _do_search_history(args: dict) -> str:
@@ -401,10 +402,10 @@ def _hand_to_shangshu(intent: str, session_id: str,
                                          for s in plan.steps]})
 
         # 通知门下省审查拟案（门下省在拟案阶段做整体合理性审查）
-        from control.agent.bus import KIND_PLAN_DRAFTED, ZHONGSHU, notify
-        notify(KIND_PLAN_DRAFTED, from_dept=ZHONGSHU,
-               plan_id=plan.id, intent=plan.intent, session_id=session_id,
-               steps_count=len(plan.steps))
+        from control.agent.bus import KIND_PLAN_DRAFTED, ZHONGSHU, notify_routed
+        notify_routed(KIND_PLAN_DRAFTED, from_dept=ZHONGSHU,
+                      plan_id=plan.id, intent=plan.intent, session_id=session_id,
+                      steps_count=len(plan.steps))
 
         # 便宜行事：如果所有步骤都标了 auto_execute=True，直接提交执行不走准奏
         all_auto = all(s.auto_execute for s in plan.steps)

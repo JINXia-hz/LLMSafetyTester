@@ -127,13 +127,12 @@ class TargetConfig:
 # ============================================================
 # 多目标扫描（.env: TARGETS + TARGET_<N>_* ；兼容旧 TARGET_*）
 # ============================================================
-def _target_from_prefixed(prefix: str, name: str) -> "TargetConfig":
+def _target_from_prefixed(prefix: str) -> "TargetConfig":
     """从 TARGET_<N>_* 一组变量构造一个目标（prefix 形如 'TARGET_1'）。"""
     return TargetConfig(
         api_key=os.getenv(f"{prefix}_API_KEY", ""),
         base_url=os.getenv(f"{prefix}_BASE_URL", DEFAULT_BASE_URL),
         model=os.getenv(f"{prefix}_MODEL", DEFAULT_MODEL),
-        # backend 类型下沉为每目标属性（缺失则继承全局 TARGET_TYPE/openai）
     )
 
 
@@ -201,7 +200,7 @@ def load_targets() -> dict[str, "TargetConfig"]:
         names = [n.strip() for n in raw_list.split(",") if n.strip()]
         # F-4 修复：复用共享映射，保证与 target_backend 一致
         for declared, prefix in _resolve_target_prefixes(names).items():
-            targets[declared] = _target_from_prefixed(prefix, declared)
+            targets[declared] = _target_from_prefixed(prefix)
 
     if not targets:
         # 回退：旧单目标 TARGET_*
@@ -242,8 +241,8 @@ def resolve_defender_name(target_model: str) -> str:
     取值与原各模块顶层 `from llmsec.targets import PCAP_MODEL_VERSION` 一致（import 期冻结）。
     """
     if os.getenv("TARGET_TYPE", "openai") == "pcap_judge":
-        from llmsec.targets import PCAP_MODEL_VERSION
-        return PCAP_MODEL_VERSION
+        from llmsec.targets.pcap import pcap_model_version
+        return pcap_model_version()
     return target_model
 
 

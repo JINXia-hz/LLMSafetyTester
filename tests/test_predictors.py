@@ -692,11 +692,12 @@ def test_blend_sim_weighted_differs_and_first_model_fallback():
 
         probe_path = Path(d) / "probes.json"
 
-        from llmsec.evaluation.predictors import fingerprint as mf
+        # r9/P3-4：fingerprint 已动态读 config.STATE_DIR——改 patch config
+        import llmsec.core.config as mf_cfg
 
-        orig = mf.PROBES_FILE
+        orig = mf_cfg.STATE_DIR
 
-        mf.PROBES_FILE = probe_path
+        mf_cfg.STATE_DIR = probe_path.parent
 
         try:
 
@@ -770,7 +771,7 @@ def test_blend_sim_weighted_differs_and_first_model_fallback():
 
         finally:
 
-            mf.PROBES_FILE = orig
+            mf_cfg.STATE_DIR = orig
 
 
 
@@ -782,11 +783,12 @@ def test_first_model_falls_back_to_uniform():
 
         probe_path = Path(d) / "probes.json"
 
-        from llmsec.evaluation.predictors import fingerprint as mf
+        # r9/P3-4：fingerprint 已动态读 config.STATE_DIR——改 patch config
+        import llmsec.core.config as mf_cfg
 
-        orig = mf.PROBES_FILE
+        orig = mf_cfg.STATE_DIR
 
-        mf.PROBES_FILE = probe_path
+        mf_cfg.STATE_DIR = probe_path.parent
 
         try:
 
@@ -818,7 +820,7 @@ def test_first_model_falls_back_to_uniform():
 
         finally:
 
-            mf.PROBES_FILE = orig
+            mf_cfg.STATE_DIR = orig
 
 
 # ===== from test_eval_review_predictors.py（评审修复回归：E 组）=====

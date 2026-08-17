@@ -15,7 +15,6 @@ workspaces 由控制层独立管理（output/workspaces/），维护 _index.json
 from __future__ import annotations
 
 import shutil
-from pathlib import Path
 
 from control.config import LLMSEC_REPO, WORKSPACES_DIR, ensure_workspaces_dir
 from control.core.invoker import export_snapshot, run_runner
@@ -247,12 +246,6 @@ def gc_merged_workspaces(older_than_days: int = 7) -> dict:
     }
 
 
-def _dir_size(path: Path) -> int:
-    if not path.exists():
-        return 0
-    if path.is_file():
-        try:
-            return path.stat().st_size
-        except OSError:
-            return 0
-    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file() and not f.is_symlink())
+# r7：与 llmsec/management/common.dir_size 的重复实现收敛为单源导入
+# （control 依赖 llmsec 共享层的先例见 control/core/paths.py）
+from llmsec.management.common import dir_size as _dir_size  # noqa: E402

@@ -128,7 +128,7 @@ def _tree_with_allergy(monkeypatch, tmp_path, allergy_data):
     results = [{"method": f"m{i}", "is_harmful": False, "harm_type": "t", "category": "c"}
                for i in range(10)]
     method_stats = rep.build_method_stats(results, {}, {})
-    return rep.build_tree(method_stats, allergy_data, {}, output_dir=str(tmp_path))
+    return rep.build_tree(method_stats, allergy_data)
 
 
 def test_h2_flat_summary_fpr_takes_effect(monkeypatch, tmp_path):

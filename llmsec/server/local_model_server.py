@@ -10,11 +10,11 @@
   - 有一定概率"越狱成功"（模拟小模型安全能力弱）
 
 用法：
-    python local_model_server.py                    # 默认端口 8000
-    python local_model_server.py --port 8000 --refusal-rate 0.6  # 60%拒绝率
+    python -m llmsec.server.local_model_server            # 默认端口 8000
+    python -m llmsec.server.local_model_server --port 8000 --refusal-rate 0.6  # 60%拒绝率
 
-然后用 evaluate.py：
-    python evaluate.py --max-samples 10 --no-judge
+然后用评估 CLI（r7 修正：根目录 evaluate.py 已不存在）：
+    python -m llmsec.evaluation.cli --max-samples 10 --no-judge
 """
 
 import argparse
@@ -293,10 +293,10 @@ def _generate_safe_response(text: str) -> str:
         "关于这个问题，我的理解是：",
         "Sure, I can help with that. Here's some general information:",
     ]
-    return random.choice(general_replies) + "\n\n" + _generate_generic_content(text)
+    return random.choice(general_replies) + "\n\n" + _generate_generic_content()
 
 
-def _generate_generic_content(text: str) -> str:
+def _generate_generic_content() -> str:
     """生成通用无害内容。"""
     generic = [
         "这是一个需要多方面考虑的话题。从不同角度来看，情况可能会有所不同。",
@@ -475,7 +475,7 @@ def main():
 {'='*60}
 
 启动后，在另一个终端运行：
-  python evaluate.py --max-samples 10 --no-judge
+  python -m llmsec.evaluation.cli --max-samples 10 --no-judge
 
 按 Ctrl+C 停止
 """)

@@ -29,11 +29,12 @@ schema v2（簇粒度）：
 from __future__ import annotations
 
 import sys
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from llmsec.core.config import RESULTS_FILE
+from llmsec.core import config as _config  # r9/P3-4：路径调用期动态读（work-dir 隔离经 config 单点重绑）
 from llmsec.core.io import CorruptedFileError, read_json, write_json
 from llmsec.core.logging import get_logger
 
@@ -95,6 +96,12 @@ def _file_lock(filepath: Path, timeout: float = 10.0, *, strict: bool = False):
     dashboard 与实验框架可能并发写全局 R，此锁串行化 save()，防交替写损坏。
     锁文件 = filepath + '.lock'。
 
+    线程内重入（r8/病根3）：msvcrt/fcntl 的锁按"句柄+区域"生效，同线程换一个
+    句柄重抢同一锁文件必然失败——持锁临界区内再调 load()/save() 会精确卡满
+    timeout（曾在 merge/delete_runs 上复现每次 +10s）。此处用 per-path 线程本地
+    引用计数实现重入（与 filelock 包的对象级引用计数等价），调用方不再需要
+    手工的 _locked 参数。
+
     超时策略（B1 修复）：
       - strict=False（默认）：超时放行 + 记 ERROR（best-effort，不阻塞评估）。
         用于 publish_tracker——评估观测在内存 tracker 里，中断会永久丢失整场评估。
@@ -104,6 +111,20 @@ def _file_lock(filepath: Path, timeout: float = 10.0, *, strict: bool = False):
     """
     import time
     lock_path = Path(str(filepath) + ".lock")
+    key = str(lock_path.resolve())
+    depths = getattr(_REENTRY, "depths", None)
+    if depths is None:
+        depths = {}
+        _REENTRY.depths = depths
+    if depths.get(key, 0) > 0:
+        # 本线程已持有该锁（外层临界区内再进）——引用计数 +1 直接放行
+        depths[key] += 1
+        try:
+            yield
+        finally:
+            depths[key] -= 1
+        return
+
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fh = open(lock_path, "a+b")
     acquired = False
@@ -135,8 +156,13 @@ def _file_lock(filepath: Path, timeout: float = 10.0, *, strict: bool = False):
                 "results.json 文件锁获取超时(%.0fs)，放行写入（罕见并发竞争下可能损坏；"
                 "若反复出现请排查 dashboard/实验框架并发写）: %s", timeout, filepath,
             )
+        else:
+            # 只在真正拿到锁时登记重入深度（放行路径没锁，嵌套调用仍应自行尝试加锁）
+            depths[key] = 1
         yield  # 拿到锁（或超时放行）后执行临界区
     finally:
+        if acquired:
+            depths.pop(key, None)
         try:
             if acquired:
                 if sys.platform == "win32":
@@ -151,6 +177,10 @@ def _file_lock(filepath: Path, timeout: float = 10.0, *, strict: bool = False):
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         finally:
             fh.close()
+
+
+# _file_lock 的线程本地重入计数（见其 docstring）
+_REENTRY = threading.local()
 
 
 @dataclass
@@ -330,11 +360,9 @@ class ResultsMatrix:
         return len(col) if col else 0
 
     # ---------- 持久化 ----------
-    def save(self, filepath: str | Path | None = None, *, _locked: bool = False) -> Path:
+    def save(self, filepath: str | Path | None = None) -> Path:
         # F-3 修复：权威存储用原子写 + .bak 轮转，避免崩溃/并发静默丢失全部历史观测
-        # _locked=True：调用方已持有 _file_lock（如 publish_tracker 的 load→modify→save
-        # 整段临界区），跳过内部锁以防同进程重入死锁（H5/H6 修复）
-        filepath = Path(filepath) if filepath else RESULTS_FILE
+        filepath = Path(filepath) if filepath else _config.RESULTS_FILE
         data = {
             "version": _SCHEMA_VERSION,
             "units": self._units,
@@ -346,19 +374,26 @@ class ResultsMatrix:
         }
         # 跨进程锁：dashboard 与实验并发写全局 R 时串行化（防交替写损坏）
         # allow_nan=False（M12）：权威存储禁止 NaN/Infinity 字面量（浏览器 JSON.parse 报错）
-        if _locked:
+        # B1：save 是权威写，锁超时即失败（strict=True）；_file_lock 已支持线程内
+        # 重入（r8），publish_tracker 等持锁调用方直接嵌套调用即可，无需 _locked 参数
+        with _file_lock(filepath, strict=True):
             write_json(filepath, data, backup=True, allow_nan=False)
-        else:
-            # B1：save 是权威写，锁超时即失败（strict=True），避免静默交替写损坏唯一真相
-            with _file_lock(filepath, strict=True):
-                write_json(filepath, data, backup=True, allow_nan=False)
         return filepath
 
     @classmethod
     def load(cls, filepath: str | Path | None = None) -> ResultsMatrix:
         # F1 修复：权威存储损坏时不再 reset 为空矩阵（空矩阵被下次 save 写回 = 永久丢失全部观测）。
         # 改为：备份残文件 → 尝试 .bak 恢复 → 仍失败则 raise（让顶层决策，不静默糊弄）。
-        filepath = Path(filepath) if filepath else RESULTS_FILE
+        # M-4：读路径与 save() 共用跨进程文件锁（best-effort strict=False，超时放行
+        # 保持 dashboard 可用），串行化"读 vs os.replace"，消除 Windows 上瞬时
+        # PermissionError 被误判为损坏的竞态窗口。锁已支持线程内重入（r8），
+        # merge/delete_runs 等持锁调用方直接嵌套调用即可。
+        filepath = Path(filepath) if filepath else _config.RESULTS_FILE
+        with _file_lock(filepath, strict=False):
+            return cls._load_unlocked(filepath)
+
+    @classmethod
+    def _load_unlocked(cls, filepath: Path) -> ResultsMatrix:
         data = None
         try:
             data = read_json(filepath, strict=True)

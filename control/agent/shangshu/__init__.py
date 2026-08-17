@@ -49,12 +49,15 @@ def approve_plan(plan_id: str) -> Plan:
     plan.approved = time.time()
     save_plan(plan)
     from control.agent import gazette
-    from control.agent.bus import KIND_PLAN_APPROVED, SHANGSHU, USER, notify
+    from control.agent.bus import KIND_PLAN_APPROVED, USER, notify_routed
     gazette.append_event(plan.id, gazette.EV_PLAN_APPROVED, USER,
                          session_id=plan.session_id, intent=plan.intent,
                          detail={"approved_at": plan.approved})
-    notify(KIND_PLAN_APPROVED, from_dept=USER, to_dept=SHANGSHU,
-           plan_id=plan.id, intent=plan.intent, session_id=plan.session_id)
+    # H-2：必须广播（不指定 to_dept）。唯一订阅方是门下省（dept=MENXIA）的
+    # 准奏阶段风险评估；定向 to_dept=SHANGSHU 时 bus 过滤 to_dept in (dept, ALL)
+    # 永不匹配，门下省审查整段静默失效。
+    notify_routed(KIND_PLAN_APPROVED, from_dept=USER,
+                   plan_id=plan.id, intent=plan.intent, session_id=plan.session_id)
     return plan
 
 
@@ -66,12 +69,12 @@ def reject_plan(plan_id: str) -> Plan:
     plan.status = P_REJECTED
     save_plan(plan)
     from control.agent import gazette
-    from control.agent.bus import KIND_PLAN_REJECTED, USER, notify
+    from control.agent.bus import KIND_PLAN_REJECTED, USER, notify_routed
     gazette.append_event(plan.id, gazette.EV_PLAN_REJECTED, USER,
                          session_id=plan.session_id, intent=plan.intent,
                          detail={})
-    notify(KIND_PLAN_REJECTED, from_dept=USER, plan_id=plan.id,
-           intent=plan.intent, session_id=plan.session_id)
+    notify_routed(KIND_PLAN_REJECTED, from_dept=USER, plan_id=plan.id,
+                   intent=plan.intent, session_id=plan.session_id)
     return plan
 
 

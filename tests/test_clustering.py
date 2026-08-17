@@ -358,7 +358,6 @@ import math
 
 from llmsec.clustering import features as feat_mod
 from llmsec.clustering.posterior import reaction_validation
-from llmsec.clustering.space import transform_to_space
 from llmsec.params import WHITEN_DAMP
 
 
@@ -498,69 +497,6 @@ def test_m3_damp_default():
 
     assert default == WHITEN_DAMP, f'M3: build_whitened_space damp 默认 == WHITEN_DAMP ({default})'
 
-
-
-def _toy_features():
-
-    rng = np.random.default_rng(7)
-
-    methods = ['a', 'b', 'c', 'd']
-
-    return (methods, {m: {'textual': rng.normal(size=3), 'prior': rng.normal(size=2)} for m in methods})
-
-
-
-def test_m15_transform_legacy_space():
-
-    methods, features = _toy_features()
-
-    space = build_whitened_space(features, methods)
-
-    legacy = {k: v for k, v in space.items() if k != 'damp'}
-
-    out = transform_to_space(legacy, features, methods)
-
-    assert out.shape == space['coords'].shape, f'M15: 无 damp 键旧工件 transform 不抛错（shape={out.shape}）'
-
-    space0 = build_whitened_space(features, methods, damp=0.0)
-
-    out0 = transform_to_space(space0, features, methods)
-
-    assert np.allclose(out, out0), 'M15: 无 damp 键时按 0.0 处理'
-
-
-
-def test_m29_transform_reproduces_coords():
-
-    methods, features = _toy_features()
-
-    # 默认 damp
-
-    space = build_whitened_space(features, methods)
-
-    out = transform_to_space(space, features, methods)
-
-    assert np.allclose(out, space['coords'], atol=1e-10), (
-
-        f'M29: 同数据 transform 应重现训练 coords（默认 damp），'
-
-        f'最大偏差 {float(np.max(np.abs(out - space["coords"])))}'
-
-    )
-
-    # damp=0.0（纯 PCA 得分，无白化）
-
-    space0 = build_whitened_space(features, methods, damp=0.0)
-
-    out0 = transform_to_space(space0, features, methods)
-
-    assert np.allclose(out0, space0['coords'], atol=1e-10), (
-
-        f'M29: 同数据 transform 应重现训练 coords（damp=0.0），'
-
-        f'最大偏差 {float(np.max(np.abs(out0 - space0["coords"])))}'
-
-    )
 
 
 
