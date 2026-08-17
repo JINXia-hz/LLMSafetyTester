@@ -21,7 +21,7 @@ from llmsec.core.llm import (
     retry_call,
 )
 from llmsec.core.logging import get_logger, setup_console
-from llmsec.core.text import extract_json_block
+from llmsec.core.text import extract_json_block, strip_reasoning
 
 logger = get_logger(__name__)
 from llmsec.params import (
@@ -271,7 +271,10 @@ class Judge:
             # reasoning_content，恢复真实输出；两者皆空才返回空串，让
             # parse_compliance_level / extract_json_block 走各自的"解析失败"分支，
             # 保留 judge_compliance/judge_harmfulness 内部的关键词降级语义。
-            return extract_message_text(response.choices[0].message)
+            raw = extract_message_text(response.choices[0].message)
+            # 推理型裁判（Qwen3/R1 类）正文前会带 <think>...</think> 思考段，
+            # 其中草拟的 JSON / "level X" 讨论会污染两级解析——在出口统一剥离。
+            return strip_reasoning(raw)
 
         def _on_retry(attempt, e):
             if self.verbose:

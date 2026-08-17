@@ -652,7 +652,12 @@ def derive_elo(
         seg_records = ordered[start:end]
         seg_rounds = rounds[start:end]
         for rd, group in groupby(zip(seg_records, seg_rounds), key=lambda x: x[1]):
-            grp = list(group)
+            # Judge 故障记录（judge_error）不参与回放——与写入侧
+            # （evaluator.update_elo / attack_phase）的过滤同口径；
+            # 正常发布路径不会写入这类行，此处是历史/手工 merge 数据的防线
+            grp = [(res, rr) for res, rr in group if res.status != "judge_error"]
+            if not grp:
+                continue
             # R 行键是实测记录 id（原始观测）；评级单位 = extra.unit（簇），
             # 回放时按 unit 聚合——同一 unit 的多条 prompt 观测累积到同一评级
             round_matches = [

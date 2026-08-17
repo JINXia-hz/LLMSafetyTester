@@ -21,6 +21,7 @@ from sklearn.pipeline import Pipeline
 
 from llmsec.core import config as _config  # r9/P3-4：路径调用期动态读
 from llmsec.core.logging import get_logger
+from llmsec.core.text import MATH_TAG_PATTERN
 from llmsec.params import PRESCREEN_ML_C, PRESCREEN_ML_MIN_TRAIN, PRESCREEN_ML_THRESHOLD
 
 logger = get_logger(__name__)
@@ -58,7 +59,7 @@ def predict(text: str) -> str | None:
     返回 'refusal' / 'empty' / None（交 Judge）。
     两层均为经验零误判（关键词需 ≥2 命中，ML 需 P≥0.90）。
     """
-    stripped = text.strip()
+    stripped = MATH_TAG_PATTERN.sub(" ", text.strip()).strip()
     if not stripped:
         return "empty"
 
@@ -153,7 +154,9 @@ def _chronological_holdout_eval(
 def train() -> dict:
     """从历史 attack_results.jsonl 训练预筛模型。
 
-    扫描 output/runs/*/attack_results.jsonl，提取 (response_preview, is_refusal) 标注对。
+    扫描 output/runs/**/attack_results*.jsonl 与 output/experiments/**/attack_results*.jsonl
+    （HPO 调参产线写 experiments/，只扫 runs/ 会漏掉整条产线的数据），
+    提取 (response_preview, is_refusal) 标注对。
     返回训练统计 {n_samples, n_refusals, n_attacks, accuracy}。
     数据不足 PRESCREEN_ML_MIN_TRAIN 时拒绝训练。
     """
@@ -161,13 +164,26 @@ def train() -> dict:
     labels: list[int] = []
     run_ids: list[str] = []  # 每条样本所属 run（时间序留出评估用）
 
-    runs_base = _config.OUTPUT_DIR.joinpath("runs")
-    for p in sorted(runs_base.rglob("attack_results*.jsonl")):
-        # run_key = runs/ 下的顶层目录名（时间戳会话），跨多目标子目录归一到同一次 run
-        try:
-            run_key = p.relative_to(runs_base).parts[0]
-        except ValueError:
-            run_key = str(p)
+    # 两条产线的数据源：runs/（看板/命令行评估）+ experiments/（HPO 调参）。
+    # 训练文本统一剥离 [MATH:x] 探针答案标记——答案数字是极稀有 token，
+    # 会把 TF-IDF 向量带偏（同一句拒绝带不带标记 P 相差 0.85+）；
+    # predict() 推理侧做同口径剥离，保证 train/serve 一致。
+    sources: list[tuple[str, object]] = [
+        ("runs", _config.OUTPUT_DIR.joinpath("runs")),
+        ("experiments", _config.OUTPUT_DIR.joinpath("experiments")),
+    ]
+    files: list[tuple[str, object]] = []
+    for _tag, base in sources:
+        for p in sorted(base.rglob("attack_results*.jsonl")):
+            try:
+                rel = p.relative_to(base)
+            except ValueError:
+                rel = p.name
+            # run_key = 前两级目录（runs/<会话> 或 experiments/<study>/<trial>），
+            # 跨多目标子目录归一到同一次 run，供时间序留出评估分组
+            run_key = "/".join((*_tag, *rel.parts[:2]))
+            files.append((run_key, p))
+    for run_key, p in sorted(files):
         for line in p.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
@@ -176,7 +192,14 @@ def train() -> dict:
                 r = json.loads(line)
             except (json.JSONDecodeError, ValueError):
                 continue
-            resp = r.get("response_preview", "")
+            # 训练标签只能来自真实 Judge 判定——Judge 故障期的行
+            # （fallback_keyword/judge_error）的 is_refusal 是默认 False 的脏标签
+            #（真实事故：25 条英文拒绝被记 is_refusal=False），喂进训练会把
+            # "拒绝"类整体带偏。--no-judge 关键词模式（no_judge）同理不采。
+            if r.get("judge_mode") in ("fallback_keyword", "no_judge") \
+                    or r.get("status") == "judge_error":
+                continue
+            resp = MATH_TAG_PATTERN.sub(" ", r.get("response_preview", ""))
             if not resp or len(resp.strip()) <= 5:
                 continue
             texts.append(resp)

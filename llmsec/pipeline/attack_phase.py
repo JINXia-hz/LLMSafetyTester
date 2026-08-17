@@ -231,6 +231,9 @@ def _build_attack_row(rec: dict, result: dict, round_idx: int, phase: str,
         # 否则 attack_results.jsonl 看不出预筛省了多少 API，prescreen_hit_rate 恒为 0。
         "prescreen_result": result.get("prescreen_result"),
         "judge_calls": result.get("judge_calls", 0),
+        # judge/no_judge/fallback_keyword：Judge 故障的记录不喂 Elo（见两处
+        # update_round 前的过滤），但明细保留此标记供分析/重跑识别
+        "judge_mode": result.get("judge_mode"),
     }
 
 
@@ -540,9 +543,12 @@ def run_attack_phase(records: list[dict],
             tested.add(uid)
             tested_recs[uid].add(str(rec["id"]))
             all_results.append(_build_attack_row(rec, result, 0, "seed", unit=uid))
-            seed_rows.append((uid, result["eval_score"]))
-            seed_statuses.append(result.get("status", ""))
-            seed_rec_ids.append(str(rec["id"]))
+            # Judge 故障（fallback_keyword）只留明细、不喂 Elo——0 分中性观测
+            # 会稀释攻防信号，且该条本就"未测出"任何结论
+            if result.get("judge_mode") != "fallback_keyword":
+                seed_rows.append((uid, result["eval_score"]))
+                seed_statuses.append(result.get("status", ""))
+                seed_rec_ids.append(str(rec["id"]))
 
             score = result["eval_score"]
             sym = "✅" if score > 0 else ("🔶" if score > -1 else "❌")
@@ -655,9 +661,11 @@ def run_attack_phase(records: list[dict],
             tested.add(uid)
             tested_recs[uid].add(str(rec["id"]))
             all_results.append(_build_attack_row(rec, result, round_idx, "attack", unit=uid))
-            round_rows.append((uid, result["eval_score"]))
-            round_statuses.append(result.get("status", ""))
-            round_rec_ids.append(str(rec["id"]))
+            # 同种子批：Judge 故障记录不喂 Elo（与 evaluator.update_elo 口径一致）
+            if result.get("judge_mode") != "fallback_keyword":
+                round_rows.append((uid, result["eval_score"]))
+                round_statuses.append(result.get("status", ""))
+                round_rec_ids.append(str(rec["id"]))
             score = result["eval_score"]
             sym = "✅" if score > 0 else ("🔶" if score > -1 else "❌")
             logger.info(f"     → {units[uid]['name'][:24]}（{rec['method'][:20]}） {sym} score={score:.1f} {result['status']}")

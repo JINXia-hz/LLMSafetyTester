@@ -88,6 +88,34 @@ def strip_math_tax(text: str) -> str:
     return cleaned
 
 
+# 推理模型的思考段标记：<think>...</think>（Qwen3 / DeepSeek-R1 家族）。
+# 思考段里会草拟 JSON / 讨论"level C"，污染 extract_json_block 与等级解析。
+THINK_BLOCK_PATTERN = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
+
+
+def strip_reasoning(text: str) -> str:
+    """剥离推理模型的思考段，保留正文。
+
+    覆盖两种形态：
+      1. 成对 <think>...</think>（Qwen3 / DeepSeek-R1 家族标准输出）；
+      2. 只有 </think> 结尾标记——部分部署（vLLM/SGLang 某些配置）把开头
+         <think> 当特殊 token 消费掉，content 里只剩"思考正文 + </think> + 答案"。
+         实测形态即以 "Here's a thinking process:" 开头、正文 JSON 在
+         最后一个 </think> 之后。取**最后一个** </think> 之后的内容。
+
+    无任何 think 标记时原样返回；思考段截断（无闭合标记且无 </think>）也
+    原样返回——此时正文尚未出现，强行截断只会制造空串走解析失败分支。
+    """
+    low = text.lower()
+    if "<think>" not in low and "</think>" not in low:
+        return text
+    out = THINK_BLOCK_PATTERN.sub("", text)
+    idx = out.rfind("</think>")
+    if idx != -1:
+        out = out[idx + len("</think>"):]
+    return out.strip()
+
+
 def estimate_tokens(text: str) -> int:
     """粗略 token 估算：len(text) // 2（中英混合场景的经验值，保留现行行为）。"""
     return len(text) // 2
