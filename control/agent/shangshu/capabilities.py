@@ -263,7 +263,7 @@ def _blk_merge_results(args: dict) -> dict | None:
         return {
             "summary": f"即将把 {src_str} 的观测合并到全局 R 矩阵",
             "detail": (
-                f"目标：全局 R（output/state/results.json，唯一真相）\n"
+                f"目标：全局 R（output/state/results.db，唯一真相）\n"
                 f"来源：{src_str}\n范围{model_str}\n"
                 f"全局 R 将永久累加这些观测，不可按来源精确剔除。"
                 f"这是不可逆的全局状态变更。"

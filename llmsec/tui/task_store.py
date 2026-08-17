@@ -62,17 +62,6 @@ def _tail_text(path: Path, limit: int = 4000) -> str:
         return ""
 
 
-def _read_meta(log_dir: Path, task_id: str) -> dict | None:
-    """读外部任务的 meta.json（task_manager 落盘）；无/损坏返回 None。"""
-    p = log_dir / f"{task_id}.meta.json"
-    if not p.exists():
-        return None
-    try:
-        return json.loads(p.read_text(encoding="utf-8", errors="replace"))
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
 def _pid_alive(pid: int | None) -> bool:
     """进程存活探测（无 psutil 依赖：win32 用 OpenProcess，posix 用 kill 0 探测）。"""
     if not pid:
@@ -316,24 +305,31 @@ class TaskStore:
             return {"error": str(e), "hint": e.hint}
 
     def cancel(self, task_id: str) -> dict:
-        """取消任务：本进程走 task_manager；外部任务经 meta.json 的 PID 跨进程强杀。"""
+        """取消任务：本进程走 task_manager；外部任务经目录库行的 PID 跨进程强杀。"""
         from llmsec.server.task_manager import cancel_task
+        from llmsec.storage import contract as _storage
 
         view = cancel_task(task_id)
         if view is not None:
             return view
-        # 外部任务：meta.json 带 PID 且进程仍活 → 跨进程终止（确认弹窗已在面板层）
-        meta = _read_meta(self._dir, task_id)
-        pid = meta.get("pid") if isinstance(meta, dict) else None
+        # 外部任务：库行带 PID 且进程仍活 → 跨进程终止（确认弹窗已在面板层）
+        row = _storage.get_task(task_id, tasks_dir=self._dir)
+        pid = row.pid if row is not None else None
         if isinstance(pid, int) and _pid_alive(pid):
             if _kill_pid(pid):
-                if isinstance(meta, dict):
+                # 双侧回写：库行是查询面；meta.json 是 P4 之前其它进程的可见通道
+                # （reconcile 以 meta mtime 为锚，单写库行会被对账覆盖回来）
+                try:
+                    _storage.update_task(task_id, status="cancelled")
+                except Exception:
+                    pass
+                try:
+                    mp = self._dir / f"{task_id}.meta.json"
+                    meta = json.loads(mp.read_text(encoding="utf-8", errors="replace"))
                     meta["status"] = "cancelled"
-                    try:
-                        (self._dir / f"{task_id}.meta.json").write_text(
-                            json.dumps(meta, ensure_ascii=False, default=str), encoding="utf-8")
-                    except OSError:
-                        pass
+                    mp.write_text(json.dumps(meta, ensure_ascii=False, default=str), encoding="utf-8")
+                except (OSError, json.JSONDecodeError):
+                    pass
                 return {"id": task_id, "status": "cancelled", "killed_pid": pid}
             return {"error": f"强杀 PID {pid} 失败（taskkill 返回非零），请手动处理"}
         return {"error": "任务不存在或已结束（外部任务无存活 PID，无法跨进程取消）"}

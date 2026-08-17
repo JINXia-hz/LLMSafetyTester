@@ -179,7 +179,20 @@ def _from_json(d: dict) -> Plan:
 
 
 def list_plans(*, recent: int = 20) -> list[dict]:
-    """列出最近的 Plan（按创建时间倒序，默认 20 条）。供前端展示历史。"""
+    """列出最近的 Plan（按创建时间倒序，默认 20 条）。供前端展示历史。
+
+    内存注册表重启即空——先扫磁盘补全（修复重启后 list_plans 返回空、
+    与"持久历史"承诺不符的缺陷；P5 库化后此处整体变 SQL 查询）。
+    """
+    for fp in _plans_dir().glob("*.json"):
+        plan_id = fp.stem
+        with _LOCK:
+            if plan_id in _PLANS:
+                continue
+        try:
+            _from_json(json.loads(fp.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError, KeyError):
+            continue  # 损坏/半写文件跳过（save_plan 无原子写的已知缺陷，P5 修复）
     with _LOCK:
         plans = list(_PLANS.values())
     plans.sort(key=lambda p: p.created, reverse=True)

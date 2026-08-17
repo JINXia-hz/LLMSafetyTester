@@ -80,10 +80,11 @@ def test_samplers_single_source():
 # ============================================================
 
 def test_run_name_re_single_source():
-    import llmsec.management.runs as runs
+    """命名契约单源：data_query 与 management 都指向 storage.contract 的同一对象。"""
     import llmsec.server.routers.data_query as dq
+    from llmsec.storage import contract
 
-    assert dq.RUN_NAME_RE is runs.RUN_NAME_RE
+    assert dq.RUN_NAME_RE is contract.RUN_NAME_RE
 
 
 def test_dir_size_single_source():

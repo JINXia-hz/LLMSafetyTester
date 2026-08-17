@@ -270,11 +270,11 @@ class TestExternalMeta:
         out = TaskStore(log_dir=tmp_path).cancel(tid)
         assert out.get("status") == "cancelled" and out.get("killed_pid") == os.getpid()
         assert killed == [os.getpid()]
-        # meta.json 状态已回写
-        import json as _json
+        # 取消状态已回写目录库行（P1：回写从 meta.json 改库行；P4 起 meta.json 退役）
+        from llmsec.storage import contract as _storage
 
-        meta = _json.loads((tmp_path / f"{tid}.meta.json").read_text(encoding="utf-8"))
-        assert meta["status"] == "cancelled"
+        row = _storage.get_task(tid, tasks_dir=tmp_path)
+        assert row is not None and row.status == "cancelled"
 
     def test_cancel_external_dead_pid_errors(self, tmp_path):
         self._write_meta(tmp_path, "evaluate-101010-fff", pid=999999999)

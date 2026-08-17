@@ -260,7 +260,7 @@ def api_block_approve(req: BlockApproveRequest):
     """
     from control.agent import gazette
     from control.agent.shangshu import get_queue, load_plan
-    ok = menxia.approve_block(req.plan_id, req.step_id)
+    ok = menxia.clear_block(req.plan_id, req.step_id)
     if not ok:
         raise HTTPException(status_code=404, detail="封驳令不存在（可能已放行或已过期）")
     gazette.append_event(req.plan_id, gazette.EV_STEP_UNBLOCKED, "用户",

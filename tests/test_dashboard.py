@@ -456,7 +456,6 @@ def test_runs_active_marking(monkeypatch, tmp_path):
     import json
 
     import llmsec.server.dashboard_api as api
-    from llmsec.server.routers import data_query as dq
     from llmsec.server.task_manager import TASKS
 
     # 构造两个批次：旧批次（任务开始前）与新批次（任务进行中）
@@ -467,7 +466,6 @@ def test_runs_active_marking(monkeypatch, tmp_path):
             "target_model": tgt, "security_level": "safe",
             "attack_phase": {"asr": 0.1}, "allergy": {}, "elo": {}}), encoding="utf-8")
     monkeypatch.setattr(api, "RUNS_DIR", tmp_path)
-    dq._RUN_META_CACHE.clear()
 
     tid = "evaluate-active-ut"
     TASKS[tid] = {"kind": "evaluate", "status": "running",
@@ -488,9 +486,11 @@ def test_runs_active_marking(monkeypatch, tmp_path):
     print("✅ /api/runs active 标注通过")
 
 
-def test_run_meta_cache_invalidation(monkeypatch, tmp_path):
-    """_run_meta：同目录覆写 runner_report.json（size 变）必须重读，不能吃目录 mtime 旧缓存。"""
+def test_run_row_refresh_on_report_overwrite(monkeypatch, tmp_path):
+    """目录库对账：同目录覆写 runner_report.json（resume 续跑场景）必须重扫，
+    查询结果反映新值——取代旧 _run_meta 的 (mtime,size) 缓存失效语义。"""
     import json
+    import os
 
     import llmsec.server.dashboard_api as api
     from llmsec.server.routers import data_query as dq
@@ -498,21 +498,22 @@ def test_run_meta_cache_invalidation(monkeypatch, tmp_path):
     run_dir = tmp_path / "2026-08-11_160000" / "modelC"
     run_dir.mkdir(parents=True)
     monkeypatch.setattr(api, "RUNS_DIR", tmp_path)
-    dq._RUN_META_CACHE.clear()
 
     (run_dir / "runner_report.json").write_text(json.dumps({
         "target_model": "modelC", "security_level": "safe", "attack_phase": {"asr": 0.10},
         "allergy": {}, "elo": {}}), encoding="utf-8")
-    m1 = dq._run_meta(run_dir)
+    m1 = next(r for r in dq._discover_runs() if r["name"].endswith("modelC"))
     assert m1["asr"] == 0.10
 
-    # 覆写（内容更长 → size 变）：resume 续跑场景
+    # 覆写（resume 续跑）：目录 mtime 变化触发对账重扫
     (run_dir / "runner_report.json").write_text(json.dumps({
         "target_model": "modelC", "security_level": "risky", "attack_phase": {"asr": 0.55},
         "allergy": {}, "elo": {}}), encoding="utf-8")
-    m2 = dq._run_meta(run_dir)
-    assert m2["asr"] == 0.55 and m2["security_level"] == "risky", "覆写后缓存必须失效重读"
-    print("✅ _run_meta 缓存失效通过")
+    st = run_dir.stat()
+    os.utime(run_dir, ns=(st.st_mtime_ns + 10_000_000_000,) * 2)  # 规避同刻 mtime
+    m2 = next(r for r in dq._discover_runs() if r["name"].endswith("modelC"))
+    assert m2["asr"] == 0.55 and m2["security_level"] == "risky", "覆写后对账必须重扫"
+    print("✅ 目录库对账失效通过")
 
 
 def test_probe_includes_services(monkeypatch):

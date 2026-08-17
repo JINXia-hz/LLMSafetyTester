@@ -70,11 +70,6 @@ def clear_all_for_plan(plan_id: str) -> int:
     return len(keys)
 
 
-def approve_block(plan_id: str, step_id: str) -> bool:
-    """用户准奏某步的封驳（= clear_block，executor 重入时重试）。"""
-    return clear_block(plan_id, step_id)
-
-
 def reset_blocks() -> None:
     """清空所有封驳（测试用）。"""
     with _LOCK:

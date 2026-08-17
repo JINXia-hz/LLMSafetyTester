@@ -22,3 +22,4 @@ attacks/*
 .idea/
 # 本地维护脚本（不入库：HPO 编排 / 测试清单生成等仓库侧工具）
 scripts/
+/experiments/

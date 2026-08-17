@@ -293,6 +293,15 @@ def get_run(name: str, *, runs_root: Path | str | None = None, db_path=None) -> 
         return s.get(Run, name)
 
 
+def get_task(task_id: str, *, tasks_dir: Path | str | None = None, db_path=None) -> Task | None:
+    """task_id → 登记行（默认先对账 meta.json，外部进程写的任务入册）。"""
+    dbp = db.catalog_db() if db_path is None else Path(db_path)
+    if tasks_dir is not None or db_path is None:
+        reconcile_tasks(tasks_dir=tasks_dir, db_path=dbp)
+    with db.session(dbp) as s:
+        return s.get(Task, task_id)
+
+
 def remove_run(name: str, *, db_path=None) -> bool:
     """删登记行（run 目录被软删/清理后同步库）。返回是否删到了。"""
     dbp = Path(db_path) if db_path is not None else db.catalog_db()

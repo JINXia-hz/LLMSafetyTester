@@ -59,15 +59,18 @@ def extract_report_metrics(report: dict) -> dict:
           "ci_half", "drift", "converged",
           "coverage", "conv_rounds",
           "fpr",                                       # allergy
+          "tax_probed",                                # attack_phase.jailbreak_tax
         }
     """
     attack = (report.get("attack_phase") or {}) if report else {}
     elo = (report.get("elo") or {}) if report else {}
     allergy = (report.get("allergy") or {}) if report else {}
+    tax = attack.get("jailbreak_tax") or {}
     return {
         "asr": attack.get("asr"),
         "rounds": attack.get("rounds"),
         "total_tested": attack.get("total_tested"),
+        "tax_probed": tax.get("probed"),
         "boundary_elo": elo.get("boundary_elo"),
         "boundary_confidence": elo.get("boundary_confidence"),
         "ci_half": elo.get("ci_half"),

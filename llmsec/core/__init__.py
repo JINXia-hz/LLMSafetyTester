@@ -1,30 +1,22 @@
 """
 llmsec.core — 基础设施层
 
-常用符号再导出，方便 `from llmsec.core import load_env, OUTPUT_DIR, ...`。
+常用符号再导出，方便 `from llmsec.core import load_env, ...`。
+
+路径常量只 re-export **永不重绑**的静态锚点（PROJECT_ROOT/ATTACKS_DIR 等）——
+会被 work-dir 隔离重绑的常量（RESULTS_*/CATALOG_DB/CLUSTER_*/STATE_DIR 等）
+不提供包层 re-export：冻结导入会静默绕过隔离（tests/test_audit_r9_guard 的
+AST 守卫口径），消费方一律 `import llmsec.core.config as _config` 调期读。
 """
 
 from llmsec.core.config import (
     ATTACK_SET_L1_FILE,
     ATTACKS_DIR,
-    CLUSTER_MATRIX_FILE,
-    CLUSTER_REPORT_FILE,
-    CLUSTER_RESULT_FILE,
-    CLUSTER_SECURITY_ANALYSIS_FILE,
     DATA_DIR,
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
-    ELO_CACHE_FILE,
-    FEATURE_CACHE_FILE,
     OUTPUT_DIR,
-    PREDICTORS_DIR,
     PROJECT_ROOT,
-    RESULTS_FILE,
-    RUNS_DIR,
-    SAFE_TWINS_FILE,
-    STATE_DIR,
-    TASK_LOG_DIR,
-    TWIN_RESULT_FILE,
     GeneratorConfig,
     JudgeConfig,
     TargetConfig,
@@ -61,14 +53,8 @@ from llmsec.core.text import (
 )
 
 __all__ = [
-    # config
-    "PROJECT_ROOT", "OUTPUT_DIR", "STATE_DIR", "ATTACKS_DIR", "RUNS_DIR", "DATA_DIR",
-    "SAFE_TWINS_FILE", "ATTACK_SET_L1_FILE",
-    "RESULTS_FILE", "PREDICTORS_DIR", "ELO_CACHE_FILE",
-    "CLUSTER_REPORT_FILE", "CLUSTER_MATRIX_FILE",
-    "FEATURE_CACHE_FILE", "CLUSTER_RESULT_FILE",
-    "CLUSTER_SECURITY_ANALYSIS_FILE",
-    "TWIN_RESULT_FILE", "TASK_LOG_DIR",
+    # config（仅静态锚点；重绑常量见模块 docstring）
+    "PROJECT_ROOT", "OUTPUT_DIR", "ATTACKS_DIR", "DATA_DIR", "ATTACK_SET_L1_FILE",
     "DEFAULT_BASE_URL", "DEFAULT_MODEL",
     "load_env", "load_targets",
     "TargetConfig", "GeneratorConfig", "JudgeConfig",

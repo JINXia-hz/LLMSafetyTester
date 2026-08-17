@@ -392,7 +392,7 @@ def test_h10_executor_receives_block_and_exempts_on_retry(tmp_path, monkeypatch)
     assert executed == [], "被封驳的步骤不应执行 handler"
 
     # 用户放行：清封驳令 + 写文牍 step_unblocked（router api_block_approve 同款流程）
-    block_mod.approve_block(plan.id, "s1")
+    block_mod.clear_block(plan.id, "s1")
     gazette.append_event(plan.id, gazette.EV_STEP_UNBLOCKED, "用户", step_id="s1",
                          detail={"capability": "放行重试"})
     for s in p1.steps:

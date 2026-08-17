@@ -253,9 +253,9 @@ def read_plan_context(plan_id: str) -> dict | None:
 
 
 def list_gazettes(*, session_id: str | None = None, recent: int = 20) -> list[dict]:
-    """列出最近的文牍（_index.json），可按 session 过滤。过滤掉 __pending__。"""
+    """列出最近的文牍（_index.json），可按 session 过滤。"""
     idx = _store.load()
-    plans = [p for p in idx.get("plans", {}).values() if p.get("plan_id") != "__pending__"]
+    plans = list(idx.get("plans", {}).values())
     if session_id:
         plans = [p for p in plans if p.get("session_id") == session_id]
     plans.sort(key=lambda p: p.get("last_ts", 0), reverse=True)

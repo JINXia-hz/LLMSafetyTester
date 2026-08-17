@@ -28,10 +28,6 @@ from llmsec.management.common import (
 
 logger = get_logger(__name__)
 
-# 命名契约与产物清单的权威定义在 storage.catalog（单一来源），此处 re-export
-# 供既有 import（data_query 等）零改动。
-from llmsec.storage.catalog import RUN_ARTIFACTS, RUN_NAME_RE  # noqa: E402,F401
-
 
 # ============================================================
 # 扫描（目录库单一实现，本层只做口径适配）

@@ -539,11 +539,8 @@ class ELOTracker(ConvergenceMixin):
     # ============================================================
     # 持久化
     # ============================================================
-    def save(self, filepath=None):
-        """持久化快照。filepath=None 时静默跳过——R 为唯一真相，per-run 快照由调用方显式传路径。"""
-        # filepath 未指定时跳过（R 为唯一真相；per-run 快照由调用方显式传路径）
-        if filepath is None:
-            return
+    def save(self, filepath) -> None:
+        """持久化快照（per-run 真相，调用方显式传路径——R 是跨 run 真相，两者互补）。"""
         filepath = str(filepath)
         data = {
             "attacker_ratings": self.attacker_ratings,

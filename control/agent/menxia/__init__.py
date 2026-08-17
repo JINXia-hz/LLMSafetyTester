@@ -14,13 +14,12 @@
   init_menxia() / reinit_menxia()    初始化总线订阅
   assess_step(cap, args)              封驳审查
   review_run(run_name)                审查某 run
-  issue_block / approve_block / ...   封驳令管理
+  issue_block / clear_block / ...      封驳令管理
   BlockTicket                         封驳令类型
 """
 
 from control.agent.menxia.block import (
     BlockTicket,
-    approve_block,
     clear_all_for_plan,
     clear_block,
     get_block,
@@ -47,7 +46,7 @@ __all__ = [
     "assess_step",
     # 封驳令管理
     "BlockTicket", "issue_block", "get_block", "clear_block",
-    "clear_all_for_plan", "approve_block", "reset_blocks",
+    "clear_all_for_plan", "reset_blocks",
     # 事后审查
     "review_run", "read_report", "assess_findings", "render_digest", "get_thresholds",
 ]

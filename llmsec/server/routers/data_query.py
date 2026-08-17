@@ -15,14 +15,12 @@ from llmsec.core.caches import SigCache
 from llmsec.core.config import ATTACKS_DIR, CLUSTER_RESULT_FILE, OUTPUT_DIR
 from llmsec.core.io import read_json
 from llmsec.core.logging import get_logger
-from llmsec.core.results import extract_report_metrics
 
 logger = get_logger(__name__)
 
 router = APIRouter()
 
-# r7：与 management/runs.py 的重复定义收敛为单源导入
-from llmsec.management.runs import RUN_NAME_RE  # noqa: E402
+from llmsec.storage.contract import RUN_NAME_RE  # noqa: E402 -- 命名契约单一来源
 
 
 def _runs_dir() -> Path:
@@ -69,7 +67,7 @@ def _run_dir(run: str | None) -> Path | None:
         _validate_run(run)
         d = runs_dir / run
         return d if d.is_dir() else None
-    runs = _discover_runs_cached()
+    runs = _discover_runs()
     for r in runs:
         if r["has_report"]:
             return runs_dir / r["name"]
@@ -113,85 +111,26 @@ def _run_time(run_name: str) -> str | None:
         return None
 
 
-def _run_summary(run_dir: Path) -> dict | None:
-    """读取单批次 runner_report.json，抽取趋势/批次富化所需的轻量字段。
+def _row_summary(row) -> dict | None:
+    """从目录库登记行构造趋势摘要（库行 metrics 即 extract_report_metrics 的落库结果）。
 
-    只读 runner_report.json（不碰 state/tree），供 /api/trend 与 /api/runs 复用，
-    单次服务端循环即可替代前端逐批次拉 /api/overview。
+    取代旧 _run_summary/_run_meta/_RUN_META_CACHE 三件：重解析 runner_report.json
+    与按 (mtime,size) 的缓存签名字号全部冗余——目录库对账本身就是持久化缓存。
     """
-    report = load_json(run_dir / "runner_report.json")
-    if not report:
+    if not row.has_report or not row.metrics:
         return None
-    m = extract_report_metrics(report)
-    attack = report.get("attack_phase", {}) or {}
-    tax = attack.get("jailbreak_tax") or {}
-    # run 名 = 相对 runs_dir 的路径（如 "2026-08-07_120000/minimax"），不用 run_dir.name（只返回末段）
-    from llmsec.server.dashboard_api import RUNS_DIR
-    try:
-        run_name = str(run_dir.relative_to(RUNS_DIR)).replace("\\", "/")
-    except ValueError:
-        run_name = run_dir.name
+    m = row.metrics
+    d = row.as_dict()
     return {
-        "run": run_name,
-        "time": _run_time(run_name.split("/")[-1]) or report.get("generated_at"),
-        "target": report.get("target_model"),
-        "asr": m["asr"],
-        "fpr": m["fpr"],
-        "elo": m["boundary_elo"],
-        "level": report.get("security_level", "inconclusive"),
-        "tax_probed": tax.get("probed"),
+        "run": row.name,
+        "time": _run_time(row.batch) or d["mtime"],
+        "target": row.target_model or row.target,
+        "asr": m.get("asr"),
+        "fpr": m.get("fpr"),
+        "elo": m.get("boundary_elo"),
+        "level": row.security_level or "inconclusive",
+        "tax_probed": m.get("tax_probed"),
     }
-
-
-# /api/runs 富化缓存：按 (run 名, 报告文件 mtime+size) 失效，避免每次下拉都重解析报告。
-# 注意不能用目录 mtime：resume 续跑覆写已有 runner_report.json 时目录 mtime 不变，会吃旧缓存。
-_RUN_META_CACHE: dict[str, tuple[tuple[float, int] | None, dict]] = {}
-
-# r9/P3-5 的 _DISCOVER_CACHE（目录签名缓存）已随 storage 重构移除：目录库的
-# 增量对账本身就是持久化的"签名缓存"（按 run 目录 mtime 逐条比对，粒度更细）。
-
-
-def _file_sig(path: Path) -> tuple[float, int] | None:
-    """单文件签名 (mtime, size)；不可 stat 返回 None。"""
-    try:
-        st = path.stat()
-        return (st.st_mtime, st.st_size)
-    except OSError:
-        return None
-
-
-def _discover_runs_cached() -> list[dict]:
-    """_discover_runs 的缓存名号保留（首屏 4 处调用点不变）。
-
-    缓存本体已由目录库增量对账取代——重复调用只付出两级目录 stat 的对账成本，
-    无报告重读。副本语义保留：避免调用方 mutate 污染后续结果（/api/runs 会 r.update）。
-    """
-    return [dict(r) for r in _discover_runs()]
-
-
-def _run_meta(run_dir: Path) -> dict:
-    """批次富化信息（target_model/security_level/asr），按报告文件 (mtime,size) 缓存。"""
-    from llmsec.server.dashboard_api import RUNS_DIR
-    try:
-        name = str(run_dir.relative_to(RUNS_DIR)).replace("\\", "/")
-    except ValueError:
-        name = run_dir.name
-    report_path = run_dir / "runner_report.json"
-    sig = _file_sig(report_path)
-    cached = _RUN_META_CACHE.get(name)
-    if cached and cached[0] == sig:
-        return cached[1]
-    meta: dict = {}
-    if sig is not None:
-        summ = _run_summary(run_dir)
-        if summ:
-            meta = {
-                "target_model": summ["target"],
-                "security_level": summ["level"],
-                "asr": summ["asr"],
-            }
-    _RUN_META_CACHE[name] = (sig, meta)
-    return meta
 
 
 def _load_state(run: str | None = None) -> dict:
@@ -290,8 +229,7 @@ def _load_tree_artifacts() -> dict | None:
 # ============================================================
 @router.get("/api/runs")
 async def api_runs():
-    runs_dir = _runs_dir()
-    runs = _discover_runs_cached()
+    runs = _discover_runs()
     # 进行中标注：有 evaluate 任务在跑时，批次 ts ≥ 任务 started_at 的 run 标 active，
     # 前端据此渲染 ⏳（多目标运行时先完成的目标报告已落盘，需与"已完成"区分）
     from llmsec.server.task_manager import TASKS
@@ -304,10 +242,8 @@ async def api_runs():
     for r in runs:
         if active_since and r.get("batch", "") >= active_since:
             r["active"] = True
-        # 富化：带报告的批次附 target_model/security_level/asr，
-        # 供批次下拉渲染成"带等级印章的列表"（安/警/伤小方印排在批次名前）
-        if r.get("has_report"):
-            r.update(_run_meta(runs_dir / r["name"]))
+    # target_model/security_level/asr 已随目录库登记行的 as_dict() 返回
+    # （旧 _run_meta 富化与库行重复，已删）
     return {"runs": runs, "total": len(runs)}
 
 
@@ -325,10 +261,10 @@ async def api_trend(target: str | None = None):
     _LOCAL_SIM_RE = re.compile(r"local.*sim", re.I)
     points: list[dict] = []
     targets_seen: list[str] = []
-    for r in _discover_runs_cached():
-        if not r.get("has_report"):
-            continue
-        summ = _run_summary(runs_dir / r["name"])
+    from llmsec.storage import contract as _storage
+
+    for row in _storage.query_runs(runs_root=runs_dir, has_report=True):
+        summ = _row_summary(row)
         if summ is None:
             continue
         tg = summ["target"]
@@ -424,7 +360,7 @@ async def api_overview(run: str | None = None):
     cur_name = _run_name(run_dir, run)
     cur_batch = cur_name.split("/", 1)[0]
     newer = next(
-        (r["name"] for r in _discover_runs_cached()
+        (r["name"] for r in _discover_runs()
          if r["has_report"] and r["name"].split("/", 1)[0] > cur_batch),
         None,
     )

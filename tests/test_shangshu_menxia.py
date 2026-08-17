@@ -309,11 +309,11 @@ class TestMenxiaAssess:
         assert assess_step(self._cap("fork_workspace"), {}) is None
 
     def test_block_lifecycle(self):
-        from control.agent.menxia import approve_block, get_block, issue_block, reset_blocks
+        from control.agent.menxia import clear_block, get_block, issue_block, reset_blocks
         reset_blocks()
         issue_block("p1", "s1", "run_evaluation", "high", {"summary": "s", "detail": "d"})
         assert get_block("p1", "s1") is not None
-        assert approve_block("p1", "s1") is True
+        assert clear_block("p1", "s1") is True
         assert get_block("p1", "s1") is None
         reset_blocks()
 

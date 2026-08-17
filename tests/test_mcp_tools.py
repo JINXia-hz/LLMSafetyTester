@@ -246,13 +246,13 @@ class TestQueryResultsAndElo:
         assert "note" in r  # results.json 不存在提示
 
     def test_get_results_summary_with_data(self, iso_out):
-        seed_results(iso_out / "state" / "results.json", "m-x",
+        seed_results(iso_out / "state" / "results.db", "m-x",
                      [("u1", 1.0), ("u2", 0.0)])
         r = query.get_results_summary()
         assert r["models"] == ["m-x"]
         assert r["records"] == 2
         assert r["total_observations"] == 2
-        assert r["results_file"].endswith("results.json")
+        assert r["results_db"].endswith("results.db")
 
     def test_elo_tools_missing_results_file(self, iso_out):
         err = query.elo_ranking("m-elo")
@@ -261,7 +261,7 @@ class TestQueryResultsAndElo:
         assert "error" in query.elo_find_surprises("m-elo")
 
     def test_elo_ranking_and_boundary(self, iso_out):
-        seed_results(iso_out / "state" / "results.json", "m-elo",
+        seed_results(iso_out / "state" / "results.db", "m-elo",
                      [("u-win", 5.0), ("u-loss", 0.0)])
 
         ranking = query.elo_ranking("m-elo")
@@ -275,7 +275,7 @@ class TestQueryResultsAndElo:
         assert "converged" in boundary and "methods_above_boundary" in boundary
 
     def test_elo_find_surprises_both_directions(self, iso_out):
-        seed_results(iso_out / "state" / "results.json", "m-elo",
+        seed_results(iso_out / "state" / "results.db", "m-elo",
                      [("u-win", 5.0), ("u-loss", 0.0)])
         r = query.elo_find_surprises("m-elo")
         assert {w["attacker"] for w in r["weakness"]} == {"u-win"}  # 低分攻击成功
@@ -283,7 +283,7 @@ class TestQueryResultsAndElo:
 
     def test_elo_suggest_next_pairing(self, iso_out):
         # 用独立模型名 + 不同分数，避免与相邻用例命中同一列指纹的进程内 tracker 缓存
-        seed_results(iso_out / "state" / "results.json", "m-pair",
+        seed_results(iso_out / "state" / "results.db", "m-pair",
                      [("p1", 3.0), ("p2", 7.0)])
         pairs = query.elo_suggest_next_pairing("m-pair", n=5)
         assert 1 <= len(pairs) <= 5
@@ -291,7 +291,7 @@ class TestQueryResultsAndElo:
         assert {p["attacker"] for p in pairs} == {"p1", "p2"}
 
     def test_elo_unknown_model_returns_empty(self, iso_out):
-        seed_results(iso_out / "state" / "results.json", "m-real", [("u1", 1.0)])
+        seed_results(iso_out / "state" / "results.db", "m-real", [("u1", 1.0)])
         assert query.elo_ranking("m-ghost") == []
 
 

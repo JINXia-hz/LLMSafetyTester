@@ -128,13 +128,13 @@ def test_g4_data_query_uses_shared_sig(tmp_path, monkeypatch):
     import os
     batch = tmp_path / "2026-01-01_000000"
     batch.mkdir()
-    dq._discover_runs_cached()
+    dq._discover_runs()
     t = batch / "gemma"
     t.mkdir()
     (t / "runner_report.json").write_text('{"target_model": "gemma"}', encoding="utf-8")
     st = batch.stat()
     os.utime(batch, ns=(st.st_mtime_ns + 10_000_000_000,) * 2)  # 规避同刻 mtime
-    names = [r["name"] for r in dq._discover_runs_cached()]
+    names = [r["name"] for r in dq._discover_runs()]
     assert "2026-01-01_000000/gemma" in names
 
 
