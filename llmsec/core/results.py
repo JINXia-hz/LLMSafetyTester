@@ -27,9 +27,6 @@ schema v2（簇粒度）：
 
 from __future__ import annotations
 
-import sys
-import threading
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -80,103 +77,6 @@ def extract_report_metrics(report: dict) -> dict:
         "conv_rounds": elo.get("conv_rounds"),
         "fpr": allergy.get("fpr"),
     }
-
-
-class LockTimeout(OSError):
-    """文件锁获取超时（strict 模式下抛出）。
-
-    区分于默认的放行策略：权威存储（save/merge）用 strict=True 超时即失败，
-    避免静默交替写损坏唯一真相；评估期写入（publish_tracker）维持放行不中断评估。
-    """
-
-
-@contextmanager
-def _file_lock(filepath: Path, timeout: float = 10.0, *, strict: bool = False):
-    """跨进程文件锁（Windows msvcrt / Unix fcntl）。
-
-    2026-08 阶段 2 起 R 真相路径不再使用本锁（SQLite 事务接管）；现存用户是
-    elo_cache.json 的 RMW（elo_access）。保留实现与重入语义不变。
-
-    线程内重入（r8/病根3）：msvcrt/fcntl 的锁按"句柄+区域"生效，同线程换一个
-    句柄重抢同一锁文件必然失败——持锁临界区内再调 load()/save() 会精确卡满
-    timeout（曾在 merge/delete_runs 上复现每次 +10s）。此处用 per-path 线程本地
-    引用计数实现重入。
-
-    超时策略（B1 修复）：strict=False（默认）超时放行 + 记 ERROR（best-effort，
-    派生缓存不值得中断评估）；strict=True 超时抛 LockTimeout。
-    """
-    import time
-    lock_path = Path(str(filepath) + ".lock")
-    key = str(lock_path.resolve())
-    depths = getattr(_REENTRY, "depths", None)
-    if depths is None:
-        depths = {}
-        _REENTRY.depths = depths
-    if depths.get(key, 0) > 0:
-        # 本线程已持有该锁（外层临界区内再进）——引用计数 +1 直接放行
-        depths[key] += 1
-        try:
-            yield
-        finally:
-            depths[key] -= 1
-        return
-
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(lock_path, "a+b")
-    acquired = False
-    deadline = time.time() + timeout
-    try:
-        while time.time() < deadline:
-            try:
-                if sys.platform == "win32":
-                    import msvcrt
-                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-                    acquired = True
-                    break
-                else:
-                    import fcntl
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    acquired = True
-                    break
-            except OSError:
-                time.sleep(0.05)
-        if not acquired:
-            # #15：超时放行时必须留痕——对"唯一真相"存储，静默交替写会损坏且无信号。
-            if strict:
-                # B1：权威写（save/merge）超时即失败，避免 RMW 临界区被打破后静默丢观测
-                raise LockTimeout(
-                    f"文件锁获取超时({timeout:.0f}s)，拒绝写入（strict 模式，防并发损坏）: {filepath}"
-                )
-            # 非 strict：保持放行策略（不阻塞评估：评估成本高于罕见损坏），但记 ERROR 供排查
-            logger.error(
-                "results.json 文件锁获取超时(%.0fs)，放行写入（罕见并发竞争下可能损坏；"
-                "若反复出现请排查 dashboard/实验框架并发写）: %s", timeout, filepath,
-            )
-        else:
-            # 只在真正拿到锁时登记重入深度（放行路径没锁，嵌套调用仍应自行尝试加锁）
-            depths[key] = 1
-        yield  # 拿到锁（或超时放行）后执行临界区
-    finally:
-        if acquired:
-            depths.pop(key, None)
-        try:
-            if acquired:
-                if sys.platform == "win32":
-                    import msvcrt
-                    try:
-                        fh.seek(0)
-                        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-                    except OSError:
-                        pass
-                else:
-                    import fcntl
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-        finally:
-            fh.close()
-
-
-# _file_lock 的线程本地重入计数（见其 docstring）
-_REENTRY = threading.local()
 
 
 @dataclass

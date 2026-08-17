@@ -7,23 +7,22 @@ evaluation.elo_access — Elo 派生访问层（R-cutover 的读取统一入口�
     R → derive_elo(R, model) → ELOTracker（ratings / ground truth / 收敛轨迹）
 
 本模块负责：
-  1. elo_state_for(model)：返回某模型的派生 Elo 状态（命中 ELO_CACHE_FILE 且指纹
-     一致则直接返回；否则从 R 重算并写缓存）。report / dashboard 经此读取，不再
-     直读 state.json。
+  1. elo_state_for(model)：返回某模型的派生 Elo 状态（命中 results.db 的
+     elo_cache 行且指纹一致则直接返回；否则从 R 重算并写行）。report /
+     dashboard 经此读取。
   2. publish_tracker(tracker, model)：评估结束后把 live tracker 的结果写入 R，
-     并把**完整**派生状态（含 live run 的收敛轨迹）发布到缓存。runner / evaluator
-     经此写入，state.json 退化为可选的快照备份。
+     并把**完整**派生状态（含 live run 的收敛轨迹）发布到缓存行。
 
-缓存失效以"模型列内容指纹"为准——R 中该模型列变动即作废对应缓存项。
+缓存失效以"模型列内容指纹"为准——R 中该模型列变动即作废对应行。
+P2：缓存自 elo_cache.json 迁入 results.db 的 elo_cache 表（rstore 事务 upsert，
+文件锁 RMW / _load_cache / _save_cache 退役）。
 """
 
 from __future__ import annotations
 
 import hashlib
 
-from llmsec.core import config
-from llmsec.core.io import read_json, write_json
-from llmsec.core.results import MatchResult, ResultsMatrix, _coarse_status, _file_lock
+from llmsec.core.results import MatchResult, ResultsMatrix, _coarse_status
 from llmsec.evaluation.elo import ELOTracker, derive_elo
 
 _CACHE_VERSION = 3  # v3：簇粒度——ratings/GT 键为 unit_id（簇），R 行键为记录 id
@@ -41,19 +40,26 @@ def _model_fingerprint(R: ResultsMatrix, model: str) -> str | None:
     return hashlib.md5(payload.encode("utf-8")).hexdigest()
 
 
-def _load_cache() -> dict:
-    cache = read_json(config.ELO_CACHE_FILE, default={})
-    if not isinstance(cache, dict):
-        return {}
-    # 缓存 schema 漂移即整体作废（指纹不变时旧 schema 项仍会命中，须按版本拦截）
-    if cache.get("_version") != _CACHE_VERSION:
-        return {}
-    return cache
+def _cache_hit(model: str, fp: str) -> dict | None:
+    """命中判定：elo_cache 行存在、指纹一致、payload schema 版本未漂移。"""
+    from llmsec.storage import rstore
+
+    row = rstore.get_elo_cache(model)
+    if row is None:
+        return None
+    row_fp, payload = row
+    if row_fp != fp or payload.get("_version") != _CACHE_VERSION:
+        return None
+    return payload
 
 
-def _save_cache(cache: dict) -> None:
-    cache.setdefault("_version", _CACHE_VERSION)
-    write_json(config.ELO_CACHE_FILE, cache, allow_nan=False)  # M12：派生缓存也禁 NaN
+def _cache_store(model: str, fp: str, entry: dict) -> None:
+    from llmsec.storage import rstore
+
+    payload = dict(entry)
+    payload["_version"] = _CACHE_VERSION
+    payload.setdefault("fingerprint", fp)  # 形状统一：读侧免特判（列与 payload 都有）
+    rstore.upsert_elo_cache(model, fp, payload)
 
 
 # ============================================================
@@ -75,9 +81,8 @@ def elo_state_for(model: str) -> dict:
     if fp is None:
         return {}
 
-    cache = _load_cache()
-    entry = cache.get(model)
-    if entry and entry.get("fingerprint") == fp:
+    entry = _cache_hit(model, fp)
+    if entry is not None:
         return entry
 
     # 缓存未命中或过期：从 R 重算
@@ -92,11 +97,7 @@ def elo_state_for(model: str) -> dict:
         "attacker_pred_std": dict(tracker.attacker_pred_std),
         "n": len(tracker.ground_truth_methods),
     }
-    # L-4：缓存 RMW 纳入文件锁（重算在锁外、提交在锁内；锁内重读防并发覆盖丢条目）
-    with _file_lock(config.ELO_CACHE_FILE, strict=False):
-        cache = _load_cache()
-        cache[model] = entry
-        _save_cache(cache)
+    _cache_store(model, fp, entry)  # P2：事务 upsert 行（锁 RMW 退役）
     return entry
 
 
@@ -221,19 +222,14 @@ def publish_tracker(tracker: ELOTracker, model: str) -> None:
     # M-2：ratings/ground_truth 用 R 派生态（同键多次观测以末值为准），
     # 不直接拷 live tracker 的累积态
     derived = derive_elo(R, model)
-    # L-4：缓存 RMW 纳入文件锁（锁内重读防并发后写者整文件覆盖先写者丢条目；
-    # 锁顺序恒 RESULTS→ELO_CACHE，与 elo_state_for 一致，无死锁）
-    with _file_lock(config.ELO_CACHE_FILE, strict=False):
-        cache = _load_cache()
-        cache[model] = {
-            "fingerprint": fp,
-            "attacker_ratings": dict(derived.attacker_ratings),
-            "defender_ratings": dict(derived.defender_ratings),
-            "ground_truth": {m: dict(g) for m, g in derived.predictor.ground_truth.items()},
-            "round_defender_elos": {k: v for k, v in tracker._round_defender_elos.items()},
-            "defender_match_count": {k: v for k, v in tracker._defender_match_count.items()},
-            "attacker_pred_std": dict(tracker.attacker_pred_std),
-            "n": len(derived.ground_truth_methods),
-        }
-        _save_cache(cache)
+    # M-2：ratings/ground_truth 用 R 派生态（同键多次观测以末值为准）
+    _cache_store(model, fp, {
+        "attacker_ratings": dict(derived.attacker_ratings),
+        "defender_ratings": dict(derived.defender_ratings),
+        "ground_truth": {m: dict(g) for m, g in derived.predictor.ground_truth.items()},
+        "round_defender_elos": {k: v for k, v in tracker._round_defender_elos.items()},
+        "defender_match_count": {k: v for k, v in tracker._defender_match_count.items()},
+        "attacker_pred_std": dict(tracker.attacker_pred_std),
+        "n": len(derived.ground_truth_methods),
+    })
 

@@ -34,7 +34,8 @@ def rebind_to_workdir(wd: Path) -> None:
     allergy_phase/clustering.pipeline/results 共 8 处）已删除。
 
     覆盖的路径（15 个 + 3 个子目录创建）：
-      权威/派生存储:  RESULTS_DB, RESULTS_FILE, ELO_CACHE_FILE, CATALOG_DB（卫星目录库）
+      权威/派生存储:  RESULTS_DB, RESULTS_FILE, CATALOG_DB（卫星目录库）
+                                          （elo 派生缓存随 results.db 走，P2 表化）
       聚类/特征:      FEATURE_CACHE_FILE, CLUSTER_RESULT_FILE, CLUSTER_REPORT_FILE,
                       CLUSTER_MATRIX_FILE, EMBEDDING_CACHE_FILE
       预测器:         PREDICTORS_DIR
@@ -53,7 +54,6 @@ def rebind_to_workdir(wd: Path) -> None:
     import llmsec.core.config as _cfg
     _cfg.RESULTS_DB = wd / "results.db"
     _cfg.RESULTS_FILE = wd / "results.json"
-    _cfg.ELO_CACHE_FILE = wd / "elo_cache.json"
     _cfg.CATALOG_DB = wd / "catalog.db"
     _cfg.CLUSTER_DIR = wd / "cluster"
     _cfg.FEATURE_CACHE_FILE = wd / "cluster" / "feature_cache.pkl"

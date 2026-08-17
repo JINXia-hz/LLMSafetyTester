@@ -1,8 +1,8 @@
 """第 7 轮审计回归——存储与并发（M-4 / M-7 / L-4 / L-7）。
 
   - M-4: read_json 区分"内容损坏"与"瞬时 IO 错误"——PermissionError 不得被
-    误判为 CorruptedFileError（否则完好 results.json 被备份成 .corrupt.bak
-    并回退旧 .bak 数据）；ResultsMatrix.load 读路径与 save 共用文件锁。
+    误判为 CorruptedFileError。（原"load 与 save 共用文件锁"已随 P2 锁家族
+    退役：R 走 SQLite 事务，elo_cache 表化。）
   - M-7: confirm._gc 必须持锁调用（锁外迭代 + 持锁 pop 并发会 RuntimeError）。
   - L-4: elo_cache 的 RMW 纳入文件锁。
   - L-7: write_json 的 tmp 名带 pid/tid（同进程并发写同一文件不互踩）。
@@ -137,53 +137,6 @@ class TestResultsMatrixLoad:
         with pytest.raises(RuntimeError, match="完整性校验失败"):
             ResultsMatrix.load(dbp)
 
-    def test_load_inside_held_lock_is_instant(self, tmp_path):
-        """r8/P0 回归：持锁临界区内嵌套 load()/save() 不得卡满锁超时。
-
-        原 _file_lock 无线程内重入：merge/delete_runs 持锁调 load() 在 Windows
-        上精确卡 10 秒并记伪 ERROR（msvcrt 锁按句柄生效，同线程二次抢锁必失败）。
-        """
-        import time
-
-        from llmsec.core.results import ResultsMatrix, _file_lock
-
-        main = tmp_path / "results.json"
-        self._valid_matrix_file(main)
-
-        t0 = time.time()
-        with _file_lock(main, strict=True):
-            R = ResultsMatrix.load(main)   # merge.py / runs.py 的真实调用形态
-            assert R.n_for_model("m1") > 0
-            R.save(main)                   # publish_tracker 的嵌套 save 形态
-        dt = time.time() - t0
-        assert dt < 2.0, f"锁内嵌套 load/save 必须即时（重入计数生效），实际 {dt:.2f}s"
-
-    def test_file_lock_still_excludes_other_threads(self, tmp_path):
-        """重入只对本线程生效：另一线程仍被锁排除（strict 超时抛 LockTimeout）。"""
-        import threading
-        import time
-
-        from llmsec.core.results import LockTimeout, _file_lock
-
-        target = tmp_path / "results.json"
-        target.write_text("{}", encoding="utf-8")
-
-        with _file_lock(target, strict=True):
-            errs = []
-
-            def rival():
-                try:
-                    with _file_lock(target, timeout=0.3, strict=True):
-                        pass
-                except LockTimeout:
-                    errs.append("timeout")
-
-            th = threading.Thread(target=rival)
-            th.start()
-            th.join(timeout=3)
-            time.sleep(0.05)
-        assert errs == ["timeout"], "跨线程互斥必须保持（重入不得退化为全局放行）"
-
 
 # ============================================================
 # M-7: confirm._gc 持锁
@@ -245,39 +198,28 @@ class TestConfirmGcThreadSafety:
 # L-4: elo_cache RMW 加锁
 # ============================================================
 
-class TestEloCacheRmwLock:
-    def test_cache_commit_under_lock_and_both_entries_survive(self, tmp_path, monkeypatch):
+class TestEloCacheTable:
+    def test_cache_rows_written_and_both_entries_survive(self, tmp_path, monkeypatch):
+        """P2：elo_cache 表化——两个模型先后派生，两行都在（事务 upsert 取代锁 RMW）。"""
         import llmsec.core.config as cfg
         import llmsec.evaluation.elo_access as ea
         from llmsec.core.results import ResultsMatrix
 
         monkeypatch.setattr(cfg, "RESULTS_DB", tmp_path / "results.db")
-        monkeypatch.setattr(cfg, "RESULTS_FILE", tmp_path / "results.json")
-        monkeypatch.setattr(cfg, "ELO_CACHE_FILE", tmp_path / "elo_cache.json")
 
         mat = ResultsMatrix(units=["u1", "u2"], models=["m1", "m2"])
         mat.upsert("r1", "m1", 2.0, status="fully_compliant", extra={"unit": "u1"})
         mat.upsert("r2", "m2", -1.0, status="refused", extra={"unit": "u2"})
-        mat.save(cfg.RESULTS_DB)  # 阶段 2：真相落 db
+        mat.save(cfg.RESULTS_DB)
 
-        # 记录锁调用（确定性验证 L-4 的锁确实加上——elo_cache 仍是文件 RMW）
-        real_lock = ea._file_lock
-        lock_targets: list[str] = []
-
-        def spy_lock(filepath, *a, **kw):
-            lock_targets.append(str(filepath))
-            return real_lock(filepath, *a, **kw)
-
-        monkeypatch.setattr(ea, "_file_lock", spy_lock)
+        from llmsec.storage import rstore
 
         ea.elo_state_for("m1")
-        assert any(str(cfg.ELO_CACHE_FILE) in p for p in lock_targets), (
-            "缓存 RMW 提交必须在 ELO_CACHE_FILE 文件锁内")
-
-        # 功能面：两个模型先后派生，缓存里两条都在
         ea.elo_state_for("m2")
-        cache = ea._load_cache()
-        assert "m1" in cache and "m2" in cache
+        row1 = rstore.get_elo_cache("m1")
+        row2 = rstore.get_elo_cache("m2")
+        assert row1 is not None and row2 is not None
+        assert "attacker_ratings" in row1[1]
 
 
 # ============================================================

@@ -1,16 +1,16 @@
 """management.snapshot — 导出快照（控制层 fork 的握手点）。
 
-快照 = 一个自包含的 R 矩阵副本（+ elo_cache），控制层复制它到新 work-dir 后
+快照 = 一个自包含的 R 矩阵副本，控制层复制它到新 work-dir 后
 ``llmsec ... --work-dir <new>`` 即可零污染全局 R，实现 fork。
 
 来源：
-  global       当前全局 output/state/results.json + elo_cache.json
+  global       当前全局 R（results.db；导出为 results.json 快照格式）
   run:<name>   从指定历史 run 的 state.json 重建一份 R（无 state.json 则报错）
 
 本模块只「导出文件」，不做 fork 决策（那是控制层职责）。
 
 输出格式：
-  --out 指定目录 → 写入 <out>/results.json [+ elo_cache.json] + manifest.json
+  --out 指定目录 → 写入 <out>/results.json + manifest.json
   --out 指定 .tar.gz → 打包上述文件
   不指定 → 默认 output/snapshots/<时间戳>/
 """
@@ -21,7 +21,7 @@ import tarfile
 from datetime import datetime
 from pathlib import Path
 
-from llmsec.core.config import ELO_CACHE_FILE, OUTPUT_DIR, RUNS_DIR
+from llmsec.core.config import OUTPUT_DIR, RUNS_DIR
 from llmsec.core.io import read_json, write_json
 from llmsec.core.logging import get_logger
 from llmsec.core.paths import safe_subpath
@@ -37,25 +37,21 @@ def export_snapshot(
     source: str = "global",
     *,
     out: Path | None = None,
-    include_elo_cache: bool = True,
 ) -> dict:
     """导出快照。返回快照元信息 dict（供 --json 输出）。
 
     Args:
         source: "global" 或 "run:<name>"
         out: 输出目录或 .tar.gz 文件；None 则默认到 output/snapshots/<ts>/
-        include_elo_cache: 是否一并导出 elo_cache.json（global 源时）
     """
     # 解析来源，得到一个 ResultsMatrix
     if source == "global":
         R = ResultsMatrix.load()
-        source_desc = "global results.json"
-        elo_src = ELO_CACHE_FILE if include_elo_cache and ELO_CACHE_FILE.exists() else None
+        source_desc = "global R (results.db)"
     elif source.startswith("run:"):
         run_name = source[4:]
         R = _R_from_run(run_name)
         source_desc = f"run:{run_name} (state.json 重建)"
-        elo_src = None  # run 源不导 elo_cache（派生层，由新工作区自建）
     else:
         raise ValueError(f"未知 source: {source!r}（用 'global' 或 'run:<name>'）")
 
@@ -88,13 +84,6 @@ def export_snapshot(
     results_path = out_dir / "results.json"
     R.save(results_path)
 
-    # 写 elo_cache（若有）
-    elo_path = None
-    if elo_src and elo_src.exists():
-        import shutil
-        elo_path = out_dir / "elo_cache.json"
-        shutil.copy2(elo_src, elo_path)
-
     # 写 manifest（来源/时间/规模，供 agent 解析）
     manifest = {
         "source": source,
@@ -106,7 +95,6 @@ def export_snapshot(
             "records": len(R._r),
             "results_total": sum(len(col) for col in R._r.values()),
         },
-        "elo_cache": str(elo_path.relative_to(OUTPUT_DIR)) if elo_path else None,
     }
     write_json(out_dir / "manifest.json", manifest)
 
@@ -128,7 +116,6 @@ def export_snapshot(
         "models": R.all_models(),
         "records": len(R._r),
         "results_total": sum(len(col) for col in R._r.values()),
-        "has_elo_cache": elo_path is not None,
     }
     logger.info("快照已导出: %s（来源 %s，%d 模型 %d 记录）",
                 result_path, source, len(info["models"]), info["records"])
@@ -204,7 +191,6 @@ def cmd_export(
             ["models", ", ".join(info["models"]) or "(无)"],
             ["records", str(info["records"])],
             ["results_total", str(info["results_total"])],
-            ["elo_cache", "是" if info["has_elo_cache"] else "否"],
         ]
         print_table(rows, headers=["field", "value"])
         print("\n控制层 fork 用法：复制快照 results.json 到新 work-dir，"

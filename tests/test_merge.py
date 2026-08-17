@@ -29,7 +29,6 @@ def iso_output(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "STATE_DIR", state)
     monkeypatch.setattr(cfg, "RESULTS_DB", state / "results.db")
     monkeypatch.setattr(cfg, "RESULTS_FILE", state / "results.json")
-    monkeypatch.setattr(cfg, "ELO_CACHE_FILE", state / "elo_cache.json")
 
     from llmsec.management import merge as merge_mod
     monkeypatch.setattr(merge_mod, "RESULTS_DB", state / "results.db")

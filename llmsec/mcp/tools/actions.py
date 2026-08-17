@@ -209,16 +209,12 @@ def fork_workspace(name: str, source: str = "global", note: str = "") -> dict[st
 def export_snapshot(
     source: str = "global",
     out: str | None = None,
-    include_elo_cache: bool = True,
 ) -> dict[str, Any]:
-    """导出 R 矩阵快照到 output/snapshots/（或指定路径）。
-
-    快照包含 results.json（和可选的 elo_cache.json），用于备份或迁移。
+    """导出 R 矩阵快照到 output/snapshots/（或指定路径），用于备份或迁移。
 
     Args:
-        source:            "global" 或 "run:<name>"。
-        out:               输出路径（目录或 .tar.gz）；None 则默认到 output/snapshots/<时间戳>/。
-        include_elo_cache: 是否一并导出 elo_cache.json（仅 global 源有效）。
+        source: "global" 或 "run:<name>"。
+        out:    输出路径（目录或 .tar.gz）；None 则默认到 output/snapshots/<时间戳>/。
 
     Returns:
         快照元信息 dict（含 snapshot 路径、models、records）。
@@ -228,7 +224,7 @@ def export_snapshot(
     from llmsec.management.snapshot import export_snapshot as _es
 
     return _try(
-        lambda: _es(source=source, out=Path(out) if out else None, include_elo_cache=include_elo_cache),
+        lambda: _es(source=source, out=Path(out) if out else None),
         error_hint=f"源 '{source}' 无效（用 'global' 或 'run:<name>'），或 R 矩阵不存在",
     )
 

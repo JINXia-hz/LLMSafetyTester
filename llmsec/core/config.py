@@ -57,7 +57,7 @@ SAFE_TWINS_FILE = STATE_DIR / "safe_twins.jsonl"
 RESULTS_DB = STATE_DIR / "results.db"
 RESULTS_FILE = STATE_DIR / "results.json"          # 遗留快照格式（导出/对账用）
 PREDICTORS_DIR = OUTPUT_DIR / "predictors"          # 统一/每模型 ridge 预测器
-ELO_CACHE_FILE = STATE_DIR / "elo_cache.json"       # Elo 派生缓存（可删可重建）
+# Elo 派生缓存 = results.db 的 elo_cache 表（P2 表化，常量已删）
 
 # 目录库（SQLite：runs/trials/tasks 登记索引，llmsec/storage/ 唯一读写方）。
 # 可重建的派生索引——删库后 `llmsec-manage storage reindex` 全量重建。

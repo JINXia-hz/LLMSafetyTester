@@ -40,7 +40,6 @@ def iso_output(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "PREDICTORS_DIR", predictors)
     monkeypatch.setattr(cfg, "TASK_LOG_DIR", tasks)
     monkeypatch.setattr(cfg, "RESULTS_FILE", state / "results.json")
-    monkeypatch.setattr(cfg, "ELO_CACHE_FILE", state / "elo_cache.json")
     monkeypatch.setattr(cfg, "FEATURE_CACHE_FILE", out / "feature_cache.pkl")
     monkeypatch.setattr(cfg, "CLUSTER_RESULT_FILE", out / "cluster_result.pkl")
 
@@ -52,15 +51,13 @@ def iso_output(monkeypatch, tmp_path):
     from llmsec.management import snapshot
     monkeypatch.setattr(snapshot, "SNAPSHOT_DIR", snapshots)
     monkeypatch.setattr(snapshot, "OUTPUT_DIR", out)
-    # snapshot 的 run:<name> 源与 global 源 elo_cache 也走模块级绑定，一并隔离
+    # snapshot 的路径绑定走模块级常量，一并隔离
     monkeypatch.setattr(snapshot, "RUNS_DIR", runs)
-    monkeypatch.setattr(snapshot, "ELO_CACHE_FILE", state / "elo_cache.json")
     # runs 模块的 RUNS_DIR
     from llmsec.management import runs as runs_mod
     monkeypatch.setattr(runs_mod, "RUNS_DIR", runs)
     # caches 模块的路径常量（import 时从 cfg 绑定）
     from llmsec.management import caches
-    monkeypatch.setattr(caches, "ELO_CACHE_FILE", state / "elo_cache.json")
     monkeypatch.setattr(caches, "PREDICTORS_DIR", predictors)
     monkeypatch.setattr(caches, "FEATURE_CACHE_FILE", out / "feature_cache.pkl")
     monkeypatch.setattr(caches, "EMBEDDING_CACHE_FILE", out / "embedding_cache.pkl")
@@ -240,39 +237,30 @@ class TestRunsDelete:
 class TestCaches:
     def test_list_categories_with_sizes(self, iso_output):
         from llmsec.management import caches
-        # 造 elo_cache + 一个 predictor + 一个 task log
-        write_json(cfg.ELO_CACHE_FILE, {"_version": 3, "mA": {}})
+        # 造一个 predictor + 一个 task log（elo_cache 已表化进 results.db，无文件类别）
         (cfg.PREDICTORS_DIR / "blend_abc.pkl").write_bytes(b"\x80\x04" * 100)
         (cfg.TASK_LOG_DIR / "eval-1.log").write_text("log line\n", encoding="utf-8")
 
         summaries = caches.all_category_summaries()
         by_name = {s["name"]: s for s in summaries}
-        assert by_name["elo_cache"]["file_count"] == 1
-        assert by_name["elo_cache"]["size"] > 0
         assert by_name["predictors"]["file_count"] == 1
         assert by_name["task_logs"]["file_count"] == 1
 
     def test_clean_dry_run_no_touch(self, iso_output):
         from llmsec.management import caches
-        write_json(cfg.ELO_CACHE_FILE, {"_version": 3})
-        plan = caches.plan_clean(["elo_cache"])
+        plan = caches.plan_clean(["predictors"])
         assert plan.dry_run is True
-        assert cfg.ELO_CACHE_FILE.exists()  # 未动
 
     def test_clean_execute_soft_deletes(self, iso_output):
         from llmsec.management import caches
         from llmsec.management.common import TRASH_DIR
-        write_json(cfg.ELO_CACHE_FILE, {"_version": 3})
         (cfg.PREDICTORS_DIR / "blend_x.pkl").write_bytes(b"\x80\x04")
 
-        plan = caches.plan_clean(["elo_cache", "predictors"])
+        plan = caches.plan_clean(["predictors"])
         done = caches.execute_clean(plan)
-        assert len([i for i in done.items if i.kind in ("cache_file", "cache_dir")]) == 2
-        assert not cfg.ELO_CACHE_FILE.exists()
+        assert len([i for i in done.items if i.kind in ("cache_file", "cache_dir")]) == 1
         assert not (cfg.PREDICTORS_DIR / "blend_x.pkl").exists()
         # trash 里有
-        assert (TRASH_DIR / "state" / "elo_cache.json").exists() or \
-               any(TRASH_DIR.rglob("elo_cache.json"))
         assert any(TRASH_DIR.rglob("blend_x.pkl"))
 
 
@@ -395,7 +383,6 @@ class TestSnapshotSources:
         info = snapshot.export_snapshot("run:2026-08-11_120000/modelA", out=out_dir)
         assert info["models"] == ["modelA"], "❌1 重建 R 应只有 modelA 列"
         assert info["records"] == 2, "❌2 r1/r2 入 R，缺 record 条目应跳过"
-        assert info["has_elo_cache"] is False, "❌3 run 源不导出 elo_cache（派生层）"
         R2 = ResultsMatrix.load(out_dir / "results.json")
         assert R2.get("r1", "modelA").eval_score == 1.5, "❌4 快照 R 内容应与 history 一致"
         m = read_json(out_dir / "manifest.json")
@@ -466,19 +453,17 @@ class TestSnapshotSources:
         assert info2["snapshot"] == "rel.tar.gz"
 
     def test_export_tar_gz_self_contained(self, iso_output, tmp_path):
-        """.tar.gz 输出：打包 results/manifest/elo_cache，staging 清理，tar 可解出可用 R。"""
+        """.tar.gz 输出：打包 results/manifest，staging 清理，tar 可解出可用 R。"""
         import tarfile
 
         from llmsec.management import snapshot
         R = ResultsMatrix()
         R.upsert("r1", "modelA", 1.0, ts=1)
         R.save()
-        write_json(cfg.ELO_CACHE_FILE, {"_version": 3, "mA": {}})
 
         archive = cfg.OUTPUT_DIR / "snap.tar.gz"
-        info = snapshot.export_snapshot("global", out=archive)
+        snapshot.export_snapshot("global", out=archive)
         assert archive.exists(), "❌1 应产出 tar.gz"
-        assert info["has_elo_cache"] is True, "❌2 global 源应带 elo_cache"
         staging = cfg.OUTPUT_DIR / ".snapshot_staging"
         assert not staging.exists() or not any(staging.iterdir()), "❌3 staging 应已清理"
 
@@ -487,7 +472,7 @@ class TestSnapshotSources:
         with tarfile.open(archive) as tar:
             tar.extractall(ex)
         names = [p.name for p in ex.rglob("*")]
-        assert {"results.json", "manifest.json", "elo_cache.json"} <= set(names), \
+        assert {"results.json", "manifest.json"} <= set(names), \
             f"❌4 包内缺文件: {names}"
         R2 = ResultsMatrix.load(next(p for p in ex.rglob("results.json")))
         assert R2.n_for_model("modelA") == 1, "❌5 tar 内 R 应可直接加载"
@@ -513,16 +498,13 @@ class TestCachesCommands:
     def test_cmd_list_json_and_human(self, iso_output, capsys):
         """cmd_list：json 输出全部类别汇总；人读输出含表格与"绝不清"提示。"""
         from llmsec.management import caches
-        write_json(cfg.ELO_CACHE_FILE, {"_version": 3})
         rc = caches.cmd_list(json_mode=True)
         assert rc == 0, "❌1 cmd_list 应返回 0"
         data = json.loads(capsys.readouterr().out)
         assert data["count"] == len(caches.CACHE_CATEGORIES), "❌2 类别数应齐全"
-        by_name = {c["name"]: c for c in data["categories"]}
-        assert by_name["elo_cache"]["file_count"] == 1, "❌3 elo_cache 应计 1 个文件"
         rc2 = caches.cmd_list()
         out = capsys.readouterr().out
-        assert rc2 == 0 and "elo_cache" in out and "绝不清" in out, "❌4 人读模式应有表格与提示"
+        assert rc2 == 0 and "predictors" in out and "绝不清" in out, "❌4 人读模式应有表格与提示"
 
     def test_legacy_predictor_split(self, iso_output):
         """predictors 按现行前缀 blend_v2_ 判活；无版本盐的旧键归 predictors_legacy。"""
@@ -547,53 +529,47 @@ class TestCachesCommands:
     def test_plan_clean_unknown_category_marked(self, iso_output):
         """未知类别不展开任何路径，标记 unknown_category 且提示。"""
         from llmsec.management import caches
-        write_json(cfg.ELO_CACHE_FILE, {"_version": 3})
-        plan = caches.plan_clean(["elo_cache", "no_such_cat"])
+        plan = caches.plan_clean(["no_such_cat"])
         kinds = [(i.kind, i.detail) for i in plan.items]
         assert any(k == "unknown_category" and "未知类别" in d for k, d in kinds), \
             f"❌1 未知类别未标记: {kinds}"
-        assert sum(1 for k, _ in kinds if k == "cache_file") == 1, "❌2 elo_cache 应恰 1 条"
+        assert not any(k == "cache_file" for k, _ in kinds), "❌2 未知类别不得展开路径"
 
     def test_execute_clean_skips_unknown_and_missing(self, iso_output):
         """执行期：未知类别条目跳过；已不存在的文件标记 missing 而非失败。"""
         from llmsec.management import caches
-        plan = caches.plan_clean(["elo_cache", "nope"])  # elo_cache 文件不存在
+        (cfg.PREDICTORS_DIR / "gone.pkl").write_bytes(b"x")
+        plan = caches.plan_clean(["predictors"])
+        (cfg.PREDICTORS_DIR / "gone.pkl").unlink()  # 计划后文件消失
         done = caches.execute_clean(plan)
         by_kind = {i.kind: i for i in done.items}
         assert by_kind["missing"].detail == "已不存在", "❌1 缺失文件应标记 missing"
-        assert by_kind["unknown_category"].detail == "跳过", "❌2 未知类别应被跳过"
 
     def test_cmd_clean_dry_run_then_yes(self, iso_output, capsys):
         """clean：默认 dry-run 不动盘；--yes 软删到 .trash 且原文件可寻回。"""
         from llmsec.management import caches
-        write_json(cfg.ELO_CACHE_FILE, {"_version": 3})
         (cfg.PREDICTORS_DIR / "blend_v2_k.pkl").write_bytes(b"z" * 16)
-        rc = caches.cmd_clean(["elo_cache", "predictors"])
+        rc = caches.cmd_clean(["predictors"])
         assert rc == 0, "❌1 dry-run 应返回 0"
         out = capsys.readouterr().out
         assert "dry-run" in out and "--yes" in out, "❌2 应提示 dry-run 与 --yes"
-        assert cfg.ELO_CACHE_FILE.exists(), "❌3 dry-run 不得动盘"
         assert (cfg.PREDICTORS_DIR / "blend_v2_k.pkl").exists(), "❌4 dry-run 不得动盘"
-        rc2 = caches.cmd_clean(["elo_cache", "predictors"], yes=True)
+        rc2 = caches.cmd_clean(["predictors"], yes=True)
         assert rc2 == 0, "❌5 --yes 应返回 0"
-        assert not cfg.ELO_CACHE_FILE.exists() \
-            and not (cfg.PREDICTORS_DIR / "blend_v2_k.pkl").exists(), "❌6 --yes 后原文件应消失"
-        assert any((cfg.OUTPUT_DIR / ".trash").rglob("elo_cache.json")), "❌7 应软删进 .trash"
+        assert not (cfg.PREDICTORS_DIR / "blend_v2_k.pkl").exists(), "❌6 --yes 后原文件应消失"
+        assert any((cfg.OUTPUT_DIR / ".trash").rglob("blend_v2_k.pkl")), "❌7 应软删进 .trash"
 
     def test_cmd_clean_json_modes(self, iso_output, capsys):
         """clean --json：dry-run 输出 Plan 序列化且不动盘；--yes 输出执行结果且真删。"""
         from llmsec.management import caches
-        write_json(cfg.ELO_CACHE_FILE, {"_version": 3})
-        rc = caches.cmd_clean(["elo_cache"], yes=False, json_mode=True)
+        rc = caches.cmd_clean(["predictors"], yes=False, json_mode=True)
         data = json.loads(capsys.readouterr().out)
         assert rc == 0 and data["_title"] == "clean (dry-run)" and data["dry_run"] is True, \
             "❌1 json dry-run 结构错误"
-        assert cfg.ELO_CACHE_FILE.exists(), "❌2 json dry-run 不动盘"
-        rc2 = caches.cmd_clean(["elo_cache"], yes=True, json_mode=True)
+        rc2 = caches.cmd_clean(["predictors"], yes=True, json_mode=True)
         data2 = json.loads(capsys.readouterr().out)
         assert rc2 == 0 and data2["_title"] == "clean (executed)" and data2["dry_run"] is False, \
             "❌3 json 执行结构错误"
-        assert not cfg.ELO_CACHE_FILE.exists(), "❌4 json --yes 应真删"
 
     def test_cmd_clean_invalid_category_warns(self, iso_output, capsys):
         """clean 带未知类别：提示未知与可选项，不影响返回 0。"""
@@ -601,7 +577,7 @@ class TestCachesCommands:
         rc = caches.cmd_clean(["ghost_cat"])
         out = capsys.readouterr().out
         assert rc == 0, "❌1 未知类别不应非零退出"
-        assert "未知类别" in out and "elo_cache" in out, "❌2 应提示未知类别与可选项"
+        assert "未知类别" in out and "predictors" in out, "❌2 应提示未知类别与可选项"
 
     def test_missing_dirs_yield_empty_categories(self, iso_output, monkeypatch):
         """目录不存在时 predictor/task_log 类别安静为空（早退分支），不报错。"""

@@ -3,8 +3,8 @@
 缓存按「可删可重建」性质分类，clean 前展示各类占用与可重建性，避免误删权威存储。
 
 类别：
-  elo_cache         output/state/elo_cache.json        删了自动重建（elo_access 从 R 重算）
   predictors        output/predictors/*.pkl            删了自动重建（load_or_fit 重训）
+  （elo_cache 已表化进 results.db 的 elo_cache 表，指纹自动失效，无需清理类别）
   predictors_legacy output/predictors/blend_*.pkl（无 v2）  版本迁移遗留死缓存，现行代码永不命中
   feature_cluster   output/feature_cache.pkl + cluster_result.pkl + embedding_cache.pkl
                                                        feature/embedding 可重建 / cluster 需重跑
@@ -19,7 +19,6 @@ from pathlib import Path
 
 from llmsec.core.config import (
     CLUSTER_RESULT_FILE,
-    ELO_CACHE_FILE,
     EMBEDDING_CACHE_FILE,
     FEATURE_CACHE_FILE,
     OUTPUT_DIR,
@@ -56,11 +55,6 @@ def _is_legacy_predictor(name: str) -> bool:
 # 类别元数据：name → (paths 生成器, 可重建性, 描述)
 # paths 生成器返回 list[(path, is_dir, detail)]
 CACHE_CATEGORIES: dict[str, dict] = {
-    "elo_cache": {
-        "rebuildable": "automatic",
-        "desc": "Elo 派生缓存，删了由 elo_access 从 R 重算",
-        "paths": lambda: [(ELO_CACHE_FILE, False, "elo_cache.json")],
-    },
     "predictors": {
         "rebuildable": "automatic",
         "desc": "混合预测器 pkl，删了由 load_or_fit 重训",

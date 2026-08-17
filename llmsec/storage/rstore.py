@@ -78,6 +78,18 @@ class RMeta(SQLModel, table=True):
     value: str = ""
 
 
+class EloCache(SQLModel, table=True):
+    """Elo 派生缓存行（P2：原 elo_cache.json 表化——指纹命中 + 事务 upsert，
+    取代文件锁 RMW）。payload 含 _version（schema 漂移即条目作废）。"""
+
+    __tablename__ = "elo_cache"
+
+    model: str = Field(primary_key=True)
+    fingerprint: str
+    payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    updated_at: float = 0.0
+
+
 # ============================================================
 # 路径与遗留迁移
 # ============================================================
@@ -356,6 +368,33 @@ def backup(dest: Path | str, path: Path | str | None = None) -> Path:
         out.close()
         src_conn.close()
     return dest
+
+
+def get_elo_cache(model: str, path: Path | str | None = None) -> tuple[str, dict] | None:
+    """取某模型的派生缓存行：返回 (fingerprint, payload)；无行返回 None。"""
+    dbp = _as_db_path(path)
+    if not dbp.exists():
+        return None
+    with _db.session(dbp) as s:
+        row = s.get(EloCache, model)
+        return (row.fingerprint, dict(row.payload)) if row is not None else None
+
+
+def upsert_elo_cache(model: str, fingerprint: str, payload: dict,
+                     path: Path | str | None = None) -> None:
+    """派生缓存 upsert（单事务——文件锁 RMW 的替代）。"""
+    import time as _time
+    dbp = _as_db_path(path)
+    with _db.tx(dbp) as s:
+        row = s.get(EloCache, model)
+        if row is None:
+            row = EloCache(model=model, fingerprint=fingerprint,
+                           payload=dict(payload), updated_at=_time.time())
+        else:
+            row.fingerprint = fingerprint
+            row.payload = dict(payload)
+            row.updated_at = _time.time()
+        s.add(row)
 
 
 def export_legacy_json(out_path: Path | str, path: Path | str | None = None) -> Path:

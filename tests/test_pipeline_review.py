@@ -118,7 +118,7 @@ def _patch_main_runtime(monkeypatch, tmp_path, captured):
     # 先登记原值，teardown 时由 monkeypatch 恢复，避免污染其它测试
     import llmsec.core.config as cfg
     # r9/P3-4：results.RESULTS_FILE 已动态读，快照清单只剩 config 属性
-    for mod, name in ((cfg, "RESULTS_FILE"), (cfg, "ELO_CACHE_FILE"),
+    for mod, name in ((cfg, "RESULTS_FILE"),
                       (cfg, "FEATURE_CACHE_FILE"), (cfg, "CLUSTER_RESULT_FILE")):
         monkeypatch.setattr(mod, name, getattr(mod, name))
     return str(attack_file)

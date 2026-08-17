@@ -1,13 +1,11 @@
 """Combined tests: ELO 评分系统（收敛判据 + 边界健壮性 + R-cutover 派生访问层）。"""
 
 
-
 # ===== from test_elo_convergence.py =====
 
 """
 
 回归测试：Elo 收敛判定与固定簇预测。
-
 
 
 验证：
@@ -21,11 +19,6 @@
 4. check_convergence 在噪声小、漂移小、覆盖率足够时判收敛。
 
 """
-
-
-
-
-
 
 
 from llmsec.clustering.features import _extract_variant_suffix, _strip_variant_suffix
@@ -62,9 +55,6 @@ def test_strip_variant_suffix():
         assert not (got != expected), f"❌ _strip_variant_suffix({raw!r}) = {got!r}, expected {expected!r}"
 
 
-
-
-
 def test_extract_variant_suffix():
 
     """测试变体后缀提取。"""
@@ -92,9 +82,6 @@ def test_extract_variant_suffix():
         got = _extract_variant_suffix(raw)
 
         assert not (got != expected), f"❌ _extract_variant_suffix({raw!r}) = {got!r}, expected {expected!r}"
-
-
-
 
 
 def test_predict_suffix_variant_fallback():
@@ -140,7 +127,6 @@ def test_predict_suffix_variant_fallback():
     }
 
 
-
     # 预测同后缀的新变体 attack_d_rot13：应接近 rot13 平均 (1800+1700)/2 = 1750
 
     pred = predictor.predict("attack_d_rot13")
@@ -152,7 +138,6 @@ def test_predict_suffix_variant_fallback():
     assert not (abs(pred["elo"] - expected) > 1e-6), f"❌ predict 同后缀预测错误: elo={pred['elo']}, expected={expected}"
 
 
-
     # 预测同基底但不同后缀的 attack_e_code：应回退到同基底变体（但同基底只有 attack_c_b64，后缀不同）
 
     # attack_e_code 与 attack_c_b64 不是同基底（基底是 attack_c vs attack_e），也不是同后缀
@@ -162,9 +147,6 @@ def test_predict_suffix_variant_fallback():
     pred2 = predictor.predict("attack_e_code")
 
     assert not (pred2["source"] == "predicted_suffix_variant"), f"❌ predict 错误地把无关方法识别为同后缀变体: source={pred2['source']}"
-
-
-
 
 
 def test_predict_base_variant_fallback():
@@ -204,7 +186,6 @@ def test_predict_base_variant_fallback():
     }
 
 
-
     # attack_code 没有同后缀 ground truth，但有同基底变体 attack_rot13 和 attack_b64
 
     pred = predictor.predict("attack_code")
@@ -216,9 +197,6 @@ def test_predict_base_variant_fallback():
     assert not (abs(pred["elo"] - expected) > 1e-6), f"❌ predict 同基底预测错误: elo={pred['elo']}, expected={expected}"
 
 
-
-
-
 def test_convergence_resists_false_positive():
 
     """Elo 噪声大（真值 Elo 95%CI 半宽超目标）时不应判收敛。"""
@@ -228,7 +206,6 @@ def test_convergence_resists_false_positive():
     defender = "test-model"
 
 
-
     # 模拟多轮防御方 Elo 大幅波动（去趋势后噪声大 → CI 半宽远超 ±20 目标）
 
     # B1：CONV_WINDOW_MIN=6，需 >= 6 轮才判收敛
@@ -236,7 +213,6 @@ def test_convergence_resists_false_positive():
     tracker._round_defender_elos[defender] = [1500.0, 1560.0, 1490.0, 1555.0, 1505.0, 1545.0, 1495.0, 1510.0]
 
     tracker.defender_ratings[defender] = 1510.0
-
 
 
     # 构造足够的方法数以满足覆盖率
@@ -250,13 +226,9 @@ def test_convergence_resists_false_positive():
         tracker.ground_truth_methods.add(f"method_{i}")
 
 
-
     conv = tracker.check_convergence(defender, total_methods=50)
 
     assert not (conv["converged"]), f"❌ 假收敛未被拦截: ci_half={conv['ci_half']}, drift={conv['drift']}, coverage={conv['coverage']}"
-
-
-
 
 
 def test_convergence_true_positive():
@@ -268,7 +240,6 @@ def test_convergence_true_positive():
     defender = "test-model"
 
 
-
     # 防御方 Elo 稳定在 ~1500（低噪声 + 低漂移 → CI 半宽 < ±20）
 
     # B1：CONV_WINDOW_MIN=6，需 >= 6 轮才判收敛
@@ -276,7 +247,6 @@ def test_convergence_true_positive():
     tracker.defender_ratings[defender] = 1498.0
 
     tracker._round_defender_elos[defender] = [1495.0, 1502.0, 1498.0, 1501.0, 1499.0, 1500.0, 1502.0, 1498.0]
-
 
 
     # 总方法 50，已测 15 => 覆盖率 30%
@@ -290,13 +260,9 @@ def test_convergence_true_positive():
         tracker.ground_truth_methods.add(f"method_{i}")
 
 
-
     conv = tracker.check_convergence(defender, total_methods=50)
 
     assert conv["converged"], f"❌ 真收敛未通过: {conv}"
-
-
-
 
 
 def test_boundary_split_tested_predicted():
@@ -308,7 +274,6 @@ def test_boundary_split_tested_predicted():
     defender = "test-model"
 
     tracker.defender_ratings[defender] = 1500.0
-
 
 
     # 2 个实测方法（1 个在边界上）、2 个预测方法（1 个在边界上）
@@ -336,7 +301,6 @@ def test_boundary_split_tested_predicted():
     tracker.ground_truth_methods = {"tested_high", "tested_low"}
 
 
-
     b = tracker.compute_security_boundary(defender)
 
     assert not (b.get("tested_above_boundary") != 1), f"❌ tested_above_boundary={b.get('tested_above_boundary')}, expected 1"
@@ -346,11 +310,6 @@ def test_boundary_split_tested_predicted():
     assert not (b.get("methods_above_boundary") != 2), f"❌ methods_above_boundary={b.get('methods_above_boundary')}, expected 2"
 
     assert not (b["tested_above_boundary"] + b["predicted_above_boundary"] != b["methods_above_boundary"]), "❌ 拆分之和 != 总数"
-
-
-
-
-
 
 
 # ===== from test_elo_edge_cases.py =====
@@ -387,9 +346,6 @@ def test_boundary_no_defender_keys():
     _ = b["converged"], b["defender_elo"]
 
 
-
-
-
 def test_update_accepts_string_score():
 
     """M-3：update_round 对数字字符串 eval_score 回写 float，不抛 TypeError。"""
@@ -405,9 +361,6 @@ def test_update_accepts_string_score():
     tracker.update_round("def", [("X", "not-a-number")])
 
     assert "X" in tracker.attacker_ratings
-
-
-
 
 
 def test_sigma2_floor_on_constant_gt():
@@ -433,13 +386,8 @@ def test_sigma2_floor_on_constant_gt():
     assert m.sigma2 >= 1e-6, f"σ² 应有下限 ≥1e-6（得 {m.sigma2}）"
 
 
-
-
-
 def test_load_artifacts_prefers_cluster_result():
-
     """M-4：两文件并存时优先 cluster_result.pkl（含 labels），重启后标签不丢。"""
-
     import llmsec.core.config as cfg
 
     orig_cr = cfg.CLUSTER_RESULT_FILE
@@ -487,11 +435,9 @@ def test_load_artifacts_prefers_cluster_result():
             cfg.FEATURE_CACHE_FILE = orig_fc
 
 
-
 # ===== from test_elo_access.py =====
 
 import llmsec.core.config as _results_cfg
-import llmsec.core.config as cfg
 from llmsec.core.results import ResultsMatrix
 from llmsec.evaluation import elo_access as ea
 from llmsec.evaluation.predictors.blend import load_or_fit_blend_predictor
@@ -501,11 +447,6 @@ def _setup(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_results_cfg, "RESULTS_DB", tmp_path / "results.db")
     monkeypatch.setattr(_results_cfg, "RESULTS_FILE", tmp_path / "results.json")
-
-    monkeypatch.setattr(cfg, "ELO_CACHE_FILE", tmp_path / "elo_cache.json")
-
-
-
 
 
 def test_publish_and_derive(tmp_path, monkeypatch):
@@ -523,7 +464,6 @@ def test_publish_and_derive(tmp_path, monkeypatch):
     ea.publish_tracker(tracker, "qwen9b")
 
 
-
     R = ResultsMatrix.load()
 
     assert R.n_for_model("qwen9b") == 2
@@ -535,9 +475,6 @@ def test_publish_and_derive(tmp_path, monkeypatch):
     assert st["fingerprint"] is not None
 
     assert st.get("round_defender_elos", {}).get("qwen9b")
-
-
-
 
 
 def test_cache_invalidates_on_R_change(tmp_path, monkeypatch):
@@ -553,7 +490,6 @@ def test_cache_invalidates_on_R_change(tmp_path, monkeypatch):
     fp1 = ea.elo_state_for("qwen9b")["fingerprint"]
 
 
-
     t2 = ELOTracker()
 
     t2.update_round("qwen9b", [("rot13", 2.0)])
@@ -565,9 +501,6 @@ def test_cache_invalidates_on_R_change(tmp_path, monkeypatch):
     assert st2["fingerprint"] != fp1
 
     assert "rot13" in st2["attacker_ratings"]
-
-
-
 
 
 def test_active_model_and_empty(tmp_path, monkeypatch):
@@ -587,9 +520,6 @@ def test_active_model_and_empty(tmp_path, monkeypatch):
     assert ea.attacker_ratings_for("modelA").get("DAN") is not None
 
     assert ea.elo_state_for("nope") == {}
-
-
-
 
 
 def test_blend_predictor_cache_reuse(tmp_path, monkeypatch):
@@ -613,13 +543,11 @@ def test_blend_predictor_cache_reuse(tmp_path, monkeypatch):
     catalog = ["DAN", "rot13", "b64"]
 
 
-
     load_or_fit_blend_predictor(R, features, method_catalog=catalog)
 
     load_or_fit_blend_predictor(R, features, method_catalog=catalog)  # 二次命中缓存
 
     assert any((tmp_path / "predictors").glob("blend_*.pkl"))
-
 
 
     R.upsert("extra", "qwen9b", 1.0, ts=4)  # R 变动 → 新缓存
@@ -629,7 +557,6 @@ def test_blend_predictor_cache_reuse(tmp_path, monkeypatch):
     files = list((tmp_path / "predictors").glob("blend_*.pkl"))
 
     assert len(files) >= 2
-
 
 
 # ===== from test_eval_review_elo.py（评审修复回归：B 组）=====
@@ -714,20 +641,13 @@ def test_elo_tracker_for_memoize_and_invalidate(tmp_path, monkeypatch):
         ea._TRACKER_CACHE.clear()
 
 
-def test_load_cache_tolerates_corrupt_schema(tmp_path, monkeypatch):
-    """缓存文件非 dict / 版本漂移 → 整体作废返回 {}。"""
-    import json as _json
+def test_elo_cache_row_version_drift_is_miss(tmp_path, monkeypatch):
+    """P2 表化：elo_cache 行 payload 版本漂移 → 视为 miss 重算（指纹相同也不命中）。"""
+    from llmsec.storage import rstore
 
     _setup(tmp_path, monkeypatch)
-    cfg.ELO_CACHE_FILE.write_text(_json.dumps(["not", "a", "dict"]), encoding="utf-8")
-    assert ea._load_cache() == {}, "非 dict 缓存应作废"
-
-    cfg.ELO_CACHE_FILE.write_text(_json.dumps({"_version": 999, "m1": {}}), encoding="utf-8")
-    assert ea._load_cache() == {}, "schema 版本漂移应作废"
-
-    cfg.ELO_CACHE_FILE.write_text(_json.dumps({"_version": ea._CACHE_VERSION, "m1": {"k": 1}}),
-                                  encoding="utf-8")
-    assert ea._load_cache() == {"_version": ea._CACHE_VERSION, "m1": {"k": 1}}, "同版本保留"
+    rstore.upsert_elo_cache("qwen9b", "deadbeef", {"_version": 999, "k": 1})
+    assert ea._cache_hit("qwen9b", "deadbeef") is None
 
 
 def test_active_model_by_latest_ts(tmp_path, monkeypatch):

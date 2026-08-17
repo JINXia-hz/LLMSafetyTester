@@ -45,7 +45,6 @@ def iso_out(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "RESULTS_DB", res_file.with_suffix(".db"))
     monkeypatch.setattr(cfg, "RESULTS_FILE", res_file)
     monkeypatch.setattr(cfg, "RUNS_DIR", out / "runs")
-    monkeypatch.setattr(cfg, "ELO_CACHE_FILE", out / "state" / "elo_cache.json")
     monkeypatch.setattr(cfg, "TASK_LOG_DIR", out / "tasks")
     monkeypatch.setattr(common_mod, "OUTPUT_DIR", out)
     monkeypatch.setattr(common_mod, "TRASH_DIR", out / ".trash")
@@ -547,20 +546,17 @@ class TestActionsConfirmFlows:
     def test_clean_caches_full_flow(self, iso_out, monkeypatch):
         from llmsec.management import caches as caches_mod
 
-        elo_cache = iso_out / "state" / "elo_cache.json"
-        elo_cache.write_text("{}", encoding="utf-8")
         tasks_dir = iso_out / "tasks"
         tasks_dir.mkdir()
         (tasks_dir / "a.log").write_text("log", encoding="utf-8")
         (tasks_dir / "a.progress.jsonl").write_text("{}", encoding="utf-8")
-        monkeypatch.setattr(caches_mod, "ELO_CACHE_FILE", elo_cache)
         monkeypatch.setattr(caches_mod, "TASK_LOG_DIR", tasks_dir)
         monkeypatch.setattr(caches_mod, "OUTPUT_DIR", iso_out)
 
-        prev = actions.clean_caches_preview(["elo_cache", "task_logs"])
+        prev = actions.clean_caches_preview(["task_logs"])
         assert prev["action"] == "clean_caches"
         items = prev["summary"]["items"]
-        assert len([i for i in items if i["kind"] == "cache_file"]) == 3
+        assert len([i for i in items if i["kind"] == "cache_file"]) == 2
 
         # 未知类别不炸，标 unknown_category
         bad = actions.clean_caches_preview(["bogus_cat"])
@@ -568,7 +564,6 @@ class TestActionsConfirmFlows:
 
         res = actions.clean_caches_confirm(prev["confirm_token"])
         assert res["status"] == "executed"
-        assert not elo_cache.exists()
         assert not (tasks_dir / "a.log").exists()
         assert not (tasks_dir / "a.progress.jsonl").exists()
 
@@ -725,7 +720,6 @@ class TestWorkspaceAndSnapshot:
         seed_results(res_file, "m1", [("u1", 1.0)])
         monkeypatch.setattr(snap_mod, "OUTPUT_DIR", iso_out)
         monkeypatch.setattr(snap_mod, "SNAPSHOT_DIR", iso_out / "snapshots")
-        monkeypatch.setattr(snap_mod, "ELO_CACHE_FILE", iso_out / "state" / "elo_cache.json")
 
         out_dir = iso_out / "snapshots" / "manual"
         r = actions.export_snapshot(source="global", out=str(out_dir))
