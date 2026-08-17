@@ -82,10 +82,34 @@ def _hermetic_catalog(tmp_path):
 
     saved_catalog = cfg.CATALOG_DB
     cfg.CATALOG_DB = tmp_path / "catalog.db"
+    # P9 补遗：派生缓存/报告路径一并隔离。此前只隔离库文件——runner 全局模式
+    # 测试（_should_refresh_features 判定小方法集 ≠ 真实缓存 → 重算覆写）把
+    # 真实 output/cluster 四件套打成测试规模数据；safe_twin 的 allergy__<模型>
+    # 报告与 .env.bak 同族泄漏（OUTPUT_DIR 动态读，重绑即生效）。
+    _saved_paths = {k: getattr(cfg, k) for k in (
+        "OUTPUT_DIR", "TWIN_RESULT_FILE", "SAFE_TWINS_FILE",
+        "CLUSTER_DIR", "FEATURE_CACHE_FILE", "CLUSTER_RESULT_FILE",
+        "CLUSTER_REPORT_FILE", "CLUSTER_MATRIX_FILE", "EMBEDDING_CACHE_FILE",
+    )}
+    out = tmp_path / "output"
+    cluster = out / "cluster"
+    state = out / "state"
+    for k, v in {
+        "OUTPUT_DIR": out, "TWIN_RESULT_FILE": out / "allergy_results.jsonl",
+        "SAFE_TWINS_FILE": state / "safe_twins.jsonl",
+        "CLUSTER_DIR": cluster, "FEATURE_CACHE_FILE": cluster / "feature_cache.pkl",
+        "CLUSTER_RESULT_FILE": cluster / "cluster_result.pkl",
+        "CLUSTER_REPORT_FILE": cluster / "cluster_report.json",
+        "CLUSTER_MATRIX_FILE": cluster / "cluster_matrix.csv",
+        "EMBEDDING_CACHE_FILE": cluster / "embedding_cache.pkl",
+    }.items():
+        setattr(cfg, k, v)
     try:
         yield
     finally:
         cfg.CATALOG_DB = saved_catalog
+        for k, v in _saved_paths.items():
+            setattr(cfg, k, v)
         storage_db.close()
 
 
