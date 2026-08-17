@@ -47,7 +47,7 @@ STATE_DIR = OUTPUT_DIR / "state"
 ATTACKS_DIR = PROJECT_ROOT / "attacks"
 RUNS_DIR = OUTPUT_DIR / "runs"
 
-# R 矩阵为唯一真相（results.json）；全局 state.json 已废弃。
+# R 观测在统一库；全局 state.json 已废弃。
 # per-run 快照在 runs/<ts>/state.json，per-target 快照在 state__<name>.json。
 SAFE_TWINS_FILE = STATE_DIR / "safe_twins.jsonl"
 

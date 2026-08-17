@@ -110,7 +110,7 @@ def _allergy_report_file(model: str):
 def _asr_from_results(model: str) -> float | None:
     """从结果矩阵 R 派生指定模型的攻击成功率（ASR）。
 
-    R 是评估的唯一真相：eval_score > 0 视为攻击成功。无 R 文件或该模型无
+    R 是评估的原始观测：eval_score > 0 视为攻击成功。无 R 文件或该模型无
     结果时返回 None（调用方据此跳过 2D 画像）。
     """
     try:
@@ -445,7 +445,7 @@ def evaluate_allergy(*, twins=None, client=None, judge=None, result_file=None):
         "interpretation": interpretation,
     }
 
-    # 2D 安全画像：ASR 从结果矩阵 R（唯一真相）按防御方名列派生（pcap 模式为
+    # 2D 安全画像：ASR 从结果矩阵 R（原始观测）按防御方名列派生（pcap 模式为
     # PCAP_MODEL_VERSION），FPR 取本次过敏结果。无 R 数据时不输出画像（保持原无画像语义）。
     asr = _asr_from_results(DEFENDER_NAME)
     if asr is not None:

@@ -454,7 +454,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # M-31：R 矩阵为唯一真相——经 elo_access 统一入口派生，不再直读易漂移的 state.json。
+    # M-31：R 为原始观测——经 elo_access 统一入口派生，不再直读易漂移的 state.json。
     # 旧实现只读 state.json：只有 results.json 的部署会用全初始 Elo 生成"所有簇都是盲区"
     # 的误导性分析并落盘。
     from llmsec.core.results import ResultsMatrix

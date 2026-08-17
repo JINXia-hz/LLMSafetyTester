@@ -323,7 +323,7 @@ def main():
     logger.info("\n📊 生成汇总报告...")
 
     # N-S2：全量回读同样按模型过滤——汇总与 update_elo 只回放当前模型的记录，
-    # 避免他模型攻击记录被 upsert 进 R 的当前模型列（污染"唯一真相"R）。
+    # 避免他模型攻击记录被 upsert 进 R 的当前模型列（污染 R 观测）。
     all_results = filter_results_for_model(read_jsonl(result_file))
 
     if not all_results:

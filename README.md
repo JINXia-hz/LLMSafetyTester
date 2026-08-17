@@ -52,7 +52,7 @@ graph LR
 
 | 层 | 模块 | 职责 | 关键文件 |
 |---|---|---|---|
-| L0 | `core/` | 基础设施：配置、I/O、路径、日志、种子 | `results.py`（R 矩阵，全系统唯一真相存储）、`units.py`（评级单位）、`isolation.py`（work-dir 重绑）、`config.py` |
+| L0 | `core/` | 基础设施：配置、I/O、路径、日志、种子 | `results.py`（R 矩阵，原始观测存储）、`units.py`（评级单位）、`isolation.py`（work-dir 重绑）、`config.py` |
 | L0 | `params.py` | 全部行为参数的统一入口（见[核心抽象](#核心抽象)） | — |
 | L1 | `targets/` | 被测模型后端路由：openai / 本地模拟 / PCAP | `__init__.py` 的 `create_target_client` / `call_target` |
 | L1 | `clustering/` | 攻击特征提取与聚类（评级单位从这来） | `features.py`、`hdb.py`、`tree.py`、`space.py` |
@@ -131,9 +131,9 @@ flowchart TD
 
 按"是什么 / 为什么存在 / 在哪"三段式，机制细节一律见 [docs/架构与算法详解.md](docs/架构与算法详解.md)。
 
-### R 矩阵 —— 唯一真相
+### R 矩阵 —— 原始观测
 
-`R[记录id][模型] = MatchResult`，定义在 `core/results.py` 的 `ResultsMatrix`，持久化于 `output/state/results.db`（SQLite，`storage/rstore.py` 后端；`results.json` 是导出快照格式）。它是全系统**唯一不可重算**的存储；Elo 缓存、预测器、指纹、孪生集全部是从 R + 攻击特征派生的缓存，删了能重建（派生入口：`evaluation/elo.py` 的 `derive_elo`）。跨进程并发安全靠 SQLite WAL + 单事务写入（BEGIN IMMEDIATE），备份用 `llmsec-manage storage backup-r`。
+`R[记录id][模型] = MatchResult`，定义在 `core/results.py` 的 `ResultsMatrix`，存于统一库 `output/state/catalog.db` 的 observations 表（`storage/rstore.py` 后端）。R 是**不可重算的原始观测**——Elo、预测器、指纹、孪生集全部可从 R + 攻击特征重算（派生入口：`evaluation/elo.py` 的 `derive_elo`）。并发安全靠 SQLite WAL + 单事务写入（BEGIN IMMEDIATE），备份用 `llmsec-manage storage backup-r`；人读快照 `rstore.export_legacy_json`。
 
 ### ELOTracker 与安全边界
 
@@ -338,25 +338,25 @@ ZCode / Cursor 配置（stdio 模式）：
 
 ```
 output/
-├── state/                  # 持久化状态（全局）
-│   ├── results.db          #   R 矩阵（唯一真相，SQLite；results.json 为导出快照/遗留源）
-│   ├── catalog.db          #   目录库（runs/trials/tasks 登记索引，可删可重建）
-│   └── elo_cache.json ...  #   派生缓存（可删可重建）
+├── state/
+│   └── catalog.db          # 统一库（唯一数据库文件）：R 观测（observations 等
+│                           #   表）+ runs/trials/tasks 登记 + control 层表
+│                           #   （文牍/Plan/封驳/队列/workspace 索引）+ elo 缓存表
 ├── cluster/                # 聚类/特征产物（feature/embedding/cluster 缓存）
-├── runs/<时间戳>/<target>/ # runner 单次运行产物（三代历史布局已归一）
-│   ├── attack_results.jsonl      #   攻击明细（含响应原文）
-│   ├── allergy.json              #   过敏报告 + 2D 画像
-│   ├── cluster_security_analysis.json
-│   └── security_report.md        #   最终交付物
-├── workspaces/<name>/      # 控制层 fork 工作区（独立 R + run 产物 + 卫星目录库）
+├── runs/<时间戳>/<target>/ # runner 单次运行产物（报告/明细/树，文件即真相）
+├── workspaces/<name>/      # fork 工作区（catalog.db 卫星库 + run 产物）
 ├── env_snapshots/<name>/   # .env 快照（隔离的连接配置）
-├── plans/ + gazette/       # 三省 Plan 与文牍（审计轨迹）
-├── experiments/<name>/     # HPO study
-├── tasks/                  # 后台任务（meta/log/progress；gc: storage gc-tasks）
+├── experiments/<name>/     # HPO study（trial 记录在统一库）
+├── tasks/                  # 后台任务（log/progress 流式产物；状态在统一库）
 └── .trash/                 # 软删除回收站（可恢复）
 ```
 
-**存储层（2026-08 数据库重构）**：`llmsec/storage/` 是唯一数据访问层（DAO 收口，SQLModel + SQLite WAL，业务代码零 SQL）。run 发现 / 字段提取 / 路径契约单一实现；R 写入单事务（BEGIN IMMEDIATE），并发 publish 零丢失。维护命令：`llmsec-manage storage reindex|verify|gc-tasks|trials|migrate-layouts|migrate-r|backup-r`，缓存 LRU 用 `cache prune --max N`。
+**存储层（2026-08 深度整合重构）**：`llmsec/storage/` 是唯一数据访问层
+（DAO 收口，SQLModel + SQLite WAL，AST 守卫禁止包外 SQL/ORM；control 经
+`control.core.storage` 薄契约消费）。**一个库、一个事务域**——R 观测、登记、
+control 状态同库，跨域操作可原子。文件只存"产物"（报告/攻击明细/日志流）。
+维护命令：`llmsec-manage storage reindex|verify|gc-tasks|trials|migrate-layouts|
+migrate-control|backup-r`；缓存 LRU 用 `cache prune --max N`。
 
 **单元化原则**：runner 默认不把观测写进全局 R（`--work-dir` 写隔离 R；全局模式需显式 `--publish-global`）。这避免了"越后面精度越高、分支互相打架"——要把某个工作区/历史 run 的观测合并进全局 R，用显式动作 `llmsec-manage merge`。
 
