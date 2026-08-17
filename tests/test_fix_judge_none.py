@@ -391,7 +391,6 @@ def test_stale_detection_by_batch_dir(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
     from llmsec.server import dashboard_api
-    from llmsec.server.routers import data_query as dq
 
     runs_dir = tmp_path / "runs"
     for batch, target in (("2026-08-11_151938", "minimax"),
@@ -403,7 +402,6 @@ def test_stale_detection_by_batch_dir(tmp_path, monkeypatch):
             _json.dumps({"target_model": target, "security_level": "safe"}),
             encoding="utf-8")
     monkeypatch.setattr(dashboard_api, "RUNS_DIR", runs_dir)
-    dq._DISCOVER_CACHE.clear()  # r9/P3-5：SigCache 用 clear() 重置
 
     client = TestClient(dashboard_api.app)
     r = client.get("/api/overview", params={"run": "2026-08-11_151938/gemma-4-12B-it"})

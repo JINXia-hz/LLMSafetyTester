@@ -91,52 +91,16 @@ def _run_name(run_dir: Path | None, run: str | None = None) -> str:
 
 
 def _discover_runs() -> list[dict]:
-    """扫描 run 目录。支持两种布局：
-    1. 新布局（并发模型）：runs/<ts>/<target>/runner_report.json — 每个目标子目录是一个独立 run
-    2. 旧布局（兼容）：runs/<ts>/runner_report.json — 单目标 run 直接在时间戳目录下
+    """列出 run（dashboard 口径：只认有 runner_report.json 的）。
+
+    storage 重构：目录扫描收敛为 storage.catalog 单一实现；本函数退化为口径
+    适配层。增量对账（reconcile）按 run 目录 mtime 感知新增/变更——包括 batch
+    内部新增 target 子目录（原 H4 的缓存盲区）与同秒撞名 `_2` 后缀目录
+    （原 RUN_NAME_RE 带 $ 锚的不可见裂缝）。
     """
-    runs_dir = _runs_dir()
-    if not runs_dir.exists():
-        return []
-    runs = []
-    for batch_dir in runs_dir.iterdir():
-        if not batch_dir.is_dir() or not RUN_NAME_RE.match(batch_dir.name):
-            continue
-        # 新布局：扫 target 子目录
-        has_target_subdirs = False
-        for target_dir in batch_dir.iterdir():
-            if not target_dir.is_dir():
-                continue
-            if (target_dir / "runner_report.json").exists():
-                has_target_subdirs = True
-                report = load_json(target_dir / "runner_report.json") or {}
-                runs.append({
-                    "name": f"{batch_dir.name}/{target_dir.name}",
-                    "batch": batch_dir.name,
-                    "target": target_dir.name,
-                    "target_model": report.get("target_model", target_dir.name),
-                    "has_report": True,
-                    "has_md": (target_dir / "security_report.md").exists(),
-                    "has_tree": (target_dir / "security_tree.json").exists(),
-                    "has_cluster_analysis": (target_dir / "cluster_security_analysis.json").exists(),
-                    "mtime": datetime.fromtimestamp(target_dir.stat().st_mtime).isoformat(),
-                })
-        # 旧布局兼容：batch_dir 自身有 runner_report.json（单目标旧格式）
-        if not has_target_subdirs and (batch_dir / "runner_report.json").exists():
-            report = load_json(batch_dir / "runner_report.json") or {}
-            runs.append({
-                "name": batch_dir.name,
-                "batch": batch_dir.name,
-                "target": report.get("target_model", ""),
-                "target_model": report.get("target_model", ""),
-                "has_report": True,
-                "has_md": (batch_dir / "security_report.md").exists(),
-                "has_tree": (batch_dir / "security_tree.json").exists(),
-                "has_cluster_analysis": (batch_dir / "cluster_security_analysis.json").exists(),
-                "mtime": datetime.fromtimestamp(batch_dir.stat().st_mtime).isoformat(),
-            })
-    runs.sort(key=lambda x: x["name"], reverse=True)
-    return runs
+    from llmsec.storage import contract as _storage
+
+    return [r.as_dict() for r in _storage.query_runs(runs_root=_runs_dir(), has_report=True)]
 
 
 def _run_time(run_name: str) -> str | None:
@@ -183,35 +147,8 @@ def _run_summary(run_dir: Path) -> dict | None:
 # 注意不能用目录 mtime：resume 续跑覆写已有 runner_report.json 时目录 mtime 不变，会吃旧缓存。
 _RUN_META_CACHE: dict[str, tuple[tuple[float, int] | None, dict]] = {}
 
-
-# _discover_runs 结果的进程内缓存。
-# 修复前：dashboard 首屏 _discover_runs 被调 4 次（/api/runs、/api/overview 的 _run_dir、
-# /api/overview 的 stale 检测、/api/trend），每次全量扫目录树 + 读每个 run 的报告。
-# 缓存签名 = (runs_dir mtime, 各 batch 目录的 (name, mtime) 全集)：
-#   - 新建/删除 batch 目录 → runs_dir mtime 与全集都变；
-#   - batch 目录**内部**新增 target 子目录 → 只改该 batch_dir 的 mtime——只看顶层
-#     会漏掉多目标 run 中靠后完成的目标（/api/runs 长期看不到新报告），故必须逐 batch stat。
-# 逐 batch stat 的开销远小于全量重扫（后者还要读每个 run 的报告）。
-# r9/P3-5：单槽签名缓存（sig = runs 目录签名），SigCache 统一实现
-_DISCOVER_CACHE = SigCache(maxsize=1)
-
-
-
-def _dir_sig(path: Path) -> tuple[float, tuple] | None:
-    """目录签名：(自身 mtime, 子目录 (name, mtime) 全集)。
-
-    mtime 族缓存（本文件 _discover_runs_cached/_run_meta 与 control 侧文牍文本
-    缓存）统一用同构指纹；子目录粒度是必须的——batch 内新增 target 只改 batch
-    的 mtime，不改父目录。已知局限：粗粒度 mtime 文件系统（FAT 2s）有窗口。
-    """
-    try:
-        st = path.stat()
-        subs = tuple(sorted(
-            (d.name, d.stat().st_mtime) for d in path.iterdir() if d.is_dir()
-        ))
-        return (st.st_mtime, subs)
-    except OSError:
-        return None
+# r9/P3-5 的 _DISCOVER_CACHE（目录签名缓存）已随 storage 重构移除：目录库的
+# 增量对账本身就是持久化的"签名缓存"（按 run 目录 mtime 逐条比对，粒度更细）。
 
 
 def _file_sig(path: Path) -> tuple[float, int] | None:
@@ -224,13 +161,12 @@ def _file_sig(path: Path) -> tuple[float, int] | None:
 
 
 def _discover_runs_cached() -> list[dict]:
-    """_discover_runs 的进程内缓存版。签名失效才重扫，首屏 4 次调用共享同一结果。"""
-    runs_dir = _runs_dir()
-    sig = _dir_sig(runs_dir)
-    if sig is None:
-        return _discover_runs()  # runs_dir 不存在/迭代中被删，直接扫（返回空）
-    # 副本语义保留：避免调用方 mutate 污染缓存（/api/runs 会 r.update(...)）
-    return [dict(r) for r in _DISCOVER_CACHE.get((), sig, _discover_runs)]
+    """_discover_runs 的缓存名号保留（首屏 4 处调用点不变）。
+
+    缓存本体已由目录库增量对账取代——重复调用只付出两级目录 stat 的对账成本，
+    无报告重读。副本语义保留：避免调用方 mutate 污染后续结果（/api/runs 会 r.update）。
+    """
+    return [dict(r) for r in _discover_runs()]
 
 
 def _run_meta(run_dir: Path) -> dict:

@@ -133,7 +133,7 @@ flowchart TD
 
 ### R 矩阵 —— 唯一真相
 
-`R[记录id][模型] = MatchResult`，定义在 `core/results.py` 的 `ResultsMatrix`，持久化于 `output/state/results.json`。它是全系统**唯一不可重算**的存储；Elo 缓存、预测器、指纹、孪生集全部是从 R + 攻击特征派生的缓存，删了能重建（派生入口：`evaluation/elo.py` 的 `derive_elo`）。跨进程并发安全靠文件锁 + 原子写 + .bak 轮转。
+`R[记录id][模型] = MatchResult`，定义在 `core/results.py` 的 `ResultsMatrix`，持久化于 `output/state/results.db`（SQLite，`storage/rstore.py` 后端；`results.json` 是导出快照格式）。它是全系统**唯一不可重算**的存储；Elo 缓存、预测器、指纹、孪生集全部是从 R + 攻击特征派生的缓存，删了能重建（派生入口：`evaluation/elo.py` 的 `derive_elo`）。跨进程并发安全靠 SQLite WAL + 单事务写入（BEGIN IMMEDIATE），备份用 `llmsec-manage storage backup-r`。
 
 ### ELOTracker 与安全边界
 
@@ -339,19 +339,24 @@ ZCode / Cursor 配置（stdio 模式）：
 ```
 output/
 ├── state/                  # 持久化状态（全局）
-│   ├── results.json        #   R 矩阵（唯一真相）
+│   ├── results.db          #   R 矩阵（唯一真相，SQLite；results.json 为导出快照/遗留源）
+│   ├── catalog.db          #   目录库（runs/trials/tasks 登记索引，可删可重建）
 │   └── elo_cache.json ...  #   派生缓存（可删可重建）
-├── runs/<时间戳>/<target>/ # runner 单次运行产物
+├── cluster/                # 聚类/特征产物（feature/embedding/cluster 缓存）
+├── runs/<时间戳>/<target>/ # runner 单次运行产物（三代历史布局已归一）
 │   ├── attack_results.jsonl      #   攻击明细（含响应原文）
 │   ├── allergy.json              #   过敏报告 + 2D 画像
 │   ├── cluster_security_analysis.json
 │   └── security_report.md        #   最终交付物
-├── workspaces/<name>/      # 控制层 fork 工作区（独立 R + run 产物）
+├── workspaces/<name>/      # 控制层 fork 工作区（独立 R + run 产物 + 卫星目录库）
 ├── env_snapshots/<name>/   # .env 快照（隔离的连接配置）
 ├── plans/ + gazette/       # 三省 Plan 与文牍（审计轨迹）
 ├── experiments/<name>/     # HPO study
+├── tasks/                  # 后台任务（meta/log/progress；gc: storage gc-tasks）
 └── .trash/                 # 软删除回收站（可恢复）
 ```
+
+**存储层（2026-08 数据库重构）**：`llmsec/storage/` 是唯一数据访问层（DAO 收口，SQLModel + SQLite WAL，业务代码零 SQL）。run 发现 / 字段提取 / 路径契约单一实现；R 写入单事务（BEGIN IMMEDIATE），并发 publish 零丢失。维护命令：`llmsec-manage storage reindex|verify|gc-tasks|trials|migrate-layouts|migrate-r|backup-r`，缓存 LRU 用 `cache prune --max N`。
 
 **单元化原则**：runner 默认不把观测写进全局 R（`--work-dir` 写隔离 R；全局模式需显式 `--publish-global`）。这避免了"越后面精度越高、分支互相打架"——要把某个工作区/历史 run 的观测合并进全局 R，用显式动作 `llmsec-manage merge`。
 

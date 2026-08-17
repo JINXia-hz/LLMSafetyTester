@@ -1,25 +1,22 @@
 """management.runs — 过滤 / 列出 / 清理 run 历史。
 
-复用 data_query._discover_runs 的扫描逻辑（双布局：runs/<ts>/<target>/ 与旧 runs/<ts>/），
-但在本包内独立实现，不依赖 server 层，保持 CLI 纯净。
+storage 重构后目录扫描收敛为 storage.catalog 单一实现，本模块保留
+management 口径（含失败 run）与多维过滤/dry-run 删除能力：
 
-关键能力：
-  - list：递归算目录大小（_discover_runs 只取 mtime，size 是空白），支持多维过滤。
+  - list：目录占用（size）随目录库登记行缓存，支持多维过滤。
   - delete：默认 dry-run 预览；软删除到 output/.trash/；可选 --delete-r 删 R 列
-    （经 ResultsMatrix.remove_model + save(backup=True) + _file_lock，复用现有原子写）。
+    （阶段 2：rstore.remove_models 单事务 SQL 删除）。
 """
 
 from __future__ import annotations
 
-import re
-from datetime import datetime
 from pathlib import Path
 
-from llmsec.core.config import RESULTS_FILE, RUNS_DIR
+from llmsec.core.config import RESULTS_DB, RUNS_DIR
 from llmsec.core.io import read_json
 from llmsec.core.logging import get_logger
 from llmsec.core.paths import safe_subpath
-from llmsec.core.results import ResultsMatrix, _file_lock, extract_report_metrics
+from llmsec.core.results import ResultsMatrix
 from llmsec.management.common import (
     Plan,
     dir_size,
@@ -31,80 +28,24 @@ from llmsec.management.common import (
 
 logger = get_logger(__name__)
 
-RUN_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{6}$")
-
-# run 目录内可能出现的产物文件（用于 size 统计与删除清单）
-RUN_ARTIFACTS = (
-    "runner_report.json",
-    "security_tree.json",
-    "security_report.md",
-    "attack_results.jsonl",
-    "state.json",
-    "allergy.json",
-    "sampler_log.jsonl",
-    "cluster_security_analysis.json",
-    "cluster_report.json",
-)
+# 命名契约与产物清单的权威定义在 storage.catalog（单一来源），此处 re-export
+# 供既有 import（data_query 等）零改动。
+from llmsec.storage.catalog import RUN_ARTIFACTS, RUN_NAME_RE  # noqa: E402,F401
 
 
 # ============================================================
-# 扫描（独立于 server 层，CLI 纯净）
+# 扫描（目录库单一实现，本层只做口径适配）
 # ============================================================
 def discover_runs(runs_dir: Path | None = None) -> list[dict]:
-    """扫描 run 目录，返回列表（时间倒序）。
+    """列出 run（时间倒序）。
 
-    支持双布局：
-      新布局 runs/<ts>/<target>/（含任意产物即视为 run，runner_report.json 可缺失=失败/垃圾）
-      旧布局 runs/<ts>/runner_report.json
-
-    与 data_query._discover_runs 字段兼容，并额外加 ``size``。
-    关键差异：本实现把「无报告但有部分产物」的失败 run 也扫出来（has_report=False），
-    供 detect_junk 识别——data_query 版只扫有 runner_report.json 的目录，会漏掉失败 run。
+    management 口径 = 有任意 RUN_ARTIFACTS 产物的目录（含无报告的失败 run，
+    供 detect_junk 识别）。字段与 data_query 口径兼容并额外含 ``size``——
+    两者都来自目录库登记行的 as_dict()（字段超集）。
     """
-    runs_dir = runs_dir or RUNS_DIR
-    if not runs_dir.exists():
-        return []
-    runs: list[dict] = []
-    for batch_dir in sorted(runs_dir.iterdir(), reverse=True):
-        if not batch_dir.is_dir() or not RUN_NAME_RE.match(batch_dir.name):
-            continue
-        has_target_subdirs = False
-        for target_dir in batch_dir.iterdir():
-            if not target_dir.is_dir():
-                continue
-            # 任意已知产物存在即视为一个 run（失败 run 可能只有部分文件）
-            if not any((target_dir / a).exists() for a in RUN_ARTIFACTS):
-                continue
-            has_target_subdirs = True
-            report = read_json(target_dir / "runner_report.json") or {}
-            runs.append(_run_entry(target_dir, batch_dir.name, target_dir.name, report))
-        # 旧布局兼容
-        if not has_target_subdirs and any((batch_dir / a).exists() for a in RUN_ARTIFACTS):
-            report = read_json(batch_dir / "runner_report.json") or {}
-            target = report.get("target_model", "") or batch_dir.name
-            runs.append(_run_entry(batch_dir, batch_dir.name, target, report))
-    runs.sort(key=lambda x: x["name"], reverse=True)
-    return runs
+    from llmsec.storage import contract as _storage
 
-
-def _run_entry(run_dir: Path, batch: str, target: str, report: dict) -> dict:
-    """构造单条 run 元数据。"""
-    size = dir_size(run_dir)
-    mtime = datetime.fromtimestamp(run_dir.stat().st_mtime).isoformat()
-    m = extract_report_metrics(report)
-    return {
-        "name": f"{batch}/{target}" if batch != target else batch,
-        "batch": batch,
-        "target": target,
-        "target_model": report.get("target_model", target),
-        "security_level": report.get("security_level", "inconclusive"),
-        "asr": m["asr"],
-        "boundary_elo": m["boundary_elo"],
-        "has_report": (run_dir / "runner_report.json").exists(),
-        "has_md": (run_dir / "security_report.md").exists(),
-        "mtime": mtime,
-        "size": size,
-    }
+    return [r.as_dict() for r in _storage.query_runs(runs_root=runs_dir, has_artifact=True)]
 
 
 def run_dir_for(name: str, runs_dir: Path | None = None) -> Path | None:
@@ -252,11 +193,11 @@ def plan_delete(
                         r_rows_total += n
                         plan.extra.setdefault("r_models", []).append(model)
                         plan.add(
-                            RESULTS_FILE, size=0, kind="r_column",
+                            RESULTS_DB, size=0, kind="r_column",
                             detail=f"将从 R 删除 model={model} 的 {n} 条观测",
                         )
                 except Exception as e:
-                    plan.add(RESULTS_FILE, size=0, kind="r_error", detail=f"读 R 失败: {e}")
+                    plan.add(RESULTS_DB, size=0, kind="r_error", detail=f"读 R 失败: {e}")
     plan.extra["r_models_affected"] = sorted(r_models_affected)
     plan.extra["r_rows_total"] = r_rows_total
     return plan
@@ -278,16 +219,12 @@ def execute_delete(plan: Plan, *, delete_r: bool = False) -> Plan:
                      detail=f"已移到 {dest}" if dest else "失败")
         else:
             done.add(src, size=0, kind="missing", detail="已不存在")
-    # 删 R 列（一次性 load→remove→save，经 _file_lock）。B1：权威写 strict=True，
-    # 锁超时抛 LockTimeout 被 except 捕获进 r_error（不静默损坏）
+    # 删 R 列（阶段 2：单事务 SQL 删除，取代"文件锁 load→remove→save"——
+    # _file_lock 与 LockTimeout 从 R 路径退役）
     if delete_r and plan.extra.get("r_models_affected"):
         try:
-            with _file_lock(RESULTS_FILE, strict=True):
-                R = ResultsMatrix.load()
-                total = 0
-                for model in plan.extra["r_models_affected"]:
-                    total += R.remove_model(model)
-                R.save()  # _file_lock 线程内重入（r8），锁内嵌套安全
+            from llmsec.storage import rstore
+            total = rstore.remove_models(list(plan.extra["r_models_affected"]))
             done.extra["r_rows_removed"] = total
             logger.info("已从 R 删除 %d 条观测（models=%s）", total, plan.extra["r_models_affected"])
         except Exception as e:

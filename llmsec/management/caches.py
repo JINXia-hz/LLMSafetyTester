@@ -219,6 +219,46 @@ def cmd_clean(categories: list[str], *, yes: bool = False, json_mode: bool = Fal
     return 0
 
 
+# ============================================================
+# prune 子命令（predictors LRU 修剪）
+# ============================================================
+def plan_prune_predictors(max_n: int) -> Plan:
+    """构造 predictors LRU 修剪预览：按 mtime（=最近命中/训练时间，见 blend.py
+    load_or_fit 的命中 touch）保留最新 max_n 个，其余软删。
+
+    审计设定的"数百再议"阈值已触发（3 天 142→398 个）——修剪是唯一能
+    自动控制 predictors 体积的手段；被误删的活缓存代价 = 下次重训。
+    """
+    plan = Plan(action="prune", dry_run=True)
+    pkls = sorted(PREDICTORS_DIR.glob("*.pkl"), key=lambda p: p.stat().st_mtime, reverse=True) \
+        if PREDICTORS_DIR.exists() else []
+    for p in pkls[max_n:]:
+        plan.add(p, size=dir_size(p), kind="cache_file", detail=f"LRU 淘汰（保留最新 {max_n}）")
+    plan.extra["kept"] = min(len(pkls), max_n)
+    plan.extra["total"] = len(pkls)
+    return plan
+
+
+def cmd_prune(max_n: int, *, yes: bool = False, json_mode: bool = False) -> int:
+    plan = plan_prune_predictors(max_n)
+    if json_mode:
+        if not yes:
+            emit(plan.to_dict(), json_mode=True, title="prune (dry-run)")
+            return 0
+        done = execute_clean(plan)  # 软删逻辑与 clean 共用
+        emit(done.to_dict(), json_mode=True, title="prune (executed)")
+        return 0
+    _print_plan(plan)
+    if not yes:
+        print(f"\n（dry-run 预览，共 {plan.extra['total']} 个 predictor，保留最新 {max_n}，"
+              f"将淘汰 {len(plan.items)} 个 / {fmt_size(plan.total_size)}）\n确认执行请加 --yes")
+        return 0
+    print("\n执行中...")
+    done = execute_clean(plan)
+    print(f"✓ 完成：淘汰 {len(done.items)} 个 predictor，释放 {fmt_size(done.total_size)}")
+    return 0
+
+
 def _print_plan(plan: Plan) -> None:
     print(f"操作: {plan.action}  模式: {'dry-run' if plan.dry_run else 'executed'}")
     rows = []

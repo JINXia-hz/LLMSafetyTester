@@ -52,9 +52,17 @@ RUNS_DIR = OUTPUT_DIR / "runs"
 SAFE_TWINS_FILE = STATE_DIR / "safe_twins.jsonl"
 
 # 结果矩阵（多模型唯一真相）+ 派生缓存目录
-RESULTS_FILE = STATE_DIR / "results.json"          # R[method][model] 主存储
+# R 真相 = results.db（SQLite，storage.rstore 后端；阶段 2 起 results.json 只是
+# 导出快照格式）。work-dir 隔离时重绑到 <wd>/results.db（见 core/isolation.py）。
+RESULTS_DB = STATE_DIR / "results.db"
+RESULTS_FILE = STATE_DIR / "results.json"          # 遗留快照格式（导出/对账用）
 PREDICTORS_DIR = OUTPUT_DIR / "predictors"          # 统一/每模型 ridge 预测器
 ELO_CACHE_FILE = STATE_DIR / "elo_cache.json"       # Elo 派生缓存（可删可重建）
+
+# 目录库（SQLite：runs/trials/tasks 登记索引，llmsec/storage/ 唯一读写方）。
+# 可重建的派生索引——删库后 `llmsec-manage storage reindex` 全量重建。
+# work-dir 隔离时重绑到 <wd>/catalog.db 卫星库（见 core/isolation.py）。
+CATALOG_DB = STATE_DIR / "catalog.db"
 
 # 攻击集（仓库根 attacks/ 目录——用户可见，支持拖拽上传）
 ATTACK_SET_L1_FILE = ATTACKS_DIR / "l1.jsonl"
@@ -78,18 +86,19 @@ ALERTS_FILE = OUTPUT_DIR / "alerts.jsonl"
 # 内置静态数据目录（HarmBench 行为库 + 越狱模板，出处见 data/Explication.md）
 DATA_DIR = PROJECT_ROOT / "data"
 
-# 聚类产物（按 clustering.py 现行约定：直接落在 output/ 下）
-CLUSTER_REPORT_FILE = OUTPUT_DIR / "cluster_report.json"
-CLUSTER_MATRIX_FILE = OUTPUT_DIR / "cluster_matrix.csv"
+# 聚类/特征产物统一归 output/cluster/（2026-08 storage 重构前散落 output/ 根目录）
 # 聚类 artifacts 已按写者拆分为两个文件（原 cluster_artifacts.pkl 由两个写者混写不同
 # schema，后写覆盖会导致下游 KeyError）：
 #   - feature_cache.pkl：先验特征缓存，仅 predictors/cold_start.py fit_features 写
 #   - cluster_result.pkl：完整聚类产物，hdb 写、final_fit 增补
-FEATURE_CACHE_FILE = OUTPUT_DIR / "feature_cache.pkl"
-CLUSTER_RESULT_FILE = OUTPUT_DIR / "cluster_result.pkl"
+CLUSTER_DIR = OUTPUT_DIR / "cluster"
+CLUSTER_REPORT_FILE = CLUSTER_DIR / "cluster_report.json"
+CLUSTER_MATRIX_FILE = CLUSTER_DIR / "cluster_matrix.csv"
+FEATURE_CACHE_FILE = CLUSTER_DIR / "feature_cache.pkl"
+CLUSTER_RESULT_FILE = CLUSTER_DIR / "cluster_result.pkl"
 # Embedding 磁盘缓存：按 (feature_config_hash, prompt_sha256) 键存原始 embedding 向量，
 # 冷启动时只 encode 缓存未命中的 prompt。features.py 动态读此常量（不 import 期冻结）。
-EMBEDDING_CACHE_FILE = OUTPUT_DIR / "embedding_cache.pkl"
+EMBEDDING_CACHE_FILE = CLUSTER_DIR / "embedding_cache.pkl"
 
 
 # ============================================================

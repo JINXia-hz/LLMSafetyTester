@@ -181,15 +181,43 @@ class TaskStore:
         return ordered, runs_dirty
 
     def _scan_detached(self, owned: dict[str, TaskSnapshot]) -> list[TaskSnapshot]:
-        """扫描日志目录，为不在本进程 TASKS 里的任务构造只读视图。
+        """构造不在本进程 TASKS 里的任务的只读视图。
 
-        优先读 meta.json（task_manager 落盘）：拿到真实状态与 PID——状态为
-        running/queued 时以 PID 存活为准（持有进程崩溃后无人回写终态）；
-        PID 已死且无终态记录 → "ended"（已结束，退出码未知）。无 meta.json
-        的旧任务退回 EXTERNAL 未知态。
+        storage 重构：外部任务发现走目录库（query_tasks 自带 meta.json 对账，
+        免逐个读文件）；状态为 running/queued 时以 PID 存活为准（持有进程崩溃
+        后无人回写终态）；PID 已死且无终态记录 → "ended"。无 meta.json 的裸
+        文件残留（旧世代 .log/.progress.jsonl，目录扫兜底）保持 EXTERNAL 未知态。
         """
         if not self._dir.is_dir():
             return []
+        from llmsec.storage import contract as _storage
+
+        out: list[TaskSnapshot] = []
+        seen: set[str] = set()
+        try:
+            rows = _storage.query_tasks(limit=_EXTERNAL_MAX, tasks_dir=self._dir)
+        except Exception:
+            rows = []
+        for row in rows:
+            tid = row.task_id
+            seen.add(tid)
+            if tid in owned:
+                continue
+            status = row.status or EXTERNAL
+            if status in ("running", "queued") and not _pid_alive(row.pid):
+                # 持有进程已退出且无人回写终态（如看板被关闭后任务自然结束）
+                status = "ended"
+            out.append(TaskSnapshot(
+                id=tid,
+                kind=row.kind,
+                status=status,
+                cmd=row.cmd or "",
+                started_at=row.started_at or "",
+                owned=False,
+                meta=row.meta,
+                pid=row.pid,
+            ))
+        # 裸文件残留兜底：只在目录里存在、目录库无行的旧任务（一次性 iterdir，零文件读）
         mtimes: dict[str, float] = {}
         for f in self._dir.iterdir():
             name = f.name
@@ -201,43 +229,23 @@ class TaskStore:
                 tid = name[: -len(".log")]
             else:
                 continue
-            # task id 形如 "evaluate-143025-ab12cd"；不带连缀的散文件跳过
-            if not tid or "-" not in tid or tid in owned:
+            if not tid or "-" not in tid or tid in owned or tid in seen:
                 continue
             try:
-                mtime = f.stat().st_mtime
+                mtimes[tid] = max(mtimes.get(tid, 0.0), f.stat().st_mtime)
             except OSError:
                 continue
-            mtimes[tid] = max(mtimes.get(tid, 0.0), mtime)
-        out = []
-        for tid, mtime in sorted(mtimes.items(), key=lambda kv: kv[1], reverse=True)[:_EXTERNAL_MAX]:
-            meta = _read_meta(self._dir, tid)
-            if meta:
-                status = str(meta.get("status") or EXTERNAL)
-                pid = meta.get("pid")
-                pid = int(pid) if isinstance(pid, int) else None
-                if status in ("running", "queued") and not _pid_alive(pid):
-                    # 持有进程已退出且无人回写终态（如看板被关闭后任务自然结束）
-                    status = "ended"
-                out.append(TaskSnapshot(
-                    id=tid,
-                    kind=str(meta.get("kind") or tid.split("-", 1)[0]),
-                    status=status,
-                    cmd=str(meta.get("cmd") or ""),
-                    started_at=str(meta.get("started_at") or datetime.fromtimestamp(mtime).isoformat(timespec="seconds")),
-                    owned=False,
-                    meta=meta.get("meta") if isinstance(meta.get("meta"), dict) else None,
-                    pid=pid,
-                ))
-            else:
-                out.append(TaskSnapshot(
-                    id=tid,
-                    kind=tid.split("-", 1)[0],
-                    status=EXTERNAL,
-                    owned=False,
-                    started_at=datetime.fromtimestamp(mtime).isoformat(timespec="seconds"),
-                ))
-        return out
+        for tid, mtime in sorted(mtimes.items(), key=lambda kv: kv[1], reverse=True):
+            if len(out) >= _EXTERNAL_MAX:
+                break
+            out.append(TaskSnapshot(
+                id=tid,
+                kind=tid.split("-", 1)[0],
+                status=EXTERNAL,
+                owned=False,
+                started_at=datetime.fromtimestamp(mtime).isoformat(timespec="seconds"),
+            ))
+        return out[:_EXTERNAL_MAX]
 
     def _replay(self, task_id: str, kind: str) -> EvalProgressState:
         """增量回放 progress.jsonl：从上次 offset 读新完整行，逐条 apply_record。"""

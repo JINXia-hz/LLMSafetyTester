@@ -289,7 +289,9 @@ class TestExternalMeta:
         import llmsec.server.task_manager as tm
 
         monkeypatch.setattr(tm, "TASK_LOG_DIR", tmp_path)
-        view = tm.start_task("metauto", ["-c", "print('meta')"], meta={"targets": ["A"]})
+        # 子进程须活过 start_task 返回（目录库镜像首调含 ORM import/建引擎的
+        # 固定开销），否则 meta.json 在测试读取前已被终态回写覆盖
+        view = tm.start_task("metauto", ["-c", "import time; time.sleep(0.5)"], meta={"targets": ["A"]})
         tid = view["id"]
         m1 = _json.loads((tmp_path / f"{tid}.meta.json").read_text(encoding="utf-8"))
         assert m1["status"] == "running" and isinstance(m1["pid"], int)

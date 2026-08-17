@@ -46,7 +46,7 @@ def sandbox(monkeypatch, tmp_path):
     from llmsec.management import merge as merge_mod
     monkeypatch.setattr(merge_mod, "WORKSPACES_DIR", out / "workspaces")
     monkeypatch.setattr(merge_mod, "OUTPUT_DIR", out)
-    monkeypatch.setattr(merge_mod, "RESULTS_FILE", out / "state" / "results.json")
+    monkeypatch.setattr(merge_mod, "RESULTS_DB", out / "state" / "results.db")
     (out / "state").mkdir()
 
     # mock export_snapshot：在 tmp 下造假快照（不经 subprocess）

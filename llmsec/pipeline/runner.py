@@ -101,17 +101,11 @@ def _positive_int(value: str) -> int:
 
 
 def _allocate_runs_dir(base_dir: Path, name: str) -> Path:
-    """返回不冲突的 run 目录路径：name 已存在时追加 _2/_3 后缀。
+    """撞名分配：name 已存在时追加 _2/_3 后缀。委托 storage.catalog 单一实现
+    （保留本函数名供测试 monkeypatch 注入固定目录）。"""
+    from llmsec.storage import contract as _storage
 
-    run 目录名为秒级时间戳，同一秒内启动两个 run 会撞名——本函数检测到冲突时
-    追加递增后缀（name_2、name_3…），确保同秒多 run 产物不互相覆盖。
-    """
-    candidate = base_dir / name
-    suffix = 2
-    while candidate.exists():
-        candidate = base_dir / f"{name}_{suffix}"
-        suffix += 1
-    return candidate
+    return _storage.allocate_runs_dir(base_dir, name)
 
 
 def partition_publish_names(names: list[str], declared: set[str]) -> tuple[list[str], list[str]]:
@@ -225,7 +219,9 @@ def main(argv=None, *, deps=None):
     if args.work_dir:
         runs_dir = Path(args.work_dir)
     else:
-        runs_dir = _allocate_runs_dir(RUNS_DIR, datetime.now().strftime("%Y-%m-%d_%H%M%S"))
+        from llmsec.storage import contract as _storage
+        runs_dir = _allocate_runs_dir(
+            RUNS_DIR, datetime.now().strftime(_storage.RUN_TS_FORMAT))
         runs_dir.mkdir(parents=True, exist_ok=True)
 
     # 加载攻击集（相对路径锚到仓库根：attacks/l1.jsonl → repo_root/attacks/l1.jsonl）
@@ -372,6 +368,13 @@ def main(argv=None, *, deps=None):
 
         run_dir = runs_dir / name
         run_dir.mkdir(parents=True, exist_ok=True)
+        # 写入口登记：run 从创建起即可见（work-dir 模式经 config 重绑落卫星库）。
+        # best-effort——索引失败不中断评估，reconcile 会自愈。
+        try:
+            from llmsec.storage import contract as _storage
+            _storage.register_run(run_dir, batch=runs_dir.name, target=name)
+        except Exception as e:
+            logger.warning("目录库登记失败（不影响评估，稍后对账自愈）: %s", e)
 
         tracker = ELOTracker()
         tracker.predictor.ridge_refit_threshold = args.ridge_refit_threshold

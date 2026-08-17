@@ -52,6 +52,10 @@ _dedup_lock = threading.Lock()
 # 事件文件写锁
 _file_lock = threading.Lock()
 
+# alerts.jsonl 轮转阈值（超过则轮转为 .1，与 llmsec.log 的 RotatingFileHandler
+# 同策略）——原先 append-only 无轮转，长期运行只增不减
+_ALERTS_MAX_BYTES = 10 * 1024 * 1024
+
 
 def _min_level() -> int:
     """读取最低告警级别（LLMSEC_ALERT_LEVEL，默认 warning）。"""
@@ -104,12 +108,22 @@ def _should_emit(dedup_key: str) -> bool:
 
 
 def _write_event_file(event: dict) -> None:
-    """追加写告警事件到 output/alerts.jsonl（线程锁保护，失败静默）。"""
+    """追加写告警事件到 output/alerts.jsonl（线程锁保护，失败静默）。
+
+    超过 _ALERTS_MAX_BYTES 时轮转为 .1 后缀——轮转在锁内做，避免并发追加截断。
+    """
     try:
         path = _alerts_file()
         path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(event, ensure_ascii=False, default=str)
         with _file_lock:
+            try:
+                if path.stat().st_size > _ALERTS_MAX_BYTES:
+                    rotated = path.with_suffix(path.suffix + ".1")
+                    rotated.unlink(missing_ok=True)
+                    path.replace(rotated)
+            except OSError:
+                pass  # 不存在/被占用：跳过轮转直接追加
             with open(path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
     except Exception as e:

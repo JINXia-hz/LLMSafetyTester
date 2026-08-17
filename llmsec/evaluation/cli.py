@@ -276,8 +276,15 @@ def main():
     base_name = Path(input_file).stem  # e.g. "l1" or "harmbench_jailbreak"
     result_file = OUTPUT_DIR / f"{base_name}_结果.jsonl"
 
-    run_dir = RUNS_DIR / datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    run_dir.mkdir(parents=True, exist_ok=True)
+    # 撞名分配（storage.catalog 单一实现）+ 写入口登记：同秒撞名加 _2 后缀且
+    # 创建即入目录库（旧实现 mkdir(exist_ok=True) 同秒会共用目录互相覆盖产物）。
+    from llmsec.storage import contract as _storage
+    run_dir = _storage.allocate_runs_dir(
+        RUNS_DIR, datetime.now().strftime(_storage.RUN_TS_FORMAT))
+    try:
+        _storage.register_run(run_dir, batch=run_dir.name, target=None)
+    except Exception as e:
+        logger.warning("目录库登记失败（不影响评估，稍后对账自愈）: %s", e)
     summary_file = run_dir / f"{base_name}_汇总.json"
 
     use_judge = not args.no_judge

@@ -27,11 +27,12 @@ def iso_output(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cfg, "OUTPUT_DIR", out)
     monkeypatch.setattr(cfg, "STATE_DIR", state)
+    monkeypatch.setattr(cfg, "RESULTS_DB", state / "results.db")
     monkeypatch.setattr(cfg, "RESULTS_FILE", state / "results.json")
     monkeypatch.setattr(cfg, "ELO_CACHE_FILE", state / "elo_cache.json")
 
     from llmsec.management import merge as merge_mod
-    monkeypatch.setattr(merge_mod, "RESULTS_FILE", state / "results.json")
+    monkeypatch.setattr(merge_mod, "RESULTS_DB", state / "results.db")
     monkeypatch.setattr(merge_mod, "WORKSPACES_DIR", out / "workspaces")
     monkeypatch.setattr(merge_mod, "OUTPUT_DIR", out)
     return out
@@ -49,7 +50,7 @@ def _save_R(path: Path, records: dict) -> None:
 class TestMerge:
     def test_plan_detects_new_records(self, iso_output):
         from llmsec.management import merge
-        global_R = cfg.RESULTS_FILE
+        global_R = cfg.RESULTS_DB
         ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
         ws_R.parent.mkdir(parents=True)
         _save_R(global_R, {"mA": [("r1", 1.0), ("r2", 0.5)]})
@@ -65,7 +66,7 @@ class TestMerge:
 
     def test_execute_merges_new_records(self, iso_output):
         from llmsec.management import merge
-        global_R = cfg.RESULTS_FILE
+        global_R = cfg.RESULTS_DB
         ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
         ws_R.parent.mkdir(parents=True)
         _save_R(global_R, {"mA": [("r1", 1.0)]})
@@ -79,7 +80,7 @@ class TestMerge:
 
     def test_dry_run_does_not_write(self, iso_output):
         from llmsec.management import merge
-        global_R = cfg.RESULTS_FILE
+        global_R = cfg.RESULTS_DB
         ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
         ws_R.parent.mkdir(parents=True)
         _save_R(global_R, {"mA": [("r1", 1.0)]})
@@ -91,7 +92,7 @@ class TestMerge:
 
     def test_models_filter(self, iso_output):
         from llmsec.management import merge
-        global_R = cfg.RESULTS_FILE
+        global_R = cfg.RESULTS_DB
         ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
         ws_R.parent.mkdir(parents=True)
         _save_R(global_R, {})
@@ -105,7 +106,7 @@ class TestMerge:
     def test_multiple_sources_merge(self, iso_output):
         """两个 ws 合并到 global，各自的新记录都进。"""
         from llmsec.management import merge
-        global_R = cfg.RESULTS_FILE
+        global_R = cfg.RESULTS_DB
         ws1 = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
         ws2 = cfg.OUTPUT_DIR / "workspaces" / "ws2" / "results.json"
         ws1.parent.mkdir(parents=True)
@@ -130,14 +131,14 @@ class TestMerge:
         _save_R(ws2, {"mB": [("r2", 0.5)]})
 
         merge.execute_merge(["ws:ws1"], "ws:ws2")
-        R = ResultsMatrix.load(ws2)
+        R = ResultsMatrix.load(ws2.with_suffix(".db"))  # 阶段 2：目标真相在 db
         assert R.n_for_model("mA") == 1   # 从 ws1 融合进来
         assert R.n_for_model("mB") == 1   # 原有保留
 
     def test_path_source(self, iso_output, tmp_path):
         """source 直接给目录路径（work-dir）。"""
         from llmsec.management import merge
-        global_R = cfg.RESULTS_FILE
+        global_R = cfg.RESULTS_DB
         workdir = tmp_path / "some-workdir"
         workdir.mkdir()
         _save_R(global_R, {})
@@ -150,7 +151,7 @@ class TestMerge:
     def test_overwrite_same_record(self, iso_output):
         """同 record+model：source 覆盖 target（upsert 语义）。"""
         from llmsec.management import merge
-        global_R = cfg.RESULTS_FILE
+        global_R = cfg.RESULTS_DB
         ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
         ws_R.parent.mkdir(parents=True)
         _save_R(global_R, {"mA": [("r1", 1.0)]})       # 旧分 1.0
@@ -165,7 +166,7 @@ class TestMerge:
 class TestMergeCLI:
     def test_cli_merge_dry_run_json(self, iso_output, capsys, monkeypatch):
         from llmsec.management import __main__ as cli
-        global_R = cfg.RESULTS_FILE
+        global_R = cfg.RESULTS_DB
         ws_R = cfg.OUTPUT_DIR / "workspaces" / "ws1" / "results.json"
         ws_R.parent.mkdir(parents=True)
         _save_R(global_R, {"mA": [("r1", 1.0)]})

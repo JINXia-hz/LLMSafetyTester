@@ -2,8 +2,8 @@
 core.results — 结果矩阵 R（唯一真相存储）
 
 设计哲学（更高视角）：
-  结果矩阵 R[record][model] → 结果记录 是整个评估体系的**唯一真相**。
-  Elo、预测器、收敛判定都是从 R + 单位特征 X **派生**出来的缓存，可随时
+  结果矩阵 R[record][model] → 结果记录 是整个评估体系的**唯一真相**。Elo、
+  预测器、收敛判定都是从 R + 单位特征 X **派生**出来的缓存，可随时
   从 R 全量重算。这保证：
     1. Elo 不跨模型混淆（每个模型的 Elo 仅由该模型列的 R 回放得到）
     2. "已攻击的只要算一下就得出了"——R 是不可重算的原始观测，其余皆派生
@@ -12,15 +12,14 @@ core.results — 结果矩阵 R（唯一真相存储）
 schema v2（簇粒度）：
   行键 = 实测 prompt 记录 id（原始观测，同一簇可有多条）；评级单位（簇）
   由 extra.unit 标注，Elo 回放时按它聚合（evaluation.elo.derive_elo）。
-  v1（method 键）文件在 load 时归档为 results.method-era.bak 并重建。
 
-存储布局：output/state/results.json
-  {
-    "version": 2,
-    "units":   ["c_1a2b3c4d5e", ...],      # 评级单位（簇）清单（来自攻击集聚类，可空）
-    "models":  ["qwen9b", ...],            # 已观测到的模型（自发现）
-    "results": { record: { model: {eval_score, status, ts, extra:{unit, round, ...}} } }
-  }
+存储布局（2026-08 数据库重构阶段 2）：
+  真相 = output/state/results.db（SQLite，storage.rstore 后端；work-dir 隔离
+  时重绑到 <wd>/results.db）。并发写由单事务（BEGIN IMMEDIATE）保证——
+  此前的手写文件锁 RMW、.bak/.corrupt.bak 轮转机器已退役（F-3/F1/B1 的
+  语义由 SQLite 事务与 quick_check 承接）。
+  显式 .json 路径的 save/load = 遗留 JSON 快照格式（人读友好的导出产物，
+  原 v1 method 键纪元的 results.method-era.bak 仍留档取证）。
 
 本模块只负责存储与访问；Elo 派生见 evaluation.elo.derive_elo；
 预测器派生见 evaluation.predictors（cold_start / blend）。
@@ -34,8 +33,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from llmsec.core import config as _config  # r9/P3-4：路径调用期动态读（work-dir 隔离经 config 单点重绑）
-from llmsec.core.io import CorruptedFileError, read_json, write_json
+from llmsec.core.io import write_json
 from llmsec.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -91,23 +89,18 @@ class LockTimeout(OSError):
 
 @contextmanager
 def _file_lock(filepath: Path, timeout: float = 10.0, *, strict: bool = False):
-    """跨进程文件锁（Windows msvcrt / Unix fcntl），保护 results.json 并发写。
+    """跨进程文件锁（Windows msvcrt / Unix fcntl）。
 
-    dashboard 与实验框架可能并发写全局 R，此锁串行化 save()，防交替写损坏。
-    锁文件 = filepath + '.lock'。
+    2026-08 阶段 2 起 R 真相路径不再使用本锁（SQLite 事务接管）；现存用户是
+    elo_cache.json 的 RMW（elo_access）。保留实现与重入语义不变。
 
     线程内重入（r8/病根3）：msvcrt/fcntl 的锁按"句柄+区域"生效，同线程换一个
     句柄重抢同一锁文件必然失败——持锁临界区内再调 load()/save() 会精确卡满
     timeout（曾在 merge/delete_runs 上复现每次 +10s）。此处用 per-path 线程本地
-    引用计数实现重入（与 filelock 包的对象级引用计数等价），调用方不再需要
-    手工的 _locked 参数。
+    引用计数实现重入。
 
-    超时策略（B1 修复）：
-      - strict=False（默认）：超时放行 + 记 ERROR（best-effort，不阻塞评估）。
-        用于 publish_tracker——评估观测在内存 tracker 里，中断会永久丢失整场评估。
-      - strict=True：超时抛 LockTimeout。用于 save/merge/runs 删除——这些是显式
-        权威写操作，静默放行导致 RMW 临界区被打破（H5/H6 场景），后写覆盖先写静默丢观测，
-        失败显式报错比静默损坏安全。
+    超时策略（B1 修复）：strict=False（默认）超时放行 + 记 ERROR（best-effort，
+    派生缓存不值得中断评估）；strict=True 超时抛 LockTimeout。
     """
     import time
     lock_path = Path(str(filepath) + ".lock")
@@ -360,10 +353,9 @@ class ResultsMatrix:
         return len(col) if col else 0
 
     # ---------- 持久化 ----------
-    def save(self, filepath: str | Path | None = None) -> Path:
-        # F-3 修复：权威存储用原子写 + .bak 轮转，避免崩溃/并发静默丢失全部历史观测
-        filepath = Path(filepath) if filepath else _config.RESULTS_FILE
-        data = {
+    def to_store_dict(self) -> dict:
+        """遗留 results.json 格式的完整 dict（v2）——快照导出 / verify 对账用。"""
+        return {
             "version": _SCHEMA_VERSION,
             "units": self._units,
             "models": self.all_models(),
@@ -372,85 +364,37 @@ class ResultsMatrix:
                 for m, col in self._r.items()
             },
         }
-        # 跨进程锁：dashboard 与实验并发写全局 R 时串行化（防交替写损坏）
-        # allow_nan=False（M12）：权威存储禁止 NaN/Infinity 字面量（浏览器 JSON.parse 报错）
-        # B1：save 是权威写，锁超时即失败（strict=True）；_file_lock 已支持线程内
-        # 重入（r8），publish_tracker 等持锁调用方直接嵌套调用即可，无需 _locked 参数
-        with _file_lock(filepath, strict=True):
-            write_json(filepath, data, backup=True, allow_nan=False)
-        return filepath
+
+    def save(self, filepath: str | Path | None = None) -> Path:
+        """持久化（阶段 2：SQLite 真相 + JSON 导出双格式）。
+
+        - filepath 为 None / 显式 .db：写 R 真相库（config.RESULTS_DB；单事务
+          全量覆写，并发安全由 BEGIN IMMEDIATE 保证——手写文件锁与 .bak 轮转
+          在真相路径退役）。
+        - 其它后缀（.json / .bak …）：写遗留 JSON（快照/分发格式，原子写+.bak）。
+        """
+        filepath = Path(filepath) if filepath else None
+        if filepath is not None and filepath.suffix != ".db":
+            # allow_nan=False（M12）：导出 JSON 禁止 NaN/Infinity 字面量
+            write_json(filepath, self.to_store_dict(), backup=True, allow_nan=False)
+            return filepath
+        from llmsec.storage import rstore  # 函数内导入防环（rstore 反向引用本类）
+        return rstore.save_matrix(self, filepath)
 
     @classmethod
     def load(cls, filepath: str | Path | None = None) -> ResultsMatrix:
-        # F1 修复：权威存储损坏时不再 reset 为空矩阵（空矩阵被下次 save 写回 = 永久丢失全部观测）。
-        # 改为：备份残文件 → 尝试 .bak 恢复 → 仍失败则 raise（让顶层决策，不静默糊弄）。
-        # M-4：读路径与 save() 共用跨进程文件锁（best-effort strict=False，超时放行
-        # 保持 dashboard 可用），串行化"读 vs os.replace"，消除 Windows 上瞬时
-        # PermissionError 被误判为损坏的竞态窗口。锁已支持线程内重入（r8），
-        # merge/delete_runs 等持锁调用方直接嵌套调用即可。
-        filepath = Path(filepath) if filepath else _config.RESULTS_FILE
-        with _file_lock(filepath, strict=False):
-            return cls._load_unlocked(filepath)
+        """加载（阶段 2：默认走 SQLite 真相库；非 .db 后缀读遗留 JSON）。
 
-    @classmethod
-    def _load_unlocked(cls, filepath: Path) -> ResultsMatrix:
-        data = None
-        try:
-            data = read_json(filepath, strict=True)
-        except CorruptedFileError as e:
-            logger.error("results.json 损坏: %s。原因: %s", filepath, e.cause)
-            # 备份残文件供取证
-            try:
-                import shutil
-                shutil.copy2(filepath, str(filepath) + ".corrupt.bak")
-            except OSError:
-                pass
-            # 尝试从 .bak 恢复（save() 每次写前都会备份）
-            bak = filepath.with_suffix(filepath.suffix + ".bak")
-            if bak.exists():
-                try:
-                    data = read_json(bak, strict=True)
-                    logger.warning("已从备份 %s 恢复 results.json", bak)
-                except CorruptedFileError:
-                    pass
-            if data is None:
-                logger.critical(
-                    "results.json 及备份均损坏，无法恢复。拒绝返回空矩阵以防永久数据丢失。"
-                )
-                raise
-        if not data:
-            return cls()
-        # schema v1（method 键）已废弃：归档后重建（不做兼容迁移——v1 行键是方法名，
-        # 无法还原记录级原始观测，硬迁移只会污染新单位空间）
-        if data.get("version") != _SCHEMA_VERSION:
-            try:
-                import shutil
-                bak = filepath.with_name("results.method-era.bak")
-                shutil.copy2(filepath, bak)
-                logger.warning(
-                    "results.json 为旧 schema（method 键 v%s），已归档为 %s 并按 v2 重建",
-                    data.get("version"), bak,
-                )
-            except OSError:
-                pass
-            return cls()
-        mat = cls(units=data.get("units", []), models=data.get("models", []))
-        for record, col in data.get("results", {}).items():
-            for model, d in col.items():
-                try:
-                    res = MatchResult.from_store(record, model, d)
-                except ValueError as e:
-                    logger.warning("跳过损坏记录: %s", e)
-                    continue
-                mat._r.setdefault(record, {})[model] = res
-                # 还原插入序兜底（取已见 ts 的上界）
-                try:
-                    self_ts = float(res.ts) if res.ts is not None else 0
-                except (TypeError, ValueError):
-                    self_ts = 0
-                if self_ts > mat._ins_order:
-                    mat._ins_order = int(self_ts)
-        return mat
+        - filepath 为 None / 显式 .db：读 R 真相库；db 缺失而旁有遗留
+          results.json 时首次自动导入（旧 workspace/全局存量无缝迁移）。
+        - 其它后缀（.json / .bak …）：读遗留 JSON（merge 源/快照；保留 F1
+          损坏处置与 v1 归档语义）。
+        """
+        filepath = Path(filepath) if filepath else None
+        from llmsec.storage import rstore  # 函数内导入防环
+        if filepath is not None and filepath.suffix != ".db":
+            return rstore.matrix_from_legacy_json(filepath)
+        return rstore.load_matrix(filepath)
 
     # ---------- 诊断 ----------
 

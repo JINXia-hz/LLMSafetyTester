@@ -27,6 +27,7 @@ def restore_r7_isolation():
         "cfg.CLUSTER_MATRIX_FILE": cfg.CLUSTER_MATRIX_FILE,
         "cfg.LOG_FILE": cfg.LOG_FILE,
         "cfg.ALERTS_FILE": cfg.ALERTS_FILE,
+        "cfg.CATALOG_DB": cfg.CATALOG_DB,
     }
     import llmsec.core.logging as logging_mod
     saved_root_configured = logging_mod._root_configured
@@ -36,6 +37,10 @@ def restore_r7_isolation():
     cfg.CLUSTER_MATRIX_FILE = saved["cfg.CLUSTER_MATRIX_FILE"]
     cfg.LOG_FILE = saved["cfg.LOG_FILE"]
     cfg.ALERTS_FILE = saved["cfg.ALERTS_FILE"]
+    cfg.CATALOG_DB = saved["cfg.CATALOG_DB"]
+    # 引擎缓存按库路径键控，重绑后旧卫星库引擎随手丢弃
+    from llmsec.storage import db as storage_db
+    storage_db.close()
     logging_mod._root_configured = saved_root_configured
     # 恢复 handler 快照（rebind_log_file 会关闭旧文件 handler 并挂新的）
     for h in list(root.handlers):
@@ -57,10 +62,11 @@ class TestRebindCoverage:
         wd = tmp_path / "wd"
         rebind_to_workdir(wd)
 
-        assert wd / "cluster_matrix.csv" == cfg.CLUSTER_MATRIX_FILE
+        assert wd / "cluster" / "cluster_matrix.csv" == cfg.CLUSTER_MATRIX_FILE
         assert wd / "state" / "safe_twins.jsonl" == cfg.SAFE_TWINS_FILE
         assert wd / "logs" / "llmsec.log" == cfg.LOG_FILE
         assert wd / "alerts.jsonl" == cfg.ALERTS_FILE
+        assert wd / "catalog.db" == cfg.CATALOG_DB  # 目录库卫星化（storage 重构）
 
     def test_export_matrix_writes_workdir(self, tmp_path, restore_r7_isolation):
         """M-2 功能面：_export_matrix 的 CSV 落 work-dir，不穿透到全局路径。"""
@@ -75,7 +81,7 @@ class TestRebindCoverage:
             {"m1": {"textual": [0.1]}, "m2": {"textual": [0.2]}},
             {"method_names": ["m1", "m2"]},
         )
-        assert (wd / "cluster_matrix.csv").exists(), "矩阵 CSV 必须落在 work-dir"
+        assert (wd / "cluster" / "cluster_matrix.csv").exists(), "矩阵 CSV 必须落在 work-dir"
 
     def test_allergy_phase_reads_workdir_twins(self, tmp_path, restore_r7_isolation, monkeypatch):
         """M-1 功能面：Phase 2 预载读 work-dir 孪生库（命中缓存则不触发生成）。"""

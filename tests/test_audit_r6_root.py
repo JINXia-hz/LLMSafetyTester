@@ -125,7 +125,6 @@ def test_g4_data_query_uses_shared_sig(tmp_path, monkeypatch):
     from llmsec.server import dashboard_api
 
     monkeypatch.setattr(dashboard_api, "RUNS_DIR", tmp_path)
-    dq._DISCOVER_CACHE.clear()  # r9/P3-5：SigCache 用 clear() 重置
     import os
     batch = tmp_path / "2026-01-01_000000"
     batch.mkdir()
@@ -137,7 +136,6 @@ def test_g4_data_query_uses_shared_sig(tmp_path, monkeypatch):
     os.utime(batch, ns=(st.st_mtime_ns + 10_000_000_000,) * 2)  # 规避同刻 mtime
     names = [r["name"] for r in dq._discover_runs_cached()]
     assert "2026-01-01_000000/gemma" in names
-    dq._DISCOVER_CACHE.clear()  # r9/P3-5：SigCache 用 clear() 重置
 
 
 # ============================================================

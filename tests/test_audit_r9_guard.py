@@ -73,8 +73,10 @@ _FROZEN_IMPORT_ALLOWLIST = {
     "llmsec/tui/task_store.py",
 }
 
-# 路径常量命名约定：以 _FILE / _DIR / _ROOT 结尾。
-_PATH_NAME_SUFFIXES = ("_FILE", "_DIR", "_ROOT")
+# 路径常量命名约定：以 _FILE / _DIR / _ROOT / _DB 结尾。
+# _DB：storage 重构引入的 SQLite 路径常量（CATALOG_DB，阶段 2 的 RESULTS_DB）——
+# 同样必须调期动态读（work-dir 隔离把 CATALOG_DB 重绑到卫星库）。
+_PATH_NAME_SUFFIXES = ("_FILE", "_DIR", "_ROOT", "_DB")
 
 
 def _frozen_path_imports(tree: ast.Ast, rel: str) -> list[str]:
@@ -134,6 +136,58 @@ def test_frozen_allowlist_has_no_stale_entries():
         if not _frozen_path_imports(tree, rel):
             stale.append(f"{rel} (已无冻结导入，应从白名单删除)")
     assert not stale, "冻结导入白名单存在过期条目：\n" + "\n".join(stale)
+
+
+# ============================================================
+# storage 重构守卫：DAO 边界（SQL/ORM 只存在于 llmsec/storage/ 内）
+# ============================================================
+
+# storage 包外禁止 import 的数据访问模块（含驱动 sqlite3——control 若直连库，
+# 薄契约边界即被绕过；经 control.core.storage 的 re-export 是唯一许可路径）
+_DB_IMPORT_MODULES = ("sqlite3", "sqlalchemy", "sqlmodel", "aiosqlite")
+
+
+def _db_driver_imports(tree: ast.Ast) -> list[str]:
+    """返回该模块顶层 import 的 DB 驱动/ORM 模块名（含 from X import 形式）。"""
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names += [a.name for a in node.names if a.name.split(".")[0] in _DB_IMPORT_MODULES]
+        elif isinstance(node, ast.ImportFrom):
+            mod = (node.module or "").split(".")[0]
+            if mod in _DB_IMPORT_MODULES:
+                names.append(node.module or mod)
+    return names
+
+
+def test_db_imports_confined_to_storage_package():
+    """sqlite3/sqlalchemy/sqlmodel 只允许出现在 llmsec/storage/ 与 tests/。
+
+    这是"DAO 收口"的机器强制：service 层（management/server/tui/mcp/experiments）
+    与 control 层只能经 llmsec.storage.contract（或 control.core.storage 薄
+    re-export）访问目录库——SQL/引擎/连接细节对业务代码不可见。
+    """
+    repo = Path(__file__).resolve().parent.parent
+    offenders: list[str] = []
+    for pkg in ("llmsec", "control"):
+        root = repo / pkg
+        for py in sorted(root.rglob("*.py")):
+            rel = py.relative_to(repo).as_posix()
+            if rel.startswith("llmsec/storage/"):
+                continue
+            try:
+                tree = ast.parse(py.read_text(encoding="utf-8"))
+            except SyntaxError:
+                offenders.append(f"{rel}: <syntax error>")
+                continue
+            hits = _db_driver_imports(tree)
+            if hits:
+                offenders.append(f"{rel}: {sorted(set(hits))}")
+    assert not offenders, (
+        "storage 包外出现 DB 驱动/ORM import（DAO 边界被绕过）。\n"
+        "改法：数据访问统一走 `from llmsec.storage import contract`（control 侧经 "
+        "control.core.storage），SQL/引擎只存在于 llmsec/storage/ 内。\n"
+        + "\n".join(offenders))
 
 
 # ============================================================

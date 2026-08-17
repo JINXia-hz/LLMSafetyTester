@@ -399,6 +399,14 @@ def load_or_fit_blend_predictor(
 
     cached = BlendPredictor.load(cache_path)
     if cached is not None:
+        # 命中 touch（LRU 依据）：caches.py 的 predictors_prune 按 mtime 淘汰最久
+        # 未用的缓存文件——不 touch 的话 mtime 只反映"何时训练"，淘汰会误杀
+        # 高频复用的活缓存（Windows 无可用 atime，用 mtime 近似访问时间）。
+        try:
+            import os
+            os.utime(cache_path)
+        except OSError:
+            pass
         return cached
 
     bp = BlendPredictor().fit(results, features, method_catalog=catalog)

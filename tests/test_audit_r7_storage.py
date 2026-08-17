@@ -124,23 +124,18 @@ class TestResultsMatrixLoad:
             "PermissionError 不是损坏：不得把完好的新数据备份成 .corrupt.bak 并回退旧 .bak")
 
     def test_load_takes_file_lock(self, tmp_path, monkeypatch):
-        """load 读路径与 save 共用锁（防读-替换竞态）。"""
-        import llmsec.core.results as results_mod
+        """阶段 2 语义：db 真相路径不再用文件锁——改为完整性快检。
+
+        原 M-4"读路径与 save 共用锁（防读-替换竞态）"由 SQLite 事务接管；
+        本测试改钉 quick_check：损坏的 db 文件 load 时显式失败（不静默返空）。
+        """
+
         from llmsec.core.results import ResultsMatrix
 
-        main = tmp_path / "results.json"
-        self._valid_matrix_file(main)
-
-        real_lock = results_mod._file_lock
-        lock_paths = []
-
-        def spy_lock(filepath, *a, **kw):
-            lock_paths.append(str(filepath))
-            return real_lock(filepath, *a, **kw)
-
-        monkeypatch.setattr(results_mod, "_file_lock", spy_lock)
-        ResultsMatrix.load(main)
-        assert any(p == str(main) for p in lock_paths), "load 应持锁读取"
+        dbp = tmp_path / "results.db"
+        dbp.write_bytes(b"this is definitely not a sqlite database")
+        with pytest.raises(RuntimeError, match="完整性校验失败"):
+            ResultsMatrix.load(dbp)
 
     def test_load_inside_held_lock_is_instant(self, tmp_path):
         """r8/P0 回归：持锁临界区内嵌套 load()/save() 不得卡满锁超时。
@@ -256,15 +251,16 @@ class TestEloCacheRmwLock:
         import llmsec.evaluation.elo_access as ea
         from llmsec.core.results import ResultsMatrix
 
+        monkeypatch.setattr(cfg, "RESULTS_DB", tmp_path / "results.db")
         monkeypatch.setattr(cfg, "RESULTS_FILE", tmp_path / "results.json")
         monkeypatch.setattr(cfg, "ELO_CACHE_FILE", tmp_path / "elo_cache.json")
 
         mat = ResultsMatrix(units=["u1", "u2"], models=["m1", "m2"])
         mat.upsert("r1", "m1", 2.0, status="fully_compliant", extra={"unit": "u1"})
         mat.upsert("r2", "m2", -1.0, status="refused", extra={"unit": "u2"})
-        mat.save(tmp_path / "results.json")
+        mat.save(cfg.RESULTS_DB)  # 阶段 2：真相落 db
 
-        # 记录锁调用（确定性验证 L-4 的锁确实加上）
+        # 记录锁调用（确定性验证 L-4 的锁确实加上——elo_cache 仍是文件 RMW）
         real_lock = ea._file_lock
         lock_targets: list[str] = []
 

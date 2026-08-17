@@ -1,7 +1,9 @@
 """control.core.compare — 历史对比（跨工作单元横截面分析）。
 
 控制层消费 llmsec 的公开输出产物（runner_report.json / security_tree.json），
-做服务端聚合对比。**只读文件，不 import llmsec，不碰 R 矩阵。**
+做服务端聚合对比。**run 发现/解析经 control.core.storage 薄契约走目录库
+（llmsec.storage 单一实现），指标提取用统一 extract_report_metrics；报告
+本体仍只读文件，不碰 R 矩阵。**
 
 对比维度：
   - 指标表：asr / fpr / boundary_elo / coverage / security_level / conv_rounds
@@ -18,6 +20,13 @@ from pathlib import Path
 
 from control.config import RUNS_DIR, WORKSPACES_DIR
 from control.core.paths import safe_component, safe_subpath
+from control.core.storage import (
+    RUN_NAME_RE,
+    extract_report_metrics,
+    get_run,
+    query_runs,
+    reconcile_runs,
+)
 
 
 def _load_json_named(run_dir: Path, filename: str) -> dict | None:
@@ -43,18 +52,18 @@ def _load_tree(run_dir: Path) -> dict | None:
 
 
 def _resolve_run_dir(run_name: str) -> Path | None:
-    """run_name → 含 runner_report.json 的目录。支持三种来源：
+    """run_name → 含 runner_report.json 的目录（目录库解析，storage 单一实现）。
 
+    支持三种来源：
       'ts/target' 或 'ts'           → output/runs/<name>（历史 run）
       'ws:<name>'                    → output/workspaces/<name>/ 下找含报告的 <target>/ 子目录
       'ws:<name>/<target>'           → output/workspaces/<name>/<target>/（指定 target）
 
-    workspace 模式下 runner 产物在 <ws>/<target>/runner_report.json（runner.py 把
-    runs_dir 重绑到 work-dir，per-target 子目录即 target 名）。
-
-    外部 run_name 走 safe_subpath 逐段校验，防路径穿越；非法名称视为目录不存在（返回 None）。
+    外部 run_name 先形状校验（RUN_NAME_RE / safe_component）防路径穿越——
+    非法名称视为目录不存在（返回 None）；dir_path 取自目录库登记行（登记来源
+    已经过扫描校验），不再手工拼路径。
     """
-    # workspace 来源
+    # workspace 来源：卫星目录库（<ws>/catalog.db，query_runs 自带对账）
     if run_name.startswith("ws:"):
         rest = run_name[3:]
         parts = rest.split("/", 1)
@@ -64,46 +73,36 @@ def _resolve_run_dir(run_name: str) -> Path | None:
             return None
         if not ws_dir.is_dir():
             return None
-        # 指定了 target：ws:<name>/<target>
+        rows = query_runs(runs_root=ws_dir)
         if len(parts) == 2:
-            try:
-                d = safe_component(ws_dir, parts[1])
-            except ValueError:
-                return None
-            return d if (d / "runner_report.json").exists() else None
-        # 未指定 target：扫子目录找第一个含报告的
-        for sub in ws_dir.iterdir():
-            if sub.is_dir() and (sub / "runner_report.json").exists():
-                return sub
+            row = next((r for r in rows if r.target == parts[1] and r.has_report), None)
+        else:
+            row = next((r for r in rows if r.has_report), None)
+        return Path(row.dir_path) if row else None
+    # 历史来源：'ts' 或 'ts/target'
+    parts = run_name.split("/", 1)
+    if not parts or not RUN_NAME_RE.match(parts[0]):
         return None
-    # 历史来源：output/runs/<ts>[/<target>]
     try:
-        parts = run_name.split("/", 1)
-        d = safe_subpath(RUNS_DIR, *parts)
+        safe_subpath(RUNS_DIR, *parts)
     except ValueError:
         return None
-    return d if d.is_dir() else None
+    reconcile_runs(runs_root=RUNS_DIR)
+    row = get_run(run_name, runs_root=RUNS_DIR) or get_run(parts[0], runs_root=RUNS_DIR)
+    return Path(row.dir_path) if row is not None else None
 
 
 # ============================================================
 # 单 run 指标提取
 # ============================================================
 def extract_elo_fields(report: dict) -> dict:
-    """从 runner_report 抽取 Elo/攻击/过敏的核心指标字段（review/compare 共用，去重）。"""
-    attack = report.get("attack_phase", {}) or {}
-    elo = report.get("elo", {}) or {}
-    allergy = report.get("allergy", {}) or {}
-    return {
-        "asr": attack.get("asr"),
-        "fpr": allergy.get("fpr"),
-        "boundary_elo": elo.get("boundary_elo"),
-        "boundary_confidence": elo.get("boundary_confidence"),
-        "coverage": elo.get("coverage"),
-        "converged": elo.get("converged"),
-        "conv_rounds": elo.get("conv_rounds"),
-        "ci_half": elo.get("ci_half"),
-        "total_tested": attack.get("total_tested"),
-    }
+    """从 runner_report 抽取 Elo/攻击/过敏的核心指标字段。
+
+    storage 重构：实现收敛到 ``extract_report_metrics``（本函数是其严格超集
+    的反向兼容名，review/compare 既有引用零改动）。额外多出的 rounds/drift
+    等字段对旧调用方是纯增量。
+    """
+    return extract_report_metrics(report or {})
 
 
 def run_metrics(run_name: str) -> dict | None:
@@ -132,7 +131,8 @@ def run_metrics(run_name: str) -> dict | None:
 def discover_workspace_runs() -> list[dict]:
     """列出所有 workspace 内含报告的 run（供 list_runs tool 补充历史 run 列表）。
 
-    每个 workspace 可能有多个 target 子目录（每个是一个独立 run）。
+    每个 workspace 可能有多个 target 子目录（每个是一个独立 run）——经各自
+    卫星目录库查询（query_runs 自带对账，旧 workspace 无库时首查自动建册）。
     返回 [{name, workspace, target, ...metrics}]，name 形如 'ws:<ws>/<target>'。
     """
     out = []
@@ -141,22 +141,17 @@ def discover_workspace_runs() -> list[dict]:
     for ws_dir in sorted(WORKSPACES_DIR.iterdir()):
         if not ws_dir.is_dir():
             continue
-        for sub in ws_dir.iterdir():
-            if not sub.is_dir() or not (sub / "runner_report.json").exists():
+        for row in query_runs(runs_root=ws_dir):
+            if not row.has_report:
                 continue
-            rep = _load_report(sub)
-            if not rep:
-                continue
-            attack = rep.get("attack_phase", {}) or {}
-            elo = rep.get("elo", {}) or {}
             out.append({
-                "name": f"ws:{ws_dir.name}/{sub.name}",
+                "name": f"ws:{ws_dir.name}/{row.target}",
                 "workspace": ws_dir.name,
-                "target": sub.name,
-                "target_model": rep.get("target_model", sub.name),
-                "security_level": rep.get("security_level", "inconclusive"),
-                "asr": attack.get("asr"),
-                "boundary_elo": elo.get("boundary_elo"),
+                "target": row.target,
+                "target_model": row.target_model or row.target,
+                "security_level": row.security_level or "inconclusive",
+                "asr": (row.metrics or {}).get("asr"),
+                "boundary_elo": (row.metrics or {}).get("boundary_elo"),
                 "has_report": True,
             })
     return out

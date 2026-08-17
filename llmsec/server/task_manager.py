@@ -265,6 +265,18 @@ def _persist_meta(t: dict, task_id: str, *, pid: int | None = None, status: str 
             json.dumps(data, ensure_ascii=False, default=str), encoding="utf-8")
     except OSError:
         pass
+    # 目录库镜像：注册/状态迁移统一随 meta.json 落一行（查询免扫 tasks/ 目录）。
+    # best-effort——与 meta.json 同口径，失败只影响索引新鲜度（reconcile 自愈）。
+    try:
+        from llmsec.storage import catalog as _catalog
+        _catalog.upsert_task(
+            task_id, data["kind"],
+            cmd=data["cmd"], pid=data["pid"], status=data["status"],
+            log_path=TASK_LOG_DIR / f"{task_id}.log",
+            started_at=data["started_at"], meta=data["meta"],
+        )
+    except Exception:
+        pass
 
 
 # ============================================================

@@ -38,12 +38,13 @@ class TestRebindToWorkdir:
         # 权威/派生存储
         assert wd / "results.json" == cfg.RESULTS_FILE
         assert wd / "elo_cache.json" == cfg.ELO_CACHE_FILE
-        # 聚类/特征
-        assert wd / "feature_cache.pkl" == cfg.FEATURE_CACHE_FILE
-        assert wd / "cluster_result.pkl" == cfg.CLUSTER_RESULT_FILE
-        assert wd / "cluster_report.json" == cfg.CLUSTER_REPORT_FILE
-        assert wd / "cluster_matrix.csv" == cfg.CLUSTER_MATRIX_FILE
-        assert wd / "embedding_cache.pkl" == cfg.EMBEDDING_CACHE_FILE
+        # 聚类/特征（2026-08 storage 重构：统一归 cluster/ 子目录）
+        assert wd / "cluster" == cfg.CLUSTER_DIR
+        assert wd / "cluster" / "feature_cache.pkl" == cfg.FEATURE_CACHE_FILE
+        assert wd / "cluster" / "cluster_result.pkl" == cfg.CLUSTER_RESULT_FILE
+        assert wd / "cluster" / "cluster_report.json" == cfg.CLUSTER_REPORT_FILE
+        assert wd / "cluster" / "cluster_matrix.csv" == cfg.CLUSTER_MATRIX_FILE
+        assert wd / "cluster" / "embedding_cache.pkl" == cfg.EMBEDDING_CACHE_FILE
         # 预测器 / 指纹 / 预筛
         assert wd / "predictors" == cfg.PREDICTORS_DIR
         assert wd / "state" == cfg.STATE_DIR

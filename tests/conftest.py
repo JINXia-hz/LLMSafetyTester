@@ -66,6 +66,33 @@ def _isolate_network_env(request):
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_catalog(tmp_path):
+    """目录库与 R 真相库按测试隔离（全 suite autouse）。
+
+    背景：task_manager._persist_meta 的目录库镜像、runner 的 register_run、
+    ResultsMatrix.save()（阶段 2 起默认写 results.db）等写入口会在不经意间
+    触碰**真实**库文件（测试只重定向了 TASK_LOG_DIR / runs 根时，常量仍指向
+    真实 output）。任何测试都不该往真实库写行/观测。
+
+    显式需要真实库的用例（当前无）可用 marker 豁免。teardown 顺手释放引擎，
+    防止 tmp 库的连接句柄滞留到后续测试（Windows 上会锁住 pytest 的 tmp 清理）。
+    """
+    import llmsec.core.config as cfg
+    from llmsec.storage import db as storage_db
+
+    saved_catalog = cfg.CATALOG_DB
+    saved_results_db = cfg.RESULTS_DB
+    cfg.CATALOG_DB = tmp_path / "catalog.db"
+    cfg.RESULTS_DB = tmp_path / "results.db"
+    try:
+        yield
+    finally:
+        cfg.CATALOG_DB = saved_catalog
+        cfg.RESULTS_DB = saved_results_db
+        storage_db.close()
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_tasks():
     """进程级 TASKS 注册表按测试隔离（全 suite autouse）。
 

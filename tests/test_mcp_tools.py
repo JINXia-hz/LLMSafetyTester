@@ -42,6 +42,7 @@ def iso_out(monkeypatch, tmp_path):
     res_file = out / "state" / "results.json"
 
     monkeypatch.setattr(cfg, "OUTPUT_DIR", out)
+    monkeypatch.setattr(cfg, "RESULTS_DB", res_file.with_suffix(".db"))
     monkeypatch.setattr(cfg, "RESULTS_FILE", res_file)
     monkeypatch.setattr(cfg, "RUNS_DIR", out / "runs")
     monkeypatch.setattr(cfg, "ELO_CACHE_FILE", out / "state" / "elo_cache.json")
@@ -49,7 +50,7 @@ def iso_out(monkeypatch, tmp_path):
     monkeypatch.setattr(common_mod, "OUTPUT_DIR", out)
     monkeypatch.setattr(common_mod, "TRASH_DIR", out / ".trash")
     monkeypatch.setattr(runs_mod, "RUNS_DIR", out / "runs")
-    monkeypatch.setattr(runs_mod, "RESULTS_FILE", res_file)
+    monkeypatch.setattr(runs_mod, "RESULTS_DB", res_file.with_suffix(".db"))
     monkeypatch.setattr(compare_mod, "RUNS_DIR", out / "runs")
     monkeypatch.setattr(compare_mod, "WORKSPACES_DIR", out / "workspaces")
 
@@ -531,7 +532,7 @@ class TestActionsConfirmFlows:
         assert res["status"] == "executed"
         assert not d.exists()                       # 目录已软删
         assert (iso_out / ".trash").exists()        # 进了回收站
-        assert ResultsMatrix.load(res_file).n_for_model("model-a") == 0
+        assert ResultsMatrix.load(res_file.with_suffix(".db")).n_for_model("model-a") == 0
 
         # token 一次性
         again = actions.delete_runs_confirm(prev["confirm_token"])
@@ -575,7 +576,7 @@ class TestActionsConfirmFlows:
         from llmsec.management import merge as merge_mod
 
         res_file = iso_out / "state" / "results.json"
-        monkeypatch.setattr(merge_mod, "RESULTS_FILE", res_file)
+        monkeypatch.setattr(merge_mod, "RESULTS_DB", res_file.with_suffix(".db"))
         monkeypatch.setattr(merge_mod, "WORKSPACES_DIR", iso_out / "workspaces")
         seed_results(res_file, "m1", [("u0", 1.0)], prefix="global")
         ws_res = iso_out / "workspaces" / "exp1" / "results.json"
@@ -588,10 +589,10 @@ class TestActionsConfirmFlows:
 
         res = actions.merge_workspaces_confirm(prev["confirm_token"])
         assert res["status"] == "executed"
-        assert ResultsMatrix.load(res_file).n_for_model("m1") == 3
+        assert ResultsMatrix.load(res_file.with_suffix(".db")).n_for_model("m1") == 3
 
-        # models 过滤：只合并指定列
-        seed_results(ws_res, "m2", [("w1", 1.0)])
+        # models 过滤：只合并指定列（阶段 2：workspace 真相在 db——json 重播种已不生效）
+        seed_results(ws_res.with_suffix(".db"), "m2", [("w1", 1.0)])
         prev2 = actions.merge_workspaces_preview(["ws:exp1"], target="global",
                                                  models=["m2"])
         assert prev2["summary"]["extra"]["per_model"].keys() == {"m2"}

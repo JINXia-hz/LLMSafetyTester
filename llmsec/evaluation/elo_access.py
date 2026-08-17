@@ -23,7 +23,7 @@ import hashlib
 
 from llmsec.core import config
 from llmsec.core.io import read_json, write_json
-from llmsec.core.results import ResultsMatrix, _coarse_status, _file_lock
+from llmsec.core.results import MatchResult, ResultsMatrix, _coarse_status, _file_lock
 from llmsec.evaluation.elo import ELOTracker, derive_elo
 
 _CACHE_VERSION = 3  # v3：簇粒度——ratings/GT 键为 unit_id（簇），R 行键为记录 id
@@ -191,33 +191,31 @@ def publish_tracker(tracker: ELOTracker, model: str) -> None:
     if not hasattr(tracker, "attacker_ratings") or not hasattr(tracker, "history"):
         return
 
-    # H5/H6 修复：整段 load→modify→save 纳入文件锁，防并发 publish 丢更新（TOCTOU）。
-    # 原 save() 内部锁只护字节级写、不护 RMW 临界区——两个并发 publish 各自 load 同一旧 R、
-    # 各自 upsert 自己的子集、各自 save → 后写者覆盖先写者。
-    # B1：publish_tracker 维持 strict=False（放行）——评估观测在内存 tracker 里，
-    # 锁超时抛异常会中断评估主循环、永久丢失整场评估观测，比罕见并发损坏代价更大。
-    # 注：_file_lock 已支持线程内重入（r8），锁内 load/save 直接嵌套调用即可。
-    with _file_lock(config.RESULTS_FILE, strict=False):
-        R = ResultsMatrix.load()
-        # 镜像 history → R（按 defender 归属，防跨模型错记）。
-        # 行键 = 实测记录 id（h["record"]，原始观测粒度）；评级单位（簇）写进 extra.unit，
-        # derive_elo 回放时按它聚合——同一 unit 的多条 prompt 观测各自成行、不再互相覆盖。
-        for h in tracker.history:
-            if h.get("defender") == model:
-                # #10：round 经 extra 持久化进 R，使 derive_elo 能按轮分组重建收敛轨迹
-                extra = {"unit": h["attacker"]}
-                if h.get("round") is not None:
-                    extra["round"] = h["round"]
-                # F2 修复：透传 live tracker 的原始 status（fully_compliant/safe_redirect/…），
-                # 不用 _coarse_status 二次改写（原实现把 safe_redirect→irrelevant、
-                # partially_compliant→fully_compliant，语义丢失）。status 缺失时才兜底。
-                raw_status = h.get("status") or _coarse_status(h["eval_score"])
-                R.upsert(
-                    h.get("record") or h["attacker"], model, h["eval_score"],
-                    status=raw_status,
-                    extra=extra,
-                )
-        R.save()  # _file_lock 线程内重入，锁内嵌套 save 安全
+    # 阶段 2（数据库重构）：H5/H6 的"文件锁 load→modify→save RMW"由
+    # rstore.upsert_observations 的单事务（BEGIN IMMEDIATE）取代——两个并发
+    # publish 各自事务串行提交，不存在后写覆盖先写的丢更新路径。原 B1 的
+    # strict 权衡（超时放行 vs 中断评估）随之消失：busy_timeout 排队即可。
+    # 镜像 history → R（按 defender 归属，防跨模型错记）。
+    # 行键 = 实测记录 id（h["record"]，原始观测粒度）；评级单位（簇）写进 extra.unit，
+    # derive_elo 回放时按它聚合——同一 unit 的多条 prompt 观测各自成行、不再互相覆盖。
+    items = []
+    for h in tracker.history:
+        if h.get("defender") == model:
+            # #10：round 经 extra 持久化进 R，使 derive_elo 能按轮分组重建收敛轨迹
+            extra = {"unit": h["attacker"]}
+            if h.get("round") is not None:
+                extra["round"] = h["round"]
+            # F2 修复：透传 live tracker 的原始 status（fully_compliant/safe_redirect/…），
+            # 不用 _coarse_status 二次改写（原实现把 safe_redirect→irrelevant、
+            # partially_compliant→fully_compliant，语义丢失）。status 缺失时才兜底。
+            raw_status = h.get("status") or _coarse_status(h["eval_score"])
+            items.append(MatchResult(
+                record=h.get("record") or h["attacker"], model=model,
+                eval_score=h["eval_score"], status=raw_status, ts=None, extra=extra,
+            ))
+    from llmsec.storage import rstore
+    rstore.upsert_observations(items)
+    R = ResultsMatrix.load()  # 读回完整矩阵（指纹/派生口径不变）
 
     fp = _model_fingerprint(R, model)
     # M-2：ratings/ground_truth 用 R 派生态（同键多次观测以末值为准），

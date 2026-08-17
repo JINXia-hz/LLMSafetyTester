@@ -5,11 +5,12 @@ workspace / run 的观测合并进全局 R 或另一工作区，用本模块显�
 
 语义：
     sources (多个) → target (一个)
-    sources: "global" | "ws:<name>" | 任意含 results.json 的目录路径
+    sources: "global" | "ws:<name>" | 任意含 R 库的目录路径（遗留 results.json 自动导入）
     target:  "global" | "ws:<name>"
     --models: 只合并指定 model 列（默认 source 的全部 model）
 
-实现复用 ResultsMatrix.load/save + _file_lock + upsert，不新增 R 操作原语。
+阶段 2（数据库重构）：目标写入走 rstore.upsert_observations 单事务，
+源读取经 ResultsMatrix.load（db / 遗留 json 双格式）。
 默认 dry-run（预览将合并多少条、影响哪些 model）+ --yes 执行。
 """
 
@@ -17,10 +18,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from llmsec.core.config import OUTPUT_DIR, RESULTS_FILE
+from llmsec.core.config import OUTPUT_DIR, RESULTS_DB
 from llmsec.core.logging import get_logger
 from llmsec.core.paths import safe_component
-from llmsec.core.results import ResultsMatrix, _file_lock
+from llmsec.core.results import ResultsMatrix
 from llmsec.management.common import Plan, emit, fmt_size, print_table
 
 logger = get_logger(__name__)
@@ -32,35 +33,45 @@ WORKSPACES_DIR = OUTPUT_DIR / "workspaces"
 # 源/目标解析
 # ============================================================
 def _resolve_results_path(spec: str) -> Path:
-    """把源/目标描述符解析为 results.json 的绝对路径。
+    """把源/目标描述符解析为 R 库（results.db）的绝对路径。
 
     spec 形式：
-      "global"         → output/state/results.json
-      "ws:<name>"      → output/workspaces/<name>/results.json（name 走校验防穿越）
-      其他             → 视为目录/文件路径（绝对或相对），取其下 results.json
+      "global"         → output/state/results.db
+      "ws:<name>"      → output/workspaces/<name>/results.db（name 走校验防穿越）
+      其他 .db/.json   → 视为文件路径（.json = 遗留源，读取时自动导入同名 .db）
+      其他             → 视为目录，取其下 results.db
 
-    裸路径分支用于「合并任意 work-dir 的 results.json」（合法且只读：合并只解析
-    JSON，读不到有效结构即视作空矩阵）。为防路径穿越注入，拒绝含 ``..`` 段的
+    裸路径分支用于「合并任意 work-dir 的 R」（合法且只读：合并只解析观测，
+    读不到有效结构即视作空矩阵）。为防路径穿越注入，拒绝含 ``..`` 段的
     相对穿越路径；绝对路径（如 pytest tmp_path、外部已导出快照）允许通过。
     """
     if spec == "global":
-        return RESULTS_FILE
+        return RESULTS_DB
     if spec.startswith("ws:"):
         # spec[3:] 外部可控，走 safe_component 防越界
-        return safe_component(WORKSPACES_DIR, spec[3:]) / "results.json"
+        return safe_component(WORKSPACES_DIR, spec[3:]) / "results.db"
     p = Path(spec)
     # 拒绝相对穿越（.. 段）；绝对路径与正常相对路径放行
     if not p.is_absolute() and any(part == ".." for part in p.parts):
         raise ValueError(f"路径越界（含 .. 段）: {spec!r}")
-    if p.suffix == ".json":
+    if p.suffix in (".json", ".db"):
         return p
-    return p / "results.json"
+    return p / "results.db"
 
 
 def _load_R(path: Path) -> ResultsMatrix:
-    """从指定 results.json 加载 R；文件不存在视为空矩阵。"""
-    if not path.exists():
-        logger.warning("源 results.json 不存在（视为空）: %s", path)
+    """从指定 R 库加载矩阵；库与遗留 json 都不存在视为空矩阵。
+
+    .json 后缀 = 遗留源（ResultsMatrix.load 直接读 json）；.db/其他 = db 路径
+    （db 缺而旁有 results.json 时 rstore 自动导入）。
+    """
+    if path.suffix == ".json":
+        if not path.exists():
+            logger.warning("源 results.json 不存在（视为空）: %s", path)
+            return ResultsMatrix()
+        return ResultsMatrix.load(path)
+    if not path.exists() and not path.with_suffix(".json").exists():
+        logger.warning("源 R 库不存在（视为空）: %s", path)
         return ResultsMatrix()
     return ResultsMatrix.load(path)
 
@@ -93,7 +104,7 @@ def plan_merge(
     source_models: dict[str, set[str]] = {}
     for src in sources:
         src_path = _resolve_results_path(src)
-        if not src_path.exists():
+        if not src_path.exists() and not src_path.with_suffix(".json").exists():
             plan.add(src_path, size=0, kind="source_missing", detail=f"源 {src} 不存在，跳过")
             continue
         src_R = _load_R(src_path)
@@ -133,25 +144,43 @@ def execute_merge(
     *,
     models: list[str] | None = None,
 ) -> Plan:
-    """执行合并。target R 经 _file_lock + save(backup=True) 原子写。"""
+    """执行合并（阶段 2：单事务 SQL upsert——文件锁 RMW 退役）。
+
+    源矩阵在事务外读（只读），观测按 (record, model) upsert 进目标库；
+    并发 merge/publish 各自事务串行提交，无丢更新路径。
+    """
+    from llmsec.storage import rstore
+
     target_path = _resolve_results_path(target)
-    # load target（在锁内 RMW）。B1：merge 是权威写，锁超时即失败（strict=True）
-    with _file_lock(target_path, strict=True):
-        target_R = _load_R(target_path)
-        merged_counts: dict[str, int] = {}
-        for src in sources:
-            src_path = _resolve_results_path(src)
-            if not src_path.exists():
+    # 先引导目标：遗留 json workspace（db 空而 json 在）必须在 upsert 前触发
+    # 自动迁移——若 upsert 先落库，迁移会判定"db 已有数据"而跳过，目标原有
+    # 观测丢失（test_merge_to_workspace_target 钉住此序）。
+    _load_R(target_path)
+    merged_counts: dict[str, int] = {}
+    items = []
+    for src in sources:
+        src_path = _resolve_results_path(src)
+        if not src_path.exists() and not src_path.with_suffix(".json").exists():
+            continue
+        src_R = _load_R(src_path)
+        for model in src_R.all_models():
+            if models and model not in models:
                 continue
-            src_R = _load_R(src_path)
-            for model in src_R.all_models():
-                if models and model not in models:
-                    continue
-                col = src_R.model_column(model)
-                for record, res in col.items():
-                    target_R.upsert(record, model, res.eval_score, res.status, res.ts, dict(res.extra))
-                merged_counts[model] = merged_counts.get(model, 0) + len(col)
-        target_R.save(target_path)  # _file_lock 线程内重入（r8），锁内嵌套安全
+            col = src_R.model_column(model)
+            items += [res for res in col.values()]
+            merged_counts[model] = merged_counts.get(model, 0) + len(col)
+    rstore.upsert_observations(items, path=target_path)
+    # 单位目录合并（source 的 units 并入 target，保序去重）
+    target_R = _load_R(target_path)
+    src_units: list[str] = []
+    for src in sources:
+        src_units += _load_R(_resolve_results_path(src)).all_units()
+    if src_units:
+        merged_units = list(target_R.all_units())
+        for u in src_units:
+            if u not in merged_units:
+                merged_units.append(u)
+        rstore.set_units(merged_units, path=target_path)
 
     done = Plan(action="merge", dry_run=False)
     done.extra["target"] = target

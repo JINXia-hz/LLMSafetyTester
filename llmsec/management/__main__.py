@@ -5,6 +5,8 @@
   python -m llmsec.management runs delete <run...> [--delete-r] [--yes] [--json]
   python -m llmsec.management cache list [--json]
   python -m llmsec.management cache clean <cat...> [--yes] [--json]
+  python -m llmsec.management cache prune [--max N] [--yes] [--json]
+  python -m llmsec.management storage reindex|verify|gc-tasks|trials|migrate-layouts
   python -m llmsec.management snapshot export [--source global|run:<name>] [--out PATH] [--json]
 
 机器友好契约：
@@ -64,6 +66,44 @@ def _build_parser() -> argparse.ArgumentParser:
     p_clean.add_argument("--yes", action="store_true", help="确认执行（默认 dry-run）")
     p_clean.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
+    p_prune = cache_sub.add_parser("prune", help="predictors LRU 修剪（按最近命中保留最新 N 个）")
+    p_prune.add_argument("--max", type=int, default=200, help="保留的最新缓存数（默认 200）")
+    p_prune.add_argument("--yes", action="store_true", help="确认执行（默认 dry-run）")
+    p_prune.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
+    # ---- storage ----（目录库管理：2026-08 数据库重构新增）
+    stg = sub.add_parser("storage", help="目录库管理（runs/trials/tasks 索引）")
+    stg_sub = stg.add_subparsers(dest="cmd", required=True)
+
+    p_reindex = stg_sub.add_parser("reindex", help="全量重建目录库索引")
+    p_reindex.add_argument("--no-empty", action="store_true", help="跳过零产物空壳目录")
+    p_reindex.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
+    p_verify = stg_sub.add_parser("verify", help="完整性校验（库行 ↔ 目录树双向对账）")
+    p_verify.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
+    p_gc = stg_sub.add_parser("gc-tasks", help="清理终态任务文件（软删 + 删库行）")
+    p_gc.add_argument("--older-than", type=float, default=14.0, help="终态超过 N 天才清理（默认 14）")
+    p_gc.add_argument("--yes", action="store_true", help="确认执行（默认 dry-run）")
+    p_gc.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
+    p_trials = stg_sub.add_parser("trials", help="列出 trials 登记行")
+    p_trials.add_argument("study", nargs="?", default=None, help="按 study 名过滤")
+    p_trials.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
+    p_mig = stg_sub.add_parser("migrate-layouts", help="Gen1/Gen2 扁平 run 归一为 Gen3 <ts>/<target>/ 布局")
+    p_mig.add_argument("--yes", action="store_true", help="确认执行（默认 dry-run）")
+    p_mig.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
+    p_mr = stg_sub.add_parser("migrate-r", help="results.json → results.db 全量搬迁（三关校验，不过即回退）")
+    p_mr.add_argument("--yes", action="store_true", help="确认执行（默认 dry-run）")
+    p_mr.add_argument("--force", action="store_true", help="库已有数据时仍从 json 重建（覆盖库内新观测）")
+    p_mr.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
+    p_bk = stg_sub.add_parser("backup-r", help="备份 R 库（sqlite3 backup API，WAL 安全）")
+    p_bk.add_argument("out", nargs="?", default=None, help="备份目标路径（默认 output/state/results.backup.<ts>.db）")
+    p_bk.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
     # ---- snapshot ----
     snap = sub.add_parser("snapshot", help="快照导出")
     snap_sub = snap.add_subparsers(dest="cmd", required=True)
@@ -118,6 +158,27 @@ def main() -> int:
             return caches.cmd_list(json_mode=args.json)
         if args.cmd == "clean":
             return caches.cmd_clean(args.categories, yes=args.yes, json_mode=args.json)
+        if args.cmd == "prune":
+            return caches.cmd_prune(args.max, yes=args.yes, json_mode=args.json)
+
+    if args.group == "storage":
+        from llmsec.management import storage as storage_mod
+        if args.cmd == "reindex":
+            return storage_mod.cmd_reindex(
+                include_empty=not args.no_empty, json_mode=args.json)
+        if args.cmd == "verify":
+            return storage_mod.cmd_verify(json_mode=args.json)
+        if args.cmd == "gc-tasks":
+            return storage_mod.cmd_gc_tasks(
+                args.older_than, yes=args.yes, json_mode=args.json)
+        if args.cmd == "trials":
+            return storage_mod.cmd_trials(args.study, json_mode=args.json)
+        if args.cmd == "migrate-layouts":
+            return storage_mod.cmd_migrate_layouts(yes=args.yes, json_mode=args.json)
+        if args.cmd == "migrate-r":
+            return storage_mod.cmd_migrate_r(yes=args.yes, force=args.force, json_mode=args.json)
+        if args.cmd == "backup-r":
+            return storage_mod.cmd_backup_r(args.out, json_mode=args.json)
 
     if args.group == "snapshot":
         from llmsec.management import snapshot
