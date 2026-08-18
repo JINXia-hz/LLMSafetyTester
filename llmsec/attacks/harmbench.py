@@ -24,6 +24,7 @@ import random
 import re
 from pathlib import Path
 
+from llmsec.attacks.base import ensure_contract
 from llmsec.attacks.obfuscators import DEFAULT_OBFUSCATIONS, OBFUSCATORS
 from llmsec.attacks.obfuscators import obfuscate as apply_obfuscation
 from llmsec.core import ATTACKS_DIR, DATA_DIR, setup_console, write_jsonl
@@ -217,6 +218,7 @@ def generate(
             }
             entries.append(entry)
 
+    ensure_contract(entries, where=f"harmbench {output_path.name}")  # 契约自检：违规即停写
     write_jsonl(output_path, entries)
     logger.info(f"  ✅ 生成 {len(rows)} 条 behavior × {variants} 变体 = {len(entries)} 条攻击 prompt → {output_path.name}")
 

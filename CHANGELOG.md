@@ -8,15 +8,29 @@
 ### 新增
 
 - 攻击记录契约（`llmsec/attacks/schema.py`）：`AttackRecord` 单一 schema 权威——必填三件套
-  硬校验、harm_type/source 宽松枚举、harmbench 溯源字段透传、进化血统字段预留
-  （evolved/operator/parent_id/generation）
+  硬校验（含空白 prompt 拒收）、harm_type/source 宽松枚举、harmbench 溯源字段透传、
+  进化血统字段预留（evolved/operator/parent_id/generation）
 - 攻击集体检校验器（`python -m llmsec.attacks.validate`）：schema 违规 / harm_type 分布
   与 other 占比 / UTF-8→GBK mojibake 特征命中 / 文件内外重复 / method-category 基数 /
   跨文件重复组，明细落盘 `output/attack_set_health.json`。定位是体检不是门禁
-- 首次全量体检结论（22,726 条 / 10 文件）：契约违规 0；other 危害占比 61.9%；
-  jailbreakv28k 有 2,090 条 mojibake（占其 46%）；五份外部数据集 method 字段
-  逐条唯一（无法用于方法级聚合）；all_merged.jsonl 为重排 id + 重新注题的
-  再生数据，与成员文件 id 不可连接
+- 攻击集清洗器（`python -m llmsec.attacks.clean`）：mojibake 分段确定性修复（GBK 逆解码，
+  真 UTF-8 中文段保留）+ 孤立标记启发式补全（em-dash/右引号，逐条记入 repaired 字段）；
+  method 去序号恢复模板族聚合（原值存 method_raw）；harm_original 保全非六类标签；
+  all_merged.jsonl 从清洗后成员重建（保留成员原 id，恢复可连接性）。产物落
+  `attacks/cleaned/`，原件零改动。实测：mojibake 2090→0，jailbreakv28k method
+  4530→326 个模板族
+- harm_type 抽样重标校准器（`python -m llmsec.attacks.relabel`）：按 source 分层抽样
+  （默认 500）LLM 语义归类，独立报告不写回数据文件；`--dry-run` 零 API 看样本构成
+- 生成器薄接口（`llmsec/attacks/base.py`：`AttackGenerator` 协议 + `ensure_contract`
+  自检）；generate.py / harmbench.py 输出端接入契约自检（违规即停写，行为不变）
+- 外部产物导入通道（`llmsec-manage attacks import`）：契约校验 → source 登记 →
+  三空间 id 冲突检测 → `attacks/imported/<source>.jsonl`；dry-run 默认。
+  配套 `docs/攻击集导入.md`（契约字段表 / 避坑清单）——外部产物走通道即合规，
+  不要求交出生成代码
+
+### 修复
+
+- 契约缺口：全空格 prompt 此前骗过 min_length=1 校验，现按空白拒收
 
 ## [1.1.0] - 2026-08-18
 

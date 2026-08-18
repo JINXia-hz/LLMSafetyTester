@@ -123,6 +123,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p_merge.add_argument("--yes", action="store_true", help="确认执行（默认 dry-run）")
     p_merge.add_argument("--json", action="store_true", help="结构化 JSON 输出")
 
+    # ---- attacks ----（外部攻击集体检与导入通道）
+    atk = sub.add_parser("attacks", help="攻击集体检 / 外部产物导入通道")
+    atk_sub = atk.add_subparsers(dest="cmd", required=True)
+
+    p_h = atk_sub.add_parser("health", help="体检（契约/分布/乱码/重复）")
+    p_h.add_argument("files", nargs="*", help="JSONL 文件（缺省= attacks/ 下全部）")
+
+    p_imp = atk_sub.add_parser("import", help="导入外部产物（契约校验+id 冲突检测）")
+    p_imp.add_argument("--file", required=True, help="待导入 JSONL 路径")
+    p_imp.add_argument("--source", required=True,
+                       help="产地标识（schema.SOURCES 之一，新产地先登记）")
+    p_imp.add_argument("--yes", action="store_true", help="确认落盘（默认 dry-run）")
+    p_imp.add_argument("--json", action="store_true", help="结构化 JSON 输出")
+
     return parser
 
 
@@ -187,6 +201,14 @@ def main() -> int:
             args.sources, args.target, models=args.models,
             yes=args.yes, json_mode=args.json,
         )
+
+    if args.group == "attacks":
+        from llmsec.management import attacks as attacks_mod
+        if args.cmd == "health":
+            return attacks_mod.cmd_health(args.files, json_mode=args.json)
+        if args.cmd == "import":
+            return attacks_mod.cmd_import(
+                args.file, args.source, yes=args.yes, json_mode=args.json)
 
     parser.print_help()
     return 1

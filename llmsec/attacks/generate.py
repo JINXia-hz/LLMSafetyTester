@@ -22,6 +22,7 @@ from pathlib import Path
 
 from openai import OpenAI
 
+from llmsec.attacks.base import ensure_contract
 from llmsec.core import (
     ATTACK_SET_L1_FILE,
     ATTACKS_DIR,
@@ -456,7 +457,9 @@ def main():
 
         # 写入JSONL（每条记录独立出题注入，见 build_entries）
         generated_ids = []
-        for entry in build_entries(method, records, harm_types):
+        entries = build_entries(method, records, harm_types)
+        ensure_contract(entries, where=f"generate.py {mid}")  # 契约自检：违规即停写
+        for entry in entries:
             append_jsonl(output_file, entry)
             generated_ids.append(entry["id"])
 
