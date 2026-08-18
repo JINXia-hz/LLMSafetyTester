@@ -600,3 +600,54 @@ class TestReview:
         assert result["summary"]
         assert len(result["findings"]) > 0
         assert "digest" in result
+
+
+# ============================================================
+# env_snapshot：merge 备份保留策略（v1.1.0——密钥明文副本不再无限堆积）
+# ============================================================
+class TestEnvBackupRetention:
+    def test_prune_keeps_newest_five(self, monkeypatch, tmp_path):
+        """merge 后仅保留最近 5 份 .env.bak.*；单槽回滚备份 .env.bak 不动。"""
+        from control.core import env_snapshot as es
+
+        case = tmp_path / "case"
+        case.mkdir()
+        ge = case / ".env"
+        ge.write_text("A=1\n", encoding="utf-8")
+        # 预置 7 份旧备份 + 1 份 data_query 的单槽回滚备份
+        for i in range(7):
+            bak = case / f".env.bak.170000000{i}.abcdef"
+            bak.write_text(f"OLD={i}\n", encoding="utf-8")
+        rollback = case / ".env.bak"
+        rollback.write_text("ROLLBACK\n", encoding="utf-8")
+
+        monkeypatch.setattr(es, "_GLOBAL_ENV", ge)
+        monkeypatch.setattr(es, "ENV_SNAPSHOTS_DIR", tmp_path / "snaps")
+        monkeypatch.setattr(es, "load_env_dict", lambda name: {"K": "V"})
+        monkeypatch.setattr(es, "_read_global_env", lambda: {"A": "1"})
+
+        es.merge_to_global("s")
+
+        baks = sorted(case.glob(".env.bak.*"))
+        # 预置 7 份删到只剩 4 份旧的（mtime 更早）+ 本次 merge 新写 1 份 = 5 份
+        assert len(baks) == 5, f"应保留 5 份，实际 {len(baks)}"
+        assert rollback.exists(), "单槽回滚备份 .env.bak 不得被清理"
+        assert "K=V" in ge.read_text(encoding="utf-8")
+
+    def test_prune_noop_and_ignores_directories(self, monkeypatch, tmp_path):
+        """不足 keep 份时零删除；同名目录不参与清理（只认 is_file）。"""
+        from control.core import env_snapshot as es
+
+        case = tmp_path / "case"
+        case.mkdir()
+        ge = case / ".env"
+        ge.write_text("A=1\n", encoding="utf-8")
+        keep2 = case / ".env.bak.1700000001.aa"
+        keep2.write_text("K\n", encoding="utf-8")
+        decoy_dir = case / ".env.bak.1700000000.bb"
+        decoy_dir.mkdir()  # 目录伪装成备份
+
+        monkeypatch.setattr(es, "_GLOBAL_ENV", ge)
+        es._prune_env_backups(keep=5)
+
+        assert keep2.exists() and decoy_dir.exists(), "不足 5 份时不得删除任何东西"

@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import re
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -242,13 +241,7 @@ def _install_exec_stub(monkeypatch, recorder):
     monkeypatch.setattr(executor, "execute_plan", _stub)
 
 
-def _wait_until(cond, timeout=8.0, interval=0.01):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if cond():
-            return True
-        time.sleep(interval)
-    return False
+from tests.utils import wait_until_sync as _wait_until
 
 
 def test_h9_worker_restarts_after_exit(monkeypatch):

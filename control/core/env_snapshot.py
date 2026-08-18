@@ -195,6 +195,26 @@ def load_env_dict(name: str) -> dict[str, str]:
     return _parse_env(env_file.read_text(encoding="utf-8"))
 
 
+def _prune_env_backups(keep: int = 5) -> None:
+    """按修改时间保留最近 keep 份 .env.bak.*，其余删除。
+
+    merge 是低频操作，备份却按次累积——不设上限时密钥明文副本会在仓库根
+    无限堆积。只匹配带后缀的时间戳备份（.env.bak.<ts>.<rand>），不碰
+    data_query 的单槽回滚备份 .env.bak。调用方须已持有 _GLOBAL_ENV 的
+    跨进程锁。
+    """
+    baks = sorted(
+        (p for p in _GLOBAL_ENV.parent.glob(".env.bak.*") if p.is_file()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for old in baks[keep:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass  # 清理失败不阻塞 merge 主流程（Windows 下文件被占用等）
+
+
 def merge_to_global(name: str) -> dict:
     """把快照的 key 写回全局 .env（critical 级操作）。
 
@@ -214,6 +234,7 @@ def merge_to_global(name: str) -> dict:
             import uuid
             bak = _GLOBAL_ENV.with_name(f".env.bak.{int(time.time())}.{uuid.uuid4().hex[:6]}")
             shutil.copy2(_GLOBAL_ENV, bak)
+            _prune_env_backups(keep=5)
 
         # 合并（快照覆盖全局）
         changed = []

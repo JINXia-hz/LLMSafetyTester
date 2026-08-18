@@ -88,14 +88,7 @@ class _ModalApp(App):
         yield Static("base")
 
 
-async def _wait_until(pilot, cond, tries: int = 25) -> None:
-    """有界等待条件成立（pause 只推进消息队列不保证真实时间，慢机需让出时间片）。"""
-    for _ in range(tries):
-        if cond():
-            return
-        await pilot.pause()
-        await asyncio.sleep(0.02)
-    raise AssertionError(f"_wait_until 超时（{tries} 轮）：条件始终未成立")
+from tests.utils import wait_until as _wait_until
 
 
 # ============================================================

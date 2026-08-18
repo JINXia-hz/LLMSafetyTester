@@ -21,17 +21,10 @@ from llmsec.tui.console import CommandInput, ConsoleScreen
 from llmsec.tui.task_store import TaskSnapshot, TaskStore
 from llmsec.tui.views import TaskLiveScreen
 
-
 # ============================================================
 # 驱动辅助
 # ============================================================
-async def _wait_until(pilot, cond, tries: int = 60) -> None:
-    for _ in range(tries):
-        if cond():
-            return
-        await pilot.pause()
-        await asyncio.sleep(0.02)
-    raise AssertionError("_wait_until 超时：条件始终未成立")
+from tests.utils import wait_until as _wait_until
 
 
 def _console_text(app) -> str:

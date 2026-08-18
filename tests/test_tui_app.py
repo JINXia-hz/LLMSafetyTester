@@ -67,13 +67,7 @@ def _fake_tasks(tmp_path) -> None:
     )
 
 
-async def _wait_until(pilot, cond, tries: int = 40) -> None:
-    for _ in range(tries):
-        if cond():
-            return
-        await pilot.pause()
-        await asyncio.sleep(0.02)
-    raise AssertionError("_wait_until 超时：条件始终未成立")
+from tests.utils import wait_until as _wait_until
 
 
 def test_tui_smoke(tmp_path):
