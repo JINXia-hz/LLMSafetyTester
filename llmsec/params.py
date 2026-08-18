@@ -345,3 +345,16 @@ SAMPLERS = ("gap", "infogain", "coordinate", "hybrid")
 PREVIEW_RESPONSE = 500   # response_preview 字段（训练/预筛/展示共用口径）
 PREVIEW_PROMPT = 300     # prompt 类预览（孪生条目/攻击行）
 PREVIEW_LOG = 200        # 日志/错误摘要预览
+
+# ============================================================
+# 12. 攻击记录契约（attacks/schema.py 单源）
+# ============================================================
+# AttackRecord 的 prompt 长度界：harmbench 的 b64 全量包装 prompt 可达数万
+# 字符，上界须容纳它；下界只排空串。契约校验是体检（报告违规）不是门禁
+# （拒绝入库），界值只是"异常膨大"的哨兵。
+ATTACK_PROMPT_MAX_CHARS = 100_000
+# mojibake 特征字符（UTF-8 被按 GBK 二次解码的典型产物）——这些字在正常
+# 简体中文语料中近乎不出现，命中即高度疑似编码事故（如 jailbreakv28k 的
+# doesn鈥檛）。启发式：只报告不删改，确认与修复在 Step 2 清洗立项。
+ATTACK_MOJIBAKE_CHARS = "鈥銆鐨锛鏄鍦鑳鐪璇鍔鍙鑱"
+

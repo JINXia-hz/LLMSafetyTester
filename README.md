@@ -399,7 +399,7 @@ pytest tests/test_elo.py    # 单文件
 pytest -n auto              # 并行（CI 默认）
 ```
 
-约 1030 个测试（70 个文件；用例数清单由脚本生成于 [tests/INVENTORY.md](tests/INVENTORY.md)，CI 强制校验一致）按子系统组织（test_elo / test_predictors / test_samplers / test_clustering / test_management / test_mcp / test_dashboard / test_experiments / test_tui_* 及回归套件）；`real_api` / `e2e` marker 默认排除，需真实模型时手动触发。完整说明见 [tests/README.md](tests/README.md)。
+约 1050 个测试（71 个文件；用例数清单由脚本生成于 [tests/INVENTORY.md](tests/INVENTORY.md)，CI 强制校验一致）按子系统组织（test_elo / test_predictors / test_samplers / test_clustering / test_management / test_mcp / test_dashboard / test_experiments / test_tui_* 及回归套件）；`real_api` / `e2e` marker 默认排除，需真实模型时手动触发。完整说明见 [tests/README.md](tests/README.md)。
 
 ### 推荐读码路径
 

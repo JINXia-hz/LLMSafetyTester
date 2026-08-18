@@ -3,6 +3,21 @@
 本项目的所有显著变更记录于此。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 新增
+
+- 攻击记录契约（`llmsec/attacks/schema.py`）：`AttackRecord` 单一 schema 权威——必填三件套
+  硬校验、harm_type/source 宽松枚举、harmbench 溯源字段透传、进化血统字段预留
+  （evolved/operator/parent_id/generation）
+- 攻击集体检校验器（`python -m llmsec.attacks.validate`）：schema 违规 / harm_type 分布
+  与 other 占比 / UTF-8→GBK mojibake 特征命中 / 文件内外重复 / method-category 基数 /
+  跨文件重复组，明细落盘 `output/attack_set_health.json`。定位是体检不是门禁
+- 首次全量体检结论（22,726 条 / 10 文件）：契约违规 0；other 危害占比 61.9%；
+  jailbreakv28k 有 2,090 条 mojibake（占其 46%）；五份外部数据集 method 字段
+  逐条唯一（无法用于方法级聚合）；all_merged.jsonl 为重排 id + 重新注题的
+  再生数据，与成员文件 id 不可连接
+
 ## [1.1.0] - 2026-08-18
 
 ### 新增
