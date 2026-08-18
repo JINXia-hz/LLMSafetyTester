@@ -1,0 +1,41 @@
+name: Flake Check
+
+# 竞态热点重放：近三天的两起 CI 竞态（TUI top 直播表断言、队列 worker 与
+# 引擎 dispose）都只在特定调度时序下显形——单次绿不代表稳定。每日对热点
+# 文件 ×5 重复跑，把"偶尔红"变成"每天都红一次，直到修掉"。
+# 非合并门禁：红了修根因，不拦 PR（PR 车道仍由 ci.yml 的单次全量负责）。
+on:
+  schedule:
+    - cron: '30 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repeat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: llmsec/requirements.txt
+      - name: Install dependencies
+        run: |
+          pip install -r llmsec/requirements.txt
+          pip install pytest pytest-xdist pytest-repeat
+          pip install "textual>=1,<4"
+      - name: Repeat hotspot tests x5
+        # 热点选取：TUI 三件套（async 轮询渲染）、r1_high + queue/menxia
+        # （worker 线程生命周期）、storage/catalog/management（引擎 dispose）。
+        # 新增竞态修复后应把对应文件加进来。
+        run: >
+          python -m pytest
+          tests/test_tui_console.py tests/test_tui_widgets.py tests/test_tui_app.py
+          tests/test_audit_r1_high.py tests/test_queue_menxia.py tests/test_shangshu_menxia.py
+          tests/test_storage_catalog.py tests/test_management.py
+          --count=5 -q -n 4 --tb=short
+        env:
+          PYTHONIOENCODING: utf-8

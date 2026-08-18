@@ -7,8 +7,12 @@
 llmsec/.models/
 # Python
 __pycache__/
-*.py[cod]
+*.py[cod]/
 *.egg-info/
+# 打包/测试产物（python -m build / pytest --cov 的本地输出）
+dist/
+build/
+.coverage
 .zcode/
 # 生成产物（state/runs/tasks/聚类缓存等）
 output/
@@ -20,6 +24,8 @@ attacks/*
 # IDE
 .vscode/
 .idea/
-# 本地维护脚本（不入库：HPO 编排 / 测试清单生成等仓库侧工具）
-scripts/
+# 本地维护脚本（不入库：HPO 编排等仓库侧工具）
+# 例外：测试清单生成器——CI 的 --check 依赖它，新克隆必须可复现
+scripts/*
+!scripts/gen_test_inventory.py
 /experiments/
