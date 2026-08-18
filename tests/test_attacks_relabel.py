@@ -4,7 +4,24 @@ import json
 
 import pytest
 
-from llmsec.attacks.relabel import classify_prompt, stratified_sample
+from llmsec.attacks.relabel import classify_prompt, parse_label, stratified_sample
+
+
+# ============================================================
+# 标签解析：全等之外的宽容提取（推理模型结论在末尾）
+# ============================================================
+class TestParseLabel:
+    def test_bare_label(self):
+        assert parse_label("violence") == "violence"
+
+    def test_explained_label(self):
+        assert parse_label("经过分析，该 prompt 的主要危害是制造武器，属于 violence") == "violence"
+
+    def test_multiple_mentions_take_last(self):
+        assert parse_label("这不是 fraud；综合判断应归为 privacy") == "privacy"
+
+    def test_no_match_returns_none(self):
+        assert parse_label("无法判断该内容类别") is None
 
 
 # ============================================================
@@ -125,3 +142,47 @@ class TestCliDryRun:
         data = json.loads(out.read_text(encoding="utf-8"))
         assert data["meta"]["dry_run"] is True and len(data["records"]) == 10
         assert all(r["id"].startswith("w-") for r in data["records"])
+
+
+# ============================================================
+# 回写：保守规则 + 溯源字段
+# ============================================================
+class TestApplyLabels:
+    def _setup(self, tmp_path):
+        cleaned = tmp_path / "cleaned"
+        cleaned.mkdir()
+        rows = [
+            {"id": "a-1", "method": "m", "prompt": "p", "harm_type": "other"},
+            {"id": "a-2", "method": "m", "prompt": "p", "harm_type": "other",
+             "harm_original": "weird"},                       # 已有溯源不覆盖
+            {"id": "a-3", "method": "m", "prompt": "p", "harm_type": "hate"},  # 非 other 不动
+            {"id": "a-4", "method": "m", "prompt": "p", "harm_type": "other"},  # 预测仍 other
+            {"id": "a-5", "method": "m", "prompt": "p", "harm_type": "other"},  # 报告未含
+        ]
+        (cleaned / "wildjailbreak.jsonl").write_text(
+            "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+        report = tmp_path / "report.json"
+        report.write_text(json.dumps({
+            "records": [
+                {"id": "a-1", "predicted": "fraud"},
+                {"id": "a-2", "predicted": "violence"},
+                {"id": "a-3", "predicted": "fraud"},   # 原 hate：不回写
+                {"id": "a-4", "predicted": "other"},
+            ],
+        }), encoding="utf-8")
+        return cleaned / "wildjailbreak.jsonl", report
+
+    def test_conservative_apply_rules(self, tmp_path):
+        from llmsec.attacks.relabel import apply_labels
+
+        data_file, report = self._setup(tmp_path)
+        stats = apply_labels(report, [data_file])
+        assert stats == {"matched": 4, "relabeled": 2, "kept_other": 1}
+        rows = {r["id"]: r for r in (
+            json.loads(l) for l in data_file.read_text(encoding="utf-8").splitlines() if l.strip())}
+        assert rows["a-1"]["harm_type"] == "fraud"
+        assert rows["a-1"]["harm_original"] == "other" and rows["a-1"]["repaired"]["relabel"] is True
+        assert rows["a-2"]["harm_original"] == "weird"          # 既有溯源保留
+        assert rows["a-3"]["harm_type"] == "hate"               # 非 other 不动
+        assert rows["a-4"]["harm_type"] == "other"              # 预测 other 保持
+        assert rows["a-5"]["harm_type"] == "other"              # 报告未含不动

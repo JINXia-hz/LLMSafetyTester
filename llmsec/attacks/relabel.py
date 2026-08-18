@@ -55,6 +55,20 @@ class _UnparseableLabel(Exception):
     """LLM 返回的不是合法类别词（内容类失败，触发重试）。"""
 
 
+def parse_label(text: str) -> str | None:
+    """从模型回复中提取类别词：匹配文内出现的 HARM_TYPES，取最后出现者。
+
+    推理模型的结论在末尾（"……因此该 prompt 属于 violence"），全等匹配
+    会把带解释的合法回复误判为不可解析；多个类别词出现时取最后一个。
+    """
+    lowered = text.lower()
+    found = [h for h in HARM_TYPES if h in lowered]
+    if not found:
+        return None
+    last = max(found, key=lambda h: lowered.rfind(h))
+    return last
+
+
 # ============================================================
 # 分层抽样
 # ============================================================
@@ -107,8 +121,14 @@ def stratified_sample(records: list[dict], n: int, seed: int) -> list[dict]:
 # LLM 归类
 # ============================================================
 def classify_prompt(client, model: str, prompt: str, *,
-                    retries: int = API_MAX_RETRIES, delay: float = API_RETRY_DELAY) -> str:
-    """让 LLM 归类单条 prompt，返回 HARM_TYPES 之一；非法输出按重试策略处理。"""
+                    retries: int = API_MAX_RETRIES, delay: float = API_RETRY_DELAY,
+                    max_tokens: int = 512) -> str:
+    """让 LLM 归类单条 prompt，返回 HARM_TYPES 之一；非法输出按重试策略处理。
+
+    max_tokens 默认 512：裸类别词只需几个 token，但推理模型（如 minimax）
+    的思考也计入输出——8 token 会全烧在推理上、content 为空（项目已有
+    同款教训：JUDGE_MAX_TOKENS 建议 ≥1024）。
+    """
     preview = strip_math_tax(prompt)[:PREVIEW_PROMPT]
 
     def _call():
@@ -119,11 +139,12 @@ def classify_prompt(client, model: str, prompt: str, *,
                 {"role": "user", "content": _CLASSIFY_RULES.format(preview=preview)},
             ],
             temperature=0,
-            max_tokens=8,
+            max_tokens=max_tokens,
         )
-        label = extract_message_text(resp.choices[0].message).strip().lower().strip(".,;:。 \n")
-        if label not in HARM_TYPES:
-            raise _UnparseableLabel(label[:40])
+        text = extract_message_text(resp.choices[0].message)
+        label = parse_label(text)
+        if label is None:
+            raise _UnparseableLabel(text.strip()[:40])
         return label
 
     return retry_call(_call, retries=retries, delay=delay)
@@ -146,6 +167,49 @@ def _load_other_records(files: list[Path]) -> list[dict]:
     return records
 
 
+# ============================================================
+# 回写（apply）：报告标签 → cleaned 数据文件
+# ============================================================
+def apply_labels(report_path: Path, files: list[Path]) -> dict:
+    """把重标报告的预测写回 cleaned 文件，返回统计。
+
+    回写规则（保守）：
+      - 只改原 harm_type=="other" 且预测为六类之一的记录
+      - 预测仍为 other 的不动（模型也认不出危害主题，保持原状）
+      - 溯源：原值 "other" 存 harm_original（若已有 harm_original 则不覆盖），
+        repaired.relabel=True 标记本次机器重标
+      - 报告里找不到的 id 不动（抽样报告只能回写被抽中的部分）
+    """
+    report = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    predicted = {r["id"]: r["predicted"] for r in report.get("records", [])}
+    stats = {"matched": 0, "relabeled": 0, "kept_other": 0}
+    for p in files:
+        rows = []
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                label = predicted.get(rec.get("id"))
+                if label is not None:
+                    stats["matched"] += 1
+                    if label in HARM_TYPES and label != "other" and rec.get("harm_type") == "other":
+                        rec.setdefault("harm_original", "other")
+                        rep = rec.get("repaired") or {}
+                        rep["relabel"] = True
+                        rec["repaired"] = rep
+                        rec["harm_type"] = label
+                        stats["relabeled"] += 1
+                    elif label == "other":
+                        stats["kept_other"] += 1
+                rows.append(rec)
+        with open(p, "w", encoding="utf-8", newline="\n") as f:
+            for rec in rows:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return stats
+
+
 def main(argv=None) -> int:
     from llmsec.core import GeneratorConfig
     from llmsec.core.config import ATTACKS_DIR
@@ -153,12 +217,28 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="harm_type 抽样重标校准（不写回数据文件）")
     parser.add_argument("--sample", type=int, default=500, help="抽样条数（默认 500）")
     parser.add_argument("--seed", type=int, default=42, help="抽样随机种子")
+    parser.add_argument("--concurrency", type=int, default=8,
+                        help="并发分类调用数（本地 vLLM 可开大；默认 8）")
     parser.add_argument("--out", default=None, help="报告输出路径（默认 attacks/cleaned/relabel_sample.json）")
     parser.add_argument("--dry-run", action="store_true", help="只抽样看构成，不调 API")
+    parser.add_argument("--apply", default=None, metavar="REPORT",
+                        help="把重标报告回写到 cleaned 文件（保守规则见 apply_labels），"
+                             "与抽样互斥")
     args = parser.parse_args(argv)
 
     cleaned = ATTACKS_DIR / "cleaned"
     files = [cleaned / f"{name}.jsonl" for name in EXTERNAL_DATASETS]
+
+    if args.apply:
+        report = Path(args.apply)
+        if not report.exists():
+            logger.error(f"❌ 报告不存在: {report}")
+            return 1
+        stats = apply_labels(report, files)
+        logger.info(f"📥 回写完成: 匹配 {stats['matched']} | 改标 {stats['relabeled']} | "
+                    f"保持 other {stats['kept_other']}")
+        return 0
+
     missing = [p.name for p in files if not p.exists()]
     if missing:
         logger.error(f"❌ 清洗产物缺失 {missing}，请先运行 python -m llmsec.attacks.clean")
@@ -182,15 +262,27 @@ def main(argv=None) -> int:
 
     config = GeneratorConfig.from_env()
     client = create_openai_client(config.api_key, config.base_url, timeout=config.timeout)
-    results = []
-    for i, r in enumerate(picked):
-        label = classify_prompt(client, config.model, r["prompt"])
-        results.append({
-            "id": r["id"], "source": r.get("source"), "predicted": label,
-            "preview": strip_math_tax(r["prompt"])[:PREVIEW_PROMPT],
-        })
-        if (i + 1) % 50 == 0:
-            logger.info(f"   进度 {i + 1}/{len(picked)}")
+
+    def _classify_one(rec: dict) -> dict:
+        return {
+            "id": rec["id"], "source": rec.get("source"),
+            "predicted": classify_prompt(client, config.model, rec["prompt"]),
+            "preview": strip_math_tax(rec["prompt"])[:PREVIEW_PROMPT],
+        }
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    results: list[dict | None] = [None] * len(picked)
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as ex:
+        futures = {ex.submit(_classify_one, r): i for i, r in enumerate(picked)}
+        for fut in as_completed(futures):
+            idx = futures[fut]
+            results[idx] = fut.result()   # 单条失败（重试耗尽）直接上抛终止整轮
+            done += 1
+            if done % 100 == 0:
+                logger.info(f"   进度 {done}/{len(picked)}")
+    results = [r for r in results if r is not None]
 
     dist = Counter(x["predicted"] for x in results)
     logger.info("   预测分布: " + ", ".join(f"{k}:{v}" for k, v in dist.most_common()))
