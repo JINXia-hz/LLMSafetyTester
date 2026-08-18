@@ -486,8 +486,19 @@ class TestTop:
             await _submit(app, pilot, "top")
             await _wait_until(pilot, lambda: isinstance(app.screen, TaskLiveScreen))
             app.screen.update_tasks(app.store.refresh()[0])
-            await pilot.pause()
-            assert app.screen.query_one("#live-table").row_count == 2
+            # 收敛式断言：补丁生效前在途的真实轮询回调（空快照）可能晚到清表
+            # （见 _inject 的竞态说明）——补丁后所有 tick 都带注入快照，终态必为
+            # 2 行；慢机（CI Windows）上单次 pause 后直接断言会撞到中间态。
+            # 查询异常按 -1 计（防御慢机上瞬时的未挂载窗口），不炸轮询 lambda。
+            live = app.screen
+
+            def _rows() -> int:
+                try:
+                    return live.query_one("#live-table").row_count
+                except Exception:
+                    return -1
+
+            await _wait_until(pilot, lambda: _rows() == 2, tries=120)
 
         _run(fn, tmp_path=tmp_path)
 
