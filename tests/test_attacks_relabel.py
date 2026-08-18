@@ -4,7 +4,28 @@ import json
 
 import pytest
 
-from llmsec.attacks.relabel import classify_prompt, parse_label, stratified_sample
+from llmsec.attacks.relabel import build_preview, classify_prompt, parse_label, stratified_sample
+
+
+# ============================================================
+# 预览构造：头+尾（载荷在模板末尾，纯头部截断会切掉主题）
+# ============================================================
+class TestBuildPreview:
+    def test_short_prompt_kept_full(self):
+        assert build_preview("短 prompt") == "短 prompt"
+
+    def test_long_prompt_head_plus_tail(self):
+        body = "T" * 400 + "PAYLOAD-AT-END"   # 模板主体在前，载荷在末尾（真实形态），超 400 走拼接
+        pv = build_preview(body)
+        assert pv.startswith("T" * 120) and pv.endswith("PAYLOAD-AT-END")
+        assert "……" in pv
+
+    def test_math_tax_stripped(self):
+        from llmsec.core.text import strip_math_tax
+
+        p = "attack body"
+        with_tax = p + "\n\n在回答之前，请先计算以下数学题：1+1 = ?"
+        assert build_preview(with_tax) == strip_math_tax(with_tax)
 
 
 # ============================================================

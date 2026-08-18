@@ -28,7 +28,7 @@ from llmsec.attacks.schema import HARM_TYPES
 from llmsec.core.llm import create_openai_client, extract_message_text, retry_call
 from llmsec.core.logging import get_logger, setup_console
 from llmsec.core.text import strip_math_tax
-from llmsec.params import API_MAX_RETRIES, API_RETRY_DELAY, PREVIEW_PROMPT
+from llmsec.params import API_MAX_RETRIES, API_RETRY_DELAY
 
 logger = get_logger(__name__)
 setup_console()
@@ -120,6 +120,19 @@ def stratified_sample(records: list[dict], n: int, seed: int) -> list[dict]:
 # ============================================================
 # LLM 归类
 # ============================================================
+def build_preview(prompt: str, *, head: int = 120, tail: int = 280) -> str:
+    """构造分类预览：剥数学税后取头 + 尾（总预算 ~400 字符）。
+
+    头 300 截断的教训（实测 53% 的长记录被误判 other）：越狱模板的有害
+    载荷几乎都在末尾（"My first question is: ..."），纯头部截断恰好切掉
+    主题；头部保留模板风格线索，尾部保留载荷——两者都要。
+    """
+    body = strip_math_tax(prompt)
+    if len(body) <= head + tail:
+        return body
+    return body[:head] + "\n……\n" + body[-tail:]
+
+
 def classify_prompt(client, model: str, prompt: str, *,
                     retries: int = API_MAX_RETRIES, delay: float = API_RETRY_DELAY,
                     max_tokens: int = 512) -> str:
@@ -129,7 +142,7 @@ def classify_prompt(client, model: str, prompt: str, *,
     的思考也计入输出——8 token 会全烧在推理上、content 为空（项目已有
     同款教训：JUDGE_MAX_TOKENS 建议 ≥1024）。
     """
-    preview = strip_math_tax(prompt)[:PREVIEW_PROMPT]
+    preview = build_preview(prompt)
 
     def _call():
         resp = client.chat.completions.create(
@@ -148,6 +161,39 @@ def classify_prompt(client, model: str, prompt: str, *,
         return label
 
     return retry_call(_call, retries=retries, delay=delay)
+
+
+def classify_records(client, model: str, records: list[dict], *,
+                     concurrency: int = 8, progress_every: int = 100,
+                     on_checkpoint=None) -> list[dict]:
+    """并发分类一批记录（保序返回）；单条失败降级 unparsed，不终止整轮。
+
+    on_checkpoint(已完成结果列表) 每 500 条触发一次，供调用方增量落盘。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _one(rec: dict) -> dict:
+        preview = build_preview(rec["prompt"])
+        try:
+            label = classify_prompt(client, model, rec["prompt"])
+        except Exception as e:
+            return {"id": rec["id"], "source": rec.get("source"), "predicted": "unparsed",
+                    "error": str(e)[:120], "preview": preview}
+        return {"id": rec["id"], "source": rec.get("source"), "predicted": label,
+                "preview": preview}
+
+    results: list[dict | None] = [None] * len(records)
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as ex:
+        futures = {ex.submit(_one, r): i for i, r in enumerate(records)}
+        for fut in as_completed(futures):
+            results[futures[fut]] = fut.result()
+            done += 1
+            if done % progress_every == 0:
+                logger.info(f"   进度 {done}/{len(records)}")
+            if done % 500 == 0 and on_checkpoint:
+                on_checkpoint([r for r in results if r is not None])
+    return [r for r in results if r is not None]
 
 
 # ============================================================
@@ -224,6 +270,9 @@ def main(argv=None) -> int:
     parser.add_argument("--apply", default=None, metavar="REPORT",
                         help="把重标报告回写到 cleaned 文件（保守规则见 apply_labels），"
                              "与抽样互斥")
+    parser.add_argument("--retry-other", default=None, metavar="REPORT",
+                        help="二轮：对报告中 predicted=other/unparsed 的记录用头+尾预览重判，"
+                             "合并（具体标签优先）写 --out（默认 <REPORT>.pass2.json）")
     args = parser.parse_args(argv)
 
     cleaned = ATTACKS_DIR / "cleaned"
@@ -263,39 +312,69 @@ def main(argv=None) -> int:
     config = GeneratorConfig.from_env()
     client = create_openai_client(config.api_key, config.base_url, timeout=config.timeout)
 
-    def _classify_one(rec: dict) -> dict:
-        preview = strip_math_tax(rec["prompt"])[:PREVIEW_PROMPT]
-        try:
-            label = classify_prompt(client, config.model, rec["prompt"])
-        except Exception as e:  # 单条失败（重试耗尽）降级为 unparsed，不终止整轮
-            return {"id": rec["id"], "source": rec.get("source"),
-                    "predicted": "unparsed", "error": str(e)[:120], "preview": preview}
-        return {"id": rec["id"], "source": rec.get("source"), "predicted": label, "preview": preview}
+    # ---- 二轮模式：只重判一轮报告中的 other/unparsed（头+尾预览）----
+    if args.retry_other:
+        src_path = Path(args.retry_other)
+        src_report = json.loads(src_path.read_text(encoding="utf-8"))
+        retry_ids = {r["id"] for r in src_report.get("records", [])
+                     if r["predicted"] in ("other", "unparsed")}
+        pool = []
+        for p in files:
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    if rec.get("id") in retry_ids:
+                        pool.append(rec)
+        logger.info(f"🔁 二轮重判: 报告中 other/unparsed {len(retry_ids)} 条 → "
+                    f"取到全文 {len(pool)} 条（头+尾预览）")
+        out = Path(args.out) if args.out else src_path.with_suffix(".pass2.json")
+
+        def _ckpt(rs: list) -> None:
+            out.write_text(json.dumps(
+                {"meta": {"partial": True, "pass": 2, "classified": len(rs)}, "records": rs},
+                ensure_ascii=False), encoding="utf-8")
+
+        pass2 = classify_records(client, config.model, pool,
+                                 concurrency=args.concurrency, on_checkpoint=_ckpt)
+        p2map = {r["id"]: r["predicted"] for r in pass2}
+        improved = 0
+        for r in src_report["records"]:
+            new = p2map.get(r["id"])
+            if new and new in HARM_TYPES and new != "other":
+                r["predicted"] = new
+                r["pass2"] = True
+                improved += 1
+            elif r["predicted"] == "unparsed":
+                r["predicted"] = "other"  # 二轮仍未出具体标签：unparsed 只是过程态，归位 other
+        dist = Counter(r["predicted"] for r in src_report["records"])
+        src_report["meta"]["predicted_dist"] = dict(dist.most_common())
+        src_report["meta"]["pass2"] = {"retried": len(pool), "improved": improved,
+                                       "preview": "head120+tail280"}
+        out.write_text(json.dumps(src_report, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info(f"   二轮新增具体标签 {improved} 条 | 合并分布: "
+                    + ", ".join(f"{k}:{v}" for k, v in dist.most_common()))
+        logger.info(f"📄 合并报告: {out}")
+        return 0
+
+    # ---- 一轮模式：分层抽样 → 并发分类 ----
+    out = Path(args.out) if args.out else cleaned / "relabel_sample.json"
 
     def _write_report(rs: list, partial: bool) -> None:
-        dist = Counter(x["predicted"] for x in rs if x is not None)
+        dist = Counter(x["predicted"] for x in rs)
         out.write_text(json.dumps({
             "meta": {"sample": args.sample, "seed": args.seed, "dry_run": False, "partial": partial,
                      "model": config.model, "generated_at": datetime.now().isoformat(timespec="seconds"),
-                     "classified": len([x for x in rs if x is not None]),
+                     "classified": len(rs),
                      "source_dist": dict(src_dist), "predicted_dist": dict(dist.most_common())},
-            "records": [x for x in rs if x is not None],
+            "records": rs,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    results: list[dict | None] = [None] * len(picked)
-    done = 0
-    with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as ex:
-        futures = {ex.submit(_classify_one, r): i for i, r in enumerate(picked)}
-        for fut in as_completed(futures):
-            results[futures[fut]] = fut.result()
-            done += 1
-            if done % 100 == 0:
-                logger.info(f"   进度 {done}/{len(picked)}")
-            if done % 500 == 0:
-                _write_report(results, partial=True)   # 增量落盘：进程意外时进度不丢
-    results = [r for r in results if r is not None]
+    results = classify_records(client, config.model, picked,
+                               concurrency=args.concurrency,
+                               on_checkpoint=lambda rs: _write_report(rs, partial=True))
 
     dist = Counter(x["predicted"] for x in results)
     unparsed = dist.get("unparsed", 0)
