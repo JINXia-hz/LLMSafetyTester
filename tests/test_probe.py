@@ -1,6 +1,80 @@
-"""pipeline.probe 探测脚本测试：路由分发 / 字段扫描 / 各错误分支（全 mock，零网络）。"""
+"""pipeline.probe / core.probe 探测测试：路由分发 / 字段扫描 / 各错误分支 /
+PCAP TLS 校验开关（全 mock，零网络）。"""
 
 from types import SimpleNamespace
+
+
+# ============================================================
+# PCAP_VERIFY_TLS：三处请求点（targets/pcap、core/probe、pipeline/probe）
+# 共用同一开关，默认 False（内网自签名），置 1/true 开启校验
+# ============================================================
+def test_pcap_verify_tls_env_parsing(monkeypatch):
+    """pcap_verify_tls()：缺省/假值 → False；1/true/yes/on（大小写不敏感）→ True。"""
+    import llmsec.targets.pcap as pc
+
+    monkeypatch.delenv("PCAP_VERIFY_TLS", raising=False)
+    assert pc.pcap_verify_tls() is False
+    for val in ("0", "", "false", "no", "off"):
+        monkeypatch.setenv("PCAP_VERIFY_TLS", val)
+        assert pc.pcap_verify_tls() is False, f"{val!r} 应为 False"
+    for val in ("1", "true", "YES", "On"):
+        monkeypatch.setenv("PCAP_VERIFY_TLS", val)
+        assert pc.pcap_verify_tls() is True, f"{val!r} 应为 True"
+
+
+def test_probe_target_pcap_respects_verify_tls(monkeypatch):
+    """core.probe.probe_target pcap 分支：verify 传参跟随 PCAP_VERIFY_TLS。"""
+    from types import SimpleNamespace as NS
+
+    import llmsec.core.probe as cp
+    import llmsec.targets.pcap as pc
+
+    monkeypatch.setattr("llmsec.targets.target_backend", lambda name: "pcap_judge")
+    monkeypatch.setattr(cp, "models_list", lambda *a, **kw: (1.0, []))
+    seen = {}
+
+    def _get(url, timeout=None, verify=None):
+        seen["verify"] = verify
+        return NS(status_code=200, raise_for_status=lambda: None)
+
+    monkeypatch.setattr("requests.get", _get)
+    cfg = NS(model="pcap-m")
+
+    monkeypatch.setenv("PCAP_JUDGE_URL", "http://fake-judge")
+    monkeypatch.delenv("PCAP_VERIFY_TLS", raising=False)
+    monkeypatch.setattr(pc, "_warning_suppressed", False)
+    out = cp.probe_target("t", cfg)
+    assert out["reachable"] is True and seen["verify"] is False
+
+    monkeypatch.setenv("PCAP_VERIFY_TLS", "1")
+    out = cp.probe_target("t", cfg)
+    assert out["reachable"] is True and seen["verify"] is True
+
+
+def test_probe_pcap_script_respects_verify_tls(monkeypatch):
+    """pipeline.probe.probe_pcap：requests.post 的 verify 传参跟随开关。"""
+    import llmsec.pipeline.probe as pb
+    import llmsec.targets.pcap as pc
+
+    monkeypatch.setattr(pb, "build_pcap_payload", lambda text, strip_math: {"q": text})
+    monkeypatch.setattr(pb, "pcap_judge_url", lambda: "http://fake-judge")
+    seen = {}
+    monkeypatch.setattr(
+        pb.requests, "post",
+        lambda url, json=None, timeout=None, verify=None: (
+            seen.__setitem__("verify", verify),
+            _fake_resp(json_data={"text": "x"}),
+        )[1],
+    )
+
+    monkeypatch.delenv("PCAP_VERIFY_TLS", raising=False)
+    monkeypatch.setattr(pc, "_warning_suppressed", False)
+    pb.probe_pcap("t")
+    assert seen["verify"] is False
+
+    monkeypatch.setenv("PCAP_VERIFY_TLS", "true")
+    pb.probe_pcap("t")
+    assert seen["verify"] is True
 
 
 def test_probe_routes_by_target_type(monkeypatch):

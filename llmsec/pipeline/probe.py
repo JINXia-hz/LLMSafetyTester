@@ -15,17 +15,18 @@ import os
 import time
 
 import requests
-import urllib3
 
 from llmsec.core.logging import get_logger, setup_console
 from llmsec.targets import call_target
-from llmsec.targets.pcap import build_pcap_payload, pcap_judge_url
+from llmsec.targets.pcap import (
+    build_pcap_payload,
+    pcap_judge_url,
+    pcap_verify_tls,
+    suppress_insecure_warning,
+)
 
 logger = get_logger(__name__)
 setup_console()
-
-# 忽略 SSL 证书警告（内网自签名证书）
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 TIMEOUT = 60.0
 
@@ -77,11 +78,14 @@ def probe_pcap(test_text: str):
 
     t0 = time.perf_counter()
     try:
+        verify = pcap_verify_tls()
+        if not verify:
+            suppress_insecure_warning()
         resp = requests.post(
             judge_url,
             json=payload,
             timeout=TIMEOUT,
-            verify=False,
+            verify=verify,
         )
         latency = (time.perf_counter() - t0) * 1000
         logger.info(f"✅ HTTP {resp.status_code} ({latency:.0f}ms)")

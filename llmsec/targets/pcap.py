@@ -6,7 +6,8 @@ targets.pcap — 受害者 PCAP 判读 API 后端
   - PCAP 日志构造（build_pcap_log，自动剥离数学题越狱税）
 
 调用行为与原 targets._call_pcap_judge 完全一致：
-  最多 3 次重试、间隔 3s、timeout 90s、verify=False（内网自签名证书）。
+  最多 3 次重试、间隔 3s、timeout 90s、TLS 校验由 PCAP_VERIFY_TLS 控制
+  （默认关闭——内网自签名证书；置 1/true 开启校验）。
 """
 
 import os
@@ -19,9 +20,6 @@ from llmsec.core.config import load_env
 from llmsec.core.llm import retry_call
 from llmsec.core.text import estimate_tokens, strip_math_tax
 from llmsec.targets.base import TargetClient
-
-# 忽略 SSL 证书警告（内网自签名证书）
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 load_env()
 
@@ -44,6 +42,29 @@ def pcap_model_version() -> str:
 def pcap_prompt_key() -> str:
     """PCAP judge 的 prompt key（调用期读 env）。"""
     return os.getenv("PCAP_PROMPT_KEY", "")
+
+
+def pcap_verify_tls() -> bool:
+    """PCAP 请求是否校验 TLS 证书（调用期读 env）。
+
+    默认 False：PCAP judge 通常部署在内网、证书自签名，校验必挂。
+    公网/正式证书部署置 1/true/yes/on 开启校验。
+    """
+    return os.getenv("PCAP_VERIFY_TLS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+_warning_suppressed = False
+
+
+def suppress_insecure_warning() -> None:
+    """verify=False 时抑制 InsecureRequestWarning（幂等；运行期翻转 env 亦正确）。
+
+    仅在实际发出不校验请求前调用——开启校验时不碰全局 warnings 过滤器。
+    """
+    global _warning_suppressed
+    if not _warning_suppressed and not pcap_verify_tls():
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        _warning_suppressed = True
 
 
 # import 期快照（仅供 BASE_PAYLOAD 等模板构造；运行期取值请用上面的函数）
@@ -142,12 +163,15 @@ class PcapJudgeTargetClient(TargetClient):
         payload = build_pcap_payload(prompt)
 
         def _do_request():
+            verify = pcap_verify_tls()
+            if not verify:
+                suppress_insecure_warning()
             t0 = time.perf_counter()
             resp = requests.post(
                 self.url,
                 json=payload,
                 timeout=self.timeout,
-                verify=False,
+                verify=verify,
             )
             latency = (time.perf_counter() - t0) * 1000
 
