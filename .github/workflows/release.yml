@@ -1,0 +1,85 @@
+name: Release
+
+# tag 驱动发版：推 v* tag 触发。
+# 产物：sdist/wheel 附到 GitHub Release（正文取 CHANGELOG.md 对应版本小节）
+#       + Docker Hub 版本标签（vX.Y.Z / X / latest 及 slim 变体）。
+# 注意：ci.yml 的 docker job 只在 main push 时推 latest/sha——tag 构建由本
+# 工作流独占，避免双推。
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # 创建 GitHub Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Extract version from tag
+        id: ver
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "major=${V%%.*}" >> "$GITHUB_OUTPUT"
+      - name: Verify tag matches pyproject version
+        run: |
+          grep -q "^version = \"${{ steps.ver.outputs.version }}\"" pyproject.toml \
+            || { echo "tag v${{ steps.ver.outputs.version }} 与 pyproject.toml 的 version 不一致"; exit 1; }
+      - name: Extract changelog section
+        id: notes
+        run: |
+          python - <<'EOF'
+          import os, re
+          from pathlib import Path
+          tag = os.environ["TAG_VERSION"]
+          text = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          m = re.search(rf"^## \[{re.escape(tag)}\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.S | re.M)
+          body = m.group(1).strip() if m else f"见 CHANGELOG.md（未找到 {tag} 小节，请补写后重打 tag）"
+          Path("release_notes.md").write_text(body, encoding="utf-8")
+          EOF
+        env:
+          TAG_VERSION: ${{ steps.ver.outputs.version }}
+      - name: Build sdist/wheel
+        run: |
+          pip install build
+          python -m build
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_notes.md
+          files: dist/*
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build & push full
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            jinxiahz/llmsec:v${{ steps.ver.outputs.version }}
+            jinxiahz/llmsec:${{ steps.ver.outputs.major }}
+            jinxiahz/llmsec:latest
+          cache-from: type=gha,scope=full
+          cache-to: type=gha,scope=full,mode=max
+      - name: Build & push slim
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./docker/Dockerfile.slim
+          platforms: linux/amd64
+          push: true
+          tags: |
+            jinxiahz/llmsec:slim-v${{ steps.ver.outputs.version }}
+            jinxiahz/llmsec:slim
+          cache-from: type=gha,scope=slim
+          cache-to: type=gha,scope=slim,mode=max

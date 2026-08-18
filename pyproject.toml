@@ -4,9 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llmsec"
-version = "1.0.0"
+version = "1.1.0"
 description = "LLM 红队攻击测试工具——自适应评估、聚类分析、ELO 收敛"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
+keywords = ["llm", "red-team", "security", "evaluation", "elo", "jailbreak"]
+authors = [
+    { name = "JINXia-hz" },
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Security",
+]
+urls.Repository = "https://github.com/JINXia-hz/LLMSafetyTester"
+urls.Issues = "https://github.com/JINXia-hz/LLMSafetyTester/issues"
 dependencies = [
     # 核心：API 客户端 + Web 面板 + ELO/评估数学库
     "openai>=2,<3",
@@ -42,6 +60,8 @@ cluster = [
 dev = [
     "pytest>=8,<9",
     "pytest-xdist>=3",
+    "pytest-cov>=5",
+    "pytest-repeat>=0.9",
     "ruff",
 ]
 # MCP 工具库接口（llmsec-mcp server，供外部 agent 调用）
@@ -114,7 +134,11 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["llmsec"]
+known-first-party = ["llmsec", "tests"]
+
+[tool.coverage.run]
+# 与 CI 的 --cov=llmsec 对齐（control/ 未计入——它是编排层，核心质量看 llmsec）
+source = ["llmsec"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
