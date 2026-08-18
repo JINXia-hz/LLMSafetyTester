@@ -264,11 +264,23 @@ def main(argv=None) -> int:
     client = create_openai_client(config.api_key, config.base_url, timeout=config.timeout)
 
     def _classify_one(rec: dict) -> dict:
-        return {
-            "id": rec["id"], "source": rec.get("source"),
-            "predicted": classify_prompt(client, config.model, rec["prompt"]),
-            "preview": strip_math_tax(rec["prompt"])[:PREVIEW_PROMPT],
-        }
+        preview = strip_math_tax(rec["prompt"])[:PREVIEW_PROMPT]
+        try:
+            label = classify_prompt(client, config.model, rec["prompt"])
+        except Exception as e:  # 单条失败（重试耗尽）降级为 unparsed，不终止整轮
+            return {"id": rec["id"], "source": rec.get("source"),
+                    "predicted": "unparsed", "error": str(e)[:120], "preview": preview}
+        return {"id": rec["id"], "source": rec.get("source"), "predicted": label, "preview": preview}
+
+    def _write_report(rs: list, partial: bool) -> None:
+        dist = Counter(x["predicted"] for x in rs if x is not None)
+        out.write_text(json.dumps({
+            "meta": {"sample": args.sample, "seed": args.seed, "dry_run": False, "partial": partial,
+                     "model": config.model, "generated_at": datetime.now().isoformat(timespec="seconds"),
+                     "classified": len([x for x in rs if x is not None]),
+                     "source_dist": dict(src_dist), "predicted_dist": dict(dist.most_common())},
+            "records": [x for x in rs if x is not None],
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -277,21 +289,21 @@ def main(argv=None) -> int:
     with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as ex:
         futures = {ex.submit(_classify_one, r): i for i, r in enumerate(picked)}
         for fut in as_completed(futures):
-            idx = futures[fut]
-            results[idx] = fut.result()   # 单条失败（重试耗尽）直接上抛终止整轮
+            results[futures[fut]] = fut.result()
             done += 1
             if done % 100 == 0:
                 logger.info(f"   进度 {done}/{len(picked)}")
+            if done % 500 == 0:
+                _write_report(results, partial=True)   # 增量落盘：进程意外时进度不丢
     results = [r for r in results if r is not None]
 
     dist = Counter(x["predicted"] for x in results)
+    unparsed = dist.get("unparsed", 0)
     logger.info("   预测分布: " + ", ".join(f"{k}:{v}" for k, v in dist.most_common()))
-    out.write_text(json.dumps({
-        "meta": {"sample": args.sample, "seed": args.seed, "dry_run": False,
-                 "model": config.model, "generated_at": datetime.now().isoformat(timespec="seconds"),
-                 "source_dist": dict(src_dist), "predicted_dist": dict(dist.most_common())},
-        "records": results,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    if unparsed:
+        logger.warning(f"   ⚠ {unparsed} 条解析失败（predicted=unparsed，回写时不改这些记录，"
+                       f"样例 error 见报告 records）")
+    _write_report(results, partial=False)
     logger.info(f"📄 校准报告: {out}（人工抽检 records 里的 predicted 后再决定全量）")
     return 0
 
