@@ -133,7 +133,7 @@ flowchart TD
 
 ### R 矩阵 —— 原始观测
 
-`R[记录id][模型] = MatchResult`，定义在 `core/results.py` 的 `ResultsMatrix`，存于统一库 `output/state/catalog.db` 的 observations 表（`storage/rstore.py` 后端）。R 是**不可重算的原始观测**——Elo、预测器、指纹、孪生集全部可从 R + 攻击特征重算（派生入口：`evaluation/elo.py` 的 `derive_elo`）。并发安全靠 SQLite WAL + 单事务写入（BEGIN IMMEDIATE），备份用 `llmsec-manage storage backup-r`；人读快照 `rstore.export_legacy_json`。
+`R[记录id][模型] = MatchResult`，定义在 `core/results.py` 的 `ResultsMatrix`，存于统一库 `output/state/catalog.db` 的 observations 表（`storage/rstore.py` 后端）。R 是**不可重算的原始观测**——Elo、预测器、指纹、孪生集全部可从 R + 攻击特征重算（派生入口：`evaluation/elo.py` 的 `derive_elo`）。并发安全靠 SQLite WAL + 单事务写入（BEGIN IMMEDIATE），备份用 `llmsec-manage storage backup-r`。
 
 ### ELOTracker 与安全边界
 
@@ -179,7 +179,7 @@ flowchart TD
 - **尚书省**（`shangshu/`）：`planner.py` 把指令拆成结构化 Plan（步骤 + 依赖），用户准奏后 `executor.py` 按拓扑分层并行执行。可调度的原子能力共 17 项（`capabilities.py`：run_evaluation / fork_workspace / merge_results / env 快照 CRUD 等），每项自带风险等级。
 - **门下省**（`menxia/`）：消息总线（`bus.py`）订阅者，对危险步骤（跑评估 / merge 全局 / 删 R 列）封驳要求确认，任务完成后自动审查产出并呈递简报。
 
-三省的真实入口是 Web 面板的 `POST /api/control/chat`（`llmsec/server/routers/control.py` 进程内直连）；`python -m control chat` 只是**无 LLM 时的规则版兜底 REPL**。Plan 与三省共享记忆持久化在 `output/plans/` 与 `output/gazette/`。交互时序见 [docs/核心业务时序图.md](docs/核心业务时序图.md)。
+三省的真实入口是 Web 面板的 `POST /api/control/chat`（`llmsec/server/routers/control.py` 进程内直连）；`python -m control chat` 只是**无 LLM 时的规则版兜底 REPL**。Plan 与三省共享记忆持久化在统一库的 ctl_* 表（文牍事件流/Plan/封驳令）。交互时序见 [docs/核心业务时序图.md](docs/核心业务时序图.md)。
 
 ---
 
@@ -422,7 +422,7 @@ pytest -n auto              # 并行（CI 默认）
 | [docs/流程追踪报告.md](docs/流程追踪报告.md) | 一次 runner 从启动到退出的逐阶段追踪 |
 | [docs/实验框架说明.md](docs/实验框架说明.md) | HPO 实验框架 |
 | [docs/攻击特征与聚类深度研究报告.md](docs/攻击特征与聚类深度研究报告.md) | 特征体系与聚类管线调研 |
-| [docs/数据管理架构深度调研报告.md](docs/数据管理架构深度调研报告.md) | output/ 产物与数据管理审计 |
+| [docs/存储深度整合重构调研.md](docs/存储深度整合重构调研.md) | 存储架构权威记录（终态 + 踩坑） |
 
 ---
 

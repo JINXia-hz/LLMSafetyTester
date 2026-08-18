@@ -24,10 +24,10 @@ python -m llmsec.experiments trials weekend_stage1       # 逐 trial 明细
 
 ## 进度观察
 - 看板：`python -m llmsec.server.dashboard_api` → http://localhost:8080 （HPO 页实时 trial 进度 + 当前最优）
-- 产物：`output/experiments/weekend_stage{1,2}/`（trials.jsonl / summary.json / trial_* 工作目录）
+- 产物：`output/experiments/weekend_stage{1,2}/`（trial 记录在统一库 trials 表；summary.json / trial_* 工作目录在本目录）
 
 ## 中断恢复
-所有 study 断点续跑：进程被杀后**重跑同一命令**即从 `trials.jsonl` 恢复，只补缺失的 (config, target, seed) 单元。
+所有 study 断点续跑：进程被杀后**重跑同一命令**即从统一库 trials 表恢复，只补缺失的 (config, target, seed) 单元。
 
 ## 周一使用最优参数
 `report` 会打印 `LLMSEC_PARAM_*` 行，追加到 `.env` 即让正式评估直接采用调优结果。

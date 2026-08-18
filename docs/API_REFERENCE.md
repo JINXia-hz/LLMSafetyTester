@@ -279,7 +279,7 @@ Agent → xxx_confirm(token) →  返回 {status: "executed", result}
 
 #### R 矩阵与 Elo 派生
 
-> R 矩阵（`output/state/results.json`）是 llmsec 的唯一真相。以下 Elo 工具均从 R 矩阵纯函数回放派生，进程内按列指纹缓存。
+> R 观测（统一库 `output/state/catalog.db` 的 observations 表）是 llmsec 唯一不可重算的状态。以下 Elo 工具均从 R 纯函数回放派生，进程内按列指纹缓存（elo_cache 表）。
 
 ##### `get_results_summary()`
 **返回**：`{models, records, total_observations}`。R 不存在或空时返回提示。
@@ -403,10 +403,11 @@ Agent → xxx_confirm(token) →  返回 {status: "executed", result}
 
 | 类别 | 说明 | 可恢复 |
 |------|------|:------:|
-| `elo_cache` | Elo 派生缓存 | ✅（从 R 重算） |
 | `predictors` | 混合预测器 pkl | ✅（重训） |
 | `feature_cluster` | 特征缓存 + 聚类产物 | 特征可重建 / cluster 需重跑 |
-| `task_logs` | 已完成任务的日志 | ❌（一次性） |
+| `model_state` | 预筛 ML 模型 joblib | ✅（重训） |
+
+（Elo 派生缓存已表化进 catalog.db 的 elo_cache 表，指纹自动失效，无需清理类别；任务日志清理走 `storage gc-tasks`。）
 
 ##### `clean_caches_confirm(token) → {status, result}`
 
@@ -421,7 +422,7 @@ Agent → xxx_confirm(token) →  返回 {status: "executed", result}
 | `target` | str | `"global"` | 目标描述符 |
 | `models` | list[str] \| None | `None` | 只合并指定模型 |
 
-**描述符格式**：`"global"` → `output/state/results.json`；`"ws:<name>"` → `output/workspaces/<name>/results.json`；其他 → 视为目录路径。
+**描述符格式**：`"global"` → 统一库 `output/state/catalog.db`；`"ws:<name>"` → `output/workspaces/<name>/catalog.db`（卫星库）；其他 → 视为目录路径。
 
 典型场景：fork 工作区跑完实验后，`sources=["ws:exp1"], target="global"` 合并回全局。
 
@@ -446,13 +447,14 @@ Agent → xxx_confirm(token) →  返回 {status: "executed", result}
 
 **返回**：工作区信息 dict（`name / path / source / models / records`）。
 
-##### `export_snapshot(source="global", out=None, include_elo_cache=True)`
+##### `export_snapshot(source="global", out=None)`
 
 | 参数 | 类型 | 默认 | 说明 |
 |------|------|------|------|
 | `source` | str | `"global"` | `"global"` 或 `"run:<name>"` |
 | `out` | str \| None | `None` | 输出路径（目录或 `.tar.gz`）；None 默认到 `output/snapshots/<时间戳>/` |
-| `include_elo_cache` | bool | `True` | 是否一并导出 `elo_cache.json`（仅 global 源有效） |
+
+快照是统一库副本（sqlite backup API，WAL 安全），elo_cache/probes 等派生表随库自带。
 
 ##### `create_env_snapshot(name, source="global", note="")`
 
@@ -925,7 +927,7 @@ llmsec-manage thresholds --json
 | `runs` | `list` | `--json`, `--target`, `--since`, `--until`, `--level`, `--no-report`, `--min-size`, `--junk-only` |
 | | `delete` | 位置参数 `names`(+)，`--delete-r`，`--yes`，`--json` |
 | `cache` | `list` | `--json` |
-| | `clean` | 位置参数 `categories`(+)：`elo_cache`/`predictors`/`predictors_legacy`/`feature_cluster`/`task_logs`，`--yes`，`--json` |
+| | `clean` | 位置参数 `categories`(+)：`predictors`/`feature_cluster`/`model_state`，`--yes`，`--json` |
 | `snapshot` | `export` | `--source`(global 或 run:\<name\>)，`--out`，`--json` |
 | `merge` | — | `--sources`(+)，`--target`，`--models`(*)，`--yes`，`--json` |
 | `thresholds` | — | `--json`（导出 params.py 审查阈值常量） |
@@ -972,7 +974,7 @@ python -m llmsec.experiments trials my-study
 |--------|----------|------|
 | `run` | `<study.yaml>` | 运行/续跑 study（支持断点续跑） |
 | `report` | `<name>` | 打印最佳 config + 对比表（读 `study_dir(name)/study.yaml`） |
-| `trials` | `<name>` | 列出全部 trial（读 `trials.jsonl`） |
+| `trials` | `<name>` | 列出全部 trial（读统一库 trials 表） |
 
 ---
 
@@ -1033,7 +1035,7 @@ python -m llmsec.experiments trials my-study
 | `LLMSEC_ALERT_LEVEL` | `warning` | 最低告警级别（`info`/`warning`/`error`） |
 | `LLMSEC_ZOMBIE_MINUTES` | `60` | 任务 running 超该分钟数无产出则告警（僵尸检测） |
 
-> 告警同时写入 `output/alerts.jsonl`（每行一个 JSON 事件），webhook 与事件文件双通道。webhook POST 非阻塞（线程池提交），失败不影响主流程。参见监控告警文档。
+> 告警走双通道：logger.warning（落 llmsec.log，人工可 grep）+ webhook。webhook POST 非阻塞（线程池提交），失败不影响主流程。
 
 ### 4.2 `params.py` 行为参数
 

@@ -177,7 +177,7 @@ python -m llmsec.pipeline.runner [--phase {all,1,2}] [--input FILE] [--batch-siz
 llmsec-manage runs list [--json] [--target NAME] [--since DATE] [--junk-only]  # List/filter runs
 llmsec-manage runs delete <run...> [--delete-r] [--yes]                        # Delete runs (soft-delete to .trash/)
 llmsec-manage cache list [--json]                                             # Cache usage
-llmsec-manage cache clean <elo_cache|predictors|feature_cluster|task_logs> [--yes]
+llmsec-manage cache clean <predictors|feature_cluster|model_state> [--yes]
 llmsec-manage snapshot export [--source global|run:<name>] [--out FILE]        # Export snapshot
 llmsec-manage merge --sources <src...> --target <global|ws:name> [--models ...] [--yes]  # Merge R
 ```
@@ -349,9 +349,9 @@ output/                   # All generated artifacts
 ```
 output/
 ├── state/                  # Persistent state (global)
-│   ├── results.json        #   R matrix (single source of truth, multi-model)
-│   ├── elo_cache.json      #   Derived Elo cache (deletable, rebuildable)
-│   ├── probes.json         #   Model defense fingerprints (discovery layer)
+│   ├── catalog.db          #   Unified DB: R observations + runs/trials/tasks
+│   │                       #   registries + elo_cache/probes derived tables
+│   │                       #   + control-layer tables (single DB file)
 │   └── safe_twins.jsonl    #   Safe twin set
 ├── predictors/             # BlendPredictor derived cache
 ├── runs/<timestamp>/       # Runner single-run artifacts

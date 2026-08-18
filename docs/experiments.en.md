@@ -101,7 +101,7 @@ Factor types: `int` / `float` (optional `log: true` for log-space sampling) / `c
 | `random` | Uniform random sampling until budget exhausted | Medium space, quick scouting |
 | `bayesian` | optuna TPE sequential model-based optimization; uses completed results to guide the next config | Large space, budget-saving (default) |
 
-Resumable runs: `trials.jsonl` is the source of truth. Restarting a study skips already-completed (config × seed) pairs; `bayesian` additionally feeds prior results back into TPE to rebuild the study state.
+Resumable runs: the `trials` table in the unified DB is the source of truth (sole write path since P4; legacy trials.jsonl is import-only). Restarting a study skips already-completed (config × seed) pairs; `bayesian` additionally feeds prior results back into TPE to rebuild the study state.
 
 ---
 
@@ -154,13 +154,13 @@ Example `report` output:
 ```
 output/experiments/<name>/
 ├── study.yaml          # config copy (reused by report)
-├── trials.jsonl        # append-only trial records (source of truth for resume)
+│                       # (trial records live in the unified DB `trials` table)
 ├── best.json           # best config, written by report
 └── <trial_idx>/        # each trial's isolated work-dir
     ├── manifest.json   #   reproducibility manifest (git/params/argv/attack-set hash/seed/libs)
     ├── runner.log      #   full runner subprocess log
     ├── runner_report.json
-    └── state.json / results.json   # that trial's isolated state
+    └── state.json / catalog.db     # that trial's isolated state & satellite DB
 ```
 
 ---

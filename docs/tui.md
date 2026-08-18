@@ -46,7 +46,7 @@ UTF-8 终端（应用启动时会做 `setup_console()` 兜底，legacy conhost �
 | `mkdir <名> [--source global\|run:<x>]` | 开辟隔离工作区 |
 | `rmdir <名>` | 删除工作区 |
 | `rm <run...> [--delete-r]` | 删除 run——预览 + `confirm <token>` 两步执行 |
-| `clean <类别...>` | 清理缓存（elo_cache/predictors/feature_cluster/task_logs）——同样两步 |
+| `clean <类别...>` | 清理缓存（predictors/feature_cluster/model_state）——同样两步 |
 | `kill <id前缀\|latest>` | 取消任务；外部任务跨进程强杀前 inline `y/N` 确认 |
 | `top [id前缀\|hpo]` | 唤起任务直播全屏视图（表格 + 盲文进度/HPO sparkline，2s 刷新），q/Esc 返回 |
 
