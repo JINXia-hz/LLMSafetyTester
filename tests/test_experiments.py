@@ -390,3 +390,30 @@ def test_run_study_no_targets_fails_fast(tmp_path):
     print('✅ run_study 空目标 fail-fast 通过')
 
 
+
+
+# ============================================================
+# D-1 回归：study name 路径穿越双层校验
+# ============================================================
+
+def _minimal_cfg(name):
+    return {
+        "name": name,
+        "objective": {"metric": "asr", "direction": "maximize"},
+        "space": {"k_factor": {"type": "float", "low": 8, "high": 32}},
+        "budget": {"max_trials": 2, "max_wall_minutes": 5, "trial_timeout_minutes": 5},
+        "targets": ["t1"],
+    }
+
+
+def test_study_name_traversal_rejected():
+    """from_dict 是全部入口的汇聚点：穿越名/绝对路径/空名必须在此被拒。"""
+    import pytest as _pytest
+    for evil in ["../pwn", "a/b", "a" + chr(92) + "b", "..", ".", "C:/evil", ""]:
+        with _pytest.raises(ValueError, match="name"):
+            StudyConfig.from_dict(_minimal_cfg(evil))
+
+
+def test_study_name_valid_passes():
+    cfg = StudyConfig.from_dict(_minimal_cfg("weekend_stage1"))
+    assert cfg.name == "weekend_stage1"

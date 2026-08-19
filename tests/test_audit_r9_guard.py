@@ -275,3 +275,45 @@ def test_tfidf_fallback_homogeneous_corpus(monkeypatch):
     assert emb.shape[0] == 8, "全部样本都应有特征向量"
     assert emb.shape[1] >= 1, "同质语料放宽 max_df 后必须有存活词项"
     assert vec is not None
+
+
+# ---- P1 修复守卫：env 覆盖入口必须在全部常量定义之后 ----
+
+def test_env_override_call_after_all_constants():
+    """_apply_env_overrides() 调用点必须晚于所有顶层常量赋值。
+
+    此前调用点在 §9 末尾，其后定义的 §10-§13 常量（SAMPLERS/PREVIEW_*/
+    ATTACK_*/RECTIFY_*）覆盖静默失效——HPO 调参白跑。AST 结构守卫防止
+    未来在文件中部重新插入调用点。
+    """
+    import llmsec.params as p
+
+    tree = ast.parse(Path(p.__file__).read_text(encoding="utf-8"))
+    call_lines = []
+    last_const_line = 0
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            if any(n.isupper() for n in names):
+                last_const_line = max(last_const_line, node.end_lineno)
+        elif (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+              and isinstance(node.value.func, ast.Name)
+              and node.value.func.id == "_apply_env_overrides"):
+            call_lines.append(node.end_lineno)
+    assert call_lines, "params.py 必须在模块级调用 _apply_env_overrides()"
+    assert min(call_lines) > last_const_line, (
+        f"_apply_env_overrides() 调用（行{call_lines}）必须晚于最后一个常量定义"
+        f"（行{last_const_line}）——否则其后定义的常量 env 覆盖静默失效")
+
+
+def test_env_override_covers_trailing_constants():
+    """功能性验证：文件尾部的 §11 常量（PREVIEW_LOG）可被子进程 env 覆盖。"""
+    import subprocess
+    import sys
+
+    code = ("import os; os.environ['LLMSEC_PARAM_PREVIEW_LOG'] = '77'; "
+            "import llmsec.params as p; "
+            "assert p.PREVIEW_LOG == 77, p.PREVIEW_LOG")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert r.returncode == 0, (
+        f"PREVIEW_LOG 覆盖失效（P1 回归）: {r.stderr[-300:]}")

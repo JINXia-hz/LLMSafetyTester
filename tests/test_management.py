@@ -585,3 +585,29 @@ class TestCachesCommands:
         from llmsec.management import caches
         assert caches._predictor_paths() == [], "❌1 目录缺失应返回空列表"
         assert caches.category_summary("predictors")["file_count"] == 0, "❌3 汇总应为 0"
+
+
+class TestStorageJsonContracts:
+    """P1/D-9 修复：--json 模式的 dry-run 契约与纯 JSON 输出。"""
+
+    def test_migrate_control_json_without_yes_is_dry_run(self, iso_output, capsys, monkeypatch):
+        """migrate-control --json 不带 --yes 必须只出预览、不执行（修复前直接落执行分支）。"""
+        # 执行分支的第一步会 import ctlstore 并扫 OUTPUT_DIR；桩掉 ctlstore 以便
+        # 若误入执行分支立刻炸（而不是静默通过）
+        import llmsec.storage.ctlstore as ctl
+        from llmsec.management import storage
+        monkeypatch.setattr(ctl, "reset_gazette", lambda: (_ for _ in ()).throw(
+            AssertionError("不应进入执行分支")))
+        rc = storage.cmd_migrate_control(yes=False, json_mode=True)
+        out = capsys.readouterr().out
+        data = json.loads(out)
+        assert rc == 0 and data["dry_run"] is True, "❌1 --json 无 --yes 应输出 dry_run 预览"
+
+    def test_backup_r_json_stdout_is_pure_json(self, iso_output, capsys):
+        """backup-r --json 的 stdout 必须整体可 json.loads（修复前尾随人类可读行）。"""
+        from llmsec.management import storage
+        # 直接用当前（conftest 隔离的）库做一次备份
+        rc = storage.cmd_backup_r(None, json_mode=True)
+        out = capsys.readouterr().out
+        data = json.loads(out)  # 整体解析：尾随任何非 JSON 行在此抛异常
+        assert rc == 0 and data["ok"] is True, "❌1 backup-r --json 应输出纯 JSON"

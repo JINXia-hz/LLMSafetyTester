@@ -20,7 +20,7 @@ Phase 2: 过敏检测
 Phase 3: 综合评判
   8. ASR + FPR → 2D 安全画像
   9. ELO 边界 + 置信度 → 量化安全等级
-  10. 输出统一报告 → output/runs/<时间戳>/runner_report.json
+  10. 输出统一报告 → output/runs/<时间戳>/<target>/runner_report.json
 
 用法:
     python -m llmsec.pipeline.runner                                    # 全流程
@@ -247,6 +247,23 @@ def main(argv=None, *, deps=None):
 
     records = read_jsonl(input_path)
 
+    # 契约校验（缺 method/prompt 等字段此前在深处分组处裸 KeyError 崩栈——
+    # 外部拖拽/手编攻击集是常态入口，须在装载口给出可读错误与定位）
+    from llmsec.attacks.schema import validate_record
+    bad_rows = []
+    for i, r in enumerate(records, 1):
+        rec, violations = validate_record(r)
+        if violations:
+            bad_rows.append((i, r.get("id", "?"), "; ".join(violations)[:100]))
+            if len(bad_rows) >= 3:
+                break
+    if bad_rows:
+        for line_no, rid, why in bad_rows:
+            logger.error(f"❌ 攻击集第 {line_no} 行 (id={rid}) 契约违规: {why}")
+        logger.error("   攻击集每行须含 id/method/prompt 等标准字段（README「攻击集」节）。"
+                     "体检命令: python -m llmsec.attacks.validate <文件>")
+        sys.exit(1)
+
     # 按方法分组
     method_records = {}
     for r in records:
@@ -451,7 +468,9 @@ def main(argv=None, *, deps=None):
                 # 串行模式向上传播终止进程。
                 raise RuntimeError(
                     f"{name}: --phase 2 需要 Phase 1 的 state.json（{state_path} 不存在）"
-                    "——请先运行 --phase all 或 --phase 1")
+                    "——请先运行 --phase all 或 --phase 1。注意：全局模式每次调用都分配"
+                    "新的时间戳 run 目录，phase 1/2 分两次调用必然找不到 state.json；"
+                    "独立跑 phase 2 请用 --work-dir（同一目录内两阶段可衔接）")
             tracker.load(str(state_path))
 
         conv = tracker.check_convergence(
@@ -611,10 +630,10 @@ def main(argv=None, *, deps=None):
         # 不校验（放行交由既有逻辑）。
         try:
             from llmsec.core.config import load_targets as _load_targets
-            declared = set(_load_targets().keys())
+            declared_set = set(_load_targets().keys())
         except Exception:
-            declared = set()
-        allowed, skipped = partition_publish_names(names, declared)
+            declared_set = set()
+        allowed, skipped = partition_publish_names(names, declared_set)
         for name in skipped:
             logger.warning(
                 f"  ⏭️ {name}: 未在 .env TARGETS 中声明，跳过全局 R 写入（防测试目标污染生产数据）。"

@@ -331,9 +331,17 @@ def cmd_migrate_control(*, yes: bool = False, json_mode: bool = False) -> int:
     def _renamed(p: Path) -> bool:
         return p.suffix == ".migrated" or p.name.endswith(".json.migrated") or p.name.endswith(".jsonl.migrated")
 
-    if not yes and not json_mode:
-        print("将把 gazette/plans/workspaces/env_snapshots 的旧文件导入目录库（ctl_* 表），")
-        print("迁移后源文件改名 .migrated。幂等，可重复执行。确认执行请加 --yes")
+    if not yes:
+        # 写操作默认 dry-run 契约（__main__ 模块 docstring）：--json 不是执行许可，
+        # 机器调用方试探性调用同样只拿预览。修复前 json_mode 直接落执行分支。
+        if json_mode:
+            emit({"dry_run": True,
+                  "note": "将导入 gazette/plans/workspaces/env_snapshots 旧文件到 ctl_* 表，"
+                          "源文件改名 .migrated。确认执行请加 --yes"},
+                 json_mode=True, title="migrate-control (dry-run)")
+        else:
+            print("将把 gazette/plans/workspaces/env_snapshots 的旧文件导入目录库（ctl_* 表），")
+            print("迁移后源文件改名 .migrated。幂等，可重复执行。确认执行请加 --yes")
         return 0
 
     # 1) gazette：jsonl 事件 + _index 元数据
@@ -426,7 +434,9 @@ def cmd_backup_r(out: str | None, *, json_mode: bool = False) -> int:
     rstore.backup(dest)
     emit({"ok": True, "dest": str(dest), "size": dest.stat().st_size},
          json_mode=json_mode, title="backup-r")
-    print(f"✓ 已备份 R 库 → {dest}（{fmt_size(dest.stat().st_size)}）")
+    if not json_mode:
+        # --json 下 stdout 必须是纯 JSON（机器调用方 json.loads），人类可读行只进非 JSON 模式
+        print(f"✓ 已备份 R 库 → {dest}（{fmt_size(dest.stat().st_size)}）")
     return 0
 
 

@@ -26,8 +26,16 @@ def _make_run(tmp_path, rows, state_extra=None):
 
 
 def _row(unit, rid, harmful, method="tpl"):
-    return {"unit": unit, "id": rid, "method": method,
+    return {"unit": unit, "id": rid, "method": method, "prompt": f"p-{rid}",
             "is_harmful": harmful, "eval_score": 1.0 if harmful else -1.0}
+
+
+from llmsec.attacks.quality import quality_key as _qk  # noqa: E402
+
+
+def _k(rid):
+    """质量分缓存键（C-6：id + prompt 指纹，与 _row 的 prompt 约定配套）。"""
+    return _qk({"id": rid, "prompt": f"p-{rid}"})
 
 
 class TestFuse:
@@ -43,9 +51,9 @@ class TestFuse:
             "u_weak": {"n_matches": 2}, "u_strong": {"n_matches": 2},
             "u_few": {"n_matches": 1}, "u_noq": {"n_matches": 2}}}
         run = _make_run(tmp_path, rows, state)
-        quality = {"a-1": _q(2.0, ["degenerate"]), "a-2": _q(2.2),
-                   "b-1": _q(4.5), "b-2": _q(4.7),
-                   "c-1": _q(1.0)}  # d-* 无质量分
+        quality = {_k("a-1"): _q(2.0, ["degenerate"]), _k("a-2"): _q(2.2),
+                   _k("b-1"): _q(4.5), _k("b-2"): _q(4.7),
+                   _k("c-1"): _q(1.0)}  # d-* 无质量分
         v = fuse(run, quality)
 
         suspects = {e["unit"] for e in v["false_defense_suspects"]}
@@ -62,24 +70,22 @@ class TestFuse:
         """高 ASR（攻击打穿了）不进嫌疑也不进强防御——质量问题是次要的。"""
         rows = [_row("u_win", "a-1", True), _row("u_win", "a-2", True)]
         run = _make_run(tmp_path, rows)
-        v = fuse(run, {"a-1": _q(1.0), "a-2": _q(1.0)})
+        v = fuse(run, {_k("a-1"): _q(1.0), _k("a-2"): _q(1.0)})
         assert not v["false_defense_suspects"] and not v["genuine_strong_defenses"]
         assert v["n_low_asr_units"] == 0
 
     def test_old_style_method_keys(self, tmp_path):
         """旧 run 的 unit 键是 method 名——按 run 自身键位连接，不假设 c_ 前缀。"""
-        rows = [{"unit": "DAN", "id": "x-1", "method": "DAN", "is_harmful": False,
-                 "eval_score": -1.0},
-                {"unit": "DAN", "id": "x-2", "method": "DAN", "is_harmful": False,
-                 "eval_score": -1.0}]
+        rows = [_row("DAN", "x-1", False, method="DAN"),
+                _row("DAN", "x-2", False, method="DAN")]
         run = _make_run(tmp_path, rows)
-        v = fuse(run, {"x-1": _q(1.5), "x-2": _q(1.5)})
+        v = fuse(run, {_k("x-1"): _q(1.5), _k("x-2"): _q(1.5)})
         assert {e["unit"] for e in v["false_defense_suspects"]} == {"DAN"}
 
     def test_render_md(self, tmp_path):
         rows = [_row("u_weak", "a-1", False), _row("u_weak", "a-2", False)]
         run = _make_run(tmp_path, rows)
-        v = fuse(run, {"a-1": _q(2.0, ["degenerate", "mild_harm"]), "a-2": _q(2.0)})
+        v = fuse(run, {_k("a-1"): _q(2.0, ["degenerate", "mild_harm"]), _k("a-2"): _q(2.0)})
         md = render_rectification_md(v)
         assert "攻击有效性评估与整改需求" in md
         assert "假防御嫌疑: 1 个" in md and "100%" in md  # 唯一低 ASR 单位即嫌疑
@@ -101,7 +107,7 @@ class TestAssessRun:
         rows = [_row("u_weak", "a-1", False), _row("u_weak", "a-2", False)]
         run = _make_run(tmp_path, rows)
         qpath = tmp_path / "q.json"
-        qpath.write_text(json.dumps({"scores": {"a-1": _q(1.5), "a-2": _q(1.5)}}),
+        qpath.write_text(json.dumps({"scores": {_k("a-1"): _q(1.5), _k("a-2"): _q(1.5)}}),
                          encoding="utf-8")
         v = assess_run(run, qpath)
         assert v is not None
@@ -144,7 +150,7 @@ class TestFinalReportHook:
             cleaned = tmp_path / "cleaned"
             cleaned.mkdir()
             (cleaned / "attack_quality.json").write_text(json.dumps(
-                {"meta": {}, "scores": {"a-1": _q(1.5), "a-2": _q(1.5)}}), encoding="utf-8")
+                {"meta": {}, "scores": {_k("a-1"): _q(1.5), _k("a-2"): _q(1.5)}}), encoding="utf-8")
 
         fr.generate_reports(run_dir, ELOTracker(), "def-v",
                             {"this_run_tested": 2, "total_tested": 2, "asr": 0.0,

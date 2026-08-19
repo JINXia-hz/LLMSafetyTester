@@ -10,12 +10,14 @@ core.logging — 日志与控制台编码设施
 
 import logging
 import sys
+import threading
 
 _FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _DATEFMT = "%H:%M:%S"
 
 _console_ready = False
 _root_configured = False
+_init_lock = threading.Lock()  # A-9：root logger 初始化的检查-置位竞态锁
 
 
 def setup_console() -> None:
@@ -44,46 +46,50 @@ def get_logger(name: str) -> logging.Logger:
     """
     global _root_configured
     if not _root_configured:
-        import os
-        from logging.handlers import RotatingFileHandler
+        # A-9：检查-置位持锁——MCP 线程池/多 worker 首次并发导入时，无锁会让两个
+        # 线程都通过检查、重复挂 console/file handler（日志成倍重复输出）
+        with _init_lock:
+            if not _root_configured:
+                import os
+                from logging.handlers import RotatingFileHandler
 
-        formatter = logging.Formatter(_FORMAT, datefmt=_DATEFMT)
-        root = logging.getLogger("llmsec")
-        root.setLevel(os.getenv("LLMSEC_LOG_LEVEL", "INFO").upper())
-        root.propagate = False
+                formatter = logging.Formatter(_FORMAT, datefmt=_DATEFMT)
+                root = logging.getLogger("llmsec")
+                root.setLevel(os.getenv("LLMSEC_LOG_LEVEL", "INFO").upper())
+                root.propagate = False
 
-        # 控制台 handler（始终挂载）
-        console = logging.StreamHandler()
-        console.setFormatter(formatter)
-        root.addHandler(console)
+                # 控制台 handler（始终挂载）
+                console = logging.StreamHandler()
+                console.setFormatter(formatter)
+                root.addHandler(console)
 
-        # 文件 handler（LLMSEC_LOG_FILE 非空时挂载；默认落盘 output/logs/llmsec.log）
-        log_file = os.getenv("LLMSEC_LOG_FILE")
-        if log_file is None:
-            # 未显式设置时用默认路径；显式置空字符串则跳过落盘
-            try:
-                from llmsec.core.config import LOG_FILE
-                log_file = str(LOG_FILE)
-            except Exception:
-                log_file = ""
-        if log_file:
-            try:
-                from pathlib import Path
+                # 文件 handler（LLMSEC_LOG_FILE 非空时挂载；默认落盘 output/logs/llmsec.log）
+                log_file = os.getenv("LLMSEC_LOG_FILE")
+                if log_file is None:
+                    # 未显式设置时用默认路径；显式置空字符串则跳过落盘
+                    try:
+                        from llmsec.core.config import LOG_FILE
+                        log_file = str(LOG_FILE)
+                    except Exception:
+                        log_file = ""
+                if log_file:
+                    try:
+                        from pathlib import Path
 
-                Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-                file_handler = RotatingFileHandler(
-                    log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
-                )
-                file_handler.setFormatter(formatter)
-                root.addHandler(file_handler)
-            except Exception:
-                # 落盘失败不阻断控制台日志（只输出 stderr 警告）
-                import sys
+                        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+                        file_handler = RotatingFileHandler(
+                            log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+                        )
+                        file_handler.setFormatter(formatter)
+                        root.addHandler(file_handler)
+                    except Exception:
+                        # 落盘失败不阻断控制台日志（只输出 stderr 警告）
+                        import sys
 
-                print(f"[logging] RotatingFileHandler 挂载失败 ({log_file})，仅 stdout 输出",
-                      file=sys.stderr)
+                        print(f"[logging] RotatingFileHandler 挂载失败 ({log_file})，仅 stdout 输出",
+                              file=sys.stderr)
 
-        _root_configured = True
+                _root_configured = True
     return logging.getLogger(name if name.startswith("llmsec") else f"llmsec.{name}")
 
 
@@ -97,6 +103,11 @@ def rebind_log_file(new_path) -> None:
     import logging
     from logging.handlers import RotatingFileHandler
     from pathlib import Path
+
+    # A-9 附注：rebind 若先于任何 get_logger 调用发生（isolation 在构造函数
+    # import 期执行时可能），root 尚未配置 level/propagate——先强制完成初始化，
+    # 避免挂出"孤儿"文件 handler 后 get_logger 再补挂第二个（同路径双写）。
+    get_logger("llmsec")
 
     root = logging.getLogger("llmsec")
     for h in list(root.handlers):

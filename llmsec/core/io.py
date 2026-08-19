@@ -91,6 +91,26 @@ def iter_jsonl(path) -> Iterator[dict]:
         logger.warning("跳过 %s 中的 %d 行坏 JSONL（解析失败）", path, bad_count)
 
 
+def _atomic_write(path: Path, write_fn) -> None:
+    """原子覆写共用实现（R1：write_jsonl / write_json / save_artifact 三份样板的单一来源）。
+
+    tmp 名带 pid/tid 后缀（同进程两线程并发写同一文件时固定名互踩）；
+    write_fn 负责"写到 tmp"（含自身 flush/fsync）；_replace_with_retry 原子替换；
+    任何异常清理残留 tmp 后上抛——write_jsonl 此前只捕 OSError，行内含不可序列化
+    对象（TypeError）会泄漏 <name>.tmp.<pid>.<tid> 垃圾（A-2 口径漂移的病根）。
+    """
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}")
+    try:
+        write_fn(tmp)
+        _replace_with_retry(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def write_jsonl(path, rows) -> None:
     """整体覆写 JSONL 文件（自动创建父目录）。
 
@@ -100,21 +120,16 @@ def write_jsonl(path, rows) -> None:
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}")
-    try:
+
+    def _write(tmp: Path) -> None:
         with open(tmp, "w", encoding="utf-8") as f:
             for row in rows:
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                f.write(json.dumps(row, ensure_ascii=False,
+                                   default=_json_numpy_default) + "\n")
             f.flush()
             os.fsync(f.fileno())
-        _replace_with_retry(tmp, path)
-    except OSError:
-        # 清理残留 tmp（os.replace 失败时）
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+
+    _atomic_write(path, _write)
 
 
 def append_jsonl(path, row: dict) -> None:
@@ -226,24 +241,13 @@ def write_json(
         except OSError as e:
             logger.warning("备份 %s -> %s 失败: %s", path, bak, e)
     if atomic:
-        # tmp 名带 pid/tid 后缀（对齐 write_jsonl/save_artifact）：同进程两线程
-        # 并发写同一文件（如 MCP 线程池并发触发的 elo_cache 写）固定名互踩。
-        # with_name 而非 with_suffix：兼容 ".env" 这类空后缀点文件
-        tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}")
-        try:
+        def _write(tmp: Path) -> None:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(obj, f, ensure_ascii=False, indent=indent,
                           allow_nan=allow_nan, default=_json_numpy_default)
                 f.flush()
                 os.fsync(f.fileno())
-            _replace_with_retry(tmp, path)
-        except Exception:
-            # 清理残留 tmp（os.replace 失败或 json.dump 序列化错误时）
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-            raise
+        _atomic_write(path, _write)
     else:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(obj, f, ensure_ascii=False, indent=indent,
@@ -296,20 +300,8 @@ def save_artifact(path, obj, *, atomic: bool = True, backup: bool = False) -> No
         except OSError as e:
             logger.warning("备份 %s -> %s 失败: %s", path, bak, e)
     if atomic:
-        # P9：tmp 名加进程/线程唯一后缀——并发写同一 cache key 时两线程共用
-        # <path>.tmp 会互相截断/损坏；os.replace 成功后 tmp 已不存在，无需额外清理
-        tmp = Path(f"{path}.tmp.{os.getpid()}.{threading.get_ident()}")
-        try:
-            joblib.dump(obj, tmp)
-            _replace_with_retry(tmp, path)
-        except BaseException:
-            # 与 write_json 同口径捕 BaseException：joblib 序列化失败（pickle
-            # TypeError 等，非 OSError）也要清 tmp，否则遗留 *.tmp.* 垃圾
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-            raise
+        # R1：与 write_json/write_jsonl 共用 _atomic_write（tmp 命名/清理口径单源）
+        _atomic_write(path, lambda tmp: joblib.dump(obj, tmp))
     else:
         joblib.dump(obj, path)
 

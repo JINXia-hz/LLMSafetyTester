@@ -71,16 +71,20 @@ def fuse(run_dir: Path, quality: dict) -> dict:
     per_unit: dict[str, dict] = defaultdict(lambda: {"n": 0, "harmful": 0,
                                                      "qualities": [], "tags": Counter(),
                                                      "methods": set()})
+    # C-10：ASR 口径单源（attack_phase / report / assess 三处同函数）
+    # C-6：质量分连接键与 quality.py 缓存键同源（id + prompt 指纹）
+    from llmsec.attacks.quality import quality_key
+    from llmsec.evaluation.scoring import count_successful
     for r in rows:
         uid = r.get("unit") or r.get("method") or "?"
         u = per_unit[uid]
         u["n"] += 1
-        if r.get("is_harmful") or (r.get("eval_score") or 0) > 0:
+        if count_successful(r):
             u["harmful"] += 1
         m = r.get("method")
         if m:
             u["methods"].add(m)
-        q = quality.get(str(r.get("id")))
+        q = quality.get(quality_key(r))
         if q and not q.get("unparsed") and "overall" in q:
             u["qualities"].append(q["overall"])
             u["tags"].update(q.get("tags", []))

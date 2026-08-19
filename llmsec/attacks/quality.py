@@ -136,6 +136,17 @@ def score_prompt(client, model: str, rec: dict, *,
         return None
 
 
+def quality_key(rec: dict) -> str:
+    """缓存/连接键 = id + prompt 指纹（C-6）。
+
+    此前仅按 id：同 id 不同 prompt（攻击集重新生成、跨数据集 id 撞车）静默复用
+    过期评分，assess 的假防御甄别基于陈旧质量分失真。指纹取 sha256 前 16 位。
+    """
+    import hashlib
+    fp = hashlib.sha256((rec.get("prompt") or "").encode("utf-8", "ignore")).hexdigest()[:16]
+    return f"{rec.get('id')}:{fp}"
+
+
 def score_records(client, model: str, records: list[dict], *,
                   concurrency: int = 8, progress_every: int = 100,
                   on_checkpoint=None) -> dict[str, dict]:
@@ -143,7 +154,7 @@ def score_records(client, model: str, records: list[dict], *,
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def _one(rec: dict) -> tuple[str, dict]:
-        rid = str(rec["id"])
+        rid = quality_key(rec)
         parsed = score_prompt(client, model, rec)
         if parsed is None:
             return rid, {"unparsed": True, "preview": build_preview(rec["prompt"])}
@@ -215,7 +226,8 @@ def main(argv=None) -> int:
             logger.warning("⚠ 已有评分缓存损坏，全量重算")
             existing = {}
 
-    todo = [r for r in records if str(r["id"]) not in existing]
+    # 键含 prompt 指纹：旧缓存（纯 id 键）全部 miss 重评——无版本兼容负担
+    todo = [r for r in records if quality_key(r) not in existing]
     logger.info(f"🎯 质量评估: {len(records)} 条 | 缓存命中 {len(records) - len(todo)} | 待评 {len(todo)}")
     if not todo:
         logger.info("📄 全部已评分，无事可做")

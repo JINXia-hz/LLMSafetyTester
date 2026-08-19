@@ -42,6 +42,7 @@ EV_PLAN_APPROVED = "plan_approved"      # 用户准奏
 EV_PLAN_REJECTED = "plan_rejected"      # 用户驳回
 EV_PLAN_STARTED = "plan_started"        # 尚书省开始执行
 EV_PLAN_FINISHED = "plan_finished"      # 执行完毕
+EV_PLAN_REQUEUED = "plan_requeued"      # 放行封驳后重新入队（P1-6：执行期放行由 executor 收尾自动触发）
 EV_COMMISSION = "commission"            # 中书省下旨（记录用户原话 + session）
 
 # Step 级

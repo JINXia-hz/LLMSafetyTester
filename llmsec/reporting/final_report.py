@@ -153,7 +153,10 @@ def generate_reports(
 
         elo_ratings = {entry["unit"]: entry["elo"] for entry in ranking}
         method_stats = build_method_stats(attack_rows, elo_ratings, {}, units=units)
-        tree = build_tree(method_stats, allergy_summary)
+        # P1-2：security_tree 必须用本 run 的 live tracker——此前恒从全局 R 派生，
+        # 报告生成时本 run 观测尚未 publish，树与 runner_report 讲两个模型的故事
+        tree = build_tree(method_stats, allergy_summary,
+                          tracker=tracker, defender=defender_name)
         write_json(run_dir / "security_tree.json", tree)
 
         # P5：本轮 0 新测试（如全量 resume）时跳过 LLM 叙事，避免白调 LLM

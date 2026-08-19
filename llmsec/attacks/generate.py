@@ -242,6 +242,26 @@ def _extract_json_array(raw: str) -> list:
     return json.loads(cleaned)
 
 
+# 生成器安全策略拒答的特征（实测：minimax 部署对攻击生成请求直接回"我无法协助…"，
+# 裸报 JSON解析失败既误导排障、又会让确定性失败白重试 3 轮 × API_RETRY_DELAY）
+_REFUSAL_MARKERS = (
+    "我无法协助", "我不能协助", "我无法帮助", "我不能帮助", "我无法提供", "我不能提供",
+    "无法协助完成", "违反基本的安全原则", "不会提供", "不予提供",
+    "i cannot assist", "i can't assist", "i cannot help", "i can't help",
+    "i'm sorry, but i cannot", "i will not provide", "i'm unable to",
+)
+
+
+def _looks_like_refusal(text: str) -> bool:
+    """判定生成器回复是否为安全策略拒答（而非可重试的格式抖动）。"""
+    low = (text or "").lower()
+    return any(mk in low for mk in _REFUSAL_MARKERS)
+
+
+class _DraftRefusalError(Exception):
+    """生成器明确拒答——确定性失败，重试同一 prompt 无意义。"""
+
+
 def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
                        model: str, max_tokens: int | None = None) -> list[dict] | None:
     """
@@ -265,7 +285,15 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
             max_tokens=max_tokens,
         )
         raw1 = extract_message_text(resp1.choices[0].message)
-        drafts = _extract_json_array(raw1)
+        # 先尝试解析、失败才判拒答——DAN 类越狱模板的 prompt 内容常含"永不说
+        # 我无法协助"这类话术，解析成功时不得因文本命中拒答特征而误杀（顺序
+        # 反了会把合法产出判成拒答）。拒答是确定性失败：同 prompt 重试无意义。
+        try:
+            drafts = _extract_json_array(raw1)
+        except json.JSONDecodeError:
+            if _looks_like_refusal(raw1):
+                raise _DraftRefusalError(f"生成器拒答（前 60 字: {raw1[:60]!r}）") from None
+            raise
         if not (isinstance(drafts, list) and len(drafts) == len(harm_types)):
             raise _DraftMismatchError()
 
@@ -282,6 +310,10 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
             max_tokens=max_tokens,
         )
         raw2 = extract_message_text(resp2.choices[0].message)
+        if _looks_like_refusal(raw2):
+            # 审查轮拒答不重试：初稿已合规，直接采用
+            logger.warning("  ⚠ 审查轮拒答，使用初稿")
+            return drafts
         reviewed = _extract_json_array(raw2)
         if not (isinstance(reviewed, list) and len(reviewed) == len(harm_types)):
             # 审查返回异常则退回初稿
@@ -314,11 +346,14 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
             retries=API_MAX_RETRIES,
             delay=API_RETRY_DELAY,
             # H-7 对齐（judge/targets 已修，此处补齐生成侧）：4xx 确定性错误
-            # （认证/参数错）不重试——内容类失败（_DraftMismatchError/JSONDecodeError）
-            # 无 status_code 且非 AttributeError/TypeError，仍正常重试
-            retry_on=is_retryable_error,
+            # （认证/参数错）不重试；拒答同为确定性失败不重试——内容类失败
+            # （_DraftMismatchError/JSONDecodeError）无 status_code，仍正常重试
+            retry_on=lambda e: not isinstance(e, _DraftRefusalError) and is_retryable_error(e),
             on_retry=_on_retry,
         )
+    except _DraftRefusalError as e:
+        logger.warning(f"  ⛔ {e}——换生成端点或强化 SYSTEM_ROLE，不重试")
+        return None
     except Exception:
         return None
 
@@ -498,10 +533,16 @@ def main():
     logger.info(f"   成功: {success_count} 种方法")
     logger.info(f"   跳过: {skip_count} 种方法")
     logger.info(f"   失败: {fail_count} 种方法")
-    total_records = success_count * 5 + skip_count * 5
+    # 真实行数（断点续跑文件含历史方法；旧算法 success*5+skip*5 硬编码每方法 5 条，
+    # assign_harm_types 条数变化或历史文件存在时数字失真）
+    total_records = 0
+    if output_file.exists():
+        with open(output_file, encoding="utf-8") as fh:
+            total_records = sum(1 for line in fh if line.strip())
     logger.info(f"   输出: {total_records} 条记录 → {output_file}")
     logger.info("=" * 70)
+    return 1 if fail_count else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

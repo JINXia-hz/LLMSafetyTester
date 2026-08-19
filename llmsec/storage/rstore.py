@@ -322,17 +322,26 @@ def clone_from_run(run_name: str, dest: Path | str) -> dict:
             "（仅 global 源或含 state.json 的 run 可导出）"
         )
     state = read_json(state_path) or {}
-    model = read_json(run_dir / "runner_report.json") or {}
-    model = model.get("target_model")
+    report = read_json(run_dir / "runner_report.json") or {}
+    model = report.get("target_model")
+    history = state.get("history", [])
+    if not model and any(h.get("defender") is None for h in history):
+        # A-3：runner_report 缺失/损坏且 history 行无 defender 键——此前 def_ 恒
+        # None、所有行被 continue 静默跳过，save_matrix 写出空 R、fork/快照带着
+        # 空数据继续走（静默数据丢失）。与 state.json 缺失同等对待：显式失败。
+        raise ValueError(
+            f"run {run_name!r} 无 runner_report.json（target_model 不可得）且 "
+            "history 缺 defender 键，无法归属模型列——拒绝导出空 R。"
+            "（run 产物可能损坏；用 llmsec-manage runs list 检查该 run）")
     mat = ResultsMatrix()
-    for h in state.get("history", []):
+    for h in history:
         rec = h.get("record")
         def_ = h.get("defender") or model
         if not rec or not def_:
             continue
         mat.upsert(
             record=rec, model=def_,
-            eval_score=float(h.get("eval_score", 0.0)),
+            eval_score=float(h.get("eval_score") or 0.0),
             status=h.get("status", ""),
             ts=h.get("round"),
             extra={"unit": h.get("unit"), "round": h.get("round")},

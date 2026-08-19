@@ -46,7 +46,7 @@ graph LR
 └──────────────────────────────────────────────────────────┘
 ```
 
-边界规则：控制层对 llmsec 只走 CLI 子进程 + 读公开产物文件，不 import llmsec 业务代码。唯一例外是 `control/core/paths.py` 复用了 `llmsec.core.paths` 的路径安全原语（防目录穿越，两边必须同一套校验口径）。反方向反而更松：`llmsec/server/routers/control.py` 与 MCP 查询工具会进程内直接 import `control` 包。
+边界规则：控制层对 llmsec 只走 CLI 子进程 + 读公开产物文件，不 import llmsec 业务代码。唯一例外是 `control/core/paths.py` 复用了 `llmsec.core.paths` 的路径安全原语（防目录穿越，两边必须同一套校验口径）。反方向反而更松：`control/api.py`（由 dashboard_api 组合根挂载）与 MCP 查询工具会进程内直接 import `control` 包。
 
 ### llmsec/ 内部分层（按依赖方向，自底向上）
 
@@ -285,7 +285,7 @@ llmsec-manage runs list|delete ...      # run 历史与清理
 llmsec-manage cache list|clean ...      # 派生缓存占用与清理
 llmsec-manage snapshot export ...       # R 快照导出（控制层 fork 的握手点）
 llmsec-manage merge --sources ... --target global   # 显式合并进全局 R
-llmsec-manage thresholds                # 审查阈值导出（审查方与被审查方同源）
+# 审查阈值经 MCP get_thresholds 工具导出（审查方与被审查方同源，无独立 CLI 子命令）
 
 # 控制层
 python -m control workspace fork|list|delete|gc ...  # 隔离工作区
@@ -399,7 +399,7 @@ pytest tests/test_elo.py    # 单文件
 pytest -n auto              # 并行（CI 默认）
 ```
 
-约 1080 个测试（74 个文件；用例数清单由脚本生成于 [tests/INVENTORY.md](tests/INVENTORY.md)，CI 强制校验一致）按子系统组织（test_elo / test_predictors / test_samplers / test_clustering / test_management / test_mcp / test_dashboard / test_experiments / test_tui_* 及回归套件）；`real_api` / `e2e` marker 默认排除，需真实模型时手动触发。完整说明见 [tests/README.md](tests/README.md)。
+约 1145 个测试（76 个文件；用例数清单由脚本生成于 [tests/INVENTORY.md](tests/INVENTORY.md)，CI 强制校验一致）按子系统组织（test_elo / test_predictors / test_samplers / test_clustering / test_management / test_mcp / test_dashboard / test_experiments / test_tui_* 及回归套件）；`real_api` / `e2e` marker 默认排除，需真实模型时手动触发。完整说明见 [tests/README.md](tests/README.md)。
 
 ### 推荐读码路径
 
@@ -422,7 +422,7 @@ pytest -n auto              # 并行（CI 默认）
 | [docs/流程追踪报告.md](docs/流程追踪报告.md) | 一次 runner 从启动到退出的逐阶段追踪 |
 | [docs/实验框架说明.md](docs/实验框架说明.md) | HPO 实验框架 |
 | [docs/攻击特征与聚类深度研究报告.md](docs/攻击特征与聚类深度研究报告.md) | 特征体系与聚类管线调研 |
-| [docs/数据结构.md](docs/数据结构.md) | 数据结构权威参考（统一库 15 表 + 文件产物） |
+| [docs/数据结构.md](docs/数据结构.md) | 数据结构权威参考（统一库 16 表 + 文件产物） |
 | [docs/攻击集导入.md](docs/攻击集导入.md) | 外部攻击集对接：契约字段 / import 通道 / 体检要求 / 避坑清单 |
 
 ---

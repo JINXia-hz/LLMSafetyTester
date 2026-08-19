@@ -286,3 +286,136 @@ class TestUnblockBusBroadcast:
                            json={"plan_id": plan.id, "step_id": "s1"})
         assert r.status_code == 404
         assert self._feed_kinds("step_unblocked") == []
+
+
+# ============================================================
+# P1-6 回归：执行期放行封驳不再静默丢失（api 清内存票 + executor 收尾自动重入队）
+# ============================================================
+class TestExecutingStateApprove:
+    @pytest.fixture(autouse=True)
+    def _sandbox_bus_plan(self, monkeypatch, tmp_path):
+        import llmsec.core.config as cfg
+        state = tmp_path / "state"
+        state.mkdir()
+        monkeypatch.setattr(cfg, "CATALOG_DB", state / "catalog.db")
+        from control.agent import bus as bus_mod
+        from control.agent.menxia import block as block_mod
+        from control.agent.menxia import listener
+        from control.agent.shangshu import plan as plan_mod
+        plan_mod.reset_plans()
+        bus_mod.reset_bus()
+        block_mod.reset_blocks()
+        listener.reinit_menxia()
+        yield
+        plan_mod.reset_plans()
+        bus_mod.reset_bus()
+        block_mod.reset_blocks()
+        listener.reinit_menxia()
+
+    def test_executing_approve_clears_memory_ticket(self):
+        """executing 态放行：内存 Step.ticket 必须同步置空（executor 重试判据）。
+
+        修复前只清库票、不重入队、内存票残留——该步所在层已过永不重试，
+        终态后 404 门再挡住 done 态重入队，放行被静默吞掉。
+        """
+        from control.agent.menxia import block as block_mod
+        from control.agent.shangshu import load_plan
+        from control.agent.shangshu.plan import Plan, Step, save_plan
+
+        ticket = {"token": "tk1", "plan_id": "p1", "step_id": "s1"}
+        plan = Plan(intent="t", steps=[
+            Step(id="s1", capability="clean_cache", args={}, status="blocked", ticket=ticket),
+        ], status="executing")
+        save_plan(plan)
+        block_mod.issue_block(plan.id, "s1", "clean_cache", "medium",
+                              {"summary": "a", "detail": "d"})
+
+        r = _client().post("/api/control/plan/block/approve",
+                           json={"plan_id": plan.id, "step_id": "s1"})
+        assert r.status_code == 200
+        assert r.json()["requeued"] is False, "executing 态由 executor 收尾重入队，api 不直接 submit"
+
+        p2 = load_plan(plan.id)
+        assert p2.steps[0].ticket is None, "内存票必须同步置空（否则 executor 永不重试）"
+        assert p2.steps[0].status == "blocked"
+
+    def test_done_approve_keeps_other_blocked_steps_blocked(self):
+        """done 态放行 s1：s2 的封驳令与其 blocked 状态必须原样保留（E-2）。
+
+        旧实现把 s2 也重置 pending 却不清其库票据——重跑时门下省再发新令，
+        前端双计数、封驳卡重复渲染。
+        """
+        from control.agent.menxia import block as block_mod
+        from control.agent.shangshu import load_plan
+        from control.agent.shangshu.plan import Plan, Step, save_plan
+
+        t2 = {"token": "tk2", "plan_id": "p2", "step_id": "s2"}
+        plan = Plan(intent="t", steps=[
+            Step(id="s1", capability="clean_cache", args={}, status="blocked",
+                 ticket={"token": "tk1", "plan_id": "p2", "step_id": "s1"}),
+            Step(id="s2", capability="delete_runs", args={}, status="blocked", ticket=t2),
+        ], status="done")
+        save_plan(plan)
+        # 只为 s1 发库票（放行 s1 需要库行存在）
+        block_mod.issue_block(plan.id, "s1", "clean_cache", "medium",
+                              {"summary": "a", "detail": "d"})
+        submitted = []
+        import control.agent.shangshu.queue as queue_mod
+        monkey = pytest.MonkeyPatch()
+        monkey.setattr(queue_mod.PlanQueue, "submit",
+                       lambda self, pid: submitted.append(pid))
+        try:
+            r = _client().post("/api/control/plan/block/approve",
+                               json={"plan_id": plan.id, "step_id": "s1"})
+        finally:
+            monkey.undo()
+        assert r.status_code == 200 and r.json()["requeued"] is True
+        assert submitted == [plan.id], "done 态放行应重新入队"
+
+        p2 = load_plan(plan.id)
+        assert p2.steps[0].status == "pending" and p2.steps[0].ticket is None
+        assert p2.steps[1].status == "blocked" and p2.steps[1].ticket == t2, \
+            "未放行的封驳步骤必须保持原状（含内存票）"
+
+    def test_executor_finalize_auto_requeues_in_flight_approval(self, monkeypatch):
+        """执行期放行竞态：executor 收尾检测 blocked+ticket-None 自动重入队（不终结为 done）。"""
+        from control.agent import bus as bus_mod
+        from control.agent.bus import KIND_STEP_BLOCKED
+        from control.agent.shangshu import plan as plan_mod
+        from control.agent.shangshu.executor import execute_plan
+        from control.agent.shangshu.plan import Plan, Step, save_plan
+
+        plan = Plan(intent="t", steps=[
+            Step(id="s1", capability="list_runs", args={}),   # low risk，正常放行执行
+            Step(id="s2", capability="delete_runs", args={}, depends_on=["s1"]),
+        ], status="approved")
+        save_plan(plan)
+
+        # 门下省对 s2 封驳（sync 回复）；同时模拟用户在执行期立刻放行 s2：
+        # 订阅 step_blocked 的回调同步清内存票（复现 api 放行的竞态注入点）
+        def fake_menxia_reply(msg):
+            if msg.payload.get("step_id") == "s2" and msg.kind == "step_start":
+                return {"plan_id": msg.plan_id, "step_id": "s2",
+                        "ticket": {"token": "tk9", "plan_id": msg.plan_id, "step_id": "s2"}}
+            return None
+        bus_mod.get_bus().subscribe(bus_mod.MENXIA, ["step_start"], fake_menxia_reply)
+
+        def user_approves_immediately(msg):
+            if msg.kind == KIND_STEP_BLOCKED:
+                p = plan_mod.load_plan(msg.plan_id)
+                for s in p.steps:
+                    if s.id == msg.payload.get("step_id") and s.status == "blocked":
+                        s.ticket = None
+        bus_mod.get_bus().subscribe(bus_mod.SHANGSHU, [KIND_STEP_BLOCKED], user_approves_immediately)
+
+        submitted = []
+        import control.agent.shangshu.queue as queue_mod
+        monkeypatch.setattr(queue_mod.PlanQueue, "submit",
+                            lambda self, pid: submitted.append(pid))
+
+        result = execute_plan(plan.id)
+
+        assert result.status == "approved", "收尾检测到执行期放行的步骤必须重入队而非终结"
+        assert submitted == [plan.id], "应自动重新提交执行队列"
+        s2 = [s for s in result.steps if s.id == "s2"][0]
+        assert s2.status == "pending" and s2.ticket is None, "放行步骤应已重置待重跑"

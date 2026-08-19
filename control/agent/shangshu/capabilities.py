@@ -50,6 +50,24 @@ class Capability:
 # ============================================================
 # handler 实现
 # ============================================================
+def _validate_param_overrides(overrides: dict) -> None:
+    """param_overrides 键必须是 llmsec.params 的合法参数名。
+
+    LLM 拟案常把 DEFAULT_BATCH_SIZE 写成 BATCH_SIZE——此前静默注入
+    LLMSEC_PARAM_BATCH_SIZE 被 params.py 判未出名忽略，步骤"成功"但参数
+    没生效（实测：尚书省拟案 param_overrides={"BATCH_SIZE": 2} 全程无报错）。
+    计划期硬校验让步骤带可读错误失败，而不是静默白跑。
+    """
+    from llmsec.params import param_names
+
+    valid = param_names()
+    bad = sorted(str(k) for k in overrides if str(k) not in valid)
+    if bad:
+        raise ValueError(
+            f"param_overrides 含未知参数名 {bad}（合法名见 llmsec/params.py；"
+            f"常见误写：BATCH_SIZE → DEFAULT_BATCH_SIZE、MAX_ROUNDS → DEFAULT_MAX_ROUNDS）")
+
+
 def _h_run_evaluation(args: dict) -> dict:
     """跑一次评估。经 invoker.run_runner 起 runner（work-dir 隔离）。"""
     from control.config import OUTPUT_DIR, WORKSPACES_DIR
@@ -78,6 +96,7 @@ def _h_run_evaluation(args: dict) -> dict:
         env_override = env_snapshot.load_env_dict(snap)
 
     if args.get("param_overrides"):
+        _validate_param_overrides(args["param_overrides"])
         env_override = dict(env_override or {})
         for k, v in args["param_overrides"].items():
             env_override[f"LLMSEC_PARAM_{k}"] = str(v)
@@ -401,7 +420,7 @@ def _build() -> list[Capability]:
                 "properties": {
                     "target": {"type": "string", "description": "目标模型名（与 targets 二选一）"},
                     "targets": {"type": "array", "items": {"type": "string"}, "description": "多目标（与 target 二选一）"},
-                    "input_file": {"type": "string", "description": "攻击集文件", "default": "attacks/l1.jsonl"},
+                    "input_file": {"type": "string", "description": "攻击集文件（裸文件名自动锚定到 attacks/ 目录；也接受带 attacks/ 前缀或绝对路径）", "default": "attacks/l1.jsonl"},
                     "max_rounds": {"type": "integer", "description": "自适应最大轮数", "default": 5},
                     "phase": {"type": "string", "enum": ["all", "1", "2"], "description": "评估阶段", "default": "all"},
                     "seed": {"type": "integer", "description": "随机种子（可复现）"},

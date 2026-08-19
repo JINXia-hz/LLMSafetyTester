@@ -108,8 +108,22 @@ class StudyConfig:
         except (TypeError, ValueError):
             raise ValueError(
                 f"study 配置 budget.trial_timeout_minutes 非法：{raw_tt!r}（需为数字分钟数）") from None
+        # name 直接拼进 output/experiments/<name>/（study_dir）落到文件系统，是所有
+        # 入口（看板路由 / 手写 yaml / MCP）的汇聚点——看板路由只校验 yaml 文件名，
+        # yaml 内容里的 name 原样进本类，故必须在此自防（D-1：../pwn 或绝对路径
+        # 均可在 experiments/ 之外建目录写 manifest/trial/summary）。
+        name = str(d["name"]).strip()
+        if not name:
+            raise ValueError("study 配置 name 不能为空")
+        from llmsec.core.config import OUTPUT_DIR
+        from llmsec.core.paths import safe_component
+        try:
+            safe_component(OUTPUT_DIR / "experiments", name)
+        except ValueError:
+            raise ValueError(
+                f"study 配置 name 非法（须为不含路径分隔符的单段名称）: {name!r}") from None
         return cls(
-            name=d["name"],
+            name=name,
             objective=ObjectiveSpec.from_dict(d.get("objective")),
             budget_max_trials=int(budget.get("max_trials", 30)),
             strategy=d.get("strategy", "bayesian"),

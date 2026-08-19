@@ -26,9 +26,8 @@ _SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2, "good": 3}
 
 
 # ============================================================
-# 阈值获取：经 invoker 调 llmsec-manage thresholds
+# 阈值获取：直读 llmsec.params 单一来源（P5）
 # ============================================================
-# r9/P3-5：TTLCache 统一实现（llmsec 侧改阈值后本进程最多滞后 5 分钟，
 def get_thresholds() -> dict:
     """审查阈值（P5：直读 llmsec.params 单一来源——原"subprocess CLI + TTL 缓存
     + fallback 复制体"机器删除；control 直 import llmsec 共享层已有

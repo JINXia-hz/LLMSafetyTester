@@ -96,8 +96,11 @@ class TestCliResume:
             {"id": "w-1", "method": "m", "prompt": "p1", "harm_type": "fraud"},
         ]) + "\n", encoding="utf-8")
         out = tmp_path / "q.json"
+        from llmsec.attacks.quality import quality_key
+        k0 = quality_key({"id": "w-0", "prompt": "p0"})
+        k1 = quality_key({"id": "w-1", "prompt": "p1"})
         out.write_text(json.dumps({"meta": {}, "scores": {
-            "w-0": {"method_fidelity": 3, "harm_substance": 3, "construction": 3,
+            k0: {"method_fidelity": 3, "harm_substance": 3, "construction": 3,
                     "overall": 3.0, "tags": []},
         }}), encoding="utf-8")
 
@@ -105,7 +108,7 @@ class TestCliResume:
 
         def fake_score(client, model, recs, **kw):
             assert [r["id"] for r in recs] == ["w-1"]  # 只评未缓存者
-            return {"w-1": {"method_fidelity": 4, "harm_substance": 4,
+            return {k1: {"method_fidelity": 4, "harm_substance": 4,
                             "construction": 4, "overall": 4.0, "tags": ["mild_harm"]}}
 
         monkeypatch.setattr(q, "score_records", fake_score)
@@ -115,7 +118,7 @@ class TestCliResume:
                                 "model": "m"})()))
         assert q.main(["--out", str(out)]) == 0
         data = json.loads(out.read_text(encoding="utf-8"))
-        assert set(data["scores"]) == {"w-0", "w-1"}  # 合并保留缓存
+        assert set(data["scores"]) == {k0, k1}  # 合并保留缓存（键 = id+prompt 指纹）
         assert data["meta"]["partial"] is False and data["meta"]["weak_count"] == 0
 
     def test_all_cached_noop(self, tmp_path, monkeypatch, caplog):
@@ -126,8 +129,10 @@ class TestCliResume:
         (cleaned / "wildjailbreak.jsonl").write_text(
             json.dumps({"id": "w-0", "method": "m", "prompt": "p"}) + "\n", encoding="utf-8")
         out = tmp_path / "q.json"
+        from llmsec.attacks.quality import quality_key
         out.write_text(json.dumps({"meta": {}, "scores": {
-            "w-0": {"overall": 5.0, "tags": []}}}), encoding="utf-8")
+            quality_key({"id": "w-0", "prompt": "p"}): {"overall": 5.0, "tags": []}}}),
+            encoding="utf-8")
         monkeypatch.setattr("llmsec.core.config.ATTACKS_DIR", tmp_path)
 
         def _boom(*a, **kw):

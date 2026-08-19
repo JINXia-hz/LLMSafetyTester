@@ -36,6 +36,7 @@ from control.agent.shangshu.plan import (
     P_APPROVED,
     P_DONE,
     P_EXECUTING,
+    P_REJECTED,
     S_BLOCKED,
     S_DONE,
     S_FAILED,
@@ -64,6 +65,15 @@ def execute_plan(
             return plan
         raise RuntimeError(f"Plan 状态不允许执行: {plan.status}（需 {P_APPROVED}）")
 
+    # E-6 崩溃恢复：上次执行中途被杀的步骤停在 S_RUNNING——单 worker 串行语义
+    # 下 execute_plan 入口不可能有真正"正在跑"的步骤（重入只发生在崩溃/恢复），
+    # 复位为 pending 重跑；已 done 的步骤保持（跳过不重复消耗 API）
+    crashed = [s for s in plan.steps if s.status == S_RUNNING]
+    if crashed:
+        for s in crashed:
+            s.status = S_PENDING
+            s.error = None
+
     plan.status = P_EXECUTING
     plan.started = time.time()
     plan_mod.save_plan(plan)
@@ -76,6 +86,24 @@ def execute_plan(
     # 拓扑分层执行
     layers = plan.topological_layers()
     for layer in layers:
+        # E-5：用户驳回必须能中止执行——executor 与 api.reject_plan 共享同一内存
+        # Plan 对象（_PLANS 缓存），此前层循环不看状态，驳回后剩余层照跑、跑完还
+        # 把状态覆写回 P_DONE，用户裁决被静默推翻。层间检查驳回即停（层内线程粒度
+        # 不追——单层耗时以分钟计的评估步骤无法安全中断，层边界是实用粒度）。
+        if plan.status == P_REJECTED:
+            stats = {}
+            for x in plan.steps:
+                stats[x.status] = stats.get(x.status, 0) + 1
+            gazette.append_event(plan.id, gazette.EV_PLAN_FINISHED, SHANGSHU,
+                                 session_id=plan.session_id, intent=plan.intent,
+                                 detail={"aborted": True,
+                                         "reason": "用户驳回，剩余层不再执行",
+                                         "step_stats": stats})
+            notify_routed(KIND_PLAN_PROGRESS, from_dept=SHANGSHU,
+                          plan_id=plan.id, intent=plan.intent, session_id=plan.session_id,
+                          status=plan.status,
+                          steps=[{"id": s.id, "status": s.status} for s in plan.steps])
+            return plan
         for s in layer:
             if s.status == S_BLOCKED and s.ticket is None:
                 s.status = S_PENDING  # 门下省已放行，重试
@@ -104,6 +132,27 @@ def execute_plan(
         _propagate_blockage(plan)
         plan_mod.save_plan(plan)
         _notify_progress(plan, on_progress)
+
+    # P1-6：执行期放行的步骤（库票已清、内存 ticket 已由 api 同步清除、状态仍
+    # blocked）不得随 Plan 一起终结——其所在层已过、executor 不再回头重试，
+    # 终态后 404 门又挡住 done 态重入队，放行会被静默吞掉。收尾时检测到即
+    # 重置并重新入队（与用户在 done 后补点放行的路径等价，走同一共享入口）。
+    requeued_ids = plan_mod.requeue_unblocked_steps(plan)
+    if requeued_ids:
+        plan.status = P_APPROVED
+        plan_mod.save_plan(plan)
+        gazette.append_event(plan.id, gazette.EV_PLAN_REQUEUED, SHANGSHU,
+                             session_id=plan.session_id, intent=plan.intent,
+                             detail={"steps": requeued_ids,
+                                     "reason": "执行期放行的封驳步骤自动重入队"})
+        notify_routed(KIND_PLAN_PROGRESS, from_dept=SHANGSHU,
+                      plan_id=plan.id, intent=plan.intent, session_id=plan.session_id,
+                      status=plan.status,
+                      steps=[{"id": s.id, "status": s.status} for s in plan.steps])
+        # 惰性导入防环（queue worker 调 execute_plan，反向引用在运行期才建立）
+        from control.agent.shangshu import get_queue
+        get_queue().submit(plan.id)
+        return plan
 
     # 全部完成
     plan.status = P_DONE

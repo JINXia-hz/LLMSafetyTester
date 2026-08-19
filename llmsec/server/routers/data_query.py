@@ -9,11 +9,11 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from llmsec.core import config as _config  # 重绑常量调期动态读
 from llmsec.core.caches import SigCache
-from llmsec.core.config import ATTACKS_DIR, OUTPUT_DIR
+from llmsec.core.config import ATTACKS_DIR
 from llmsec.core.io import read_json
 from llmsec.core.logging import get_logger
 
@@ -560,7 +560,11 @@ async def api_clusters(run: str | None = None):
     # 无快照回退全局最近产物（旧 run 行为不变）
     report = load_json(run_dir / "cluster_report.json") if run_dir else {}
     if not report:
-        report = load_json(OUTPUT_DIR / "cluster_report.json")
+        # A-6：2026-08 storage 重构后唯一写入口径是 output/cluster/cluster_report.json
+        # （_config.CLUSTER_REPORT_FILE）；旧根目录位置的残留文件会以"最近产物"
+        # 之名被读进看板，展示过期聚类视图。动态读 _config 以兼容 work-dir 重绑。
+        import llmsec.core.config as _config
+        report = load_json(_config.CLUSTER_REPORT_FILE)
 
     if not analysis and not report:
         return {"available": False, "reason": "no_cluster",
@@ -673,7 +677,10 @@ async def api_targets():
 
 
 class AddTargetRequest(BaseModel):
-    name: str
+    # D-7：name 直接进 TARGETS 逗号列表与 .env 键值——含 ,/"=/换行会拆错列表、
+    # 破坏 dotenv 解析，后续所有评估目标路由错配。与 EvaluateRequest.target
+    # 同一口径 ^[\w.\-:]+$
+    name: str = Field(pattern=r"^[\w.\-:]+$")
     model: str
     base_url: str
     api_key: str
@@ -697,9 +704,13 @@ def _env_quote(value: str) -> str:
 
     含空格/#/换行或为空时加双引号，否则裸写——不加引号的 `#` 会被 dotenv 当注释
     截断、空值会被当"未设置"。
+    D-7：内嵌双引号/反斜杠须转义——否则加引号后 dotenv 按首个未转义 " 截断、
+    键值对结构损坏（pydantic 层已拒非法 name，此处兜其余键的任意值）。
     """
     value = value.strip()
-    if any(c in value for c in (" ", "#", "\n")) or not value:
+    if '"' in value or "\\" in value:
+        value = value.replace("\\", "\\\\").replace('"', '\\"')
+    if any(c in value for c in (" ", "#", "\n")) or not value or '"' in value:
         return f'"{value}"'
     return value
 

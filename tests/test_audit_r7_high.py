@@ -131,3 +131,32 @@ def test_approve_plan_notifies_menxia(tmp_path, monkeypatch):
 
     assert got, ("准奏通知必须广播到门下省订阅——修复前 to_dept=SHANGSHU 与 "
                  "bus 过滤 to_dept in (dept, ALL) 永不相交，准奏风险评估整段静默失效")
+
+
+# ============================================================
+# P0 回归：--publish-global 分支 declared 重绑 set 崩溃（09a1007 引入）
+# ============================================================
+
+def test_publish_global_branch_publishes_declared_targets(tmp_path, monkeypatch):
+    """--publish-global：守卫放行的目标必须真的 publish 进全局 R。
+
+    修复前 publish 分支把 declared（dict）重绑为 set，随后 declared[name].model
+    在 publish 循环与汇总日志两处下标访问必 TypeError——看板/MCP 默认评估通路
+    （launch.py publish_global=True）全部以失败告终，全局 R 一条都写不进。
+    """
+    rn, fixed_run, base_argv, deps = _offline_runner_env(tmp_path, monkeypatch)
+
+    published = []
+    monkeypatch.setattr(rn, "publish_tracker", lambda tr, d: published.append(d))
+    # t1 声明进 .env 目标集 → 防注入守卫放行（覆盖 declared[name].model 下标路径；
+    # 即便守卫全跳过，汇总日志的 declared[name].model 同样会崩）
+    import llmsec.core.config as cfg
+    monkeypatch.setattr(cfg, "load_targets",
+                        lambda: {"t1": NS(model="t1-model", api_key="k",
+                                          base_url="http://t1")})
+
+    rn.main(base_argv[1:] + ["--publish-global"], deps=deps)
+
+    assert published == ["t1-model"], (
+        "守卫放行目标必须经 publish_tracker 写入——修复前此路径在写入前即 "
+        "TypeError: 'set' object is not subscriptable（runner.py:627/651）")

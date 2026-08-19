@@ -913,11 +913,14 @@ def test_api_targets_add_appends_block(monkeypatch, tmp_path):
     assert os.environ.get('TARGET_2_NAME') == 'new-t', '进程内 env 同步'
     assert (tmp_path / "output" / ".env.bak").exists() or True  # output 备份尽力而为
 
-    # 重名 / 空 name 各 400
+    # 重名 400（端点判定）；非法 name（空/含逗号引号等）由 pydantic pattern
+    # 前置拒绝 422（D-7：name 进 TARGETS 逗号列表与 .env，非法字符会破坏解析）
     assert client.post('/api/targets/add', json={
         'name': 't1', 'model': 'm', 'base_url': 'http://x', 'api_key': 'k'}).status_code == 400
     assert client.post('/api/targets/add', json={
-        'name': ' ', 'model': 'm', 'base_url': 'http://x', 'api_key': 'k'}).status_code == 400
+        'name': ' ', 'model': 'm', 'base_url': 'http://x', 'api_key': 'k'}).status_code == 422
+    assert client.post('/api/targets/add', json={
+        'name': 'a,b', 'model': 'm', 'base_url': 'http://x', 'api_key': 'k'}).status_code == 422
 
     # .env 不存在时自动新建
     env_path.unlink()

@@ -54,7 +54,7 @@ class Run(SQLModel, table=True):
     has_md: bool = False
     has_tree: bool = False
     has_cluster: bool = False
-    has_artifact: bool = False   # RUN_ARTIFACTS 九种产物任一存在（management 发现口径）
+    has_artifact: bool = False   # RUN_ARTIFACTS 八种产物任一存在（management 发现口径）
     size: int | None = None
     metrics: dict | None = Field(default=None, sa_column=Column(JSON))
 

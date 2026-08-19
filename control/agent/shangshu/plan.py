@@ -142,6 +142,37 @@ def load_plan(plan_id: str) -> Plan | None:
     return _from_dict(d)
 
 
+def requeue_unblocked_steps(plan: Plan) -> list[str]:
+    """把"已放行（ticket 已清）但状态仍 blocked"的步骤及其被跳过的后续步骤重置为 pending。
+
+    P1-6 共享入口（api 放行 / executor 收尾自动重入队都走这里）：
+      - 只有明确放行的步骤会重跑；其他仍持有效封驳令的步骤保持 blocked
+        等待各自的圣裁——不再整体重置（旧实现把其他 blocked 步骤一并重置，
+        其库中票据未清，重跑时门下省再发新令，前端双计数，E-2）。
+      - 被重置步骤的 skipped 后续也恢复 pending；若其还依赖另一个仍 blocked
+        的步骤，executor 的 _propagate_blockage 会在下一轮重新 skip（自愈）。
+    返回重置的 step id 列表（空 = 无需重置）。
+    """
+    unblocked = [s for s in plan.steps if s.status == S_BLOCKED and s.ticket is None]
+    if not unblocked:
+        return []
+    ids: set[str] = set()
+    for s in unblocked:
+        s.status = S_PENDING
+        s.error = None
+        ids.add(s.id)
+    changed = True
+    while changed:
+        changed = False
+        for s in plan.steps:
+            if s.status == S_SKIPPED and any(d in ids for d in s.depends_on):
+                s.status = S_PENDING
+                s.error = None
+                ids.add(s.id)
+                changed = True
+    return sorted(ids)
+
+
 def _from_dict(d: dict) -> Plan:
     """从库行 payload 重建 Plan 对象。"""
     plan = Plan(

@@ -278,34 +278,22 @@ def api_block_approve(req: BlockApproveRequest):
     gazette.append_event(req.plan_id, gazette.EV_STEP_UNBLOCKED, "用户",
                          step_id=req.step_id,
                          detail={"capability": "放行重试"})
-    # 检查是否需要重新入队
+    # 同步内存票：clear_block 只清库行，内存 Step.ticket 必须一并置空——
+    # executor 的重试/重入队判据恰是 ticket is None（P1-6：此前 executing 态
+    # 放行只清库不重入队、内存票残留导致永不重试，步骤被静默吞掉）
+    from control.agent.shangshu.plan import requeue_unblocked_steps
     plan = load_plan(req.plan_id)
+    if plan is not None:
+        for s in plan.steps:
+            if s.id == req.step_id and s.status == "blocked":
+                s.ticket = None
     requeued = False
     if plan and plan.status == "done":
-        # 放行的步骤 + 因它被跳过的后续步骤都要重置
-        unblocked_sids = set()
-        for s in plan.steps:
-            if s.id == req.step_id:
-                s.status = "pending"
-                s.ticket = None
-                unblocked_sids.add(s.id)
-        # 因依赖被放行步骤而 skipped 的也要重置
-        changed = True
-        while changed:
-            changed = False
-            for s in plan.steps:
-                if s.status == "skipped" and any(d in unblocked_sids for d in s.depends_on):
-                    s.status = "pending"
-                    unblocked_sids.add(s.id)
-                    changed = True
-        # 其他 blocked 步骤（未被放行的）也重置为 pending（它们的 ticket 可能已过时）
-        for s in plan.steps:
-            if s.status == "blocked":
-                s.status = "pending"
-                s.ticket = None
-                unblocked_sids.add(s.id)
-        has_pending = any(s.status == "pending" for s in plan.steps)
-        if has_pending:
+        # 已终结的 Plan：立即重置放行步骤（及被它连坐 skipped 的后续）并重新
+        # 入队。仍持有效封驳令的其他步骤保持 blocked 等各自圣裁——不再整体
+        # 重置（旧实现不清它们的库票据，重跑时门下省再发新令、前端双计数，E-2）
+        requeued_ids = requeue_unblocked_steps(plan)
+        if requeued_ids:
             plan.status = "approved"
             from control.agent.shangshu import save_plan
             save_plan(plan)

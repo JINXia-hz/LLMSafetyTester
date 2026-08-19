@@ -118,7 +118,8 @@ class TestPlanQueue:
 
     def test_restart_recovers_queued_plans(self, tmp_path, monkeypatch):
         """P9/B2 重启恢复：ctl_queue 的 queued 行在新 PlanQueue 构造时回填
-        （此前只写不读，重启即静默丢队列）。running 不回填（无重入语义）。"""
+        （此前只写不读，重启即静默丢队列）。E-6：崩溃遗留的 running 行也重置回
+        queued 一并恢复（executor 按 step.status 跳过已 done 步骤，重跑代价可控）。"""
         import threading
 
         from control.agent.shangshu.queue import PlanQueue
@@ -135,7 +136,10 @@ class TestPlanQueue:
         enqueue_plan("plan-b")
         mark_queue_running("plan-a")   # 崩溃时在跑
         enqueue_plan("plan-c")
-        assert pending_queue_plans() == ["plan-b", "plan-c"]
+        # E-6：running 行回收为 queued，按入队序（plan-a 先入队故排最前）
+        assert pending_queue_plans() == ["plan-a", "plan-b", "plan-c"]
+        # 回收后行状态已重置（幂等再读仍是三行 queued）
+        assert pending_queue_plans() == ["plan-a", "plan-b", "plan-c"]
 
         # fake_execute 阻塞到断言完成——worker 构造即开始消费恢复的队列，
         # 直接读 q._queue 会与 popleft 竞态；按 status() 终态判定
@@ -150,11 +154,12 @@ class TestPlanQueue:
         deadline = time.time() + 5
         while time.time() < deadline:
             st = q.status()
-            if st["running"] == "plan-b" and st["queued"] == ["plan-c"]:
+            # E-6：plan-a（崩溃遗留 running）回收后按入队序最先执行
+            if st["running"] == "plan-a" and st["queued"] == ["plan-b", "plan-c"]:
                 break
             time.sleep(0.05)
         else:
-            raise AssertionError(f"恢复失败：{q.status()}（queued 行未回填或 running 误回填）")
+            raise AssertionError(f"恢复失败：{q.status()}（queued/崩溃 running 行应全部回填）")
 
         released.set()
         time.sleep(0.3)  # 放行 worker 排空退出

@@ -4,7 +4,7 @@
 背景：体检显示 ~14k 条外部记录 harm_type="other"（占比 66%），危害维度
 分析不可用。本工具先按 source 分层抽样（默认 500 条）让 LLM 按 prompt
 语义归入六类+other，产物是**独立的抽样报告**（relabel_sample.json），
-不写回数据文件——人工抽检质量后再决定是否全量重标。
+默认不写回数据文件——人工抽检质量后可用 --apply <REPORT> 回写（确认后仍有 --retry-other 兜底）。
 
 用法：
   python -m llmsec.attacks.relabel --dry-run          # 只抽样不调 API（看样本构成）

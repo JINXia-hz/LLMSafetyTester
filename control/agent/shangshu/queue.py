@@ -110,9 +110,12 @@ class PlanQueue:
                         return
                 plan_id = self._queue.popleft()
                 self._running = plan_id
+                # E-6：锁内同步标记 running——popleft 与落库之间崩溃会让行留
+                # queued，重启整 Plan 重跑（含已执行层，重复消耗 API）
+                from control.core.storage import mark_queue_running
+                mark_queue_running(plan_id)
 
-            from control.core.storage import finish_queue_item, mark_queue_running
-            mark_queue_running(plan_id)
+            from control.core.storage import finish_queue_item
             try:
                 execute_plan(plan_id)
             except Exception as e:

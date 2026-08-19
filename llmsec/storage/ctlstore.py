@@ -259,15 +259,25 @@ def finish_queue_item(plan_id: str) -> None:
 
 
 def pending_queue_plans() -> list[str]:
-    """重启恢复读侧：queued 状态的 plan（按入队序）。PlanQueue 构造时回填。
+    """重启恢复读侧：queued + 崩溃遗留的 running（重置回 queued，按入队序）。
 
-    running 状态不回填——worker 崩溃时该 Plan 的执行已不可续（executor 的
-    步骤进度在 ctl_events 里，无重入语义），恢复为排队重跑比静默丢失好。
+    E-6：此前只回填 queued——worker 崩溃/进程被杀时 running 行永久搁浅，
+    Plan 卡在 executing、其封驳令成孤儿。恢复为排队重跑：executor 按
+    step.status 跳过已 done 步骤、复位僵死 running 步骤（execute_plan 入口），
+    重跑代价可控。单进程部署假设下启动时回收 running 行是安全的（此刻本
+    进程尚无 worker 在跑）。
     """
-    with _db.session() as s:
-        rows = s.exec(_select(CtlQueueItem).where(CtlQueueItem.status == "queued")
+    with _db.tx() as s:
+        rows = s.exec(_select(CtlQueueItem)
+                      .where(CtlQueueItem.status.in_(["queued", "running"]))
                       .order_by(CtlQueueItem.queued_at)).all()
-        return [r.plan_id for r in rows]
+        ids = []
+        for r in rows:
+            if r.status == "running":
+                r.status = "queued"
+                s.add(r)
+            ids.append(r.plan_id)
+        return ids
 
 
 def reset_queue() -> None:

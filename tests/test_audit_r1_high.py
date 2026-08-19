@@ -519,3 +519,55 @@ def test_h14_render_compare_columns():
     assert "gemma" in text, "H14: target_model 列未渲染目标名"
     assert "vulnerable" in text, "H14: security_level 列未渲染等级"
     assert "1480" in text, "H14: boundary_elo 列未渲染 ELO"
+
+
+# ============================================================
+# P1-2 回归：security_tree 必须用本 run 的 live tracker，不再从全局 R 派生
+# ============================================================
+def test_build_tree_uses_passed_tracker_not_global_r(monkeypatch, tmp_path):
+    """runner 路径传入 tracker 时，边界/置信度必须来自该 tracker。
+
+    修复前 build_tree 恒走 _load_elo_tracker（全局 R 派生）：报告生成时本 run
+    观测尚未 publish → work-dir 卫星库为空 → 边界恒 1500/置信 0/inconclusive，
+    与 runner_report（live tracker 口径）系统性矛盾。
+    """
+    import llmsec.reporting.report as rep
+
+    class _LiveTracker:
+        attacker_ratings = {"u1": 1700.0}
+        defender_ratings = {"def-live": 1521.7}
+
+        def compute_security_boundary(self, defender=None, *a, **k):
+            assert defender == "def-live", "必须把 defender 名传给边界计算"
+            return {"confidence": 0.98, "boundary_elo": 1521.7}
+
+        def find_surprises(self, min_elo_gap=0):
+            return {"weakness": [], "strength": []}
+
+    # 全局 R 派生路径若被误用立即炸（证明走的是传入 tracker）
+    def _boom():
+        raise AssertionError("不得从全局 R 派生（P1-2 修复前行为）")
+    monkeypatch.setattr(rep, "_load_elo_tracker", _boom)
+
+    results = [{"method": f"m{i}", "is_harmful": False, "harm_type": "t", "category": "c"}
+               for i in range(10)]
+    method_stats = rep.build_method_stats(results, {}, {})
+    tree = rep.build_tree(method_stats, {"fpr": 0.0},
+                          tracker=_LiveTracker(), defender="def-live")
+
+    assert tree["overall"]["elo_boundary"] == 1521.7
+    assert tree["overall"]["elo_confidence"] == 0.98
+
+
+def test_build_method_stats_asr_includes_eval_score_fallback():
+    """C-10：is_harmful=False 但 eval_score>0 的行计入 ASR（与 attack_phase 同口径）。"""
+    import llmsec.reporting.report as rep
+
+    results = [
+        {"method": "m1", "is_harmful": True, "eval_score": 3.0, "harm_type": "t", "category": "c"},
+        {"method": "m1", "is_harmful": False, "eval_score": 1.5, "harm_type": "t", "category": "c"},
+        {"method": "m1", "is_harmful": False, "eval_score": -2.0, "harm_type": "t", "category": "c"},
+    ]
+    stats = rep.build_method_stats(results, {}, {})
+    assert stats["m1"]["harmful"] == 2, "eval_score>0 兜底必须生效（C-10）"
+    assert stats["m1"]["asr"] == 0.6667, f"ASR 应为 2/3 四舍五入（C-10），实得 {stats['m1']['asr']}"

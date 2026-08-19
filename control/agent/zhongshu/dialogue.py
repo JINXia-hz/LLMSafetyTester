@@ -259,8 +259,9 @@ def _react_loop(user_text: str, messages: list[dict], session_id: str,
 
         if not msg.tool_calls:
             turn.reply = msg.content or "(臣无以作答)"
+            # E-4：append_message 与 append（内部即再调 append_message）双写同一条
+            # assistant 回复——每轮历史膨胀一倍、上下文重复发言。只写一次。
             sess.append_message(session_id, {"role": "assistant", "content": turn.reply})
-            sess.append(session_id, "assistant", turn.reply)
             return turn
 
         sess.append_message(session_id, {
@@ -327,8 +328,8 @@ def _react_loop(user_text: str, messages: list[dict], session_id: str,
     final_messages = messages + [{"role": "user", "content": "请基于已有信息总结回复。"}]
     resp = chat_with_tools(final_messages, tools=None)
     turn.reply = resp.choices[0].message.content or "(臣无以作答)"
+    # E-4：同上，只写一次
     sess.append_message(session_id, {"role": "assistant", "content": turn.reply})
-    sess.append(session_id, "assistant", turn.reply)
     return turn
 
 

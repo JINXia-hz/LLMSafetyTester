@@ -76,7 +76,7 @@ SCORE_PERF_TAU = 2.0       # 连续成绩映射 perf = score/(score+τ)；τ = �
 #       score=1→0.33, 2→0.50, 3→0.60, 5→0.71，单调有界饱和。
 K_DEF_DECAY_N0 = 10        # 防御方 K 衰减尺度：K_def = K / sqrt(max(1, n_def/N0))
 # 解释：防御方每场必上，累计场次越多其评级越稳。前 N0 场为"暖机期"（K_def=K 不衰减），
-#       之后开始衰减：n=10→32（暖机末）, n=40→16, n=90→10.7。
+#       之后开始衰减（示例按现行 K_FACTOR=16）：n=10→16（暖机末）, n=40→8, n=90→5.3。
 # Model B（同步轮次）：n_def 按轮累积（每轮 +batch_size），K_def 取轮始值整轮一致；
 #       防御方聚合步长额外除以 √N（update_round），消"N×全K 求和"过冲。
 #       蒙特卡洛权威数字（elo.py 注释引用此处）：逐场更新（历史 Model A，已移除）误差 ~102，√N 缩放后 ~13。
@@ -287,6 +287,16 @@ SIM_MATH_ACCURACY = 0.55       # 模拟模型数学题基础正确率（随 harm
 # 因 params 在所有消费方（elo/runner/...）import 之前先完成自身初始化，此处覆盖
 # 会在消费方 `from llmsec.params import NAME` 绑定时即生效——构成 HPO 的参数注入点。
 # 支持类型推断：bool/int/float/str；非法值忽略并警告。
+def param_names() -> frozenset[str]:
+    """全部可被 LLMSEC_PARAM_<NAME> 覆盖的参数名。
+
+    供计划期校验消费（control 层 capabilities 把 LLM 拟案的 param_overrides
+    注入子进程前先比对——此前拼错名（如 BATCH_SIZE）静默被忽略，步骤"成功"
+    但参数没生效）。isupper() 天然滤掉模块级小写导入名。
+    """
+    return frozenset(k for k in globals() if k.isupper() and not k.startswith("_"))
+
+
 def _apply_env_overrides() -> None:
     import os
 
@@ -328,8 +338,6 @@ def _apply_env_overrides() -> None:
             logger.warning("LLMSEC_PARAM_%s=%r 转换为 %s 失败，保留默认值",
                            name, raw, type(old).__name__)
 
-
-_apply_env_overrides()
 
 # ============================================================
 # 10. 采样器清单（r7 单源）
@@ -373,5 +381,15 @@ ATTACK_QUALITY_HIGH = 3.5
 # 意义——一次成功/失败都可能是抖动）。
 RECTIFY_LOW_ASR_MAX = 0.2
 RECTIFY_MIN_TESTS = 2
+
+
+# ============================================================
+# env 覆盖入口——必须在文件末尾调用（P1 修复）
+# ============================================================
+# 此前调用点在 §9 末尾，导致其后定义的 §10-§13 常量（SAMPLERS/PREVIEW_*/
+# ATTACK_*/RECTIFY_*）在覆盖发生时尚不存在：LLMSEC_PARAM_<NAME> 命中
+# "不是合法参数名"被静默忽略，HPO 对这些旋钮调参等于白跑。函数按
+# globals() 逐名查找，调用点后移到全部常量定义之后即可覆盖全量参数。
+_apply_env_overrides()
 
 

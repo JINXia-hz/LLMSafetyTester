@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -36,6 +37,12 @@ TASKS: dict[str, dict] = {}
 # TASKS 上限：新任务入列时淘汰最旧的终态任务（running 不淘汰）
 _TASKS_MAX = 64
 _TERMINAL_STATUSES = ("success", "failed", "cancelled")
+# D-10：终态迁移竞态锁——cancel（asyncio.to_thread 可并发多个）与 SSE 轮询里的
+# _refresh_task_status 可同时通过"仍非终态"检查、双 _finish（终态互相覆盖 +
+# _advance_queue 双跑）。查重放进锁内，后到者 no-op。
+# 必须用 RLock：_finish → _advance_queue → _spawn 失败路径会**同线程**再调
+# _finish（排队链可多级递归）——非重入 Lock 在此处自死锁（实测全量测试挂起）。
+_TRANSITION_LOCK = threading.RLock()
 
 # 僵尸任务检测：running 超 N 分钟无 progress 产出则告警（不自动杀，避免误杀慢任务）
 _ZOMBIE_MINUTES = float(os.getenv("LLMSEC_ZOMBIE_MINUTES", "60") or "60")
@@ -178,11 +185,15 @@ def _finish(t, status: str, *, returncode: int | None = None) -> None:
     统一入口后"离开 running/queued 即推进"成为结构保证。调用方先完成自己的
     清理（终止进程、关日志句柄）再调本函数。
     """
-    t["status"] = status
-    if returncode is not None:
-        t["returncode"] = returncode
-    _persist_task(t, t.get("_task_id", ""))
-    _advance_queue(t["kind"])
+    with _TRANSITION_LOCK:
+        if t["status"] in _TERMINAL_STATUSES:
+            return False  # D-10：并发迁移竞争，先到者已定终态
+        t["status"] = status
+        if returncode is not None:
+            t["returncode"] = returncode
+        _persist_task(t, t.get("_task_id", ""))
+        _advance_queue(t["kind"])
+        return True
 
 
 def _spawn(task_id: str, t: dict) -> None:

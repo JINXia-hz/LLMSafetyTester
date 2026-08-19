@@ -506,9 +506,17 @@ class ELOTracker(ConvergenceMixin):
         # 注意不含 ground_truth：本集合只统计未测方法，而未测方法的 source
         # 不可能是 ground_truth（实测转正时 source 已被清除）
         _RIGOROUS = {"svd_ridge", "blend", "unified_only", "model_only"}
+        # B-3：排除"目录占位"单位——派生 tracker（derive_elo）的未测单位只有
+        # unit_catalog 注入的初始 Elo、无任何预测来源，不是预测威胁；把它们计入
+        # predicted_above 会全部落进 heuristic 桶，下游看板据此系统性错报
+        # "模型预测威胁 0 可信"。（live tracker 的冷启动预测会记 source 或注入
+        # 非初始 Elo，不受影响；预测值恰好等于初始 Elo 且无 source 的边缘情形
+        # 一并视为占位——语义上它与占位不可区分）
+        def _placeholder(m, elo):
+            return not self.attacker_pred_source.get(m) and elo == float(self.initial)
         predicted_above = sum(
             1 for m, elo in self.attacker_ratings.items()
-            if m not in tested_set and elo > def_elo
+            if m not in tested_set and elo > def_elo and not _placeholder(m, elo)
         )
         predicted_above_rigorous = sum(
             1 for m, elo in self.attacker_ratings.items()

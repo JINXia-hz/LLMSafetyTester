@@ -58,17 +58,25 @@ def repair_mojibake(text: str) -> tuple[str, list[str]]:
     （前邻 ASCII 字母数字 → 右引号，其余 → em-dash）。操作列表元素为
     "mojibake_segment" / "marker_quote" / "marker_dash"，供 repaired 字段
     区分确定性修复与启发式补全。幂等：干净文本返回原文与空列表。
+
+    C-5 防误伤：段内须命中 ATTACK_MOJIBAKE_CHARS 特征字才进入逆解码。
+    仅凭"GBK 字节恰为合法 UTF-8"判定不够——GB2312 一级字库有 930 个字
+    （一/路/录/孝/楼…）的字节序列合法 UTF-8，孤立真中文段会被逆解码成
+    西里尔/希腊乱码（实测 jailbreakv28k-0869 的"孝"→"Т"，属数据损坏）。
+    真 mojibake 段（UTF-8 被按 GBK 显示）必然含特征字，特征门不漏判。
     """
+    from llmsec.params import ATTACK_MOJIBAKE_CHARS
+    sig = set(ATTACK_MOJIBAKE_CHARS)
     ops: list[str] = []
-    # 第 1 遍：分段逆解码
+    # 第 1 遍：分段逆解码（仅限命中乱码特征字的段）
     parts: list[str] = []
     for seg in _ASCII_RUN.split(text):
-        if seg and not seg.isascii():
+        if seg and not seg.isascii() and any(ch in sig for ch in seg):
             try:
                 parts.append(seg.encode("gbk").decode("utf-8"))
                 ops.append("mojibake_segment")
             except (UnicodeEncodeError, UnicodeDecodeError):
-                parts.append(seg)  # 真 UTF-8 中文段（数学税等）
+                parts.append(seg)  # 特征字是巧合（非 GBK 可编码段），保留原文
         else:
             parts.append(seg)
     text = "".join(parts)

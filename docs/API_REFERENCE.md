@@ -8,7 +8,7 @@ llmsec 通过 **三类接口** 对外暴露能力：
 | 接口类型 | 消费者 | 启动方式 | 文档章节 |
 |----------|--------|----------|----------|
 | MCP 工具库（54 工具） | 外部 Agent（ZCode / Cursor / Claude） | `llmsec-mcp` | [一](#一mcp-工具库) |
-| HTTP REST API（54 端点） | 人类（Web 看板 UI） / 脚本 | `uvicorn llmsec.server.dashboard_api:app` | [二](#二http-rest-api) |
+| HTTP REST API（43 API 端点 + 4 应用级路径） | 人类（Web 看板 UI） / 脚本 | `uvicorn llmsec.server.dashboard_api:app` | [二](#二http-rest-api) |
 | CLI（3 console script + 2 模块入口） | 脚本自动化 | `llmsec` / `llmsec-manage` / `python -m control` 等 | [三](#三cli-入口) |
 
 三套接口共享同一套底层能力（ELO 评估、R 矩阵、workspace fork/merge、子进程任务管理），但面向不同消费者。配置项统一从仓库根 `.env` 读取，参见 [四、配置参考](#四配置参考)。
@@ -583,7 +583,7 @@ uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
 
 ### 2.1 端点总览
 
-共 54 个端点，按 5 个 router 模块组织。所有 `APIRouter()` 无 prefix、无 tags，完整路径直接写在装饰器中。
+共 47 个路径（4 个应用级 + 43 个 API 端点），按 4 个 router 模块 + control 组织。所有 `APIRouter()` 无 prefix、无 tags，完整路径直接写在装饰器中。（审查清理：control 侧 fork-and-run / review / plan-queue / blocks / env-snapshots×3 共 8 个端点经全仓 grep 确认无调用方，已删除——下表若仍出现仅为历史记录）
 
 <details>
 <summary>完整端点一览表（点击展开）</summary>
@@ -622,7 +622,7 @@ uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
 | POST | `/api/run/hpo` | hpo | 启动 HPO study 任务 |
 | GET | `/api/control/workspaces` | control | 列出工作区 |
 | POST | `/api/control/fork` | control | fork 新工作区 |
-| POST | `/api/control/fork-and-run` | control | fork 并起 runner |
+~~| POST | `/api/control/fork-and-run` | control | 已删除（无调用方） |~~
 | DELETE | `/api/control/workspaces/{name}` | control | 删除工作区 |
 | POST | `/api/control/compare` | control | 对比 run |
 | POST | `/api/control/merge` | control | 合并 R 矩阵 |
@@ -631,18 +631,18 @@ uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
 | GET | `/api/control/capabilities` | control | 尚书省能力清单 |
 | POST | `/api/control/chat` | control | 中书省对话 |
 | POST | `/api/control/chat/reset` | control | 清空 session |
-| POST | `/api/control/review` | control | 门下省审查 run |
+~~| POST | `/api/control/review` | control | 已删除（无调用方） |~~
 | POST | `/api/control/plan/approve` | control | 准奏 Plan 并入队 |
 | POST | `/api/control/plan/reject` | control | 驳回 Plan |
 | POST | `/api/control/plan/block/approve` | control | 放行某步封驳 |
-| GET | `/api/control/plan/queue` | control | Plan 队列状态 |
+~~| GET | `/api/control/plan/queue` | control | 已删除（无调用方） |~~
 | GET | `/api/control/plan/{plan_id}/status` | control | 查 Plan 状态 |
 | GET | `/api/control/plans` | control | 列出最近 Plan |
 | GET | `/api/control/bus/feed` | control | 总线消息流（轮询） |
-| GET | `/api/control/blocks` | control | 待确认封驳列表 |
-| GET | `/api/control/env-snapshots` | control | 列出 .env 快照 |
-| POST | `/api/control/env-snapshots` | control | 创建 .env 快照 |
-| DELETE | `/api/control/env-snapshots/{name}` | control | 删除 .env 快照 |
+~~| GET | `/api/control/blocks` | control | 已删除（无调用方） |~~
+~~| GET | `/api/control/env-snapshots` | control | 已删除（无调用方） |~~
+~~| POST | `/api/control/env-snapshots` | control | 已删除（无调用方） |~~
+~~| DELETE | `/api/control/env-snapshots/{name}` | control | 已删除（无调用方） |~~
 
 </details>
 
@@ -800,7 +800,7 @@ uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
 |------|--------|------|
 | `GET /api/control/workspaces` | — | 列出所有 fork 工作区 |
 | `POST /api/control/fork` | `ForkRequest` | fork 新工作区 |
-| `POST /api/control/fork-and-run` | `ForkRunRequest` | fork 后异步起 runner（后台子进程任务） |
+~~`POST /api/control/fork-and-run`~~（已删除） | — | 无调用方，随审查清理删除 |
 | `DELETE /api/control/workspaces/{name}` | — | 删除工作区（不存在→404） |
 
 **`ForkRequest`**：`name`(必填)、`source`(默认 `"global"`)、`note`(默认 `""`)。
@@ -826,7 +826,7 @@ uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
 | `GET /api/control/capabilities` | — | 尚书省完整能力清单 |
 | `POST /api/control/chat` | `ChatRequest` | 中书省对话（简单自处理，复杂转尚书省拟案） |
 | `POST /api/control/chat/reset` | `ResetRequest` | 清空 session 历史 |
-| `POST /api/control/review` | `ReviewRequest` | 门下省审查 run |
+~~`POST /api/control/review`~~（已删除） | — | 无调用方，随审查清理删除 |
 
 **`ChatRequest`**：`text`(str, 必填)、`session_id`(str \| None)。
 **`ResetRequest`**：`session_id`。
@@ -839,7 +839,7 @@ uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
 | `POST /api/control/plan/approve` | `PlanApproveRequest` | 准奏 Plan → 提交执行队列（异步） |
 | `POST /api/control/plan/reject` | `PlanRejectRequest` | 驳回 Plan（同时清封驳） |
 | `POST /api/control/plan/block/approve` | `BlockApproveRequest` | 放行某步封驳 |
-| `GET /api/control/plan/queue` | — | 查执行队列状态 |
+~~`GET /api/control/plan/queue`~~（已删除） | — | 无调用方，随审查清理删除 |
 | `GET /api/control/plan/{plan_id}/status` | path: `plan_id` | 查 Plan 状态（不存在→404） |
 | `GET /api/control/plans` | — | 列出最近 Plan |
 
@@ -852,10 +852,10 @@ uvicorn llmsec.server.dashboard_api:app --host 127.0.0.1 --port 8080
 | 端点 | 参数 | 说明 |
 |------|------|------|
 | `GET /api/control/bus/feed` | query: `since`(float), `dept` | 总线消息流（前端轮询补全） |
-| `GET /api/control/blocks` | — | 当前待确认封驳列表 |
-| `GET /api/control/env-snapshots` | — | 列出 .env 快照 |
-| `POST /api/control/env-snapshots` | `EnvSnapshotCreateRequest` | 创建 .env 快照 |
-| `DELETE /api/control/env-snapshots/{name}` | path: `name` | 删除 .env 快照（不存在→404） |
+~~`GET /api/control/blocks`~~（已删除） | — | 无调用方，随审查清理删除 |
+~~`GET /api/control/env-snapshots`~~（已删除） | — | 无调用方，随审查清理删除 |
+~~`POST /api/control/env-snapshots`~~（已删除） | — | 无调用方，随审查清理删除 |
+~~`DELETE /api/control/env-snapshots/{name}`~~（已删除） | — | 无调用方，随审查清理删除 |
 
 **`EnvSnapshotCreateRequest`**：`name`(必填)、`source`(默认 `"global"`)、`note`(默认 `""`)。
 

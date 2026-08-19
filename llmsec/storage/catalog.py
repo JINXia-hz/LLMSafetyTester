@@ -199,11 +199,17 @@ def allocate_runs_dir(base_dir: Path, name: str) -> Path:
     base_dir = Path(base_dir)
     candidate = base_dir / name
     suffix = 2
-    while candidate.exists():
-        candidate = base_dir / f"{name}_{suffix}"
-        suffix += 1
-    candidate.mkdir(parents=True, exist_ok=True)
-    return candidate
+    while True:
+        try:
+            # A-4：mkdir 本身做独占判定（exist_ok=False）——exists() 检查与 mkdir
+            # 之间的窗口里，另一进程（看板同秒起两个评估任务）可抢先建同名目录，
+            # 双方都"成功"收敛到同一 candidate 互写产物。FileExistsError 即撞名
+            # 事实，换下一个后缀重试（与原语义一致，只是判定原子化了）。
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            candidate = base_dir / f"{name}_{suffix}"
+            suffix += 1
 
 
 def reconcile_runs(runs_root: Path | str | None = None, *, db_path=None, include_empty: bool = False) -> dict:

@@ -199,7 +199,7 @@ The control layer treats llmsec as an independent work unit via subprocess, **ne
 
 **Three-Province Architecture** (`control/agent/`):
 - **Secretariat** (`zhongshu.py`): Dialogue front, understands intent and judges complexity, handles simple queries, delegates complex instructions via `request_shangshu_plan`
-- **Department of State** (`shangshu/`): `planner.py` drafts structured Plan → user approves → `executor.py` executes topologically in parallel layers; 16 capabilities (run_evaluation / fork_workspace / create_env_snapshot / merge_results, etc.)
+- **Department of State** (`shangshu/`): `planner.py` drafts structured Plan → user approves → `executor.py` executes topologically in parallel layers; 17 capabilities (run_evaluation / fork_workspace / create_env_snapshot / merge_results, etc.)
 - **Chancellery** (`menxia.py`): Bus subscriber, blocks dangerous steps by risk_level, auto-reviews on plan_done; `.env` snapshots (`env_snapshot.py`) isolate connection config
 
 **.env Snapshots** (`output/env_snapshots/`): Independent resource — create/edit/merge/delete. Run experiments with isolated model lists / judge / params without touching global `.env`.

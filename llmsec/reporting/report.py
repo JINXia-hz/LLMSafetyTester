@@ -243,9 +243,13 @@ def build_method_stats(results: list[dict], elo_ratings: dict,
         by_method[r.get("unit") or r.get("method", "unknown")].append(r)
 
     method_stats = {}
+    from llmsec.evaluation.scoring import count_successful
     for method, items in by_method.items():
         n = len(items)
-        harmful = [r for r in items if r.get("is_harmful")]
+        # C-10：与 attack_phase 汇总 / assess.fuse 同一 ASR 口径（is_harmful 或
+        # eval_score>0）——此前这里只看 is_harmful，security_tree.overall.asr
+        # 可与 runner_report.attack_phase.asr 不一致
+        harmful = [r for r in items if count_successful(r)]
         asr = len(harmful) / n if n > 0 else 0
         taxes = [r["jailbreak_tax"] for r in harmful if r.get("jailbreak_tax") is not None]
         mean_tax = sum(taxes) / len(taxes) if taxes else None
@@ -314,13 +318,20 @@ def _load_elo_tracker() -> ELOTracker | None:
 
 
 def build_tree(method_stats: dict[str, dict], allergy_data: dict,
-               tax_info: dict | None = None) -> dict:
+               tax_info: dict | None = None, *,
+               tracker: "ELOTracker | None" = None,
+               defender: str | None = None) -> dict:
     """
     构建多维树形安全画像。
 
     tax_info: 可选，runner 的越狱税聚合块（含 baseline 对比），
               透传进 overall.jailbreak_tax 供报告/前端展示。
-    （r7：ELO 边界恒从 R 矩阵派生，旧的 elo_ratings/output_dir 参数已删。）
+    tracker/defender（P1-2）：runner 路径必须传本 run 的 live tracker——
+              此前恒从全局 R 派生（active_model 取"最新活跃模型"），而报告生成时
+              本 run 观测尚未 publish：work-dir 卫星库为空 → 边界恒 1500/置信 0/
+              inconclusive；全局模式则读到**上一次别的 run** 的模型——
+              security_tree 与 runner_report（live tracker 口径）系统性矛盾。
+              独立 CLI 兜底（无 tracker 时）才走 _load_elo_tracker。
 
     返回:
     {
@@ -343,14 +354,20 @@ def build_tree(method_stats: dict[str, dict], allergy_data: dict,
     total_harmful = sum(m["harmful"] for m in methods)
     overall_asr = total_harmful / total_tests if total_tests > 0 else 0
 
-    # ELO 边界：直接加载 ELO 状态文件，用 ELOTracker 真实 API 计算
-    # （旧代码在此试图手工重建 tracker.ratings/history，访问的是不存在的属性，
-    #   属无效死代码——即使能跑，没有防御方评分也算不出边界）
+    # ELO 边界：runner 路径用传入的 live tracker（本 run 数据）；独立 CLI 无
+    # tracker 时从 R 派生兜底
     boundary = {}
     surprises = {"weakness": [], "strength": []}
-    tracker = _load_elo_tracker()
+    if tracker is None:
+        tracker = _load_elo_tracker()
     if tracker is not None and (tracker.attacker_ratings or tracker.defender_ratings):
-        boundary = tracker.compute_security_boundary()
+        try:
+            boundary = (tracker.compute_security_boundary(defender)
+                        if defender else tracker.compute_security_boundary())
+        except ValueError:
+            # 多防御方且未指名（独立 CLI 派生的 tracker 可能含多列，B-15）：
+            # 边界留空 → 下游按置信度 0 判 inconclusive，不崩报告
+            boundary = {}
         surprises = tracker.find_surprises(min_elo_gap=0)
 
     # 将意外事件聚合到方法级

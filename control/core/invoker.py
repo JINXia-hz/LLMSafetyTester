@@ -147,6 +147,23 @@ def clean_caches(categories: list[str]) -> dict:
     return res.json or {}
 
 
+def _anchor_input_file(input_file: str) -> str:
+    """裸文件名锚定到 LLMSEC_REPO/attacks/（与 server/launch.py 同一口径）。
+
+    runner 把相对 --input 锚 PROJECT_ROOT（仓库根）：用户自然语言/LLM 拟案常给
+    裸文件名（"audit_small.jsonl"），原样透传必报"攻击集不存在"（P1-7）。
+    launch 层早已做 attacks/ 归一化，控制层此前漏做。已带路径/绝对路径且存在则
+    原样；都不存在也原样透传，交给 runner 报缺文件错误（保持既有错误语义）。
+    """
+    p = Path(input_file)
+    if p.is_absolute():
+        return input_file
+    for cand in (LLMSEC_REPO / input_file, LLMSEC_REPO / "attacks" / input_file):
+        if cand.exists():
+            return cand.as_posix()
+    return input_file
+
+
 def run_runner(
     work_dir: Path,
     *,
@@ -169,7 +186,7 @@ def run_runner(
     argv = [
         PYTHON, "-m", "llmsec.pipeline.runner",
         "--work-dir", str(work_dir),
-        "--input", input_file,
+        "--input", _anchor_input_file(input_file),
         "--max-rounds", str(max_rounds),
         "--phase", phase,
         "--no-early-stop",  # work-dir 模式 runner 会强制，显式传便于阅读

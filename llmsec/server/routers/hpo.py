@@ -130,9 +130,11 @@ async def api_run_hpo(req: HpoRequest):
         safe_name = safe_component(OUTPUT_DIR / "experiments", req.name.strip()).name
     except ValueError as e:
         raise HTTPException(400, f"study 名非法: {e}")
-    # 构造 StudyConfig 兼容的 dict（schema.StudyConfig.from_dict 解析）
+    # 构造 StudyConfig 兼容的 dict（schema.StudyConfig.from_dict 解析）。
+    # name 用已过 safe_component 校验的 safe_name——原始 req.name 带穿越串时
+    # 虽过不了文件名校验，但纵深防御要求 yaml 内容与文件名同源
     cfg_dict = {
-        "name": req.name.strip(),
+        "name": safe_name,
         "objective": {"metric": req.objective.metric, "direction": req.objective.direction,
                       "aggregate": req.objective.aggregate},
         "strategy": req.strategy,

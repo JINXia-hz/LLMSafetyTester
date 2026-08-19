@@ -651,3 +651,35 @@ class TestEnvBackupRetention:
         es._prune_env_backups(keep=5)
 
         assert keep2.exists() and decoy_dir.exists(), "不足 5 份时不得删除任何东西"
+
+
+# ============================================================
+# P1-7 回归：invoker 输入锚定 + param_overrides 参数名校验
+# ============================================================
+class TestP17InputAnchorAndParamValidation:
+    def test_anchor_bare_filename_to_attacks(self, monkeypatch, tmp_path):
+        """裸文件名必须锚定到 LLMSEC_REPO/attacks/（修复前原样透传必报"攻击集不存在"）。"""
+        from control.core import invoker
+        (tmp_path / "attacks").mkdir()
+        (tmp_path / "attacks" / "l1.jsonl").write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(invoker, "LLMSEC_REPO", tmp_path)
+
+        anchored = invoker._anchor_input_file("l1.jsonl")
+        assert anchored.replace("\\", "/").endswith("attacks/l1.jsonl"), anchored
+
+        # 已带前缀的既有值原样（posix 归一）
+        assert invoker._anchor_input_file("attacks/l1.jsonl").replace("\\", "/").endswith("attacks/l1.jsonl")
+        # 不存在的裸名保持透传（交给 runner 报缺文件错误，保持既有语义）
+        assert invoker._anchor_input_file("ghost.jsonl") == "ghost.jsonl"
+
+    def test_param_overrides_unknown_name_rejected(self):
+        """LLM 拟案写 BATCH_SIZE（正名 DEFAULT_BATCH_SIZE）必须在计划期报错。"""
+        import pytest
+
+        from control.agent.shangshu.capabilities import _validate_param_overrides
+
+        with pytest.raises(ValueError, match="BATCH_SIZE"):
+            _validate_param_overrides({"BATCH_SIZE": 2})
+
+        # 合法名放行
+        _validate_param_overrides({"DEFAULT_BATCH_SIZE": 2, "K_FACTOR": 8})
