@@ -9,7 +9,7 @@
   3. 每步执行后文牍记 step_succeeded/failed，notify 推进度。
   4. 全部完成文牍记 plan_finished + notify(plan_done) → 门下省自动审查。
 
-文牍：每个事件 append 到 output/gazette/<plan_id>.jsonl，持久化完整执行历史。
+文牍：事件 append 到目录库 ctl_events 表（append-only，经 gazette 单事务写入），持久化完整执行历史。
 总线：用 notify_routed() 按路由表发布，带 plan_id/intent/session_id 公共信封。
 """
 
