@@ -1,17 +1,19 @@
 # 测试清单（自动生成，勿手改）
 
-> 由 `scripts/gen_test_inventory.py` 生成于 2026-08-18T15:48:23；
+> 由 `scripts/gen_test_inventory.py` 生成于 2026-08-19T10:47:44；
 > CI 会校验本文件与实际收集结果一致（`--check`），过期即失败。
 > 本地刷新：`python scripts/gen_test_inventory.py`。
 
-合计 **74** 个文件 / **1079** 个用例（含 parametrize 展开；
+合计 **76** 个文件 / **1106** 个用例（含 parametrize 展开；
 含默认排除的 real_api/e2e 用例——它们需手动 `pytest -m real_api` / `-m e2e` 触发）。
 
 | 测试文件 | 用例数 |
 |---|---|
 | tests/test_allergy.py | 8 |
+| tests/test_attacks_assess.py | 9 |
 | tests/test_attacks_clean.py | 15 |
-| tests/test_attacks_relabel.py | 8 |
+| tests/test_attacks_quality.py | 10 |
+| tests/test_attacks_relabel.py | 16 |
 | tests/test_attacks_schema.py | 19 |
 | tests/test_audit_r1_high.py | 17 |
 | tests/test_audit_r2_control.py | 12 |

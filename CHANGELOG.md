@@ -27,6 +27,12 @@
   三空间 id 冲突检测 → `attacks/imported/<source>.jsonl`；dry-run 默认。
   配套 `docs/攻击集导入.md`（契约字段表 / 避坑清单）——外部产物走通道即合规，
   不要求交出生成代码
+- 攻击有效性评估（V1/V2/V3）：静态质量评估器（`python -m llmsec.attacks.quality`，
+  方法贯彻度/危害实质性/构造质量三维锚定量表 + 问题标签，缓存于
+  `attack_quality.json` 支持续跑）+ 融合层（`python -m llmsec.attacks.assess <run_dir>`，
+  低 ASR × 低质量 = 假防御嫌疑——修正安全边界的解释层，不重算 Elo）+
+  `generate_reports` 自动挂接（产出 `attack_validity.json` / `attack_rectification.md`
+  整改需求报告并并入 runner_report）
 
 ### 修复
 
