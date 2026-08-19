@@ -46,11 +46,9 @@ def run_trial(
     config: {factor_name: value}（搜索值 ∪ fixed），含 input/target/max_rounds 等。
     trial_timeout_minutes: 单 trial 超时；超时杀子进程、status="timeout"（防慢/挂 trial 阻塞 study）。
     """
-    # input 路径归一化（无分隔符 → 补 attacks/），统一用于 argv 与 manifest
     config = dict(config)
-    inp = config.get("input")
-    if inp and "/" not in str(inp) and "\\" not in str(inp):
-        config["input"] = f"attacks/{inp}"
+    # input 归一化在 study 层完成（D-26/R11：此处重复实现是防御性死代码——
+    # run_trial 仅被 study 调用且入参已归一；裸调方走 launch/invoker 各自归一）
 
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)

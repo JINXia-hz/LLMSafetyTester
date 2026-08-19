@@ -126,6 +126,13 @@ def _get_executor():
             from concurrent.futures import ThreadPoolExecutor
 
             _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="alert-webhook")
+            # A-28：非守护 worker 从不 shutdown——最后一个 webhook 在途时进程退出
+            # 会被拖住至多 ~10s（timeout）。atexit 尽力而为地放弃等待。
+            import atexit
+
+            def _shutdown_executor(_ex=_executor):
+                _ex.shutdown(wait=False)
+            atexit.register(_shutdown_executor)
     return _executor
 
 

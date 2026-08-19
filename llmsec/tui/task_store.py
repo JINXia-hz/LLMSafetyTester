@@ -89,10 +89,40 @@ def _pid_alive(pid: int | None) -> bool:
         return False
 
 
+def _pid_image_is_python(pid: int) -> bool:
+    """PID 身份核验（F-6）：该 PID 当前映像是 Python 解释器才允许强杀。
+
+    Windows PID 复用积极——持有进程早已退出、PID 被无关进程（编辑器/终端）
+    复用时，盲目 taskkill /T 会连无辜进程树强杀。本项目任务进程全部是
+    python 子进程（sys.executable -m ...），映像名前缀不匹配即拒绝；探测
+    失败同样拒绝（fail-safe）。字节比较避开 tasklist 的控制台编码差异。
+    posix 无廉价等价探测且 PID 复用窗口远小，维持原行为。
+    """
+    if sys.platform != "win32":
+        return True
+    import subprocess as _sp
+
+    try:
+        r = _sp.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                    capture_output=True, timeout=10)
+        line = r.stdout.splitlines()[0] if r.stdout else b""
+        # CSV 形如 "python.exe","1234",...（无匹配时是信息行，不以 "python 开头）
+        return line.lower().startswith(b'"python')
+    except Exception:
+        return False
+
+
 def _kill_pid(pid: int) -> bool:
-    """跨进程强杀（win32 taskkill /T 连子进程树一起；posix SIGTERM 宽限后 SIGKILL）。"""
+    """跨进程强杀（win32 taskkill /T 连子进程树一起；posix SIGTERM 宽限后 SIGKILL）。
+
+    F-6：杀前核验映像身份——PID 复用后指向无关进程时拒绝（返回 False），
+    宁可不杀不可误杀（/T 连子树，误杀代价高）。
+    """
     if sys.platform == "win32":
         import subprocess
+
+        if not _pid_image_is_python(pid):
+            return False
 
         # 不做文本解码：taskkill 在中文 Windows 输出 GBK，UTF-8 环境下解码会抛错；
         # 这里只关心 returncode。

@@ -33,6 +33,20 @@ def setup_console() -> None:
                 reconfigure(encoding="utf-8", errors="replace")
 
 
+def _make_file_handler(path):
+    """构造统一的滚动文件 handler（R8：get_logger 初始化与 rebind_log_file
+    两处逐字重复的构造参数单源——maxBytes/backupCount 只在这一处定义）。"""
+    from logging.handlers import RotatingFileHandler
+    from pathlib import Path
+
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    fh = RotatingFileHandler(
+        path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
+    fh.setFormatter(logging.Formatter(_FORMAT, datefmt=_DATEFMT))
+    return fh
+
+
 def get_logger(name: str) -> logging.Logger:
     """
     获取统一格式的 logger。
@@ -51,7 +65,6 @@ def get_logger(name: str) -> logging.Logger:
         with _init_lock:
             if not _root_configured:
                 import os
-                from logging.handlers import RotatingFileHandler
 
                 formatter = logging.Formatter(_FORMAT, datefmt=_DATEFMT)
                 root = logging.getLogger("llmsec")
@@ -74,14 +87,7 @@ def get_logger(name: str) -> logging.Logger:
                         log_file = ""
                 if log_file:
                     try:
-                        from pathlib import Path
-
-                        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
-                        file_handler = RotatingFileHandler(
-                            log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
-                        )
-                        file_handler.setFormatter(formatter)
-                        root.addHandler(file_handler)
+                        root.addHandler(_make_file_handler(log_file))
                     except Exception:
                         # 落盘失败不阻断控制台日志（只输出 stderr 警告）
                         import sys
@@ -102,7 +108,6 @@ def rebind_log_file(new_path) -> None:
     """
     import logging
     from logging.handlers import RotatingFileHandler
-    from pathlib import Path
 
     # A-9 附注：rebind 若先于任何 get_logger 调用发生（isolation 在构造函数
     # import 期执行时可能），root 尚未配置 level/propagate——先强制完成初始化，
@@ -115,13 +120,7 @@ def rebind_log_file(new_path) -> None:
             h.close()
             root.removeHandler(h)
     try:
-        new_path = Path(new_path)
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-        fh = RotatingFileHandler(
-            new_path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
-        )
-        fh.setFormatter(logging.Formatter(_FORMAT, datefmt=_DATEFMT))
-        root.addHandler(fh)
+        root.addHandler(_make_file_handler(new_path))
     except Exception:
         import sys
 

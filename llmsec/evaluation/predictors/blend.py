@@ -331,7 +331,9 @@ class BlendPredictor:
         # R 内容指纹：每模型列的 (method, score, ts)——M-37 复用 ResultsMatrix.column_payload
         parts = []
         for model in sorted(results.all_models()):
-            payload = results.column_payload(model) or ""
+            # B-10：extra_fields 带 round——publish 侧缓存键（elo_access:37）含
+            # round，此处漏带时"仅 round 字段变化"的两列指纹相同，缓存错误复用
+            payload = results.column_payload(model, extra_fields=("round",)) or ""
             parts.append(f"{model}={payload}")
         r_fp = hashlib.md5(("|".join(parts)).encode("utf-8")).hexdigest()
         cat_fp = hashlib.md5(",".join(method_catalog).encode("utf-8")).hexdigest()
@@ -350,7 +352,10 @@ class BlendPredictor:
             probe_fp = "noprobes"
         # v2：EloPredictorModel 新增 no_signal 属性，旧缓存反序列化后 predict 会
         # AttributeError——键加版本盐让旧 pkl 静默 miss 重训，不加 getattr 兜底
-        return f"blend_v2_{r_fp[:12]}_{cat_fp[:8]}_{feat_fp[:8]}_{probe_fp}"
+        # B-10：BLEND_PRIOR_K 进键——HPO env 调参改收缩权重时旧缓存必须失效
+        #（与 M-8 的 sampler 参数失效同类病根）
+        from llmsec.params import BLEND_PRIOR_K
+        return f"blend_v2_{r_fp[:12]}_{cat_fp[:8]}_{feat_fp[:8]}_{probe_fp}_pk{BLEND_PRIOR_K}"
 
     def save(self, path) -> None:
         save_artifact(path, {

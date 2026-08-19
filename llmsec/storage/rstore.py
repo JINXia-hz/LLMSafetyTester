@@ -98,10 +98,19 @@ def _as_db_path(path: Path | str | None) -> Path:
     return Path(path) if path is not None else results_db()
 
 
+# A-13：quick_check 是整库扫描——load_matrix 高频调用（publish 每模型一次、
+# safe_twin._asr_from_results 裸调等），每次全检纯开销。进程内按路径记忆
+# "已检通过"，同一库只检一次（重启/换库/work-dir 卫星库各自独立首次校验）。
+_quick_check_ok: set[str] = set()
+
+
 def _quick_check(dbp: Path) -> None:
     """SQLite 完整性快检（替代 .bak/.corrupt.bak 机器）。损坏抛 RuntimeError。"""
     # timeout=5：写锁竞争时等待而非立刻 OperationalError——否则锁竞争会被
     # 误报成"库损坏"
+    key = str(dbp)
+    if key in _quick_check_ok:
+        return
     conn = _sqlite3.connect(str(dbp), timeout=5.0)
     try:
         try:
@@ -111,6 +120,7 @@ def _quick_check(dbp: Path) -> None:
             raise RuntimeError(f"R 库完整性校验失败: {dbp}: {e}") from e
         if row and row[0] != "ok":
             raise RuntimeError(f"R 库完整性校验失败: {dbp}: {row[0]}")
+        _quick_check_ok.add(key)
     finally:
         conn.close()
 

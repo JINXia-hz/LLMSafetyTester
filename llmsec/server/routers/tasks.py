@@ -313,6 +313,7 @@ async def api_task_stream(task_id: str):
     async def event_gen():
         offset = 0
         buffer = ""  # D-6：跨读次的残行缓冲（字节 offset 前进、文本留在缓冲拼接）
+        deadline = asyncio.get_event_loop().time() + 7200  # D-6 残项：流总生命周期 2h
         # 连接初始上下文：回放射全部已有进度行（每轮/每 trial 一行，量小）
         if progress_path.exists():
             try:
@@ -351,6 +352,19 @@ async def api_task_stream(task_id: str):
                     offset = size
                     buffer = ""
             status, returncode = _current_status()
+            now = asyncio.get_event_loop().time()
+            # D-6 残项：无总上限时任务对象若永不过渡，流永不关闭（连接泄漏）
+            if now > deadline:
+                yield (
+                    "event: done\ndata: "
+                    + json.dumps(
+                        {"status": "stream_timeout", "returncode": None,
+                         "note": "SSE 流达 2h 上限关闭（任务仍可能在跑，重连继续）"},
+                        ensure_ascii=False,
+                    )
+                    + "\n\n"
+                )
+                return
             # queued 也是活跃态（排队中尚未 spawn）：只有终态才发 done 关流。
             # 旧版 `!= "running"` 会让排队任务一连流就收到 done。
             if status not in ("running", "queued"):
@@ -391,6 +405,9 @@ async def upload_attack_set(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="无效文件名")
 
     content = await file.read()
+    # D-23：大小上限——整文件读内存前先拒（默认 64MB，覆盖万级攻击集 jsonl）
+    if len(content) > 64 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="文件超过 64MB 上限")
     if not content.strip():
         raise HTTPException(status_code=400, detail="文件为空")
 

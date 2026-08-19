@@ -199,7 +199,16 @@ def _finish(t, status: str, *, returncode: int | None = None) -> None:
 def _spawn(task_id: str, t: dict) -> None:
     """启动已入队任务的子进程（打开日志、Popen、置 running）。Popen 失败置 failed。"""
     _config.TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_file = open(t["log_path"], "w", encoding="utf-8")
+    try:
+        log_file = open(t["log_path"], "w", encoding="utf-8")
+    except OSError as e:
+        # D-36：open 在 try 外——磁盘满/非法路径时 OSError 直接从 _spawn 抛到
+        # start_task 成 500，且不走 _finish（同 kind 队列搁浅）。与 Popen 失败
+        # 同分支：置 failed + 推进队列。
+        t["returncode"] = -1
+        t["error"] = f"任务日志文件打开失败: {e}"
+        _finish(t, "failed")
+        return
     try:
         env = os.environ.copy()
         env["LLMSEC_TASK_ID"] = task_id
