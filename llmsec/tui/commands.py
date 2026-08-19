@@ -180,7 +180,7 @@ _COMMANDS: tuple[Command, ...] = (
     # ---- / 特制 ----
     Command(
         "/agent",
-        "宣政殿对话（自然语言 / JSON 指令；无参看引擎 help）",
+        "宣政殿对话模式（无参=开关；带文本=进入并发送；自然语言自动进入）",
         args=(Arg("text", variadic=True, required=False),),
         slash=True,
     ),
@@ -245,6 +245,45 @@ def weak_matches(word: str, candidates: Iterable[str], n: int = 4) -> list[str]:
     """宽松候选（did-you-mean 列表用）。"""
     cands = [c for c in candidates if c.lower() != word.lower()]
     return difflib.get_close_matches(word.lower(), [c.lower() for c in cands], n=n, cutoff=0.6)
+
+
+# ============================================================
+# 自然语言判定（agent 模式自动进入）
+# ============================================================
+
+
+def _has_cjk(text: str) -> bool:
+    return any(
+        "\u4e00" <= ch <= "\u9fff"  # 汉字
+        or "\u3000" <= ch <= "\u303f"  # 中文标点（，。？！…）
+        or "\uff00" <= ch <= "\uffef"  # 全角形式（！？，（）)
+        for ch in text
+    )
+
+
+def looks_natural(line: str) -> bool:
+    """输入是否明显是自然语言（→ 自动进入 /agent 对话）而非打错的命令。
+
+    判据（任一命中即自然语言）：
+      - 含汉字 / 中文标点 / 全角字符（中文提问必然命中）；
+      - 含半角问号（英文提问）；
+      - 多词且首词与命令动词既无强纠错也无弱匹配（不像拼错的命令）。
+    单个未知 ASCII 词（如手滑的 "asdf"）不算——保留 did-you-mean 纠错路径。
+    """
+    if not line:
+        return False
+    if _has_cjk(line) or "?" in line:
+        return True
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        return False  # 引号不匹配：非 CJK/问号场景按命令错误处理
+    if len(tokens) >= 2 and not tokens[0].startswith("-"):
+        head = tokens[0].lower()
+        verbs = _verbs(slash=False) + list(ALIASES)
+        if strong_match(head, verbs) is None and not weak_matches(head, verbs):
+            return True
+    return False
 
 
 # ============================================================

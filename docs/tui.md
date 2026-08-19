@@ -63,8 +63,11 @@ UTF-8 终端（应用启动时会做 `setup_console()` 兜底，legacy conhost �
 | `confirm <token>` | 执行 rm/clean 预览过的写操作 |
 | `help [命令]` / `clear` / `refresh` / `quit` | 速查 / 清屏 / 强制刷新 / 退出 |
 
-**`/` 特制（仅 1 条）**：`/agent <文本>` —— 宣政殿对话（自然语言或 JSON 指令直调
-控制层；无参打印引擎 help）。
+**`/` 特制（仅 1 条）**：`/agent [文本]` —— 宣政殿对话模式（无参=开关；带文本=
+进入并发送）。自然语言输入（含中文/问号/整句）解析不到命令时**自动进入**该模式并
+转交中书省：LLM ReAct 对话（与看板 `POST /api/control/chat` 同引擎，多轮上下文；
+未配置 LLM 自动回退规则引擎）。模式内命令照常可用——只有匹配不到命令的输入才进
+对话；每次进入重置会话，`/agent` 退出。
 
 ## 补全与纠错
 
@@ -93,7 +96,9 @@ UTF-8 终端（应用启动时会做 `setup_console()` 兜底，legacy conhost �
 ❯ confirm ab12
 ✓ 已执行：删除 1 个 run
 ❯ /agent 对比 glm4 最近的两个 run
-中书 ❯ ……
+❯❯ 宣政殿对话模式
+（已进入 · LLM 优先 · 命令照常可用 · /agent 退出）
+中书[llm] ❯ ……
 ```
 
 ## 架构（与看板/MCP 的关系）
@@ -113,11 +118,17 @@ task_manager ───────┼─ MCP server（fastmcp）      ├── 
 - 发起评估经统一启动层 `llmsec/server/launch.py`（与 Web/MCP 同链路全能力面）；
   HPO 与看板 `POST /api/run/hpo` 同一命令；
 - 任务终态时控制台顶部 notify 一次（`top 查看`），不做进度自动刷屏；
-- 渲染层 `tui/render.py` 移植自 Web 端 `run-control.js`，配色延续「漆夜玄朱」。
+- 渲染层 `tui/render.py` 移植自 Web 端 `run-control.js`；配色为 TUI 独立创作的
+  「敦煌暮色」（敦煌壁画矿物色，只做文字配色、不画背景——界面底色交给终端
+  默认；色值集中在 `render.py` 的调色板常量与 `THEME` 字典，CSS 经
+  `themed_css` 模板注入）。注意：控制台屏样式放在 App 级 `_CSS`
+  （textual 3.7.1 不加载 `get_default_screen()` 返回 Screen 的类级 CSS），
+  `top` 直播屏是 push_screen 挂载，类级 CSS 正常生效。
 
 ## 已知边界
 
-- `/agent` 为规则版意图引擎（LLM 版对话在看板 `POST /api/control/chat`，需开服务）；
+- `/agent` 对话走 `dialogue.handle_message`（LLM 优先；未配置 LLM 或回路异常自动
+  回退规则引擎，回退时附注说明）；尚书省拟案（plan_pending）需到 Web 看板确认执行；
 - merge 工作区（`merge_workspaces_*`）两步流未接入，走看板或 MCP；
 - `cd` 切换工作区上下文未做（mkdir/rmdir/ls workspaces 可用）；
 - 旧世代裸残留文件（无库行、无 meta.json）的历史外部任务显示「外部」（状态未知）；

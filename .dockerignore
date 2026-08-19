@@ -11,3 +11,4 @@ docs/*.md
 .env
 .env.bak
 .env.tmp
+video/

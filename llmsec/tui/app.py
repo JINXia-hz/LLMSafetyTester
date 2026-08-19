@@ -14,54 +14,85 @@ from textual.app import App
 from textual.message import Message
 
 from llmsec.tui.console import ConsoleScreen
+from llmsec.tui.render import themed_css
 from llmsec.tui.task_store import TERMINAL_STATUSES, TaskSnapshot, TaskStore
 from llmsec.tui.views import TaskLiveScreen
 
-# 漆夜玄朱：延续 web 端暗色主题（index.html :83-95）。
-# 只保留全局组件样式（DataTable/TermBox/LogModal 模态）；控制台样式在
-# ConsoleScreen.CSS，直播视图样式在 TaskLiveScreen.CSS。
-_CSS = """
+# 敦煌暮色：TUI 独立创作的配色（唐三彩/敦煌矿物色，见 render.py）——只做文字
+# 配色，背景一律 transparent 交给终端自身的黑色；边框一律方角 solid；金色只
+# 小面积点缀（提示符/进度），结构与信息色走石青。控制台屏样式必须放 App 级——
+# textual 3.7.1 下 get_default_screen() 的 Screen 类级 CSS 不会被加载
+# （push_screen 的 TaskLiveScreen 不受此限，其样式在 views.py）。
+_CSS = themed_css("""
 Screen {
-    background: #15120E;
+    background: transparent;
 }
 DataTable {
-    background: #1C1814;
+    background: transparent;
 }
+#console {
+    height: 1fr;
+    border: solid $BORDER;
+    background: transparent;
+    color: $TEXT;
+    padding: 0 1;
+    margin: 1 1 0 1;
+}
+#cmd-complete {
+    height: auto;
+    max-height: 8;
+    border: solid $BORDER;
+    background: transparent;
+    padding: 0 1;
+    margin: 0 1;
+}
+#cmd-complete.hidden { display: none; }
+#cmd-hint {
+    height: 1;
+    color: $DIM;
+    padding: 0 2;
+}
+#cmd-bar {
+    border: solid $BORDER;
+    background: transparent;
+    margin: 0 1 1 1;
+}
+#cmd-bar:focus { border: solid $AZURE; }
+#cmd-bar.agent { border: solid $SAFE; }
 TermBox {
-    border: round #4B4136;
-    background: #20242B;
-    color: #E7DFC8;
+    border: solid $BORDER;
+    background: transparent;
+    color: $TEXT;
     padding: 0 1;
     height: auto;
     max-height: 24;
     margin-top: 1;
 }
-/* cat 命令的日志/报告查看模态 */
+/* cat 命令的日志/报告查看模态：盒体保留深色底（无背景会被下层文字透穿） */
 LogModal {
     align: center middle;
-    background: #15120E 60%;
 }
 .modal-box {
     width: 72;
     max-width: 92%;
     height: 1fr;
     max-height: 88%;
-    border: round #D9B45C;
-    background: #241F19;
+    border: solid $BORDER;
+    background: $RAISED;
     padding: 1 2;
 }
 .modal-title {
-    color: #D9B45C;
+    color: $AZURE;
     text-style: bold;
     margin-bottom: 1;
 }
 #modal-log {
     height: 1fr;
-    border: round #4B4136;
-    background: #20242B;
-    color: #E7DFC8;
+    border: solid $BORDER;
+    background: $RAISED;
+    color: $TEXT;
 }
-"""
+""")
 
 
 class TasksUpdated(Message):

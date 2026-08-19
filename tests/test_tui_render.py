@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from llmsec.tui.render import (
+    C_GOLD,
     EvalProgressState,
     TargetProgressTracker,
     braille_bar,
@@ -50,7 +51,7 @@ class TestBrailleBar:
         bar = braille_bar(50, width=2)
         segments = [(bar.plain[s.start:s.end], s.style or "") for s in bar.spans]
         styles = dict(segments)
-        assert "D9B45C" in styles["⣿"]  # 填充描金
+        assert C_GOLD in styles["⣿"]  # 填充描金
         assert "dim" in styles["⣀"]     # 空槽压暗
 
 
@@ -69,9 +70,9 @@ class TestSparkline:
 
     def test_best_char_gold_by_direction(self):
         up = sparkline([1.0, 5.0, 3.0], "maximize")
-        assert "D9B45C" in (up.spans[1].style or "")
+        assert C_GOLD in (up.spans[1].style or "")
         down = sparkline([1.0, 5.0, 3.0], "minimize")
-        assert "D9B45C" in (down.spans[0].style or "")
+        assert C_GOLD in (down.spans[0].style or "")
 
     def test_flat_series_middle_level(self):
         assert sparkline([2.0, 2.0, 2.0]).plain == "▄▄▄"

@@ -15,7 +15,7 @@ from textual.containers import Horizontal
 from textual.screen import Screen
 from textual.widgets import DataTable, Static
 
-from llmsec.tui.render import C_DIM, C_GOLD, status_text
+from llmsec.tui.render import C_DIM, C_GOLD, status_text, themed_css
 from llmsec.tui.task_store import TaskSnapshot, TaskStore, kind_label, task_summary
 from llmsec.tui.widgets import LogModal, TermBox
 
@@ -52,12 +52,12 @@ def refresh_task_table(
 class TaskLiveScreen(Screen):
     """任务直播视图（top 唤起）。kind 过滤（"hpo" 只看 HPO），focus_id 直达选中。"""
 
-    CSS = """
+    CSS = themed_css("""
     #live-head { height: 1; }
-    .panel-title { color: #D9B45C; text-style: bold; width: auto; }
-    #live-summary { color: #9A8F76; margin-left: 2; }
+    .panel-title { color: $AZURE; text-style: bold; width: auto; }
+    #live-summary { color: $DIM; margin-left: 2; }
     #live-table { height: 1fr; margin-top: 1; }
-    """
+    """)
 
     BINDINGS = [
         Binding("q", "close", "返回控制台"),

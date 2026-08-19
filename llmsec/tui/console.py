@@ -33,14 +33,17 @@ from llmsec.tui.commands import (
     LS_RESOURCES,
     REGISTRY,
     complete,
+    looks_natural,
     parse,
     tokens_with_partial,
     usage,
 )
 from llmsec.tui.render import (
+    C_AZURE,
     C_DIM,
     C_GOLD,
     C_SAFE,
+    C_TEXT,
     C_WARN,
     status_text,
 )
@@ -58,6 +61,10 @@ from llmsec.tui.widgets import LogModal
 _HIST_MAX = 200
 _POPUP_MAX_ROWS = 6
 _PROMPT = Text("❯ ", style=C_GOLD)
+_SPIN_FRAMES = "⣾⣽⣻⢿⡿⣟⣯⣷"  # 盲文转轮帧（与进度条同族字符）
+_SPIN_TEXT = "中书省思虑中…"
+_CMD_PLACEHOLDER = "输入命令（Tab 补全 · help 速查 · /agent 对话 · top 任务直播）"
+_AGENT_PLACEHOLDER = "宣政殿对话中 · 自然语言直说 · 命令照常 · /agent 退出"
 logger = get_logger(__name__)
 
 # ============================================================
@@ -70,6 +77,15 @@ def _sampler_names() -> list[str]:
     from llmsec.params import SAMPLERS
 
     return ["hybrid", *(s for s in SAMPLERS if s != "hybrid")]
+
+
+def _is_unknown_input(p) -> bool:
+    """「未知命令」类解析失败（可路由给 /agent 对话）。
+
+    区别于用法错误（cmd 已匹配、旗标/参数非法——照常报错）与多词首词
+    「需要子命令」（首词是已知动词，仍属命令域，保留提示）。
+    """
+    return p.cmd is None and not any("需要子命令" in e for e in p.errors)
 
 
 class _TTL:
@@ -133,9 +149,9 @@ def _fmt_ratio(v) -> str:
 
 
 def _table(title: str | None, cols: list[str]) -> Table:
-    t = Table(box=None, pad_edge=False, title=title, title_style=f"bold {C_GOLD}")
+    t = Table(box=None, pad_edge=False, title=title, title_style=f"bold {C_AZURE}")
     for c in cols:
-        t.add_column(Text(c, style=f"bold {C_GOLD}"))
+        t.add_column(Text(c, style=f"bold {C_AZURE}"))
     return t
 
 
@@ -182,30 +198,8 @@ class CommandInput(Input):
 
 
 class ConsoleScreen(Screen):
-    CSS = """
-    #console {
-        height: 1fr;
-        border: round #4B4136;
-        background: #1C1814;
-        color: #E7DFC8;
-        padding: 0 1;
-    }
-    #cmd-complete {
-        height: auto;
-        max-height: 8;
-        border: round #4B4136;
-        background: #241F19;
-        padding: 0 1;
-        margin: 0 1;
-    }
-    #cmd-complete.hidden { display: none; }
-    #cmd-hint {
-        height: 1;
-        color: #9A8F76;
-        padding: 0 2;
-    }
-    #cmd-bar { border: round #D9B45C; }
-    """
+    # 注意：本类的样式必须放在 App 级 CSS（app.py::_CSS）——textual 3.7.1 下
+    # get_default_screen() 返回的 Screen 其类级 CSS 不会被加载（push_screen 的会）。
 
     BINDINGS: list[Binding] = []
 
@@ -223,6 +217,11 @@ class ConsoleScreen(Screen):
         self._sel: int = 0
         self._hist_suppress: bool = False  # 历史召回抑制一轮浮层（见 _on_input_changed）
         self._pending_confirm: Callable[[], None] | None = None  # kill 外部强杀 y/N
+        self._agent_mode: bool = False  # /agent 宣政殿对话模式开关
+        self._agent_session: str = "tui-console"  # 固定 session：进入/退出都重置
+        self._agent_pending: int = 0  # 中书省在途请求数（>0 时 hint 行显示转轮）
+        self._spin_phase: int = 0
+        self._spin_timer = None
         self._tokens: dict[str, tuple[str, str]] = {}  # preview token -> (动作, 描述)
         # 补全源（击键惰性求值；重 IO 的带 TTL 缓存）
         self._snap_names = _TTL(lambda: self._snapshot_names())
@@ -238,17 +237,17 @@ class ConsoleScreen(Screen):
         yield Static("", id="cmd-complete", classes="hidden")
         yield Static("", id="cmd-hint")
         yield CommandInput(
-            placeholder="输入命令（Tab 补全 · help 速查 · /agent 对话 · top 任务直播）",
+            placeholder=_CMD_PLACEHOLDER,
             id="cmd-bar",
         )
 
     def on_mount(self) -> None:
         self._load_history()
         self.query_one("#cmd-bar", CommandInput).focus()
-        self.out(Text("llmsec 终端指挥台 · shell 式命令", style=f"bold {C_GOLD}"))
+        self.out(Text("llmsec 终端指挥台 · shell 式命令", style=f"bold {C_TEXT}"))
         self.out(
             Text(
-                "  help 命令速查 · Tab 补全 · ↑↓ 历史 · top 任务直播 · /agent 宣政殿对话 · quit 退出",
+                "  help 命令速查 · Tab 补全 · ↑↓ 历史 · top 任务直播 · 自然语言自动进入 /agent 对话 · quit 退出",
                 style=f"dim {C_DIM}",
             )
         )
@@ -309,7 +308,9 @@ class ConsoleScreen(Screen):
         self._assist = r
         self._partial = tokens_with_partial(value[:caret])[1]
         self._sel = 0
-        self.query_one("#cmd-hint", Static).update(Text(r.hint, style=C_WARN if r.hint_error else f"dim {C_DIM}"))
+        # 中书省在途期间 hint 行归转轮所有，命令 hint 不覆盖（popup 照常）
+        if not self._agent_pending:
+            self.query_one("#cmd-hint", Static).update(Text(r.hint, style=C_WARN if r.hint_error else f"dim {C_DIM}"))
         popup = self.query_one("#cmd-complete", Static)
         # 空输入（刚执行完/初始态）不弹全量命令浮层——打字后才浮现
         if r.items and value.strip():
@@ -329,7 +330,7 @@ class ConsoleScreen(Screen):
             if i == self._sel:
                 text.append(f"❯ {item.label}", style=f"bold {C_GOLD}")
             else:
-                text.append(f"  {item.label}", style="#E7DFC8")
+                text.append(f"  {item.label}", style=C_TEXT)
             if item.help:
                 text.append(f"  {item.help}", style=f"dim {C_DIM}")
         popup.update(text)
@@ -544,6 +545,12 @@ class ConsoleScreen(Screen):
             for c in p.corrections:
                 self.dim(f"✎ 已纠错：{c}")
             if not p.ok:
+                if _is_unknown_input(p) and (self._agent_mode or looks_natural(line)):
+                    # 对话模式：非命令输入直发中书省；自然语言则自动进入对话模式
+                    if not self._agent_mode:
+                        self._agent_set(True, auto=True)
+                    self._agent_say(line)
+                    return
                 for e in p.errors:
                     self.err(e)
                 return
@@ -602,7 +609,12 @@ class ConsoleScreen(Screen):
         elif name == "quit":
             self.app.exit()
         elif name == "/agent":
-            self._cmd_agent(p)
+            if not p.positionals:
+                self._agent_set(not self._agent_mode)
+            else:
+                if not self._agent_mode:
+                    self._agent_set(True)
+                self._agent_say(" ".join(p.positionals))
 
     # ============================================================
     # ls —— 各资源渲染
@@ -1233,7 +1245,7 @@ class ConsoleScreen(Screen):
             if cmd is None:
                 self.err(f"未知命令 {arg}（help 查看全部）")
                 return
-            lines = [Text(f"{usage(cmd)}", style=f"bold {C_GOLD}"), Text(f"  {cmd.help}", style=None)]
+            lines = [Text(f"{usage(cmd)}", style=f"bold {C_AZURE}"), Text(f"  {cmd.help}", style=None)]
             for a in cmd.args:
                 tag = "…" if a.variadic else ("" if a.required else "（可选）")
                 lines.append(Text(f"  <{a.name}>{tag}  {a.help}", style=f"dim {C_DIM}"))
@@ -1246,7 +1258,10 @@ class ConsoleScreen(Screen):
         for c in COMMANDS:
             t.add_row(c.name, c.help)
         self.out(t)
-        self.dim("别名：q/exit→quit · evaluate→eval ｜ 键位：↑↓ 历史 · Tab 补全 · Esc 关闭 · q/Esc 退出视图")
+        self.dim(
+            "别名：q/exit→quit · evaluate→eval ｜ 对话：/agent 开关 · 自然语言自动进入 ｜ "
+            "键位：↑↓ 历史 · Tab 补全 · Esc 关闭 · q/Esc 退出视图"
+        )
 
     def _cmd_clear(self, p) -> None:
         self._log.clear()
@@ -1255,17 +1270,71 @@ class ConsoleScreen(Screen):
         self.app.action_refresh_all()
         self.ok("已刷新（任务 + runs 缓存）")
 
-    @work(thread=True, exclusive=False, group="chat")
-    def _cmd_agent(self, p) -> None:
-        from control.agent.zhongshu.fallback import _help, chat_one
+    # ---- 中书省加载指示（hint 行盲文转轮）----
+    def _agent_busy(self, on: bool) -> None:
+        """UI 线程：在途数 ±1；>0 时 hint 行交给转轮，归零时复原命令 hint。"""
+        self._agent_pending = max(0, self._agent_pending + (1 if on else -1))
+        if self._agent_pending and self._spin_timer is None:
+            self._spin_phase = 0
+            self._spin_timer = self.set_interval(0.12, self._tick_spin)
+            self._tick_spin()  # 立即出第一帧，不等 0.12s
+        elif not self._agent_pending and self._spin_timer is not None:
+            self._spin_timer.stop()
+            self._spin_timer = None
+            inp = self.query_one("#cmd-bar", CommandInput)
+            self._refresh_assist(inp.value, inp.cursor_position)
 
-        text = " ".join(p.positionals).strip()
+    def _tick_spin(self) -> None:
+        frame = _SPIN_FRAMES[self._spin_phase % len(_SPIN_FRAMES)]
+        self._spin_phase += 1
+        self.query_one("#cmd-hint", Static).update(
+            Text.assemble((f"{frame} ", C_AZURE), (_SPIN_TEXT, f"dim {C_AZURE}"))
+        )
+
+    @work(thread=True, exclusive=False, group="chat")
+    def _agent_say(self, text: str) -> None:
+        """把一条消息交给中书省（handle_message：LLM ReAct · 未配置回退规则引擎）。"""
+        from control.agent.zhongshu.dialogue import handle_message
+
+        self.app.call_from_thread(self._agent_busy, True)
         try:
-            reply = _help() if not text else chat_one(text)
+            result = handle_message(text, session_id=self._agent_session) or {}
         except Exception as e:
-            reply = f"❌ chat_one 异常: {type(e).__name__}: {e}"
-        if reply:
-            self.app.call_from_thread(self.out, Text.assemble(("中书 ❯ ", C_DIM), (reply,)))
+            self.app.call_from_thread(self.err, f"❌ handle_message 异常: {type(e).__name__}: {e}")
+            return
+        finally:
+            self.app.call_from_thread(self._agent_busy, False)
+        reply = str(result.get("reply") or "").strip() or "（中书省无应答）"
+        mode = result.get("mode") or "rule"
+        self.app.call_from_thread(self.out, Text.assemble((f"中书[{mode}] ❯ ", C_DIM), (reply,)))
+        if result.get("llm_error"):
+            self.app.call_from_thread(self.dim, "（LLM 回路异常，规则引擎接答）")
+        plan = result.get("plan_pending")
+        if isinstance(plan, dict) and plan.get("plan_id"):
+            self.app.call_from_thread(
+                self.dim, f"已转尚书省拟案 {plan['plan_id']}——Web 看板可确认执行"
+            )
+
+    def _agent_set(self, on: bool, *, auto: bool = False) -> None:
+        """切换宣政殿对话模式（UI 线程）。进入/退出都重置 session，每次从新对话开始。"""
+        self._agent_mode = on
+        try:
+            from control.agent.zhongshu.session import reset as _sess_reset
+
+            _sess_reset(self._agent_session)
+        except Exception:
+            pass  # session 层异常不阻断模式切换
+        bar = self.query_one("#cmd-bar", CommandInput)
+        if on:
+            bar.add_class("agent")
+            bar.placeholder = _AGENT_PLACEHOLDER
+            lead = "检测到自然语言，已自动进入" if auto else "已进入"
+            self.out(Text("❯❯ 宣政殿对话模式", style=f"bold {C_AZURE}"))
+            self.dim(f"{lead}（LLM 优先 · 未配置回退规则引擎 · 命令照常可用 · /agent 退出）")
+        else:
+            bar.remove_class("agent")
+            bar.placeholder = _CMD_PLACEHOLDER
+            self.dim("已退出对话模式（session 已清空）")
 
 
 def _dict_compact(d: dict, limit: int = 160) -> str:

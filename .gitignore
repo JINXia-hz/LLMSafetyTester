@@ -29,3 +29,4 @@ attacks/*
 scripts/*
 !scripts/gen_test_inventory.py
 /experiments/
+video/

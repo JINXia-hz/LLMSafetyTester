@@ -18,7 +18,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, RichLog, Static
 
-from llmsec.tui.render import C_DIM, EvalProgressState
+from llmsec.tui.render import C_DIM, C_GOLD, EvalProgressState
 from llmsec.tui.task_store import TaskSnapshot, kind_label, short_cmd, task_summary
 from llmsec.tui.views import refresh_task_table
 from llmsec.tui.widgets import LogModal, TermBox
@@ -319,7 +319,7 @@ class TestRefreshTaskTable:
             assert row[0] == "评估·ab12cd"
             assert row[1].plain == "外部"
             assert row[2].plain == "40%"
-            assert "D9B45C" in row[2].style  # 进度描金
+            assert C_GOLD in row[2].style  # 进度描金
             assert row[3] == "10:00:01"  # started_at 取 [11:19] 时间段
             assert row[4] == "外部"
             assert row[5] == ""  # 无 meta/cmd → 空摘要

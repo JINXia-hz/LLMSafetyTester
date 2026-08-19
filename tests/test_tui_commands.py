@@ -9,6 +9,7 @@ from __future__ import annotations
 from llmsec.tui.commands import (
     REGISTRY,
     complete,
+    looks_natural,
     parse,
     strong_match,
     usage,
@@ -218,6 +219,37 @@ class TestFuzzyMatchers:
 
     def test_weak(self):
         assert "eval" in weak_matches("evl", ["eval", "ls", "top"])
+
+
+# ============================================================
+# looks_natural：自然语言判定（agent 模式自动进入）
+# ============================================================
+class TestLooksNatural:
+    def test_cjk_question(self):
+        assert looks_natural("你好，能告诉我ASR是什么")
+        assert looks_natural("列出最近的run")  # 无问号有汉字
+
+    def test_ascii_question(self):
+        assert looks_natural("what is the asr metric?")
+
+    def test_multiword_english_sentence(self):
+        # 多词且首词与命令动词毫无相似 → 句子而非拼错的命令
+        assert looks_natural("show me the best model please")
+
+    def test_single_unknown_token_not_natural(self):
+        # 手滑的单个未知词 → 保留 did-you-mean 纠错路径
+        assert not looks_natural("asdf")
+
+    def test_known_command_not_natural(self):
+        assert not looks_natural("ls tasks")
+
+    def test_typo_of_command_not_natural(self):
+        # 近似命令（evl→eval）像拼错，不进 agent
+        assert not looks_natural("evl -t x")
+
+    def test_empty_and_flags(self):
+        assert not looks_natural("")
+        assert not looks_natural("--all")
 
 
 # ============================================================

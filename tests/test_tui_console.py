@@ -439,16 +439,107 @@ class TestTwoStepWrite:
 
 
 # ============================================================
-# /agent —— 宣政殿（规则引擎 monkeypatch）
+# /agent —— 宣政殿对话模式（handle_message monkeypatch）
 # ============================================================
 class TestAgent:
-    def test_agent_reply(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("control.agent.zhongshu.fallback.chat_one", lambda t: f"收到:{t}")
+    def _mock_handle(self, monkeypatch, seen=None, mode="rule"):
+        def _fake(text, *, session_id=None):
+            if seen is not None:
+                seen.append(text)
+            return {"mode": mode, "reply": f"收到:{text}", "session_id": session_id}
+
+        monkeypatch.setattr("control.agent.zhongshu.dialogue.handle_message", _fake)
+
+    def test_agent_with_text_enters_mode(self, tmp_path, monkeypatch):
+        seen = []
+        self._mock_handle(monkeypatch, seen, mode="rule")
 
         async def fn(app, pilot):
             await _submit(app, pilot, "/agent 你好")
             await _wait_until(pilot, lambda: "收到:你好" in _console_text(app))
-            assert "中书 ❯" in _console_text(app)
+            text = _console_text(app)
+            assert "已进入" in text  # 带文本 = 进入模式并发送
+            assert "中书[rule] ❯" in text
+            assert _input(app).has_class("agent")
+            assert seen == ["你好"]
+
+        _run(fn, tmp_path=tmp_path)
+
+    def test_agent_bare_toggles(self, tmp_path, monkeypatch):
+        resets: list[str] = []
+        monkeypatch.setattr(
+            "control.agent.zhongshu.session.reset", lambda sid: resets.append(sid)
+        )
+
+        async def fn(app, pilot):
+            bar = _input(app)
+            await _submit(app, pilot, "/agent")
+            await _wait_until(pilot, lambda: "已进入" in _console_text(app))
+            assert bar.has_class("agent")
+            assert "宣政殿对话中" in bar.placeholder
+            await _submit(app, pilot, "/agent")
+            await _wait_until(pilot, lambda: "已退出" in _console_text(app))
+            assert not bar.has_class("agent")
+            assert "Tab 补全" in bar.placeholder  # 恢复命令行占位文案
+            assert resets == ["tui-console", "tui-console"]  # 进出各重置一次
+
+        _run(fn, tmp_path=tmp_path)
+
+    def test_natural_language_auto_enters(self, tmp_path, monkeypatch):
+        seen = []
+        self._mock_handle(monkeypatch, seen, mode="llm")
+
+        async def fn(app, pilot):
+            await _submit(app, pilot, "你好，最近的任务有哪些？")
+            await _wait_until(pilot, lambda: "已自动进入" in _console_text(app))
+            await _wait_until(pilot, lambda: "中书[llm] ❯" in _console_text(app))
+            assert _input(app).has_class("agent")
+            assert seen == ["你好，最近的任务有哪些？"]
+
+        _run(fn, tmp_path=tmp_path)
+
+    def test_agent_mode_commands_still_work(self, tmp_path, monkeypatch):
+        self._mock_handle(monkeypatch, mode="rule")
+
+        async def fn(app, pilot):
+            await _submit(app, pilot, "/agent")
+            await _wait_until(pilot, lambda: "已进入" in _console_text(app))
+            # 已知命令照常执行（clear 清屏，不应出现在 agent 回复里）
+            await _submit(app, pilot, "clear")
+            await _wait_until(pilot, lambda: "宣政殿对话模式" not in _console_text(app))
+            # 模式内非命令输入直发中书省
+            await _submit(app, pilot, "随便聊聊")
+            await _wait_until(pilot, lambda: "收到:随便聊聊" in _console_text(app))
+            # 用法错误照常报错，不路由给 agent
+            await _submit(app, pilot, "eval --seed abc")
+            await _wait_until(pilot, lambda: "须为整数" in _console_text(app))
+            assert "收到:eval" not in _console_text(app)
+
+        _run(fn, tmp_path=tmp_path)
+
+    def test_agent_spinner_while_waiting(self, tmp_path, monkeypatch):
+        """中书省在途期间 hint 行显示盲文转轮，回复落盘后转轮撤下、hint 复原。"""
+        import threading
+
+        gate = threading.Event()
+
+        def _fake(text, *, session_id=None):
+            gate.wait(10)
+            return {"mode": "rule", "reply": f"收到:{text}", "session_id": session_id}
+
+        monkeypatch.setattr("control.agent.zhongshu.dialogue.handle_message", _fake)
+
+        async def fn(app, pilot):
+            hint = app.query_one("#cmd-hint", Static)
+            await _submit(app, pilot, "/agent 你好")
+            # 在途：转轮文案出现，且在途计数为 1
+            await _wait_until(pilot, lambda: "思虑中" in str(hint.renderable))
+            assert app._console._agent_pending == 1
+            # 放行：回复落盘 → 转轮撤下（在途归零、hint 不再被占用）
+            gate.set()
+            await _wait_until(pilot, lambda: "收到:你好" in _console_text(app))
+            await _wait_until(pilot, lambda: app._console._agent_pending == 0)
+            assert "思虑中" not in str(hint.renderable)
 
         _run(fn, tmp_path=tmp_path)
 

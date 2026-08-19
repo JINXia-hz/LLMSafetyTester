@@ -8,32 +8,57 @@
   hpo_lines/sparkline  ← renderHpoBox (:901)
 
 全部为纯函数/纯状态类（只依赖 rich，不依赖 textual），可独立单测。
-配色延续看板进度窗口「漆夜玄朱」暗色终端风格（index.html :83-95）。
+配色为「敦煌暮色」：取敦煌壁画矿物颜料（月白/金箔/石绿/石青/朱砂/赭石），
+只做文字配色、不画背景（界面底色交给终端默认），暖金担主线、寒青做对比——
+TUI 独立创作，不与 web 端「漆夜玄朱」（index.html）对齐。
 """
 
 from __future__ import annotations
 
 import json
+from string import Template
 
 from rich.cells import cell_len
 from rich.text import Text
 
-# ---- 配色（暗色主题进度窗口）----
-C_TEXT = "#E7DFC8"  # 牙白：主体文字
-C_DIM = "#9A8F76"  # 暗：次要文字/idle 行
-C_GOLD = "#D9B45C"  # 戗金：填充条/active 提示符/描金
-C_SAFE = "#7E9478"  # 石绿：done 标记/完成态
-C_WARN = "#C0492B"  # 朱：失败 trial
-C_UP = "#9CB58E"  # delta 上涨
-C_DOWN = "#D89A82"  # delta 下跌
-C_MUTED = "#AC9F83"  # 空槽/状态字
+# ---- 配色（「敦煌暮色」文字/语义色：月白为主，石青结构，金仅小面积点缀）----
+C_TEXT = "#E9E3D3"  # 月白：主体文字
+C_DIM = "#8A8B7E"  # 灰绿：次要文字/idle 行
+C_GOLD = "#D9A441"  # 三彩黄：仅提示符/进度填充等点缀（不大面积用）
+C_SAFE = "#87B08C"  # 石绿：done 标记/完成态
+C_WARN = "#C4553A"  # 朱砂：失败 trial
+C_UP = "#9FBE8C"  # 头绿：delta 上涨
+C_DOWN = "#CE8F6E"  # 赭红：delta 下跌
+C_MUTED = "#9C9484"  # 灰沙：空槽/状态字
+C_AZURE = "#5E9AB8"  # 石青（结构色）：标题/表头/命令名/运行态/加载动画
+
+# ---- 结构色（无背景界面：边框是唯一结构手段；RAISED 仅供模态遮底）----
+C_RAISED = "#161616"  # 中性黑：cat 模态盒底（无背景会被下层文字透穿，不可用）
+C_BORDER = "#43433C"  # 灰绿线：方角边框
 
 STYLE_EMPTY = f"dim {C_MUTED}"  # 盲文空槽（web 端 opacity .4 的等价物）
+
+# Textual CSS 模板变量：app/views 两处 CSS 共用，色值单一事实源。
+THEME: dict[str, str] = {
+    "RAISED": C_RAISED,
+    "BORDER": C_BORDER,
+    "TEXT": C_TEXT,
+    "DIM": C_DIM,
+    "GOLD": C_GOLD,
+    "SAFE": C_SAFE,
+    "WARN": C_WARN,
+    "AZURE": C_AZURE,
+}
+
+
+def themed_css(css: str) -> str:
+    """把 CSS 模板里的 $BORDER/$GOLD/... 替换为 THEME 色值。"""
+    return Template(css).substitute(THEME)
 
 # 任务状态 → (中文标签, 颜色)。external/ended 为 TUI 特有：外部任务无元数据 /
 # 持有进程已退出但无人回写终态（meta.json + PID 探活推断）。
 STATUS_LABELS: dict[str, tuple[str, str]] = {
-    "running": ("运行中", C_GOLD),
+    "running": ("运行中", C_AZURE),
     "queued": ("排队中", C_MUTED),
     "success": ("完成", C_SAFE),
     "failed": ("失败", C_WARN),
