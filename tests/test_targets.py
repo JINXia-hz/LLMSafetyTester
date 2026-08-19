@@ -418,15 +418,21 @@ def test_m11_pcap_env_lazy():
 
 def test_m17_judge_env_lazy():
 
-    saved = {k: os.environ.get(k) for k in ('GENERATOR_API_KEY', 'GENERATOR_BASE_URL', 'JUDGE_MODEL')}
+    saved = {k: os.environ.get(k) for k in ('GENERATOR_API_KEY', 'GENERATOR_BASE_URL', 'JUDGE_API_KEY', 'JUDGE_BASE_URL', 'JUDGE_MODEL')}
 
     old_create = judge_mod.create_openai_client
 
     try:
 
-        os.environ['GENERATOR_API_KEY'] = 'runtime-key-123'
+        # GENERATOR_* 与 JUDGE_* 同时设且不同值，验证解绑：judge 只认 JUDGE_*
 
-        os.environ['GENERATOR_BASE_URL'] = 'https://runtime-judge.local/v1'
+        os.environ['GENERATOR_API_KEY'] = 'gen-key-should-not-leak'
+
+        os.environ['GENERATOR_BASE_URL'] = 'https://gen.local/v1'
+
+        os.environ['JUDGE_API_KEY'] = 'runtime-key-123'
+
+        os.environ['JUDGE_BASE_URL'] = 'https://runtime-judge.local/v1'
 
         os.environ['JUDGE_MODEL'] = 'runtime-judge-model'
 
@@ -444,9 +450,9 @@ def test_m17_judge_env_lazy():
 
         judge_mod.create_judge_client()
 
-        assert captured.get('api_key') == 'runtime-key-123', 'M17: create_judge_client 重新读取运行期 GENERATOR_API_KEY'
+        assert captured.get('api_key') == 'runtime-key-123', 'M17: create_judge_client 重新读取运行期 JUDGE_API_KEY（不借 GENERATOR_API_KEY）'
 
-        assert captured.get('base_url') == 'https://runtime-judge.local/v1', 'M17: create_judge_client 重新读取运行期 GENERATOR_BASE_URL'
+        assert captured.get('base_url') == 'https://runtime-judge.local/v1', 'M17: create_judge_client 重新读取运行期 JUDGE_BASE_URL（不借 GENERATOR_BASE_URL）'
 
         judge = judge_mod.Judge(client=object())
 

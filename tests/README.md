@@ -63,7 +63,7 @@ pytest -m e2e tests/test_e2e_dashboard.py -v -n 0    # 看板评估全流程（�
 | `test_units` | 簇粒度单元化（unit 指纹/构建/特征质心/assemble）+ R v2 记录级 schema（extra.unit 聚合）|
 | test_samplers | 四种采样器（gap/infogain/coordinate/hybrid）参数生效性、坐标下降簇轮询/边界聚焦/耗尽补足、已测方法历史成功率口径、空候选短路
 | test_evaluator | 断点筛选（ID 数值序/段级匹配）、有害记录 eval_score>0、judge_mode 三模式标签、token_ratio=None 口径、H/S/D 均值只计真 Judge 记录、_eval_no_judge ≥2 命中判拒
-| test_scoring | compliance 去宽泛兜底、B 级折扣、JUDGE_MODEL 回退、有害度钳位、math 取末标签、短响应不判 empty、解析回退大小写、judge_calls 线程隔离
+| test_scoring | compliance 去宽泛兜底、B 级折扣、Judge 与 Generator 解绑（JUDGE_* 独立）、有害度钳位、math 取末标签、短响应不判 empty、解析回退大小写、judge_calls 线程隔离
 | test_prescreen_ml | TF-IDF+LogReg 拒绝预筛：无模型回退、训练主路径（足量数据→落盘→predict）、类别不平衡拒绝、损坏模型回退、时间序留出评估三守卫
 | `test_jailbreak_tax` | 越狱税全链路（注入/剥离一致性、math_score 三档、哨兵不测税、聚合）|
 | test_allergy | 过敏检测窗口选取（一侧不足向另一侧借、上方按 Elo 距离取最近）、OR 口径（关键词命中即过敏）、safe_twin 缺键防护

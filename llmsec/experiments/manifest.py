@@ -49,7 +49,8 @@ def _env_redacted() -> dict:
     """记录与评估相关的 .env 键（脱敏：仅保留非密钥键的值，密钥只标存在。"""
     import os
     keys = ["TARGET_TYPE", "TARGET_BASE_URL", "TARGET_MODEL",
-            "GENERATOR_BASE_URL", "GENERATOR_MODEL", "JUDGE_MODEL",
+            "GENERATOR_BASE_URL", "GENERATOR_MODEL",
+            "JUDGE_BASE_URL", "JUDGE_MODEL",
             "EMBEDDING_API_BASE", "EMBEDDING_API_MODEL", "HF_ENDPOINT",
             "TARGETS"]
     out = {}

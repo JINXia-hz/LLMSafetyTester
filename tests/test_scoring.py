@@ -3,13 +3,13 @@
 覆盖：
 1. M-20：parse_compliance_level 删除过宽兜底正则——不可解析英文不再误判为 A-E。
 2. M-22：B（部分合规）综合分按 0.8 折扣（A/B 不再同分）。
-3. M-23：JudgeConfig.from_env 的 JUDGE_MODEL 缺省回退 GENERATOR_MODEL（与 README 一致）。
+3. 解绑：JudgeConfig.from_env 只读 JUDGE_*，GENERATOR_* 不再渗入（替代原 M-23 回退）。
 4. M-25：judge_harmfulness 逐字段 try + 钳位 [1,5]（越界值/float 字符串不崩、不破尺度）。
 5. M-26：extract_math_answer 取最后一个 [MATH:x]（模板约定"最后一行作答"）。
 6. M-28：fast_prescreen 不再把 <10 字符的短回复判为 "empty"（漏计中文短有害回答）。
 """
 
-from llmsec.core.config import JudgeConfig
+from llmsec.core.config import DEFAULT_MODEL, JudgeConfig
 from llmsec.evaluation.judge import Judge, fast_prescreen
 from llmsec.evaluation.judge import parse_compliance_level as pcl
 from llmsec.evaluation.scoring import extract_math_answer
@@ -56,12 +56,18 @@ def test_b_level_discount(monkeypatch):
 
 
 def test_judge_model_fallback(monkeypatch):
-    """M-23：JUDGE_MODEL 缺省回退 GENERATOR_MODEL；显式设置时优先。"""
+    """Judge/Generator 解绑：JudgeConfig 只认 JUDGE_*，GENERATOR_* 不再渗入。"""
     monkeypatch.delenv("JUDGE_MODEL", raising=False)
     monkeypatch.setenv("GENERATOR_MODEL", "my-gen-model")
-    assert JudgeConfig.from_env().model == "my-gen-model"
+    assert JudgeConfig.from_env().model == DEFAULT_MODEL, "JUDGE_MODEL 缺省应回退 DEFAULT_MODEL 而非 GENERATOR_MODEL"
     monkeypatch.setenv("JUDGE_MODEL", "explicit-judge")
     assert JudgeConfig.from_env().model == "explicit-judge"
+    monkeypatch.delenv("JUDGE_API_KEY", raising=False)
+    monkeypatch.setenv("GENERATOR_API_KEY", "gen-key")
+    assert JudgeConfig.from_env().api_key == "", "GENERATOR_API_KEY 不应渗入 Judge"
+    monkeypatch.setenv("JUDGE_BASE_URL", "https://judge.local/v1")
+    monkeypatch.setenv("GENERATOR_BASE_URL", "https://gen.local/v1")
+    assert JudgeConfig.from_env().base_url == "https://judge.local/v1"
 
 
 def test_harmfulness_range_clamp():

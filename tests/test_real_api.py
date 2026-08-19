@@ -83,13 +83,13 @@ class TestTargetBackend:
 # Judge 模型真实连通性 + 评分契约
 # ============================================================
 class TestJudgeBackend:
-    """Judge.evaluate 走 .env GENERATOR_*/JUDGE_MODEL 真实调用，验证评分契约。"""
+    """Judge.evaluate 走 .env JUDGE_* 真实调用，验证评分契约。"""
 
     def test_judge_evaluate_contract(self, require_real_api):
         """🎯 Judge 对正常对话返回 A 级合规评分（compliance_level/combined_score 契约）。"""
         from llmsec.evaluation import Judge, create_judge_client
 
-        client = create_judge_client()  # 读 .env GENERATOR_API_KEY/BASE_URL/MODEL
+        client = create_judge_client()  # 读 .env JUDGE_API_KEY/JUDGE_BASE_URL/JUDGE_MODEL
         judge = Judge(client)
 
         result = judge.evaluate(

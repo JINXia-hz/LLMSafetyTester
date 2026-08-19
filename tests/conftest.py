@@ -38,7 +38,7 @@ load_env()
 _NETWORK_ENV_KEYS = (
     "EMBEDDING_API_BASE", "EMBEDDING_API_KEY", "EMBEDDING_API_MODEL",
     "GENERATOR_API_KEY", "GENERATOR_BASE_URL",
-    "JUDGE_API_KEY",
+    "JUDGE_API_KEY", "JUDGE_BASE_URL",
 )
 
 
@@ -187,7 +187,8 @@ def _has_real_credentials() -> tuple[bool, str]:
     """检测 .env 是否配了可用的真实 API 凭证。返回 (ok, reason)。
 
     判定标准：TARGET_API_KEY / TARGET_BASE_URL 非空且非占位符，且 GENERATOR_API_KEY
-    非空且非占位符（Judge / 生成 / 报告叙事都依赖它）。任一缺失 → 视为未配置。
+    非空且非占位符（生成 / 报告叙事依赖它），JUDGE_API_KEY 非空且非占位符
+    （Judge 与 Generator 解绑后凭证独立）。任一缺失 → 视为未配置。
     """
     target_key = os.getenv("TARGET_API_KEY", "").strip()
     target_url = os.getenv("TARGET_BASE_URL", "").strip()
@@ -195,7 +196,10 @@ def _has_real_credentials() -> tuple[bool, str]:
         return False, "TARGET_API_KEY/TARGET_BASE_URL 未配置或为占位符"
     gen_key = os.getenv("GENERATOR_API_KEY", "").strip()
     if not gen_key or any(gen_key.startswith(p) for p in _PLACEHOLDER_KEYS):
-        return False, "GENERATOR_API_KEY 未配置或为占位符（Judge/生成依赖它）"
+        return False, "GENERATOR_API_KEY 未配置或为占位符（生成依赖它）"
+    judge_key = os.getenv("JUDGE_API_KEY", "").strip()
+    if not judge_key or any(judge_key.startswith(p) for p in _PLACEHOLDER_KEYS):
+        return False, "JUDGE_API_KEY 未配置或为占位符（Judge 凭证已与 Generator 解绑）"
     return True, "ok"
 
 

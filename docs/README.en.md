@@ -295,7 +295,7 @@ The result matrix **R** (`core/results.py`): `R[method][model] = MatchResult` is
 | `GENERATOR_API_KEY` | Attack gen / safe twin / report API Key | - |
 | `GENERATOR_BASE_URL` | Generator model URL | `https://api.deepseek.com/v1` |
 | `GENERATOR_MODEL` | Generator model name | `deepseek-v4-flash` |
-| `JUDGE_MODEL` | Judge model (falls back to GENERATOR) | `deepseek-v4-flash` |
+| `JUDGE_MODEL` / `JUDGE_BASE_URL` / `JUDGE_API_KEY` | Judge trio (decoupled from GENERATOR) | deepseek |
 
 Full template: `.env.example`.
 

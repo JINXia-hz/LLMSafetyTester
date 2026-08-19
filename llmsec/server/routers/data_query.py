@@ -909,6 +909,9 @@ async def api_env():
                    "api_key_masked": _masked("TARGET_API_KEY")},
         "generator": {"base_url": os.getenv("GENERATOR_BASE_URL", ""), "model": os.getenv("GENERATOR_MODEL", ""),
                       "api_key_masked": _masked("GENERATOR_API_KEY")},
+        "judge": {"base_url": os.getenv("JUDGE_BASE_URL", ""), "model": os.getenv("JUDGE_MODEL", ""),
+                  "api_key_masked": _masked("JUDGE_API_KEY")},
+        # 兼容旧前端（run-control.js 只读 judge_model）
         "judge_model": os.getenv("JUDGE_MODEL", ""),
     }
 
@@ -920,7 +923,9 @@ class EnvUpdate(BaseModel):
     generator_base_url: str | None = None
     generator_model: str | None = None
     generator_api_key: str | None = None
+    judge_base_url: str | None = None
     judge_model: str | None = None
+    judge_api_key: str | None = None
 
 
 @router.put("/api/env")
@@ -929,7 +934,9 @@ async def api_env_put(req: EnvUpdate):
     mapping = {
         "target_base_url": "TARGET_BASE_URL", "target_model": "TARGET_MODEL", "target_api_key": "TARGET_API_KEY",
         "generator_base_url": "GENERATOR_BASE_URL", "generator_model": "GENERATOR_MODEL",
-        "generator_api_key": "GENERATOR_API_KEY", "judge_model": "JUDGE_MODEL",
+        "generator_api_key": "GENERATOR_API_KEY",
+        "judge_base_url": "JUDGE_BASE_URL", "judge_model": "JUDGE_MODEL",
+        "judge_api_key": "JUDGE_API_KEY",
     }
     updates: dict[str, str] = {}
     for fld, envkey in mapping.items():

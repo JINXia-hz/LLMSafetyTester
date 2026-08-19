@@ -996,7 +996,9 @@ python -m llmsec.experiments trials my-study
 | `GENERATOR_API_KEY` | ✱ | — | 生成模型 key（攻击生成/安全孪生/报告叙事） |
 | `GENERATOR_BASE_URL` | ✱ | — | 生成模型端点 |
 | `GENERATOR_MODEL` | ✱ | — | 生成模型名 |
-| `JUDGE_MODEL` | | 回退 GENERATOR_MODEL | Judge 模型 |
+| `JUDGE_BASE_URL` | | `https://api.deepseek.com/v1` | Judge 独立端点（不回退 GENERATOR） |
+| `JUDGE_API_KEY` | | — | Judge 独立凭证（不回退 GENERATOR） |
+| `JUDGE_MODEL` | | `deepseek-v4-flash` | Judge 模型 |
 
 #### 超时 / token 预算
 
