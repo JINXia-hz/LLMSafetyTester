@@ -145,3 +145,67 @@ def test_generate_all_twins_missing_id_or_prompt_skipped(monkeypatch, tmp_path):
     safe_twin.generate_all_twins()
     rows = [json.loads(x) for x in twin_file.read_text(encoding="utf-8").splitlines()]
     assert [r["original_id"] for r in rows] == ["b2"]
+
+
+# ===== 补充覆盖：推理型孪生模型 <think> 兼容 + 预载回退 + 哑火计数（B-6 回归）=====
+
+def _twin_client(content):
+    """返回固定响应文本的假孪生生成 client（chat.completions.create）。"""
+    from types import SimpleNamespace
+
+    def _create(**kw):
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content=content))])
+
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_create)))
+
+
+def test_generate_safe_twin_strips_think_draft():
+    """思考段含草稿 JSON：取正文最终版，不把思考里的草稿当孪生用（污染 FPR）。"""
+    draft = '{"safe_prompt": "草稿版本", "replacement": "草稿替换"}'
+    final = '{"safe_prompt": "最终安全版本", "replacement": "最终替换"}'
+    raw = f'<think>先草拟 {draft}</think>\n{final}'
+    twin = safe_twin.generate_safe_twin("攻击prompt", _twin_client(raw))
+    assert twin is not None, "剥思考段后应解析成功（回归：草稿干扰解析）"
+    assert twin["safe_prompt"] == "最终安全版本", "不得误取思考段里的草稿对象"
+
+
+def test_generate_safe_twin_strips_think_unclosed_brace():
+    """思考段含未闭合括号：现行必解析失败返 None，剥除后应正常拿到孪生。"""
+    final = '{"safe_prompt": "最终安全版本", "replacement": "替换说明"}'
+    raw = f'<think>构造 {{"safe_prompt": "未闭合的草稿</think>\n{final}'
+    twin = safe_twin.generate_safe_twin("攻击prompt", _twin_client(raw))
+    assert twin is not None and twin["safe_prompt"] == "最终安全版本"
+
+
+def test_load_unit_twin_cache_legacy_c_prefix_accepted(tmp_path):
+    """旧条目无 key_space：c_ 指纹键按 unit 空间接受；method 空间与缺键条目仍拒绝。"""
+    rows = [
+        {"method": "c_abc123def0", "safe_prompt": "s1"},                            # 旧 unit 条目（无标签）
+        {"method": "c_abc123def0", "safe_prompt": "s1-new", "key_space": "unit"},   # 新条目（同键后写覆盖）
+        {"method": "角色扮演", "safe_prompt": "s2"},                                 # 旧 method 空间（无标签）
+        {"method": "角色扮演", "safe_prompt": "s2", "key_space": "method"},          # 显式 method 空间
+        {"method": "c_broken"},                                                     # 缺 safe_prompt
+        {"safe_prompt": "s3"},                                                      # 缺 method
+    ]
+    path = tmp_path / "safe_twins.jsonl"
+    path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows),
+                    encoding="utf-8")
+    cache = allergy_phase.load_unit_twin_cache(path)
+    assert cache == {"c_abc123def0": "s1-new"}, \
+        "c_ 旧条目应被回退接受；方法名键与缺键条目不得混入"
+
+
+def test_allergy_phase_zero_effective_samples_counts_skips(monkeypatch, tmp_path):
+    """候选全跳过（孪生生成失败）：fpr=None 且 skipped 计数进 summary 与落盘文件。"""
+    monkeypatch.setattr(allergy_phase, "get_or_create_twin",
+                        lambda method, rec, cache, client: None)  # 孪生生成全失败
+    monkeypatch.setattr(cfg_mod, "SAFE_TWINS_FILE", tmp_path / "safe_twins.jsonl")
+    summary = allergy_phase.run_allergy_phase(
+        {"m1": {"id": "x1", "prompt": "p", "category": "c", "method": "m1"}},
+        twin_client=None, judge=_FakeJudge(), tracker=_FakeTracker(),
+        n_window=1, allergy_file=tmp_path / "allergy.json", concurrency=0)
+    assert summary["fpr"] is None and summary["total_tested"] == 0
+    assert summary["skipped"] == {"twin_failed": 1}, "跳过原因必须计数（哑火可诊断）"
+    saved = json.loads((tmp_path / "allergy.json").read_text(encoding="utf-8"))
+    assert saved["summary"]["skipped"] == {"twin_failed": 1}, "落盘口径同步携带 skipped"

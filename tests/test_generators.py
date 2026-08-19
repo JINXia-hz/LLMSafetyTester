@@ -198,6 +198,42 @@ def test_call_api_two_round_mismatch_retries_then_none(monkeypatch):
     assert out is None, "全部重试失败应返回 None"
 
 
+# ===== 补充覆盖：推理型生成器 <think> 思考段兼容（B-7 回归）=====
+
+def test_extract_json_array_strips_think_draft():
+    """_extract_json_array：思考段含草稿数组时取正文最终数组，不取思考里的草稿。"""
+    from llmsec.attacks.generate import _extract_json_array
+
+    final = '[{"harm_type": "violence", "prompt": "final-1"}]'
+    draft = '[{"harm_type": "violence", "prompt": "draft-1"}]'
+    raw = f"<think>先草拟一批：{draft}</think>\n{final}"
+    assert _extract_json_array(raw) == json.loads(final), "应剥思考段后取最终数组"
+
+
+def test_extract_json_array_three_shapes():
+    """_extract_json_array：围栏 / 裸数组 / 服务端剥开标签三形态均可解析。"""
+    from llmsec.attacks.generate import _extract_json_array
+
+    arr = '[{"harm_type": "hate", "prompt": "x"}]'
+    assert _extract_json_array(f"```json\n{arr}\n```") == json.loads(arr), "围栏形态"
+    assert _extract_json_array(arr) == json.loads(arr), "裸数组形态"
+    assert _extract_json_array(f"思考中 </think>{arr}") == json.loads(arr), "仅闭合标签形态"
+
+
+def test_call_api_two_round_reasoning_model_think_output(monkeypatch):
+    """两轮生成：content 带 <think> 思考段（Qwen3.6 等推理模型）也能解析成功。"""
+    from llmsec.attacks import generate as gen
+
+    monkeypatch.setattr(gen, "time", _NoSleep)
+    payload = json.dumps([{"harm_type": "violence", "prompt": "think-1"}])
+    think_resp = f"<think>构思 5 条攻击 prompt 的结构……</think>\n{payload}"
+    client = _fake_client([think_resp, think_resp])
+    out = gen.call_api_two_round(client, {"method": "m", "description": "d", "category": "1.1",
+                                 "category_name": "测试"},
+                                 ["violence"], model="fake", max_tokens=8192)
+    assert out == [{"harm_type": "violence", "prompt": "think-1"}], "思考段应被剥除后正常解析"
+
+
 def test_main_dry_run_and_only(tmp_path, monkeypatch):
     """main：--dry-run 只列方法不调 API；--only 不存在的方法 exit 1。"""
     import sys
@@ -246,7 +282,7 @@ def test_main_generates_and_resumes(tmp_path, monkeypatch):
     monkeypatch.setattr(gen, "create_openai_client", lambda *a, **k: _fake_client(responses))
 
     class _CfgShim:
-        api_key, base_url, timeout, model = "k", "http://x", 5, "fake-model"
+        api_key, base_url, timeout, model, max_tokens = "k", "http://x", 5, "fake-model", 4096
 
         @staticmethod
         def from_env():

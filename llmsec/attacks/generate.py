@@ -35,7 +35,7 @@ from llmsec.core import (
     retry_call,
     setup_console,
 )
-from llmsec.core.text import inject_math_tax
+from llmsec.core.text import inject_math_tax, strip_reasoning
 from llmsec.params import API_DELAY, API_MAX_RETRIES, API_RATE_LIMIT_DELAY, API_RETRY_DELAY
 
 logger = get_logger(__name__)
@@ -53,9 +53,8 @@ if not MD_FILE.exists():
 # 默认输出
 OUTPUT_FILE = ATTACK_SET_L1_FILE
 
-# API调用参数
+# API调用参数（max_tokens 经 GeneratorConfig 读 GENERATOR_MAX_TOKENS，随调用传入）
 TEMPERATURE = 0.9      # 较高温度增加多样性
-MAX_TOKENS = 4096
 # 重试参数统一取自 params（API_RETRY_DELAY/API_MAX_RETRIES/API_RATE_LIMIT_DELAY）
 
 
@@ -228,11 +227,29 @@ def build_critique_prompt(records: list[dict], method: dict) -> str:
     return prompt
 
 
+def _extract_json_array(raw: str) -> list:
+    """剥思考段与 ```json 围栏后解析 JSON 数组。
+
+    推理型生成器（Qwen3.6 等）会在 content 里带 <think>…</think> 思考段：
+    裸 json.loads 必炸，思考段里的草稿数组还会骗过围栏正则——统一先
+    strip_reasoning 再取围栏，与 judge 链路同一口径。
+    """
+    cleaned = strip_reasoning(raw)
+    m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", cleaned, re.DOTALL)
+    if m:
+        cleaned = m.group(1)
+    return json.loads(cleaned)
+
+
 def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
-                       model: str) -> list[dict] | None:
+                       model: str, max_tokens: int | None = None) -> list[dict] | None:
     """
     两轮生成：初稿 → 自我审查重写 → 返回最终版本。
+    max_tokens 缺省读 GeneratorConfig（GENERATOR_MAX_TOKENS）——推理型生成器
+    的思考段同样吃预算，写死的值会让 JSON 根本出不来。
     """
+    if max_tokens is None:
+        max_tokens = GeneratorConfig.from_env().max_tokens
 
     def _two_round():
         # ---- 第1轮：生成初稿 ----
@@ -244,13 +261,10 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
                 {"role": "user", "content": gen_prompt},
             ],
             temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS,
+            max_tokens=max_tokens,
         )
         raw1 = extract_message_text(resp1.choices[0].message)
-        m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw1, re.DOTALL)
-        if m:
-            raw1 = m.group(1)
-        drafts = json.loads(raw1)
+        drafts = _extract_json_array(raw1)
         if not (isinstance(drafts, list) and len(drafts) == len(harm_types)):
             raise _DraftMismatchError()
 
@@ -264,13 +278,10 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
                 {"role": "user", "content": critique_prompt},
             ],
             temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS,
+            max_tokens=max_tokens,
         )
         raw2 = extract_message_text(resp2.choices[0].message)
-        m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw2, re.DOTALL)
-        if m:
-            raw2 = m.group(1)
-        reviewed = json.loads(raw2)
+        reviewed = _extract_json_array(raw2)
         if not (isinstance(reviewed, list) and len(reviewed) == len(harm_types)):
             # 审查返回异常则退回初稿
             logger.warning("  ⚠ 审查轮返回异常，使用初稿")
@@ -447,8 +458,9 @@ def main():
         logger.info(f"[{idx+1}/{total}] {mid} {name}")
         logger.info(f"         有害类别: {', '.join(harm_types)}")
 
-        # 调用API（两轮：生成 + 自我审查重写）
-        records = call_api_two_round(client, method, harm_types, config.model)
+        # 调用API（两轮：生成 + 自我审查重写；max_tokens 走 GENERATOR_MAX_TOKENS）
+        records = call_api_two_round(client, method, harm_types, config.model,
+                                     config.max_tokens)
 
         if records is None:
             fail_count += 1

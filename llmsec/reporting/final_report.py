@@ -136,6 +136,7 @@ def generate_reports(
             "fpr": round(fpr, 4) if fpr is not None else None,
             "total_tested": allergy_summary.get("total_tested", 0),
             "allergic_count": allergy_summary.get("allergic", 0),
+            "skipped": allergy_summary.get("skipped", {}),
         },
         "recommendation": _generate_recommendation(level),
     }

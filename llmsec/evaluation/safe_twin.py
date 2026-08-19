@@ -44,7 +44,7 @@ from llmsec.core.llm import (
     retry_call,
 )
 from llmsec.core.logging import get_logger, setup_console
-from llmsec.core.text import extract_json_block, strip_math_tax
+from llmsec.core.text import extract_json_block, strip_math_tax, strip_reasoning
 from llmsec.evaluation.judge import FAST_REFUSAL_PATTERNS, Judge, create_judge_client
 from llmsec.params import (
     ALLERGY_FPR_SAFE,
@@ -93,7 +93,10 @@ def _default_input_file():
 # 避免换模型重跑时全局单文件互相覆盖。
 
 # TEMPERATURE 统一从 llmsec.params 读取（TWIN_GEN_TEMPERATURE 别名）
-MAX_TOKENS = 1024
+# max_tokens 随生成侧读 GENERATOR_MAX_TOKENS（经 _GEN_CONFIG）：推理型孪生模型
+# （SAFE_TWIN_MODEL）思考段吃预算，写死 1024 时 JSON 出不来 → 孪生全军覆没
+# → 过敏检测 total=0 → FPR 恒 None
+MAX_TOKENS = _GEN_CONFIG.max_tokens
 # RETRY_DELAY / MAX_RETRIES 统一从 params 读取（API_RETRY_DELAY / API_MAX_RETRIES）
 
 
@@ -160,7 +163,9 @@ def generate_safe_twin(attack_prompt: str, client) -> dict | None:
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
         )
-        raw = extract_message_text(response.choices[0].message)
+        # strip_reasoning：思考段里的草稿 JSON 会被 extract_json_block 误取
+        # （草稿当孪生用，污染 FPR）或令解析失败（候选被静默跳过），先剥再抽
+        raw = strip_reasoning(extract_message_text(response.choices[0].message))
         data = extract_json_block(raw)
         if data is not None:
             return {
