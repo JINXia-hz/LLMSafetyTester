@@ -91,18 +91,7 @@ def execute_plan(
         # 把状态覆写回 P_DONE，用户裁决被静默推翻。层间检查驳回即停（层内线程粒度
         # 不追——单层耗时以分钟计的评估步骤无法安全中断，层边界是实用粒度）。
         if plan.status == P_REJECTED:
-            stats = {}
-            for x in plan.steps:
-                stats[x.status] = stats.get(x.status, 0) + 1
-            gazette.append_event(plan.id, gazette.EV_PLAN_FINISHED, SHANGSHU,
-                                 session_id=plan.session_id, intent=plan.intent,
-                                 detail={"aborted": True,
-                                         "reason": "用户驳回，剩余层不再执行",
-                                         "step_stats": stats})
-            notify_routed(KIND_PLAN_PROGRESS, from_dept=SHANGSHU,
-                          plan_id=plan.id, intent=plan.intent, session_id=plan.session_id,
-                          status=plan.status,
-                          steps=[{"id": s.id, "status": s.status} for s in plan.steps])
+            _abort_finish(plan, "用户驳回，剩余层不再执行")
             return plan
         for s in layer:
             if s.status == S_BLOCKED and s.ticket is None:
@@ -133,6 +122,14 @@ def execute_plan(
         plan_mod.save_plan(plan)
         _notify_progress(plan, on_progress)
 
+    # G-3：圣裁终局复查——最后一层执行期间的驳回走到这里时层间检查（E-5）
+    # 已不再有机会拦截，收尾的 done/approved 覆写会把用户裁决单方面推翻
+    #（变体2：驳回被记成"成功完成"；变体1：放行+驳回被改判 approved 叠加
+    # 重入队成"既不执行也不驳回"）。驳回优先于一切收尾状态。
+    if plan.status == P_REJECTED:
+        _abort_finish(plan, "用户驳回（最后一层执行期间），收尾保持驳回终局")
+        return plan
+
     # P1-6：执行期放行的步骤（库票已清、内存 ticket 已由 api 同步清除、状态仍
     # blocked）不得随 Plan 一起终结——其所在层已过、executor 不再回头重试，
     # 终态后 404 门又挡住 done 态重入队，放行会被静默吞掉。收尾时检测到即
@@ -149,7 +146,9 @@ def execute_plan(
                       plan_id=plan.id, intent=plan.intent, session_id=plan.session_id,
                       status=plan.status,
                       steps=[{"id": s.id, "status": s.status} for s in plan.steps])
-        # 惰性导入防环（queue worker 调 execute_plan，反向引用在运行期才建立）
+        # 惰性导入防环（queue worker 调 execute_plan，反向引用在运行期才建立）。
+        # E-2：此刻 worker 仍持 _running——submit 对 running 中的 plan 是
+        # "当前轮结束后重跑"语义（排队行与 running 行并存），不再判重拒绝
         from control.agent.shangshu import get_queue
         get_queue().submit(plan.id)
         return plan
@@ -223,9 +222,12 @@ def _execute_step(step: Step, plan: Plan, on_progress: ProgressCallback | None) 
             _reason = "订阅回调异常" if _cb_error else "门下省未就绪（未订阅审查）"
             try:
                 from control.agent.menxia import issue_block
+                # E-1：issue_block 返回 BlockTicket 对象，而 step.ticket/文牍/
+                # ctl_plans.payload 全按 dict 序列化（JSON 列不容 dataclass）——
+                # 正常路径（listener）返回的就是 to_dict()，此处必须同口径
                 block_msg = issue_block(plan.id, step.id, step.capability, cap.risk_level,
                                         {"summary": f"门下省审查不可用（{_reason}）",
-                                         "detail": "安全闸 fail-closed：确认门下省正常后圣裁"})
+                                         "detail": "安全闸 fail-closed：确认门下省正常后圣裁"}).to_dict()
             except Exception:
                 import time as _t
                 import uuid as _u
@@ -276,6 +278,24 @@ def _execute_step(step: Step, plan: Plan, on_progress: ProgressCallback | None) 
         notify_routed(KIND_STEP_FAILED, from_dept=SHANGSHU, plan_id=plan.id,
                       intent=plan.intent, session_id=plan.session_id,
                       step_id=step.id, capability=step.capability, error=step.error)
+
+
+def _abort_finish(plan: Plan, reason: str) -> None:
+    """驳回中止的收尾（文牍 + 总线进度，E-5 层间与 G-3 收尾两处共用）。
+
+    不改 plan.status（保持 P_REJECTED 终局、由 reject_plan 落盘），只补记
+    aborted 的 finished 事件，让文牍里能看到"执行侧何时停手"。"""
+    stats = {}
+    for x in plan.steps:
+        stats[x.status] = stats.get(x.status, 0) + 1
+    gazette.append_event(plan.id, gazette.EV_PLAN_FINISHED, SHANGSHU,
+                         session_id=plan.session_id, intent=plan.intent,
+                         detail={"aborted": True, "reason": reason,
+                                 "step_stats": stats})
+    notify_routed(KIND_PLAN_PROGRESS, from_dept=SHANGSHU,
+                  plan_id=plan.id, intent=plan.intent, session_id=plan.session_id,
+                  status=plan.status,
+                  steps=[{"id": s.id, "status": s.status} for s in plan.steps])
 
 
 def _propagate_blockage(plan: Plan) -> None:

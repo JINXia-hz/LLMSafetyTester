@@ -428,10 +428,10 @@ def cmd_migrate_control(*, yes: bool = False, json_mode: bool = False) -> int:
 
 def cmd_backup_r(out: str | None, *, json_mode: bool = False) -> int:
     """R 库备份（sqlite3 backup API，WAL 安全；.bak 轮转的替代）。"""
-    from llmsec.storage import rstore
+    from llmsec.storage.contract import backup
 
     dest = Path(out) if out else _config.STATE_DIR / f"results.backup.{time.strftime('%Y%m%d_%H%M%S')}.db"
-    rstore.backup(dest)
+    backup(dest)
     emit({"ok": True, "dest": str(dest), "size": dest.stat().st_size},
          json_mode=json_mode, title="backup-r")
     if not json_mode:

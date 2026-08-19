@@ -45,7 +45,7 @@ from llmsec.core.llm import (
 )
 from llmsec.core.logging import get_logger, setup_console
 from llmsec.core.text import extract_json_block, strip_math_tax, strip_reasoning
-from llmsec.evaluation.judge import FAST_REFUSAL_PATTERNS, Judge, create_judge_client
+from llmsec.evaluation.judge import Judge, create_judge_client, refusal_hits
 from llmsec.params import (
     ALLERGY_FPR_SAFE,
     API_DELAY,
@@ -325,8 +325,7 @@ def judge_allergic(judge, safe_prompt: str, content: str) -> "tuple[bool, bool, 
     返回 (is_allergic, keyword_refused, judge_result)。
     """
     judge_result = judge.evaluate(safe_prompt, content)
-    hits = sum(1 for kw in FAST_REFUSAL_PATTERNS if kw.lower() in content.lower())
-    keyword_refused = hits >= PRESCREEN_REFUSAL_HITS
+    keyword_refused = refusal_hits(content) >= PRESCREEN_REFUSAL_HITS
     return judge_result["is_refusal"] or keyword_refused, keyword_refused, judge_result
 
 
@@ -412,8 +411,7 @@ def evaluate_allergy(*, twins=None, client=None, judge=None, result_file=None):
         except Exception as e:
             logger.warning(f"⚠ {oid} Judge故障，降级关键词判定（不计入 FPR）: {e}")
             judge_degraded = True
-            hits = sum(1 for kw in FAST_REFUSAL_PATTERNS if kw.lower() in content.lower())
-            keyword_refused = hits >= PRESCREEN_REFUSAL_HITS
+            keyword_refused = refusal_hits(content) >= PRESCREEN_REFUSAL_HITS
             is_allergic = keyword_refused
             judge_result = {"is_refusal": keyword_refused, "is_harmful": False,
                             "compliance_level": "N/A"}

@@ -141,10 +141,17 @@ def quality_key(rec: dict) -> str:
 
     此前仅按 id：同 id 不同 prompt（攻击集重新生成、跨数据集 id 撞车）静默复用
     过期评分，assess 的假防御甄别基于陈旧质量分失真。指纹取 sha256 前 16 位。
+
+    C-1：优先读行内现成的 prompt_sha16（attack_results 行由 _build_attack_row
+    落盘——评估明细不带全文 prompt，无此字段时键恒为空串指纹、与攻击集侧
+    缓存键永不相等，假防御甄别整链静默失效）；攻击集记录（带 prompt）与
+    新明细行（带 sha16）两侧同键。
     """
     import hashlib
-    fp = hashlib.sha256((rec.get("prompt") or "").encode("utf-8", "ignore")).hexdigest()[:16]
-    return f"{rec.get('id')}:{fp}"
+    sha = rec.get("prompt_sha16")
+    if not sha:
+        sha = hashlib.sha256((rec.get("prompt") or "").encode("utf-8", "ignore")).hexdigest()[:16]
+    return f"{rec.get('id')}:{sha}"
 
 
 def score_records(client, model: str, records: list[dict], *,

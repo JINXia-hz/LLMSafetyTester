@@ -231,8 +231,8 @@ def execute_delete(plan: Plan, *, delete_r: bool = False) -> Plan:
     # _file_lock 与 LockTimeout 从 R 路径退役）
     if delete_r and plan.extra.get("r_models_affected"):
         try:
-            from llmsec.storage import rstore
-            total = rstore.remove_models(list(plan.extra["r_models_affected"]))
+            from llmsec.storage.contract import remove_models
+            total = remove_models(list(plan.extra["r_models_affected"]))
             done.extra["r_rows_removed"] = total
             logger.info("已从 R 删除 %d 条观测（models=%s）", total, plan.extra["r_models_affected"])
         except Exception as e:

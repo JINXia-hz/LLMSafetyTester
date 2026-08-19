@@ -133,8 +133,8 @@ def _persist_unit_catalog(units: dict) -> None:
     if not units:
         return
     try:
-        from llmsec.storage import rstore
-        rstore.set_units(sorted(units.keys()))
+        from llmsec.storage.contract import set_units
+        set_units(sorted(units.keys()))
     except Exception as e:
         logger.warning("unit 目录落库失败（不影响评估）: %s", e)
 

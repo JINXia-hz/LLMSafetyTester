@@ -5,7 +5,8 @@
 
 设计：
   - 单 worker 线程串行执行（Plan 之间有数据依赖——R 观测是共享状态）
-  - submit() 不阻塞——立即返回 "queued" / "running" / "duplicate"
+  - submit() 不阻塞——立即返回 "queued" / "duplicate"（对执行中的 plan 提交
+    是"当前轮结束后重跑"语义，E-2：此前恒 "duplicate" 使执行期放行被吞）
   - 前端轮询 bus feed 看执行进度（已有逻辑）
   - cancel() 只能取消排队中的，不能中断正在执行的
   - P5：队列内容落 ctl_queue 表（重启恢复排队 Plan）；worker 线程生命周期
@@ -51,12 +52,19 @@ class PlanQueue:
 
         Returns:
             "queued" — 已加入队列，等待执行
-            "duplicate" — 该 Plan 已在队列或正在执行
+            "duplicate" — 该 Plan 已在队列中
+
+        E-2：plan_id == self._running 不再判重拒绝——executor 收尾重入队
+        （执行期放行的步骤）与 api 的 done 态放行补入队都发生在 worker 仍
+        持 _running 的窗口内，旧实现恒返回 "duplicate" 且返回值被丢弃，
+        放行被静默吞掉（Plan 永卡 approved）。此处的语义是"当前轮结束后
+        重跑一轮"：排队行与 running 行并存（finish_queue_item 只关 running
+        行），worker 摘牌后自然进入下一轮。
         """
         from control.core.storage import enqueue_plan
 
         with self._lock:
-            if plan_id == self._running or plan_id in self._queue:
+            if plan_id in self._queue:
                 return "duplicate"
             self._queue.append(plan_id)
             enqueue_plan(plan_id)
@@ -82,7 +90,8 @@ class PlanQueue:
         with self._lock:
             if plan_id in self._queue:
                 self._queue.remove(plan_id)
-                finish_queue_item(plan_id)
+                # 排队行一并关闭（默认只关 running 行是给 worker 收尾用的）
+                finish_queue_item(plan_id, include_queued=True)
                 return True
             return False
 

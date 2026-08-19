@@ -459,12 +459,11 @@ def update_elo(all_results: list[dict], summary: dict,
         return r.get("round") if r.get("round") is not None else 0
 
     # M10：groupby 要求按键连续排序（写文件顺序是 rec1-r0,r1,...,rec2-r0,...）
-    # Judge 故障（fallback_keyword/judge_error）记录不回放——0 分中性观测
-    # 稀释攻防信号，且其"未测出结论"的本质不应进入 R（唯一真相）。
-    # 与 attack_phase 两处 update_round 前的过滤同口径。
-    elo_results = [r for r in all_results
-                   if r.get("judge_mode") != "fallback_keyword"
-                   and r.get("status") != "judge_error"]
+    # Judge 故障（fallback_keyword/judge_parse_fallback/judge_error）记录不回放——
+    # 0 分中性观测稀释攻防信号，且其"未测出结论"的本质不应进入 R（唯一真相）。
+    # B-1：与 attack_phase 两处 update_round 前的过滤同口径（单源 elo_eligible）。
+    from llmsec.evaluation.scoring import elo_eligible
+    elo_results = [r for r in all_results if elo_eligible(r)]
     sorted_results = sorted(elo_results, key=_round_key)
     for rd, group in groupby(sorted_results, key=_round_key):
         group_list = list(group)

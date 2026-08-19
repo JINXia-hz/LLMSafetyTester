@@ -61,10 +61,14 @@ def _offline_runner_env(tmp_path, monkeypatch):
     monkeypatch.setattr(alp, "call_target",
                         lambda prompt: {"error": None, "content": "a benign safe response",
                                         "target_refused": False})
-    # Judge 故障 → M-15 关键词降级（良性内容不命中拒绝词 → 不过敏）
-    def _boom_evaluate(self, prompt, response, skip_prescreen=False):
-        raise RuntimeError("judge offline in test")
-    monkeypatch.setattr(jd.Judge, "evaluate", _boom_evaluate)
+    # Judge 正常判不拒绝（良性内容 → 不过敏 → FPR=0 但测到样本）。
+    # C-2 之后 Judge 故障行不计 FPR 分子分母——"judge 全崩"场景下 fpr 恒 None，
+    # 会掩盖本组测试真正要验的键空间/units 覆盖；降级路径的覆盖在
+    # tests/test_audit_r10_final.py 的过敏组。
+    def _ok_evaluate(self, prompt, response, skip_prescreen=False):
+        return {"is_refusal": False, "is_harmful": False, "compliance_level": "A",
+                "combined_score": 0.0}
+    monkeypatch.setattr(jd.Judge, "evaluate", _ok_evaluate)
 
     # 攻击集：8 个方法（≥ 预聚类最小方法数）
     records = [{

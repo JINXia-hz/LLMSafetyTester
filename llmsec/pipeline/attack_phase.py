@@ -38,7 +38,7 @@ from llmsec.evaluation.predictors.cold_start import (
     current_feature_config_hash,
 )
 from llmsec.evaluation.samplers import build_sampler
-from llmsec.evaluation.scoring import measure_math_baseline
+from llmsec.evaluation.scoring import elo_eligible, measure_math_baseline
 from llmsec.params import (
     ADAPTIVE_BATCH_MAX,
     ADAPTIVE_BATCH_MIN,
@@ -205,6 +205,8 @@ def _adaptive_batch_size(
 def _build_attack_row(rec: dict, result: dict, round_idx: int, phase: str,
                       unit: str | None = None) -> dict:
     """构造 attack_results.jsonl 的单行（seed/attack 共用，避免两处大 dict 重复）。"""
+    import hashlib
+
     from llmsec.core.taxonomy import normalize_harm_type
 
     return {
@@ -213,6 +215,11 @@ def _build_attack_row(rec: dict, result: dict, round_idx: int, phase: str,
         "unit": unit,               # 评级单位（簇指纹）；分析/展示的聚合键
         "method": rec["method"],
         "id": rec["id"],
+        # C-1：质量分连接键的 prompt 指纹（与 quality.quality_key 同源）——
+        # attack_results 行不带全文 prompt（体积），assess 侧凭本字段算键，
+        # 否则键恒为空串指纹、与质量缓存永不相等（假防御甄别整链静默失效）
+        "prompt_sha16": hashlib.sha256(
+            (rec.get("prompt") or "").encode("utf-8", "ignore")).hexdigest()[:16],
         "category": rec.get("category", "unknown"),
         "category_name": rec.get("category_name", ""),
         "source": rec.get("source", "our"),
@@ -240,6 +247,25 @@ def _build_attack_row(rec: dict, result: dict, round_idx: int, phase: str,
         # update_round 前的过滤），但明细保留此标记供分析/重跑识别
         "judge_mode": result.get("judge_mode"),
     }
+
+
+def _resume_tested_recs(R, defender_name: str, rec_to_unit: dict[str, str],
+                         tested_recs: dict[str, set]) -> None:
+    """R 中该模型已测记录 → 标记对应 unit 的记录池（防同 prompt 重测）。
+
+    C-12：跨攻击集撞名防护——R 行的观测单位必须与本集该 id 所属单位一致
+    才算已测（同 id 异内容 ⇒ 异簇 ⇒ unit 指纹不同）。生成集 id 命名空间
+    （X.Y.Z-序号）跨版本必然重叠，不过滤时他集同 id 记录会把本集记录池
+    误标"已测"，池提前测尽、漏测 prompt。旧 R 行无 unit 键时退回 id 匹配。
+    """
+    for rid, _res in R.model_column(defender_name).items():
+        uid = rec_to_unit.get(str(rid))
+        if uid is None:
+            continue
+        _r_unit = (_res.extra or {}).get("unit") if getattr(_res, "extra", None) else None
+        if _r_unit is not None and _r_unit != uid:
+            continue
+        tested_recs[uid].add(str(rid))
 
 
 def _resolve_workers(batch_n: int, concurrency: int | None) -> int:
@@ -456,11 +482,8 @@ def run_attack_phase(records: list[dict],
         from llmsec.evaluation.elo import derive_elo
         _derived = derive_elo(_R, defender_name, unit_catalog=unit_ids)
         _merge_resume_from_r(tracker, _derived, defender_name, _tested_in_R)
-    # R 中该模型已测记录 → 标记对应 unit 的记录池（防同 prompt 重测）
-    for rid, _res in _R.model_column(defender_name).items():
-        uid = _rec_to_unit.get(str(rid))
-        if uid is not None:
-            tested_recs[uid].add(str(rid))
+    # R 中该模型已测记录 → 记录池标记（C-12 撞名防护，见 _resume_tested_recs）
+    _resume_tested_recs(_R, defender_name, _rec_to_unit, tested_recs)
     # 防跨攻击集 stale GT 污染（单位指纹跨攻击集不复用，换攻击集即全部 stale）
     _current_units = set(unit_ids)
     _stale_gt = tracker.ground_truth_methods - _current_units
@@ -570,9 +593,10 @@ def run_attack_phase(records: list[dict],
             tested.add(uid)
             tested_recs[uid].add(str(rec["id"]))
             all_results.append(_build_attack_row(rec, result, 0, "seed", unit=uid))
-            # Judge 故障（fallback_keyword）只留明细、不喂 Elo——0 分中性观测
-            # 会稀释攻防信号，且该条本就"未测出"任何结论
-            if result.get("judge_mode") != "fallback_keyword":
+            # Judge 故障（fallback_keyword/judge_parse_fallback/judge_error）只留
+            # 明细、不喂 Elo——0 分中性观测会稀释攻防信号，且该条本就"未测出"
+            # 任何结论（B-1：单源 elo_eligible，与 evaluator 回放同口径）
+            if elo_eligible(result):
                 seed_rows.append((uid, result["eval_score"]))
                 seed_statuses.append(result.get("status", ""))
                 seed_rec_ids.append(str(rec["id"]))
@@ -687,8 +711,9 @@ def run_attack_phase(records: list[dict],
             tested.add(uid)
             tested_recs[uid].add(str(rec["id"]))
             all_results.append(_build_attack_row(rec, result, round_idx, "attack", unit=uid))
-            # 同种子批：Judge 故障记录不喂 Elo（与 evaluator.update_elo 口径一致）
-            if result.get("judge_mode") != "fallback_keyword":
+            # 同种子批：Judge 故障记录不喂 Elo（B-1：单源 elo_eligible，
+            # 与 evaluator.update_elo 口径一致）
+            if elo_eligible(result):
                 round_rows.append((uid, result["eval_score"]))
                 round_statuses.append(result.get("status", ""))
                 round_rec_ids.append(str(rec["id"]))

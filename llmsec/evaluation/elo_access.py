@@ -42,9 +42,9 @@ def _model_fingerprint(R: ResultsMatrix, model: str) -> str | None:
 
 def _cache_hit(model: str, fp: str) -> dict | None:
     """命中判定：elo_cache 行存在、指纹一致、payload schema 版本未漂移。"""
-    from llmsec.storage import rstore
+    from llmsec.storage.contract import get_elo_cache
 
-    row = rstore.get_elo_cache(model)
+    row = get_elo_cache(model)
     if row is None:
         return None
     row_fp, payload = row
@@ -54,12 +54,12 @@ def _cache_hit(model: str, fp: str) -> dict | None:
 
 
 def _cache_store(model: str, fp: str, entry: dict) -> None:
-    from llmsec.storage import rstore
+    from llmsec.storage.contract import upsert_elo_cache
 
     payload = dict(entry)
     payload["_version"] = _CACHE_VERSION
     payload.setdefault("fingerprint", fp)  # 形状统一：读侧免特判（列与 payload 都有）
-    rstore.upsert_elo_cache(model, fp, payload)
+    upsert_elo_cache(model, fp, payload)
 
 
 # ============================================================
@@ -214,8 +214,8 @@ def publish_tracker(tracker: ELOTracker, model: str) -> None:
                 record=h.get("record") or h["attacker"], model=model,
                 eval_score=h["eval_score"], status=raw_status, ts=None, extra=extra,
             ))
-    from llmsec.storage import rstore
-    rstore.upsert_observations(items)
+    from llmsec.storage.contract import upsert_observations
+    upsert_observations(items)
     R = ResultsMatrix.load()  # 读回完整矩阵（指纹/派生口径不变）
 
     fp = _model_fingerprint(R, model)

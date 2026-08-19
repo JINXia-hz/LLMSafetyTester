@@ -146,7 +146,7 @@ def execute_merge(
     源矩阵在事务外读（只读），观测按 (record, model) upsert 进目标库；
     并发 merge/publish 各自事务串行提交，无丢更新路径。
     """
-    from llmsec.storage import rstore
+    from llmsec.storage.contract import set_units, upsert_observations
 
     target_path = _resolve_results_path(target)
     merged_counts: dict[str, int] = {}
@@ -162,7 +162,7 @@ def execute_merge(
             col = src_R.model_column(model)
             items += [res for res in col.values()]
             merged_counts[model] = merged_counts.get(model, 0) + len(col)
-    rstore.upsert_observations(items, path=target_path)
+    upsert_observations(items, path=target_path)
     # 单位目录合并（source 的 units 并入 target，保序去重）
     target_R = _load_R(target_path)
     src_units: list[str] = []
@@ -173,7 +173,7 @@ def execute_merge(
         for u in src_units:
             if u not in merged_units:
                 merged_units.append(u)
-        rstore.set_units(merged_units, path=target_path)
+        set_units(merged_units, path=target_path)
 
     done = Plan(action="merge", dry_run=False)
     done.extra["target"] = target

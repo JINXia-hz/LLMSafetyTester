@@ -307,7 +307,10 @@ async def api_task_stream(task_id: str):
             return t["status"], t.get("returncode")
         fresh = _external_task_row(task_id)
         if fresh is not None:
-            return fresh.status, fresh.returncode
+            # D-1：Task 模型无 returncode 列（MCP/TUI 写入的外部行）——裸属性
+            # 访问让外部任务的 SSE 首轮即 AttributeError 断流，与 _external_task_view
+            # 同口径用 getattr 兜底
+            return fresh.status, getattr(fresh, "returncode", None)
         return "failed", None  # 库行消失（极端）：按终态关流
 
     async def event_gen():

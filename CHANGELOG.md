@@ -36,6 +36,35 @@
 
 ### 修复
 
+- 上线前终审第五轮（P0/P1 十项 + 缓后两项收口，全部活体复现后修复）：
+  - **P0 假防御甄别整链失效**：质量缓存键加 prompt 指纹（C-6）时评估明细行
+    不带 prompt，两侧键恒不等——攻击有效性评估全部单位误判"质量分缺失"。
+    现明细行落 `prompt_sha16`（`_build_attack_row`），`quality_key` 双侧同源，
+    assess 增加零命中 ERROR 哨兵防键口径再次静默漂移
+  - **门下省 fail-closed 故障票序列化崩溃**（E-3 路径）：`issue_block` 返回的
+    BlockTicket 对象未 `to_dict()`，门下省回调一旦异常文牍/Plan 落库即抛
+    TypeError、Plan 永久卡 executing。现与正常路径同口径返回 dict
+  - **执行期放行被静默吞掉**：worker 摘牌窗口内 executor 收尾重入队恒被
+    submit 判重拒绝。现 running 中再提交 = "当前轮结束后重跑"语义（ctl_queue
+    行 per-entry 生命周期：mark 只迁 queued、finish 只关 running、恢复去重）
+  - **用户驳回被收尾改判**：最后一层执行期间的驳回会被 done/approved 覆盖。
+    现收尾前复查圣裁终局（与层间 E-5 检查共用 `_abort_finish`）
+  - **judge_parse_fallback 污染 live Elo**：attack_phase 两处过滤漏滤第二种
+    降级模式，live 与 R 派生 Elo 分叉。抽 `scoring.elo_eligible` 单源三处共用
+  - **生产链路 FPR 失真**：allergy_phase（runner 主链路）Judge 降级条目计入
+    FPR 分子分母且单关键词命中即判过敏——与 safe_twin（CLI 路径）口径分叉。
+    现对齐：降级剔除（计 `judge_failed_count` 单列）+ 阈值同源
+    `≥PRESCREEN_REFUSAL_HITS`（拒绝关键词计数四处收口为 `judge.refusal_hits`）
+  - **外部任务 SSE 必崩**：`_current_status` 裸访问 Task.returncode（模型无该列），
+    跨进程任务连流零事件即断。改 getattr 兜底
+  - **clone_from_run 静默空 R**：state.json 损坏时非严格解析回退空 history 绕过
+    守卫、空矩阵覆写 dest。现 strict 解析 + 显式 ValueError
+  - **跨攻击集撞名 id**：R 行观测单位与本集单位不一致（重新生成攻击集的典型
+    场景）时记录池被误标已测、漏测 prompt。resume 标记加 unit 一致性过滤
+  - storage 契约 R 域收口（缓后 A-5）：service 层 8 处直连 rstore 改道
+    `storage.contract`（R 域 API 补齐导出）+ AST 守卫禁止包外 import 子模块
+  - real_api 判别力测试断言方向写反（A/B=配合有害请求=攻击成功），修正为与
+    评级方案一致；此前"通过"只是 judge 端点返空、兜底猜 D 碰巧满足反断言
 - 契约缺口：全空格 prompt 此前骗过 min_length=1 校验，现按空白拒收
 - 门下省封驳待裁计数跨页/重放失配：放行（`plan/block/approve`）与 Plan 驳回
   （`plan/reject`）清封驳令时新增总线广播 `step_unblocked`（信封带 plan_id，

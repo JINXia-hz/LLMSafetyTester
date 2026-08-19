@@ -254,15 +254,24 @@ def enqueue_plan(plan_id: str) -> None:
 
 
 def mark_queue_running(plan_id: str) -> None:
+    # E-2：只迁 queued→running——执行中重入队（执行期放行/驳回改判修复后）
+    # 会在 running 行旁边并存一条 queued 行（下一轮），全行置 running 会把
+    # 它一并吞进当前轮
     with _db.tx() as s:
-        for r in s.exec(_select(CtlQueueItem).where(CtlQueueItem.plan_id == plan_id)).all():
+        for r in s.exec(_select(CtlQueueItem).where(
+                CtlQueueItem.plan_id == plan_id, CtlQueueItem.status == "queued")).all():
             r.status = "running"
             s.add(r)
 
 
-def finish_queue_item(plan_id: str) -> None:
+def finish_queue_item(plan_id: str, *, include_queued: bool = False) -> None:
+    """关闭队列行。默认只关 running 行（当前轮结束），保留该 plan 的 queued
+    行（重入队的下一轮）；cancel 路径传 include_queued=True 连排队行一起关。"""
+    statuses = ("running", "queued") if include_queued else ("running",)
     with _db.tx() as s:
-        for r in s.exec(_select(CtlQueueItem).where(CtlQueueItem.plan_id == plan_id)).all():
+        for r in s.exec(_select(CtlQueueItem).where(
+                CtlQueueItem.plan_id == plan_id,
+                CtlQueueItem.status.in_(statuses))).all():
             r.status = "done"
             s.add(r)
         done = list(s.exec(_select(CtlQueueItem).where(CtlQueueItem.status == "done")
@@ -284,12 +293,15 @@ def pending_queue_plans() -> list[str]:
         rows = s.exec(_select(CtlQueueItem)
                       .where(CtlQueueItem.status.in_(["queued", "running"]))
                       .order_by(CtlQueueItem.queued_at)).all()
-        ids = []
+        ids: list[str] = []
         for r in rows:
             if r.status == "running":
                 r.status = "queued"
                 s.add(r)
-            ids.append(r.plan_id)
+            # E-2：同一 plan 可能同时留有 running（崩溃遗留）+ queued（重入队）
+            # 两行——按首次出现去重，避免恢复队列里同一 Plan 连跑两遍
+            if r.plan_id not in ids:
+                ids.append(r.plan_id)
         return ids
 
 

@@ -75,12 +75,29 @@ from llmsec.storage.ctlstore import (
 )
 from llmsec.storage.db import catalog_db, db_for
 from llmsec.storage.models import Run, Task, Trial
-from llmsec.storage.rstore import backup, clone_from_run, close_db, results_stats
+from llmsec.storage.rstore import (
+    backup,
+    clone_from_run,
+    close_db,
+    get_elo_cache,
+    load_matrix,
+    remove_models,
+    results_db,
+    results_stats,
+    save_matrix,
+    set_units,
+    upsert_elo_cache,
+    upsert_observations,
+)
 
 __all__ = [
     "RUN_ARTIFACTS", "RUN_NAME_RE", "RUN_TS_FORMAT",
     "Run", "Task", "Trial",
     "allocate_runs_dir", "catalog_db", "db_for", "extract_report_metrics",
+    # R 域（A-5 收口）：service 层此前 8 处直连 rstore——契约自述"只许 import
+    # 本模块"与现实违例并存；导出补齐 + AST 守卫禁止包外再 import rstore
+    "results_db", "load_matrix", "save_matrix", "upsert_observations",
+    "remove_models", "set_units", "get_elo_cache", "upsert_elo_cache",
     "backup", "clone_from_run", "close_db", "results_stats", "search_gazette",
     "append_event", "gazette_events", "gazette_meta", "list_gazette_meta", "reset_gazette",
     "save_ctl_plan", "get_ctl_plan", "list_ctl_plans", "reset_ctl_plans",

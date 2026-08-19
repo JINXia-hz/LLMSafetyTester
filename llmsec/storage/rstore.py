@@ -331,7 +331,18 @@ def clone_from_run(run_name: str, dest: Path | str) -> dict:
             f"run {run_name!r} 无 state.json，无法重建 R。"
             "（仅 global 源或含 state.json 的 run 可导出）"
         )
-    state = read_json(state_path) or {}
+    # A-1：state.json 存在但内容损坏（半写/非法 JSON）时显式失败——非严格
+    # read_json 静默返回 {} → 空 history → A-3 守卫对空序列恒 False 不触发
+    # → save_matrix 把空库全量覆写进 dest，fork/快照带着空 R 静默丢观测
+    #（与"history 行缺 defender"是同一危害的两个入口）。
+    from llmsec.core.io import CorruptedFileError
+    try:
+        state = read_json(state_path, strict=True) or {}
+    except CorruptedFileError as e:
+        raise ValueError(
+            f"run {run_name!r} 的 state.json 损坏（{e}），拒绝导出空 R。"
+            "（先排查该 run 产物完整性；确需放弃观测请显式删除 state.json）"
+        ) from e
     report = read_json(run_dir / "runner_report.json") or {}
     model = report.get("target_model")
     history = state.get("history", [])

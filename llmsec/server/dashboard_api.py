@@ -100,22 +100,23 @@ async def ready():
     P9：原先每次探针全量 load_matrix（整矩阵构建 + quick_check）——
     探针只需证明 db 可开可查，COUNT 足矣。
     """
-    from llmsec.storage import rstore
+    from llmsec.storage.contract import results_db as _results_db
+    from llmsec.storage.contract import results_stats
 
     # results_db() 调期解析（work-dir 重绑兼容）；P7 统一库后 R 与目录同在
     # catalog.db——旧常量 RESULTS_DB 已随存储重构删除
-    results_db = rstore.results_db()
-    if results_db.exists():
+    rdb = _results_db()
+    if rdb.exists():
         try:
-            stats = rstore.results_stats()
+            stats = results_stats()
             return JSONResponse({
                 "status": "ready",
-                "results_db": str(results_db),
+                "results_db": str(rdb),
                 "observations": stats["observations"],
             })
         except (OSError, RuntimeError):
             pass
-    return JSONResponse({"status": "not_ready", "results_db": str(results_db)}, status_code=503)
+    return JSONResponse({"status": "not_ready", "results_db": str(rdb)}, status_code=503)
 
 
 # ============================================================

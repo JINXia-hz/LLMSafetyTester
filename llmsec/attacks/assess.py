@@ -67,7 +67,7 @@ def fuse(run_dir: Path, quality: dict) -> dict:
     rows = _load_jsonl(run_dir / "attack_results.jsonl")
     state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
 
-    # ---- 逐 unit 聚合：观测数 / 成功数 / 质量分（经 id 连接） ----
+    # ---- 逐 unit 聚合：观测数 / 成功数 / 质量分（经 id+prompt_sha16 连接，C-1） ----
     per_unit: dict[str, dict] = defaultdict(lambda: {"n": 0, "harmful": 0,
                                                      "qualities": [], "tags": Counter(),
                                                      "methods": set()})
@@ -94,6 +94,14 @@ def fuse(run_dir: Path, quality: dict) -> dict:
     for v in (state.get("defender_ratings") or {}).values():
         defender_elo = v
         break
+
+    # C-1 防回归哨兵：质量报告非空且有明细行却零连接命中——键口径再次漂移
+    # （旧行为：明细行无 prompt 字段 → 键恒为空串指纹 → 恒 miss，所有单位
+    # 判"质量分缺失"、假防御嫌疑恒 0，比不产出报告更误导）。必须吵出来。
+    if quality and rows and not any(u["qualities"] for u in per_unit.values()):
+        logger.error(f"❌ 质量分连接 0 命中（{len(rows)} 行明细 × {len(quality)} 条质量分）"
+                     "——attack_results 行缺 prompt_sha16（旧 run？）或质量报告来自"
+                     "不同攻击集，假防御甄别不可用")
 
     verdicts = {"false_defense_suspect": [], "genuine_strong_defense": [], "inconclusive": []}
     for uid, u in sorted(per_unit.items()):

@@ -16,7 +16,7 @@ from llmsec.core.config import OUTPUT_DIR
 from llmsec.core.io import write_json
 from llmsec.core.logging import get_logger
 from llmsec.management.common import emit, print_table
-from llmsec.storage import rstore
+from llmsec.storage.contract import backup, clone_from_run, results_stats
 
 logger = get_logger(__name__)
 
@@ -51,11 +51,11 @@ def export_snapshot(
 
     dst = out_dir / "catalog.db"
     if source == "global":
-        rstore.backup(dst)
-        stats = rstore.results_stats(dst)
+        backup(dst)
+        stats = results_stats(dst)
         source_desc = "global R (catalog.db)"
     elif source.startswith("run:"):
-        stats = rstore.clone_from_run(source[4:], dst)
+        stats = clone_from_run(source[4:], dst)
         source_desc = f"run:{source[4:]} (state.json 重建)"
     else:
         raise ValueError(f"未知 source: {source!r}（用 'global' 或 'run:<name>'）")

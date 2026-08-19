@@ -38,25 +38,40 @@ class TestPlanQueue:
         time.sleep(0.5)
         assert plan.id in executed
 
-    def test_duplicate_rejected(self, tmp_path, monkeypatch):
+    def test_submit_duplicate_and_running_rerun(self, tmp_path, monkeypatch):
+        """排队中重复提交 → duplicate；运行中提交 → queued（E-2 重跑语义）。
+
+        E-2 之前 running 中的 plan 再提交恒被 "duplicate" 拒绝——executor 收尾
+        自动重入队（执行期放行）与 api 的 done 态补入队都发生在这个窗口，
+        放行被静默吞掉。新语义：当前轮结束后重跑一轮（排队行与 running 行并存）。
+        """
         from control.agent.shangshu import plan as plan_mod
         from control.agent.shangshu.plan import P_APPROVED, Plan, Step, save_plan
-        from control.agent.shangshu.queue import get_queue
+        from control.agent.shangshu.queue import PlanQueue, get_queue
         plan_mod.reset_plans()
-
-        from control.agent.shangshu import executor
-        def slow_execute(plan_id):
-            time.sleep(1.0)  # 慢执行，确保第二个 submit 时第一个还在跑
-        monkeypatch.setattr(executor, "execute_plan", slow_execute)
 
         plan = Plan(intent="test", steps=[Step(id="s1", capability="list_runs", args={})],
                     status=P_APPROVED)
         save_plan(plan)
 
-        get_queue().submit(plan.id)
-        # 再次提交同一个 → duplicate
-        result = get_queue().submit(plan.id)
-        assert result == "duplicate"
+        # 场景1（排队中重复提交）：不启 worker，plan 稳定留在 deque——
+        # 旧写法靠 sleep 与 worker 抢跑，天然竞态
+        monkeypatch.setattr(PlanQueue, "_ensure_worker", lambda self: None)
+        q = get_queue()
+        assert q.submit(plan.id) == "queued"
+        assert q.submit(plan.id) == "duplicate"
+
+        # 场景2（运行中提交）：worker 仍持 _running——E-2 修复后是"重跑"而非拒绝
+        q._queue.clear()
+        with q._lock:
+            q._running = plan.id
+        try:
+            assert q.submit(plan.id) == "queued", "运行中重提交必须是重跑语义（E-2）"
+            assert plan.id in q._queue
+        finally:
+            with q._lock:
+                q._running = None
+                q._queue.clear()
 
     def test_status(self, tmp_path, monkeypatch):
         from control.agent.shangshu import plan as plan_mod

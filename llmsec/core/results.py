@@ -203,14 +203,14 @@ class ResultsMatrix:
 
         filepath 缺省 = 统一库（storage.db.catalog_db）。
         """
-        from llmsec.storage import rstore  # 函数内导入防环（rstore 反向引用本类）
-        return rstore.save_matrix(self, filepath)
+        from llmsec.storage.contract import save_matrix  # 函数内导入防环（contract 顶层反向引用本模块）
+        return save_matrix(self, filepath)
 
     @classmethod
     def load(cls, filepath: str | Path | None = None) -> ResultsMatrix:
         """从统一库全量构建内存矩阵（filepath 缺省 = storage.db.catalog_db）。"""
-        from llmsec.storage import rstore  # 函数内导入防环
-        return rstore.load_matrix(filepath)
+        from llmsec.storage.contract import load_matrix  # 函数内导入防环
+        return load_matrix(filepath)
 
     # ---------- 诊断 ----------
 

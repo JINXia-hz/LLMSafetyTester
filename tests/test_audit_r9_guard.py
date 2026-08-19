@@ -146,6 +146,61 @@ def test_db_imports_confined_to_storage_package():
 
 
 # ============================================================
+# A-5 收口守卫：storage 子模块（rstore/ctlstore/catalog/db/models）
+# 只许 llmsec/storage/ 内部使用——service 层与 control 层必须走 contract
+# ============================================================
+
+_STORAGE_SUBMODULES = ("rstore", "ctlstore", "catalog", "db", "models")
+
+
+def _storage_submodule_imports(tree: ast.Ast) -> list[str]:
+    """返回该模块任何位置 import 的 llmsec.storage.<子模块> 名。"""
+    hits: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                parts = a.name.split(".")
+                if len(parts) >= 3 and parts[:2] == ["llmsec", "storage"] \
+                        and parts[2] in _STORAGE_SUBMODULES:
+                    hits.append(a.name)
+        elif isinstance(node, ast.ImportFrom):
+            parts = (node.module or "").split(".")
+            if len(parts) >= 3 and parts[:2] == ["llmsec", "storage"] \
+                    and parts[2] in _STORAGE_SUBMODULES:
+                hits.append(node.module or "")
+    return hits
+
+
+def test_storage_submodules_confined_behind_contract():
+    """rstore/ctlstore/catalog/db/models 禁止 storage 包外 import（A-5）。
+
+    contract 自述"service/control 层只许 import 本模块"，但修复前 8 处服务层
+    直连 rstore——契约与现实违例并存是双源漂移的起点。R 域 API 已在 contract
+    导出；本守卫把"不经 contract 的存储消费"钉死为机器错误。
+    """
+    repo = Path(__file__).resolve().parent.parent
+    offenders: list[str] = []
+    for pkg in ("llmsec", "control"):
+        for py in sorted((repo / pkg).rglob("*.py")):
+            rel = py.relative_to(repo).as_posix()
+            if rel.startswith("llmsec/storage/"):
+                continue
+            try:
+                tree = ast.parse(py.read_text(encoding="utf-8"))
+            except SyntaxError:
+                offenders.append(f"{rel}: <syntax error>")
+                continue
+            hits = _storage_submodule_imports(tree)
+            if hits:
+                offenders.append(f"{rel}: {sorted(set(hits))}")
+    assert not offenders, (
+        "storage 子模块被包外 import（A-5 契约边界被绕过）。\n"
+        "改法：R 域/目录库操作统一 `from llmsec.storage.contract import ...`"
+        "（control 侧经 control.core.storage），子模块只在 llmsec/storage/ 内。\n"
+        + "\n".join(offenders))
+
+
+# ============================================================
 # P3-3: pcap 三件套函数化（运行期 env 生效；常量只是 import 期快照）
 # ============================================================
 

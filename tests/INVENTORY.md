@@ -1,10 +1,10 @@
 # 测试清单（自动生成，勿手改）
 
-> 由 `scripts/gen_test_inventory.py` 生成于 2026-08-19T20:07:52；
+> 由 `scripts/gen_test_inventory.py` 生成于 2026-08-19T23:07:40；
 > CI 会校验本文件与实际收集结果一致（`--check`），过期即失败。
 > 本地刷新：`python scripts/gen_test_inventory.py`。
 
-合计 **76** 个文件 / **1148** 个用例（含 parametrize 展开；
+合计 **77** 个文件 / **1166** 个用例（含 parametrize 展开；
 含默认排除的 real_api/e2e 用例——它们需手动 `pytest -m real_api` / `-m e2e` 触发）。
 
 | 测试文件 | 用例数 |
@@ -15,6 +15,7 @@
 | tests/test_attacks_quality.py | 10 |
 | tests/test_attacks_relabel.py | 16 |
 | tests/test_attacks_schema.py | 19 |
+| tests/test_audit_r10_final.py | 17 |
 | tests/test_audit_r1_high.py | 19 |
 | tests/test_audit_r2_control.py | 12 |
 | tests/test_audit_r3_llmsec.py | 7 |
@@ -27,7 +28,7 @@
 | tests/test_audit_r7_server.py | 12 |
 | tests/test_audit_r7_storage.py | 8 |
 | tests/test_audit_r8_rootfix.py | 11 |
-| tests/test_audit_r9_guard.py | 12 |
+| tests/test_audit_r9_guard.py | 13 |
 | tests/test_clustering.py | 17 |
 | tests/test_control.py | 44 |
 | tests/test_control_router.py | 17 |
