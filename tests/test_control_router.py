@@ -419,3 +419,22 @@ class TestExecutingStateApprove:
         assert submitted == [plan.id], "应自动重新提交执行队列"
         s2 = [s for s in result.steps if s.id == "s2"][0]
         assert s2.status == "pending" and s2.ticket is None, "放行步骤应已重置待重跑"
+
+
+def test_bus_feed_carries_authoritative_blocks():
+    """E-7：feed 响应必须捎带 ctl_tickets 权威清单（前端计数基准）。"""
+    from control.agent.menxia import block as block_mod
+    from control.agent.shangshu.plan import Plan, Step, save_plan
+
+    plan = Plan(intent="t", steps=[Step(id="s1", capability="clean_cache", args={})],
+                status="executing")
+    save_plan(plan)
+    block_mod.issue_block(plan.id, "s1", "clean_cache", "medium",
+                          {"summary": "a", "detail": "d"})
+
+    r = _client().get("/api/control/bus/feed")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["pending_count"] >= 1
+    mine = [b for b in d["active_blocks"] if b["plan_id"] == plan.id]
+    assert mine and mine[0]["step_id"] == "s1" and mine[0]["token"]

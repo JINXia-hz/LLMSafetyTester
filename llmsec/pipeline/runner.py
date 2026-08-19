@@ -312,6 +312,20 @@ def main(argv=None, *, deps=None):
         logger.error(f"❌ 未声明的目标: {invalid}（可用: {sorted(declared)}）")
         sys.exit(1)
 
+    # F-2：defender 身份键 = resolve_defender_name(model)——两个目标声明同一
+    # model 字符串（或两个 pcap 目标同 PCAP_MODEL_VERSION）时会写进同一 R 列，
+    # 观测/过敏/画像数据混列（trackers 却按目标名分立）。不阻断（同 model 合并
+    # 或为刻意配置时仍可跑），但必须显著告警让操作者知情。
+    _def_map = {n: resolve_defender_name(declared[n].model, target_name=n) for n in names}
+    _by_defender: dict[str, list[str]] = {}
+    for _n, _d in _def_map.items():
+        _by_defender.setdefault(_d, []).append(_n)
+    for _d, _ns in _by_defender.items():
+        if len(_ns) > 1:
+            logger.warning(f"⚠️ 目标 {_ns} 解析到同一防御方列 {_d!r}——它们的观测/过敏/"
+                           f"画像将混入同一 R 列。若非刻意（同 model 双端点合并），"
+                           f"请为各目标配置不同的 model 名。")
+
     # 多目标时各目标后端配置取自 .env TARGETS、彼此可能不同，单目标才按 TARGET_TYPE 描述
     if len(names) > 1:
         logger.info(f"🎯 攻击目标: {len(names)} 个（{', '.join(names)}），逐目标评估")

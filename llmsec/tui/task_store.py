@@ -24,7 +24,9 @@ from llmsec.core import config as _config  # TASK_LOG_DIR 调用期动态读（�
 from llmsec.tui.render import EvalProgressState
 
 EXTERNAL = "external"  # TUI 特有状态：磁盘扫描发现的外部任务
-TERMINAL_STATUSES = ("success", "failed", "cancelled")
+TERMINAL_STATUSES = ("success", "failed", "cancelled", "ended")
+# R10/F-4：ended（外部任务持有进程退出）是 TUI 特有终态——并入单源集合，
+# 此前 console 两处手工补 `or s.status == "ended"`、app 终态 toast 漏判
 _EXTERNAL_MAX = 20  # 外部任务最多显示条数（旧日志无限堆积，只取最近）
 
 

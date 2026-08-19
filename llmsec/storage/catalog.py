@@ -620,6 +620,6 @@ def query_tasks(
     with db.session(dbp) as s:
         q = select(Task)
         q = q.order_by(Task.registered_at.desc())
-        if limit:
+        if limit is not None:  # A-18：limit=0 是"要 0 条"，不是"不限"
             q = q.limit(limit)
         return list(s.exec(q).all())

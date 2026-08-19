@@ -323,7 +323,16 @@ def api_plan_status(plan_id: str):
 # ============================================================
 @router.get("/api/control/bus/feed")
 def api_bus_feed(since: float = 0.0, dept: str | None = None):
-    """总线消息流（供前端面板轮询补全）。"""
+    """总线消息流（供前端面板轮询补全）。
+
+    E-7：响应捎带 active_blocks（ctl_tickets 现存封驳令权威清单）——前端待裁
+    计数以此为基准，总线消息只做卡片渲染与乐观更新。此前计数以易失总线缓冲
+    为权威：重启清零、挤出/重放失配、同时间戳游标丢消息（E-8）都会让徽标与
+    真实票据脱钩；权威清单让这些全部只影响卡片而不再影响计数。
+    """
+    from control.core.storage import list_active_tickets
     bus = get_bus()
     msgs = bus.recent(since_ts=since, dept=dept)  # kinds 缺省=所有 kind（前端按需过滤）
-    return {"messages": [m.to_dict() for m in msgs], "latest_ts": msgs[-1].ts if msgs else since}
+    blocks = list_active_tickets()
+    return {"messages": [m.to_dict() for m in msgs], "latest_ts": msgs[-1].ts if msgs else since,
+            "active_blocks": blocks, "pending_count": len(blocks)}

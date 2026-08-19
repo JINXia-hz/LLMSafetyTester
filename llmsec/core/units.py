@@ -34,6 +34,31 @@ def method_set_hash(methods: list[str]) -> str:
     return hashlib.md5(",".join(sorted(set(methods))).encode("utf-8")).hexdigest()
 
 
+def representative_records(attack_records: list[dict]) -> dict[str, dict]:
+    """每方法取首条记录（runner 装配 method_records 的同一规则：first-wins）。
+
+    C-7：写读两侧（fit_features 存指纹 / _should_refresh_features 校指纹）必须
+    用同一代表选择规则，否则内容指纹永远对不上。
+    """
+    rep: dict[str, dict] = {}
+    for r in attack_records:
+        rep.setdefault(r["method"], r)
+    return rep
+
+
+def prompts_content_hash(rep_records: dict[str, dict]) -> str:
+    """代表 prompt 内容指纹（C-7）：方法名集合不变但 prompt 换血时旧特征缓存失效。
+
+    此前缓存失效只看方法名 hash——同方法名、内容变化的攻击集（重新生成
+    l1.jsonl、外部集换血）静默复用旧特征/embedding/聚类划分。
+    """
+    parts = []
+    for m in sorted(rep_records):
+        prompt = str(rep_records[m].get("prompt") or "")
+        parts.append(f"{m}:{hashlib.sha256(prompt.encode('utf-8', 'ignore')).hexdigest()[:16]}")
+    return hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()
+
+
 def build_units(
     labels: dict[str, int],
     method_records: dict[str, dict],

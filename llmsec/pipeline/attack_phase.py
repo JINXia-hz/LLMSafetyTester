@@ -167,6 +167,11 @@ def _should_refresh_features(
     cached_cfg_hash = (predictor.artifacts.get("meta") or {}).get("feature_config_hash")
     if cached_cfg_hash != current_feature_config_hash():
         return True
+    # C-7：代表 prompt 内容指纹——方法名不变但 prompt 换血（重新生成/外部集
+    # 换血）时旧特征/embedding/聚类必须重提。旧缓存无该键 → 刷新一次后写入。
+    from llmsec.core.units import prompts_content_hash
+    if predictor.artifacts.get("content_hash") != prompts_content_hash(method_records):
+        return True
     return False
 
 
@@ -279,6 +284,45 @@ def _emit_round_progress(defender_name: str, round_idx: int, max_rounds: int,
 # ============================================================
 # Phase 1: ELO 自适应攻击测试
 # ============================================================
+def _merge_resume_from_r(tracker, derived, defender_name: str, tested_in_R: set) -> None:
+    """跨 run resume：把 R 回放派生态并入本 run tracker（C-3 修复版）。
+
+    两种时序，两种合并方向：
+    1. state 为空/为本 defender 子集（常规跨 run 进新目录）：R 回放是该
+       defender 的累计真相，字段级整体并入（评分/场次/轨迹/历史/predictor GT）。
+    2. **state 是 R 的超集**（同目录上一轮 publish 后又跑了若干轮、中途崩溃——
+       publish 只在 run 全部结束时执行，state.json 却每轮落盘）：此前无条件以
+       R 回放覆盖 history/ratings，会把崩溃前那些轮次静默丢出 Elo 轨迹（明细
+       还在 attack_results.jsonl、GT 已标记不会重测，但它们对评分/收敛的贡献
+       消失，Elo 系统性偏低）。此时保留 state 侧全部字段，只并入 R 补充的 GT。
+       超集判定按 (defender, record) 键集合——回放与 state 同源时键一致。
+    """
+    def _keys(hist):
+        return {(h.get("defender"), str(h.get("record"))) for h in hist}
+
+    state_hist = [h for h in tracker.history if h.get("defender") == defender_name]
+    if state_hist and _keys(derived.history) <= _keys(state_hist):
+        logger.info(f"  📥 从 R 恢复 {len(tested_in_R)} 个已测单位"
+              f"（state 为 R 超集——崩溃轮观测保留，不回退到 R 回放）")
+        tracker.ground_truth_methods.update(tested_in_R)
+        tracker.predictor.ground_truth.update(derived.predictor.ground_truth)
+        return
+
+    for m in derived.ground_truth_methods:
+        tracker.attacker_ratings[m] = derived.attacker_ratings[m]
+    tracker.defender_ratings.update(derived.defender_ratings)
+    tracker._defender_match_count.update(derived._defender_match_count)
+    tracker._round_defender_elos.update(derived._round_defender_elos)
+    # 历史：R 回放是该 defender 的累计真相——先剔除本 tracker 同 defender 旧条目
+    #（state 与 R 同源时防重复计数），再并入回放历史；其他 defender 条目保留
+    tracker.history = [h for h in tracker.history if h.get("defender") != defender_name]
+    tracker.history.extend(derived.history)
+    tracker.ground_truth_methods.update(tested_in_R)
+    tracker.predictor.ground_truth.update(derived.predictor.ground_truth)
+    logger.info(f"  📥 从 R 恢复 {len(tested_in_R)} 个已测单位"
+          f"（跨 run resume，评分/历史/predictor GT 已回放）")
+
+
 def run_attack_phase(records: list[dict],
                      judge: Judge, tracker: ELOTracker,
                      batch_size: int, max_rounds: int,
@@ -411,19 +455,7 @@ def run_attack_phase(records: list[dict],
         #（K 衰减场次从 0 重累计是项目认可口径，同 elo_access.publish_tracker）。
         from llmsec.evaluation.elo import derive_elo
         _derived = derive_elo(_R, defender_name, unit_catalog=unit_ids)
-        for m in _derived.ground_truth_methods:
-            tracker.attacker_ratings[m] = _derived.attacker_ratings[m]
-        tracker.defender_ratings.update(_derived.defender_ratings)
-        tracker._defender_match_count.update(_derived._defender_match_count)
-        tracker._round_defender_elos.update(_derived._round_defender_elos)
-        # 历史：R 回放是该 defender 的累计真相——先剔除本 tracker 同 defender 旧条目
-        #（state 与 R 同源时防重复计数），再并入回放历史；其他 defender 条目保留
-        tracker.history = [h for h in tracker.history if h.get("defender") != defender_name]
-        tracker.history.extend(_derived.history)
-        tracker.ground_truth_methods.update(_tested_in_R)
-        tracker.predictor.ground_truth.update(_derived.predictor.ground_truth)
-        logger.info(f"  📥 从 R 恢复 {len(_tested_in_R)} 个已测单位"
-              f"（跨 run resume，评分/历史/predictor GT 已回放）")
+        _merge_resume_from_r(tracker, _derived, defender_name, _tested_in_R)
     # R 中该模型已测记录 → 标记对应 unit 的记录池（防同 prompt 重测）
     for rid, _res in _R.model_column(defender_name).items():
         uid = _rec_to_unit.get(str(rid))

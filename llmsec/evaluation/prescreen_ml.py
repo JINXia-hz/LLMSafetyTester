@@ -166,7 +166,8 @@ def train() -> dict:
     labels: list[int] = []
     run_ids: list[str] = []  # 每条样本所属 run（时间序留出评估用）
 
-    # 两条产线的数据源：runs/（看板/命令行评估）+ experiments/（HPO 调参）。
+    # 三条产线的数据源：runs/（看板/命令行评估）+ experiments/（HPO 调参）
+    # + 根目录 *_结果.jsonl（独立评估 CLI，evaluation/cli.py 写 OUTPUT_DIR 根）。
     # 训练文本统一剥离 [MATH:x] 探针答案标记——答案数字是极稀有 token，
     # 会把 TF-IDF 向量带偏（同一句拒绝带不带标记 P 相差 0.85+）；
     # predict() 的 ML 层做同口径剥离，保证 train/serve 一致（关键词层是
@@ -186,6 +187,11 @@ def train() -> dict:
             # 跨多目标子目录归一到同一次 run，供时间序留出评估分组
             run_key = "/".join((*_tag, *rel.parts[:2]))
             files.append((run_key, p))
+    # B-5：独立评估 CLI 写 OUTPUT_DIR/<base>_结果.jsonl（根目录、非 runs/ 子树），
+    # 此前 rglob 扫不到——"随评估数据增长增量重训"对这条产线整体失效
+    if _config.OUTPUT_DIR.is_dir():
+        for p in sorted(_config.OUTPUT_DIR.glob("*_结果.jsonl")):
+            files.append(("cli", p))
     for run_key, p in sorted(files):
         for line in p.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -198,9 +204,16 @@ def train() -> dict:
             # 训练标签只能来自真实 Judge 判定——Judge 故障期的行
             # （fallback_keyword/judge_error）的 is_refusal 是默认 False 的脏标签
             #（真实事故：25 条英文拒绝被记 is_refusal=False），喂进训练会把
-            # "拒绝"类整体带偏。--no-judge 关键词模式（no_judge）同理不采。
-            if r.get("judge_mode") in ("fallback_keyword", "no_judge") \
-                    or r.get("status") == "judge_error":
+            # "拒绝"类整体带偏。--no-judge 关键词模式（no_judge）与合规等级
+            # 解析失败降级（judge_parse_fallback，B-2）同理不采。
+            # B-4：预筛自身拦截的行（prescreen_result="refusal"）从未经过 Judge，
+            # is_refusal 标签来自预筛——喂回训练是标签循环：ML 层在关键词已放行
+            # 的残差分布上训练、关键词层的假拒绝被永久放大（漏报真实有害 →
+            # ASR 下界进一步偏低）。留出评估同理不采。
+            if r.get("judge_mode") in ("fallback_keyword", "no_judge",
+                                       "judge_parse_fallback") \
+                    or r.get("status") == "judge_error" \
+                    or r.get("prescreen_result") == "refusal":
                 continue
             resp = MATH_TAG_PATTERN.sub(" ", r.get("response_preview", ""))
             if not resp or len(resp.strip()) <= 5:

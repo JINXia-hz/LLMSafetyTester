@@ -200,3 +200,57 @@ def test_twin_entry_missing_fields(tmp_path, monkeypatch):
         defender_name="def",
     )
     assert isinstance(summary, dict)
+
+
+# ============================================================
+# C-3 回归：R-resume 合并方向（state 超集时保留崩溃轮观测）
+# ============================================================
+class TestMergeResumeFromR:
+    @staticmethod
+    def _hist(tracker_like, recs, defender="def-x"):
+        return [{"attacker": f"u-{r}", "record": r, "defender": defender,
+                 "attacker_old_elo": 1500.0, "attacker_new_elo": 1510.0,
+                 "attacker_delta": 10.0, "defender_old_elo": 1500.0,
+                 "defender_new_elo": 1505.0, "defender_delta": 5.0,
+                 "eval_score": 3.0, "round": 0, "status": "fully_compliant"}
+                for r in recs]
+
+    def test_state_superset_keeps_crash_rounds(self):
+        """state ⊋ R（崩溃前有未 publish 轮次）：history/ratings 保留 state 版本。"""
+        from llmsec.evaluation.elo import ELOTracker
+        from llmsec.pipeline.attack_phase import _merge_resume_from_r
+
+        state_tr = ELOTracker()
+        state_tr.history = self._hist(state_tr, ["r1", "r2", "r3"])
+        state_tr.attacker_ratings = {"u-r1": 1510.0, "u-r2": 1512.0, "u-r3": 1514.0}
+        state_tr.defender_ratings = {"def-x": 1508.0}
+
+        derived = ELOTracker()
+        derived.history = self._hist(derived, ["r1", "r2"])   # R 只到崩溃前 publish
+        derived.attacker_ratings = {"u-r1": 1509.0, "u-r2": 1511.0}
+        derived.defender_ratings = {"def-x": 1506.0}
+
+        _merge_resume_from_r(state_tr, derived, "def-x", {"u-r1", "u-r2"})
+
+        recs = {h["record"] for h in state_tr.history if h.get("defender") == "def-x"}
+        assert recs == {"r1", "r2", "r3"}, "崩溃轮 r3 不得被 R 回放覆盖掉（C-3）"
+        assert state_tr.defender_ratings["def-x"] == 1508.0, "评分保留 state 版本"
+        assert "u-r3" in state_tr.attacker_ratings
+
+    def test_state_subset_full_injection(self):
+        """state 为空（跨 run 进新目录）：R 回放字段级整体并入。"""
+        from llmsec.evaluation.elo import ELOTracker
+        from llmsec.pipeline.attack_phase import _merge_resume_from_r
+
+        tr = ELOTracker()  # 无 state——全新目录
+        derived = ELOTracker()
+        derived.history = self._hist(derived, ["r1"])
+        derived.attacker_ratings = {"u-r1": 1511.0}
+        derived.defender_ratings = {"def-x": 1506.0}
+        derived.ground_truth_methods = {"u-r1"}  # 注入循环按 GT 集合迭代
+
+        _merge_resume_from_r(tr, derived, "def-x", {"u-r1"})
+
+        assert len(tr.history) == 1 and tr.history[0]["record"] == "r1"
+        assert tr.defender_ratings.get("def-x") == 1506.0
+        assert tr.attacker_ratings.get("u-r1") == 1511.0

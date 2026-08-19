@@ -47,14 +47,39 @@ function updateMenxiaStatus() {
 async function pollMenxiaBus() {
   try {
     const data = await api(`/api/control/bus/feed?since=${_mxLatestTs}`);
-    const msgs = data.messages || [];
-    if (!msgs.length) return;
-    _mxLatestTs = data.latest_ts || _mxLatestTs;
-    for (const m of msgs) {
-      handleBusMessage(m);
+    // E-7：待裁计数以 ctl_tickets 权威清单为基准（服务重启/总线缓冲挤出/重放
+    // 都不再影响计数），总线消息只负责卡片渲染与乐观更新
+    if (typeof data.pending_count === 'number') {
+      _mxPendingBlocks = data.pending_count;
     }
+    const activeKeys = new Set(
+      (data.active_blocks || []).map(b => `${b.plan_id}:${b.step_id}`));
+    const msgs = data.messages || [];
+    if (msgs.length) {
+      _mxLatestTs = data.latest_ts || _mxLatestTs;
+      for (const m of msgs) {
+        handleBusMessage(m);
+      }
+    }
+    reconcileBlocks(activeKeys);
+    updateMenxiaStatus();
     renderMenxiaLog();
   } catch { /* 静默 */ }
+}
+
+// 对账：已不在权威清单里的封驳卡翻成"已放行"印（他页放行/驳回撤销/刷新重放
+// 的兜底；applyUnblock 已处理过的由 Set 幂等跳过）。计数不做本地增减——下轮
+// 轮询的 pending_count 即真相。
+function reconcileBlocks(activeKeys) {
+  for (const e of _mxEntries) {
+    if (!e.blockKey || _mxUnblocked.has(e.blockKey)) continue;
+    if (!activeKeys.has(e.blockKey)) {
+      _mxUnblocked.add(e.blockKey);
+      e.html = e.html.replace(
+        /<button class="mx-unblock"[^>]*>准奏放行<\/button>/,
+        '<span class="mx-unblock-done">已放行</span>');
+    }
+  }
 }
 
 function handleBusMessage(m) {
@@ -64,11 +89,7 @@ function handleBusMessage(m) {
     if (!t) return;
     // plan_id 在消息信封顶层（notify_routed 的信封字段），step_id 在 payload
     const key = `${m.plan_id}:${m.payload.step_id}`;
-    const done = _mxUnblocked.has(key);   // 重放乱序兜底：已解除的不计数
-    if (!done) {
-      _mxPendingBlocks++;
-      updateMenxiaStatus();
-    }
+    const done = _mxUnblocked.has(key);   // 重放乱序兜底：已解除的不再渲染按钮
     const actionHtml = done
       ? '<span class="mx-unblock-done">已放行</span>'
       : `<button class="mx-unblock" data-plan="${esc(m.plan_id)}" data-step="${esc(m.payload.step_id)}">准奏放行</button>`;
@@ -139,9 +160,10 @@ function renderMenxiaLog() {
   log.scrollTop = log.scrollHeight;
 }
 
-// 幂等解除一个封驳：递减待裁计数 + 卡片按钮翻成已放行印。
+// 幂等解除一个封驳：乐观递减计数 + 卡片按钮翻成已放行印（下轮轮询的
+// pending_count 权威值会覆写计数，乐观值只为即时反馈）。
 // 双路径调用：① 本页按钮点击成功后（即时反馈）② 总线 step_unblocked 消息
-// （他页放行 / Plan 驳回撤销 / 刷新重放配平）——Set 去重，谁先到谁生效。
+// （他页放行 / Plan 驳回撤销）——Set 去重，谁先到谁生效。
 function applyUnblock(planId, stepId, label) {
   const key = `${planId}:${stepId}`;
   if (_mxUnblocked.has(key)) return;

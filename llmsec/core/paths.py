@@ -35,6 +35,14 @@ def safe_component(base: Path, name: str) -> Path:
     """
     if not name or name in (".", "..") or "/" in name or "\\" in name:
         raise ValueError(f"非法名称: {name!r}")
+
+    # A-22：Windows 保留设备名（NUL/CON/COM1…）与尾点/尾空格——open("<base>/NUL","w")
+    # 会静默丢弃写入、尾点/空格被 NTFS 剥离后与预期路径不符
+    import re as _re
+    if _re.match(r"(?i)^(CON|PRN|AUX|NUL|COM\d|LPT\d)(\.|$)", name):
+        raise ValueError(f"非法名称（Windows 保留设备名）: {name!r}")
+    if name != name.rstrip(". "):
+        raise ValueError(f"非法名称（尾部点/空格会被 NTFS 剥离）: {name!r}")
     base_r = base.resolve()
     p = (base / name).resolve()
     # 结果必须严格落在 base 内（不允许等于 base 之外）

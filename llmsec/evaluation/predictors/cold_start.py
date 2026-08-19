@@ -268,12 +268,15 @@ class ColdStartPredictor:
         # M-6：特征配置指纹写入 meta，供 runner 缓存失效判断与 ridge 特征签名使用
         meta["feature_config_hash"] = current_feature_config_hash()
 
+        # C-7：内容指纹与方法名 hash 并存——方法名不变但 prompt 换血时缓存失效
+        from llmsec.core.units import prompts_content_hash, representative_records
         self.artifacts = {
             "schema_version": 1,
             "kind": "feature_cache",
             "features": features,
             "meta": meta,
             "method_set_hash": _compute_method_set_hash(sorted(features.keys())),
+            "content_hash": prompts_content_hash(representative_records(attack_records)),
             "generated_at": datetime.now().isoformat(),
         }
         self.last_fit_at = self.artifacts["generated_at"]

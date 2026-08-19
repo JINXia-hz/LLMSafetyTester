@@ -129,13 +129,26 @@ class MessageBus:
             try:
                 r = cb(msg)
             except Exception:
-                # 订阅者异常不阻断总线（记录到 stderr 但不抛）
+                # 订阅者异常不阻断总线（记录到 stderr 但不抛）。collect 模式补
+                # 哨兵应答：请求-应答的调用方（executor step_start → 门下省裁决）
+                # 需能区分"订阅者允许（None）"与"订阅者崩了没答"——后者对危险
+                # 步骤按封驳处理（E-3 fail-closed），不能再静默当放行
                 import sys
                 print(f"[bus] 订阅者回调异常 (kind={msg.kind}): {sys.exc_info()[1]}", file=sys.stderr)
+                if collect_replies:
+                    replies.append({"__subscriber_error__": str(sys.exc_info()[1])})
                 continue
             if collect_replies and r is not None:
                 replies.append(r)
         return replies if collect_replies else None
+
+    def has_subscriber(self, dept: str, kind: str) -> bool:
+        """是否存在匹配 (dept, kind) 的订阅者（E-3：门下省就绪探测）。"""
+        with self._lock:
+            return any(
+                (dept == d or d == ALL) and (not kinds or kind in kinds)
+                for (d, kinds, _cb) in self._subs
+            )
 
     def recent(self, since_ts: float = 0.0, dept: str | None = None,
               kinds: list[str] | None = None) -> list[BusMessage]:

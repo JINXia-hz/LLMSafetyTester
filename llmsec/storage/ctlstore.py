@@ -66,7 +66,7 @@ def gazette_events(plan_id: str, *, limit: int | None = None) -> list[dict]:
     """某 Plan 的事件流（事件序升序；dict 形状与原 GazetteEvent.to_dict 一致）。"""
     with _db.session() as s:
         q = _select(CtlEvent).where(CtlEvent.plan_id == plan_id).order_by(CtlEvent.id)
-        if limit:
+        if limit is not None:  # A-18：limit=0 是"要 0 条"，不是"不限"
             q = q.limit(limit)
         return [e.event_dict() for e in s.exec(q).all()]
 
@@ -110,13 +110,17 @@ def search_gazette(keywords: list[str], *, limit: int = 500) -> list[dict]:
         return out
 
 
+def _delete_all(s, *models) -> None:
+    """事务内清空若干表（R2 单源：reset_* 四份逐字重复的全表删除）。"""
+    for model in models:
+        for row in s.exec(_select(model)).all():
+            s.delete(row)
+
+
 def reset_gazette() -> None:
     """清空文牍（测试用）。"""
     with _db.tx() as s:
-        for row in s.exec(_select(CtlEvent)).all():
-            s.delete(row)
-        for row in s.exec(_select(CtlPlanMeta)).all():
-            s.delete(row)
+        _delete_all(s, CtlEvent, CtlPlanMeta)
 
 
 # ============================================================
@@ -153,8 +157,7 @@ def list_ctl_plans(*, recent: int = 20) -> list[dict]:
 
 def reset_ctl_plans() -> None:
     with _db.tx() as s:
-        for row in s.exec(_select(CtlPlan)).all():
-            s.delete(row)
+        _delete_all(s, CtlPlan)
 
 
 # ============================================================
@@ -174,16 +177,22 @@ def save_ticket(ticket: dict) -> None:
         s.add(row)
 
 
+def _ticket_dict(r: CtlTicket) -> dict:
+    """票据行 → dict（R3 单源：get_ticket / list_tickets_for_plan /
+    list_active_tickets 三处逐字重复的同一形状）。"""
+    return {
+        "token": r.token, "plan_id": r.plan_id, "step_id": r.step_id,
+        "capability": r.capability, "risk_level": r.risk_level,
+        "summary": r.summary, "detail": r.detail, "created": r.created,
+    }
+
+
 def get_ticket(plan_id: str, step_id: str) -> dict | None:
     with _db.session() as s:
         row = s.get(CtlTicket, (plan_id, step_id))
         if row is None:
             return None
-        return {
-            "token": row.token, "plan_id": row.plan_id, "step_id": row.step_id,
-            "capability": row.capability, "risk_level": row.risk_level,
-            "summary": row.summary, "detail": row.detail, "created": row.created,
-        }
+        return _ticket_dict(row)
 
 
 def clear_ticket(plan_id: str, step_id: str) -> bool:
@@ -209,20 +218,24 @@ def list_tickets_for_plan(plan_id: str) -> list[dict]:
         rows = s.exec(
             _select(CtlTicket).where(CtlTicket.plan_id == plan_id)
         ).all()
-        return [
-            {
-                "token": r.token, "plan_id": r.plan_id, "step_id": r.step_id,
-                "capability": r.capability, "risk_level": r.risk_level,
-                "summary": r.summary, "detail": r.detail, "created": r.created,
-            }
-            for r in rows
-        ]
+        return [_ticket_dict(r) for r in rows]
+
+
+def list_active_tickets() -> list[dict]:
+    """全部现存封驳令（E-7：看板待裁计数的权威数据源）。
+
+    ctl_tickets 行即活跃集——approve/reject 清令时删行。此前前端计数以易失的
+    总线环形缓冲（500 条、进程内）为权威：服务重启清零、缓冲挤出后重放失配，
+    面板徽标与真实待裁票据脱钩。
+    """
+    with _db.session() as s:
+        rows = s.exec(_select(CtlTicket).order_by(CtlTicket.created)).all()
+        return [_ticket_dict(r) for r in rows]
 
 
 def reset_tickets() -> None:
     with _db.tx() as s:
-        for row in s.exec(_select(CtlTicket)).all():
-            s.delete(row)
+        _delete_all(s, CtlTicket)
 
 
 # ============================================================
@@ -282,8 +295,7 @@ def pending_queue_plans() -> list[str]:
 
 def reset_queue() -> None:
     with _db.tx() as s:
-        for row in s.exec(_select(CtlQueueItem)).all():
-            s.delete(row)
+        _delete_all(s, CtlQueueItem)
 
 
 # ============================================================

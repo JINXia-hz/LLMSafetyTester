@@ -632,7 +632,7 @@ class ConsoleScreen(Screen):
                 # 且与 kill/top 的任务解析同口径——不出现"看得到杀不掉"）
                 snaps = list(self._snaps)
                 if not want_all:
-                    snaps = [s for s in snaps if s.status not in TERMINAL_STATUSES and s.status != "ended"]
+                    snaps = [s for s in snaps if s.status not in TERMINAL_STATUSES]
                 out: list[object]
                 if not snaps:
                     out = [Text("无任务（-a 看全部；eval 发起评估）", style=f"dim {C_DIM}")]
@@ -947,7 +947,7 @@ class ConsoleScreen(Screen):
             self.out(Text("多个匹配：" + " ".join(s.id for s in resolved[:6]), style=C_WARN))
             return
         snap = resolved
-        if snap.status in TERMINAL_STATUSES or snap.status == "ended":
+        if snap.status in TERMINAL_STATUSES:
             self.err(f"{snap.id} 已是终态（{snap.status}），无需取消")
             return
         if not snap.owned and snap.pid is not None:

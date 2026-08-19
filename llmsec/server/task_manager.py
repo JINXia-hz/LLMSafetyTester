@@ -8,7 +8,7 @@
   - 按 kind 串行执行（同 kind 有 running 时排队）
   - 状态刷新（poll 子进程终态；每次迁移 upsert 目录库行——P4 起 db 即真相）
   - 日志/进度读取
-  - 取消（SIGTERM → SIGKILL）
+  - 取消（Windows: taskkill /T 树杀；POSIX: SIGTERM → 5s → SIGKILL）
 
 线程安全说明：TASKS 在 FastAPI 和 MCP 场景下都是单进程内共享。
 FastAPI 的 endpoint 是 async 但这些函数是同步的（cancel 在 router 里用 to_thread 包装）。
@@ -433,12 +433,25 @@ def cancel_task(task_id: str) -> dict | None:
         _finish(t, "cancelled")
         return task_view(task_id)
     proc: subprocess.Popen = t["proc"]
-    proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
+    # D-3：树杀。Windows Popen.terminate 只杀直接子进程——runner 再派生的孙进程
+    # （local_model_server / HPO trial 的 runner 等）会孤儿化继续消耗 API 额度。
+    # taskkill /T 连整棵进程树收割（与 TUI 跨进程强杀 task_store 同口径）；
+    # POSIX 无树杀原语，维持 terminate → 5s → kill。
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                       capture_output=True)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    else:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
     log_file = t.get("log_file")
     if log_file is not None:
         log_file.close()

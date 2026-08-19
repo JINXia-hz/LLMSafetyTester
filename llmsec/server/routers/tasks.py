@@ -36,6 +36,45 @@ def _require_task(task_id: str) -> dict:
     return t
 
 
+def _external_task_row(task_id: str):
+    """跨进程任务的目录库行回退（D-4）。
+
+    list_tasks 是"本进程 TASKS ∪ 库行"的跨进程视图，但各任务端点此前只查
+    本进程 TASKS——MCP/TUI 启动的任务（或已被 >64 淘汰出 TASKS 的历史任务）
+    在看板"列表可见、详情/日志/进度/SSE 全 404"，前端 watcher 静默死亡。
+    返回 Task 库行；无行返回 None。
+    """
+    from llmsec.storage import catalog
+
+    try:
+        return catalog.get_task(task_id)
+    except Exception:
+        return None
+
+
+def _external_task_view(task_id: str, row) -> dict:
+    """把目录库行构造成 task_view 同形 dict（只读：log_tail 尾部 4KB）。
+
+    Task 表无 returncode 列（退出码在 _persist_task 只写进程内 dict）——
+    getattr 兜 None，避免库行字段差异把端点打成 500。
+    """
+    log_path = Path(row.log_path) if row.log_path else None
+    log_tail = ""
+    if log_path is not None and log_path.exists():
+        try:
+            log_tail = log_path.read_text(encoding="utf-8", errors="replace")[-4096:]
+        except OSError:
+            pass
+    return {
+        "id": task_id, "kind": row.kind, "status": row.status,
+        "returncode": getattr(row, "returncode", None), "cmd": row.cmd,
+        "log_tail": log_tail, "started_at": getattr(row, "started_at", None),
+        "pid": getattr(row, "pid", None), "meta": None, "error": None,
+        "external": True,
+        "log_path": str(log_path) if log_path is not None else None,
+    }
+
+
 class EvaluateRequest(BaseModel):
     phase: str = Field(default="all", pattern="^(all|1|2)$")
     input: str = "l1.jsonl"
@@ -115,7 +154,12 @@ async def api_tasks():
 
 @router.get("/api/tasks/{task_id}")
 async def api_task(task_id: str):
-    _require_task(task_id)
+    if task_id not in TASKS:
+        # D-4：跨进程任务只读回退（详情不再 404）
+        row = _external_task_row(task_id)
+        if row is not None:
+            return _external_task_view(task_id, row)
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
     view = task_view(task_id)
     if view is None:  # 竞态：刚被淘汰出 TASKS
         raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
@@ -128,8 +172,19 @@ async def api_task_log(task_id: str, download: bool = False):
 
     ?download=1 时以 text/plain + Content-Disposition 返回，便于直接下载 .log。
     """
-    _require_task(task_id)
-    text = task_manager.read_full_log(task_id)
+    if task_id in TASKS:
+        text = task_manager.read_full_log(task_id)
+    else:
+        # D-4：跨进程任务——log_path 在库行里
+        row = _external_task_row(task_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+        text = ""
+        if row.log_path and Path(row.log_path).exists():
+            try:
+                text = Path(row.log_path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                text = ""
     if download:
         return PlainTextResponse(
             text,
@@ -146,7 +201,25 @@ async def api_task_log(task_id: str, download: bool = False):
 async def api_task_progress(task_id: str):
     """任务进度快照：evaluate 返回每目标最后一条 + 全部声明目标（占位）；
     hpo 返回最后一条汇总。供看板初次渲染与 SSE 不可用时的轮询兜底。"""
-    t = _require_task(task_id)
+    t = TASKS.get(task_id)
+    if t is None:
+        # D-4：跨进程任务——progress 文件路径可由 id 推导，状态取库行
+        row = _external_task_row(task_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
+        records = task_manager.read_progress(task_id)
+        if row.kind == "hpo":
+            return {"kind": "hpo", "status": row.status,
+                    "progress": records[-1] if records else {},
+                    "trials": [r["last"] for r in records if r.get("last")][-30:]}
+        by_target: dict[str, dict] = {}
+        for r in records:
+            tg = r.get("target")
+            if tg:
+                by_target[tg] = r
+        return {"kind": "evaluate", "status": row.status,
+                "targets": list(by_target), "max_rounds": None,
+                "progress": by_target}
     _refresh_task_status(t)
     kind = t["kind"]
     status = t["status"]
@@ -185,12 +258,20 @@ async def api_task_progress(task_id: str):
 async def api_task_cancel(task_id: str):
     """取消排队中或运行中的任务，置 cancelled。
 
-    queued：直接标记取消（无子进程可杀）。running：SIGTERM → 5s 宽限 → SIGKILL，
-    取消后推进同 kind 队列。Windows 无 SIGTERM 语义（Popen.terminate 即强杀）。
+    queued：直接标记取消（无子进程可杀）。running：Windows taskkill /T 树杀、
+    POSIX SIGTERM → 5s 宽限 → SIGKILL，取消后推进同 kind 队列。
     runner 每场攻击实时 upsert 进 R，故取消后已观测的结果保留在结果矩阵中。
-    已结束的任务返回 409。
+    已结束的任务返回 409；跨进程任务（MCP/TUI 启动、proc 句柄不在本进程）
+    无法从看板取消，返回 409 明示。
     """
-    _require_task(task_id)
+    if task_id not in TASKS:
+        row = _external_task_row(task_id)
+        if row is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="跨进程任务（其他入口启动）无法从看板取消——请在启动方"
+                       "（TUI/MCP）执行取消，或直接结束其进程")
+        raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
     # cancel 内含 proc.wait(5)，阻塞等待放线程池，不卡事件循环
     view = await asyncio.to_thread(task_manager.cancel_task, task_id)
     if view is None:
@@ -205,12 +286,33 @@ async def api_task_stream(task_id: str):
     连接时先回放射已有进度行（初次渲染上下文），之后跟随新增行直播。
     子进程结束时发一个 event:done（携带 status/returncode）再关闭，前端据此刷新数据。
     原始 .log 不再直播（仅 /api/tasks/{id}/log 下载）——运行框改为结构化简略信息。
+
+    D-4：跨进程任务（TASKS 无、库行有）同样可流——状态改查目录库行（进程句柄
+    不在本进程，无法 poll，库行由启动方 upsert）。
+    D-6：行缓冲读——子进程写与 SSE 读并发时最后一行可能被"撕开"（半行 JSON），
+    此前按行直发即丢该条进度记录；残行留在缓冲区与下轮 chunk 拼接。
     """
-    t = _require_task(task_id)
+    t = TASKS.get(task_id)
+    external_row = None
+    if t is None:
+        external_row = _external_task_row(task_id)
+        if external_row is None:
+            raise HTTPException(status_code=404, detail=f"任务不存在: {task_id}")
     progress_path = _progress_path(task_id)
+
+    def _current_status() -> tuple[str, object]:
+        """(status, returncode)：本进程任务实时 poll；外部任务查库行。"""
+        if t is not None:
+            _refresh_task_status(t)
+            return t["status"], t.get("returncode")
+        fresh = _external_task_row(task_id)
+        if fresh is not None:
+            return fresh.status, fresh.returncode
+        return "failed", None  # 库行消失（极端）：按终态关流
 
     async def event_gen():
         offset = 0
+        buffer = ""  # D-6：跨读次的残行缓冲（字节 offset 前进、文本留在缓冲拼接）
         # 连接初始上下文：回放射全部已有进度行（每轮/每 trial 一行，量小）
         if progress_path.exists():
             try:
@@ -218,7 +320,8 @@ async def api_task_stream(task_id: str):
                 offset = len(init.encode("utf-8"))
             except OSError:
                 init = ""
-            for line in init.splitlines():
+            *complete, buffer = init.split("\n")
+            for line in complete:
                 line = line.strip()
                 if line:
                     yield f"event: progress\ndata: {line}\n\n"
@@ -237,21 +340,24 @@ async def api_task_stream(task_id: str):
                         offset = size
                     except OSError:
                         chunk = ""
-                    for line in chunk.splitlines():
+                    buffer += chunk
+                    *complete, buffer = buffer.split("\n")
+                    for line in complete:
                         line = line.strip()
                         if line:
                             yield f"event: progress\ndata: {line}\n\n"
                 elif size < offset:
-                    # 文件被截断/轮转，重置偏移跟随新内容
+                    # 文件被截断/轮转，重置偏移跟随新内容（残行一并丢弃）
                     offset = size
-            _refresh_task_status(t)
+                    buffer = ""
+            status, returncode = _current_status()
             # queued 也是活跃态（排队中尚未 spawn）：只有终态才发 done 关流。
             # 旧版 `!= "running"` 会让排队任务一连流就收到 done。
-            if t["status"] not in ("running", "queued"):
+            if status not in ("running", "queued"):
                 yield (
                     "event: done\ndata: "
                     + json.dumps(
-                        {"status": t["status"], "returncode": t.get("returncode")},
+                        {"status": status, "returncode": returncode},
                         ensure_ascii=False,
                     )
                     + "\n\n"

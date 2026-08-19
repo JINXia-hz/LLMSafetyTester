@@ -208,6 +208,34 @@ def _execute_step(step: Step, plan: Plan, on_progress: ProgressCallback | None) 
         (r for r in (replies or [])
          if isinstance(r, dict) and r.get("plan_id") == plan.id and r.get("step_id") == step.id),
         None)
+
+    # E-3 fail-closed：门下省是危险步骤（merge 全局 / 删 R 列 / 改全局 .env）的
+    # 最后一道闸——此前"订阅回调异常被总线吞掉"与"门下省未初始化"都等价于放行
+    # （critical 步骤直接执行）。订阅者崩溃（总线补 __subscriber_error__ 哨兵）
+    # 或门下省无订阅时，非 low 风险步骤按封驳处理，由用户圣裁兜底；low 风险
+    # 只读步骤不受影响。
+    if block_msg is None and cap.risk_level != "low":
+        _cb_error = any(isinstance(r, dict) and "__subscriber_error__" in r
+                        for r in (replies or []))
+        from control.agent.bus import MENXIA, get_bus
+        _no_menxia = not get_bus().has_subscriber(MENXIA, KIND_STEP_START)
+        if _cb_error or _no_menxia:
+            _reason = "订阅回调异常" if _cb_error else "门下省未就绪（未订阅审查）"
+            try:
+                from control.agent.menxia import issue_block
+                block_msg = issue_block(plan.id, step.id, step.capability, cap.risk_level,
+                                        {"summary": f"门下省审查不可用（{_reason}）",
+                                         "detail": "安全闸 fail-closed：确认门下省正常后圣裁"})
+            except Exception:
+                import time as _t
+                import uuid as _u
+                block_msg = {"token": _u.uuid4().hex[:12], "plan_id": plan.id,
+                             "step_id": step.id, "capability": step.capability,
+                             "risk_level": cap.risk_level,
+                             "summary": f"门下省审查不可用（{_reason}）",
+                             "detail": "安全闸 fail-closed（封驳令落库失败，内存票）",
+                             "created": _t.time()}
+
     if block_msg is not None:
         step.status = S_BLOCKED
         step.ticket = block_msg

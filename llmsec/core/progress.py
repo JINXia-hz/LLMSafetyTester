@@ -32,15 +32,17 @@ def emit_progress(record: dict) -> None:
     task_id = os.getenv("LLMSEC_TASK_ID")
     if not task_id:
         return
-    line = json.dumps(
-        {"ts": datetime.now().isoformat(timespec="seconds"), **record},
-        ensure_ascii=False,
-        default=str,
-    )
     try:
+        # A-10：dumps 同入 try——record 含非 str 键等 TypeError 属"进度数据问题"，
+        # 与 IO 异常同按"绝不能拖垮评估主流程"处理（模块 docstring 的承诺口径）
+        line = json.dumps(
+            {"ts": datetime.now().isoformat(timespec="seconds"), **record},
+            ensure_ascii=False,
+            default=str,
+        )
         with _lock:
             _config.TASK_LOG_DIR.mkdir(parents=True, exist_ok=True)
             with open(_config.TASK_LOG_DIR / f"{task_id}.progress.jsonl", "a", encoding="utf-8") as f:
                 f.write(line + "\n")
-    except OSError:
+    except (OSError, TypeError, ValueError):
         pass
