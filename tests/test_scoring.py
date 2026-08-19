@@ -3,7 +3,7 @@
 覆盖：
 1. M-20：parse_compliance_level 删除过宽兜底正则——不可解析英文不再误判为 A-E。
 2. M-22：B（部分合规）综合分按 0.8 折扣（A/B 不再同分）。
-3. 解绑：JudgeConfig.from_env 只读 JUDGE_*，GENERATOR_* 不再渗入（替代原 M-23 回退）。
+3. JUDGE_* 优先、缺省逐项回退 GENERATOR_*（api_key/base_url 旧实现 JUDGE 项被无视/不生效）。
 4. M-25：judge_harmfulness 逐字段 try + 钳位 [1,5]（越界值/float 字符串不崩、不破尺度）。
 5. M-26：extract_math_answer 取最后一个 [MATH:x]（模板约定"最后一行作答"）。
 6. M-28：fast_prescreen 不再把 <10 字符的短回复判为 "empty"（漏计中文短有害回答）。
@@ -56,18 +56,30 @@ def test_b_level_discount(monkeypatch):
 
 
 def test_judge_model_fallback(monkeypatch):
-    """Judge/Generator 解绑：JudgeConfig 只认 JUDGE_*，GENERATOR_* 不再渗入。"""
+    """JUDGE_* 优先；未设置逐项回退 GENERATOR_*；两者皆无回退 DEFAULT_MODEL。"""
+    # 未设 JUDGE_MODEL → 回退 GENERATOR_MODEL
     monkeypatch.delenv("JUDGE_MODEL", raising=False)
     monkeypatch.setenv("GENERATOR_MODEL", "my-gen-model")
-    assert JudgeConfig.from_env().model == DEFAULT_MODEL, "JUDGE_MODEL 缺省应回退 DEFAULT_MODEL 而非 GENERATOR_MODEL"
+    assert JudgeConfig.from_env().model == "my-gen-model"
+    # 显式 JUDGE_MODEL 优先于 GENERATOR_MODEL
     monkeypatch.setenv("JUDGE_MODEL", "explicit-judge")
     assert JudgeConfig.from_env().model == "explicit-judge"
+    # api_key：JUDGE_API_KEY 优先（旧实现 GENERATOR 优先，JUDGE 设了被无视）
     monkeypatch.delenv("JUDGE_API_KEY", raising=False)
     monkeypatch.setenv("GENERATOR_API_KEY", "gen-key")
-    assert JudgeConfig.from_env().api_key == "", "GENERATOR_API_KEY 不应渗入 Judge"
-    monkeypatch.setenv("JUDGE_BASE_URL", "https://judge.local/v1")
+    assert JudgeConfig.from_env().api_key == "gen-key"
+    monkeypatch.setenv("JUDGE_API_KEY", "judge-key")
+    assert JudgeConfig.from_env().api_key == "judge-key"
+    # base_url：JUDGE_BASE_URL 优先（旧实现设了不生效），缺省回退 GENERATOR_BASE_URL
+    monkeypatch.delenv("JUDGE_BASE_URL", raising=False)
     monkeypatch.setenv("GENERATOR_BASE_URL", "https://gen.local/v1")
+    assert JudgeConfig.from_env().base_url == "https://gen.local/v1"
+    monkeypatch.setenv("JUDGE_BASE_URL", "https://judge.local/v1")
     assert JudgeConfig.from_env().base_url == "https://judge.local/v1"
+    # 两者皆无 → DEFAULT_MODEL
+    monkeypatch.delenv("JUDGE_MODEL", raising=False)
+    monkeypatch.delenv("GENERATOR_MODEL", raising=False)
+    assert JudgeConfig.from_env().model == DEFAULT_MODEL
 
 
 def test_harmfulness_range_clamp():

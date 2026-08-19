@@ -887,10 +887,7 @@ def _update_env_vars(updates: dict) -> None:
         pass  # output 卷不可写（如 :ro 挂载）不阻塞功能
 
 
-def _masked(key: str) -> str | None:
-    import os
-
-    v = os.getenv(key, "")
+def _mask_value(v: str) -> str | None:
     if not v:
         return None
     if len(v) <= 6:
@@ -898,21 +895,30 @@ def _masked(key: str) -> str | None:
     return v[:3] + "****" + v[-3:]
 
 
+def _masked(key: str) -> str | None:
+    import os
+
+    return _mask_value(os.getenv(key, ""))
+
+
 @router.get("/api/env")
 async def api_env():
-    """返回当前连接配置（默认 TARGET / GENERATOR / JUDGE）；api_key 掩码显示。"""
-    from llmsec.core.config import load_env
+    """返回当前连接配置（默认 TARGET / GENERATOR / JUDGE）；api_key 掩码显示。
+    judge 展示生效值（JUDGE_* 优先，未设逐项回退 GENERATOR_*）——raw env
+    为空但实际借用 generator 端点时，显示空会误导。"""
+    from llmsec.core.config import JudgeConfig, load_env
     load_env()
     import os
+    _jc = JudgeConfig.from_env()
     return {
         "target": {"base_url": os.getenv("TARGET_BASE_URL", ""), "model": os.getenv("TARGET_MODEL", ""),
                    "api_key_masked": _masked("TARGET_API_KEY")},
         "generator": {"base_url": os.getenv("GENERATOR_BASE_URL", ""), "model": os.getenv("GENERATOR_MODEL", ""),
                       "api_key_masked": _masked("GENERATOR_API_KEY")},
-        "judge": {"base_url": os.getenv("JUDGE_BASE_URL", ""), "model": os.getenv("JUDGE_MODEL", ""),
-                  "api_key_masked": _masked("JUDGE_API_KEY")},
+        "judge": {"base_url": _jc.base_url, "model": _jc.model,
+                  "api_key_masked": _mask_value(_jc.api_key)},
         # 兼容旧前端（run-control.js 只读 judge_model）
-        "judge_model": os.getenv("JUDGE_MODEL", ""),
+        "judge_model": _jc.model,
     }
 
 

@@ -240,7 +240,7 @@ class Judge:
     def __init__(self, client, model: str | None = None, verbose: bool = False):
         self.client = client
         # env 惰性读取：model 缺省时走 JudgeConfig.from_env().model
-        # （JUDGE_MODEL 缺省回退 DEFAULT_MODEL，与 GENERATOR_* 解耦），
+        # （JUDGE_MODEL → GENERATOR_MODEL → DEFAULT_MODEL 逐级回退），
         # 长跑进程运行期改 os.environ["JUDGE_MODEL"] 后新建 Judge 生效
         self.model = model or JudgeConfig.from_env().model
         self.verbose = verbose

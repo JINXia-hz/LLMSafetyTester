@@ -424,7 +424,7 @@ def test_m17_judge_env_lazy():
 
     try:
 
-        # GENERATOR_* 与 JUDGE_* 同时设且不同值，验证解绑：judge 只认 JUDGE_*
+        # GENERATOR_* 与 JUDGE_* 同时设且不同值，验证 JUDGE_* 显式优先
 
         os.environ['GENERATOR_API_KEY'] = 'gen-key-should-not-leak'
 

@@ -372,7 +372,7 @@ migrate-control|backup-r`；缓存 LRU 用 `cache prune --max N`。
 | `TARGET_API_KEY` / `TARGET_BASE_URL` / `TARGET_MODEL` | 目标模型三件套 | deepseek |
 | `TARGETS` | 多目标扫描：逗号分隔名称，配合 `TARGET_<N>_*` 四件套 | - |
 | `GENERATOR_*` | 攻击生成 / 安全孪生 / 报告叙事模型 | deepseek |
-| `JUDGE_MODEL` / `JUDGE_BASE_URL` / `JUDGE_API_KEY` | Judge 三件套（与 GENERATOR 解绑，各自独立配置） | deepseek |
+| `JUDGE_MODEL` / `JUDGE_BASE_URL` / `JUDGE_API_KEY` | Judge 三件套，显式设置优先；未设时逐项回退 `GENERATOR_*` 对应项 | 同 GENERATOR |
 
 完整模板见 `.env.example`。行为参数不在此——改 `llmsec/params.py` 或用 `LLMSEC_PARAM_<NAME>` 环境变量覆盖。embedding 降级链：API → 本地缓存 → HF 镜像 → TF-IDF，模型缓存于 `llmsec/.models/` 后完全离线可用。
 

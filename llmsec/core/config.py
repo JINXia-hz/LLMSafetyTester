@@ -280,10 +280,11 @@ class GeneratorConfig:
 
 @dataclass
 class JudgeConfig:
-    """LLM-as-Judge 配置。环境变量前缀 JUDGE_*，与 GENERATOR_* 完全解耦：
-      api_key  = JUDGE_API_KEY，默认 ""
-      base_url = JUDGE_BASE_URL，默认 DEFAULT_BASE_URL
-      model    = JUDGE_MODEL，默认 DEFAULT_MODEL
+    """LLM-as-Judge 配置。JUDGE_* 显式优先；未设置时逐项回退 GENERATOR_*，
+    再回退内置默认（借用而非绑定：设了 JUDGE_* 任意项即独立生效）：
+      model    = JUDGE_MODEL or GENERATOR_MODEL or DEFAULT_MODEL
+      api_key  = JUDGE_API_KEY or GENERATOR_API_KEY or ""
+      base_url = JUDGE_BASE_URL or GENERATOR_BASE_URL or DEFAULT_BASE_URL
     """
 
     api_key: str = ""
@@ -297,14 +298,14 @@ class JudgeConfig:
     @classmethod
     def from_env(cls) -> "JudgeConfig":
         load_env()
-        # Judge 与 Generator 解绑：只读 JUDGE_*，不再回退/借用 GENERATOR_*。
-        # 原实现 model 回退 GENERATOR_MODEL、api_key 优先 GENERATOR_API_KEY、
-        # base_url 只认 GENERATOR_BASE_URL——生成模型一换，judge 跟着漂移，
-        # 且 JUDGE_BASE_URL 设了也不生效。解绑后各管各的凭证与地址。
+        # JUDGE_* 优先、缺省逐项回退 GENERATOR_*（未配置 judge 时跟生成侧
+        # 走同一端点，零配置可用）。注意与旧实现的两点差异：
+        # 1. api_key 旧实现 GENERATOR_API_KEY 优先——JUDGE_API_KEY 设了被无视；
+        # 2. base_url 旧实现只认 GENERATOR_BASE_URL——JUDGE_BASE_URL 设了不生效。
         return cls(
-            api_key=os.getenv("JUDGE_API_KEY") or "",
-            base_url=os.getenv("JUDGE_BASE_URL") or DEFAULT_BASE_URL,
-            model=os.getenv("JUDGE_MODEL") or DEFAULT_MODEL,
+            api_key=os.getenv("JUDGE_API_KEY") or os.getenv("GENERATOR_API_KEY") or "",
+            base_url=os.getenv("JUDGE_BASE_URL") or os.getenv("GENERATOR_BASE_URL") or DEFAULT_BASE_URL,
+            model=os.getenv("JUDGE_MODEL") or os.getenv("GENERATOR_MODEL") or DEFAULT_MODEL,
             timeout=float(os.getenv("JUDGE_TIMEOUT", "90.0")),
             max_tokens=int(os.getenv("JUDGE_MAX_TOKENS", "1024")),
         )

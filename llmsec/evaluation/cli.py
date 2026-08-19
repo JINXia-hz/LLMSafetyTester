@@ -49,7 +49,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--no-judge", action="store_true",
                         help="禁用LLM-as-Judge，回退到旧版关键词检测")
     parser.add_argument("--judge-model", type=str, default=None,
-                        help="Judge使用的模型（默认取 JUDGE_MODEL env）")
+                        help="Judge使用的模型（默认JUDGE_MODEL，缺省回退GENERATOR_MODEL）")
     parser.add_argument("--skip-judge-prescreen", action="store_true",
                         help="跳过Judge预筛，所有案例都经Judge判断")
     parser.add_argument("--input", type=str, default=None,
@@ -70,8 +70,8 @@ def init_judge(args: argparse.Namespace, use_judge: bool) -> Judge | None:
     if not use_judge:
         return None
     judge_client = create_judge_client()
-    # JudgeConfig.from_env() 只读 JUDGE_*（与 GENERATOR_* 解绑），
-    # 杜绝硬编码 deepseek 模型名与空串 env 传空 model。
+    # JudgeConfig.from_env()：JUDGE_MODEL 优先，缺省回退 GENERATOR_MODEL
+    # （再回退 DEFAULT_MODEL），杜绝硬编码 deepseek 模型名与空串 env 传空 model。
     judge_model = args.judge_model or JudgeConfig.from_env().model
     judge = Judge(judge_client, model=judge_model)
     logger.info(f"🧑‍⚖️  Judge模型: {judge_model}\n")
