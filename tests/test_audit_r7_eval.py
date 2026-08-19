@@ -81,24 +81,22 @@ def test_safe_twin_judge_failure_degrades(tmp_path, monkeypatch):
     def boom_judge_allergic(judge, safe_prompt, content):
         raise RuntimeError("judge 401 (simulated)")
     monkeypatch.setattr(st, "judge_allergic", boom_judge_allergic)
+    monkeypatch.setattr(st, "API_DELAY", 0)
 
-    # 目标模型调用桩：evaluate_allergy 内走 client.chat.completions.create
-    class _Msg:
-        content = "benign target response"
-    class _Choice:
-        message = _Msg()
-    class _Resp:
-        choices = [_Choice()]
-    class _FakeClient:
-        chat = type("Chat", (), {"completions": type("Completions", (), {
-            "create": staticmethod(lambda **kw: _Resp())})})
+    # 目标模型调用桩：b0f0933（B-1）后 evaluate_allergy 的目标调用统一走
+    # targets.call_target（safe_twin 内函数导入、运行期解析），client= 参数
+    # 已废弃——此前注入 _FakeClient 是死桩，本地靠 .env 真实端点"碰巧通过"，
+    # CI 无凭证三条全 API错误 跳过、entries=0（与 test_allergy 的 B-6 桩同式）
+    import llmsec.targets as tgt
+    monkeypatch.setattr(tgt, "call_target",
+                        lambda p: {"error": None, "content": "benign target response",
+                                   "meta": {}})
     result_file = tmp_path / "twin_results.jsonl"
 
-    # r9/P3-7：twins/client/judge/result_file 全部显式注入——不再 patch
+    # r9/P3-7：twins/judge/result_file 显式注入——不再 patch
     # create_openai_client/create_judge_client/config 路径
     import llmsec.evaluation.judge as jd
-    st.evaluate_allergy(twins=twins, client=_FakeClient(),
-                        judge=jd.Judge(None), result_file=result_file)
+    st.evaluate_allergy(twins=twins, judge=jd.Judge(None), result_file=result_file)
     # 修复前：第一条 judge 故障即未捕获异常带栈退出
 
     entries = read_jsonl(result_file)
