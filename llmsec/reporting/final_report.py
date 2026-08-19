@@ -168,6 +168,25 @@ def generate_reports(
         else:
             markdown = generate_narrative(tree)
         (run_dir / "security_report.md").write_text(markdown, encoding="utf-8")
+
+        # ---- 攻击有效性（V2 融合）：质量报告存在时甄别假防御并写整改需求 ----
+        # 优雅降级：attack_quality.json 不存在 → assess_run 返回 None，本段无产物，
+        # 评估行为与无此特性时完全一致。不重算 Elo，只修正解释层。
+        try:
+            from llmsec.attacks.assess import assess_run
+            validity = assess_run(run_dir)
+            if validity is not None:
+                report["attack_validity"] = {
+                    "n_units": validity["n_units"],
+                    "n_low_asr_units": validity["n_low_asr_units"],
+                    "false_defense_suspects": len(validity["false_defense_suspects"]),
+                    "suspect_ratio_among_low_asr": validity["suspect_ratio_among_low_asr"],
+                    "genuine_strong_defenses": len(validity["genuine_strong_defenses"]),
+                    "report": "attack_rectification.md",
+                }
+                write_json(run_dir / "runner_report.json", report)
+        except Exception as e:
+            logger.warning(f"  攻击有效性评估失败（不影响主报告）: {e}")
     except Exception as e:
         logger.warning(f"  报告生成（tree/md）失败（runner_report.json 已写入）: {e}")
 
