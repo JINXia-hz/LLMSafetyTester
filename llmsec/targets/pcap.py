@@ -25,9 +25,10 @@ load_env()
 
 # ============================================================
 # 配置（与原 targets.py 一致：env 覆盖，内网地址为默认值）
-# r9/P3-3：函数是唯一取值源（调用期读 env，长跑进程运行期改 os.environ 即生效）；
-# 模块常量只是 import 期快照（BASE_PAYLOAD 模板等 import 期构造物使用，
-# M11 测试钉住"常量不被运行期污染"）。运行期敏感的消费方一律调函数。
+# r9/P3-3：函数是唯一取值源（调用期读 env，长跑进程运行期改 os.environ 即生效）。
+# 原先为 BASE_PAYLOAD 构造留的 import 期快照常量（PCAP_JUDGE_URL 等）已删——
+# 模板内两处 env 敏感字段恒被 build_pcap_payload 用调用期值整体替换，
+# 快照从不生效，只留下"改 env 后模板不变"的误导面。
 # ============================================================
 def pcap_judge_url() -> str:
     """PCAP judge 端点（调用期读 env）。"""
@@ -67,11 +68,6 @@ def suppress_insecure_warning() -> None:
         _warning_suppressed = True
 
 
-# import 期快照（仅供 BASE_PAYLOAD 等模板构造；运行期取值请用上面的函数）
-PCAP_JUDGE_URL = pcap_judge_url()
-PCAP_MODEL_VERSION = pcap_model_version()
-PCAP_PROMPT_KEY = pcap_prompt_key()
-
 REQUEST_TIMEOUT = 90.0   # PCAP 判读较慢
 from llmsec.params import API_MAX_RETRIES, TARGET_RETRY_DELAY  # noqa: E402
 
@@ -84,9 +80,11 @@ class _PcapHttpError(Exception):
         self.resp = resp
         self.latency = latency
 
-# 模板请求体（与原 targets.py / probe_victim.py 一致，只改 log 字段）
+# 模板请求体（与原 targets.py / probe_victim.py 一致，只改 log 字段）。
+# model_config / pcap_judge_prompt_key 是占位（None）——build_pcap_payload
+# 每次用调用期 env 值整体替换这两处，模板内不放 import 期快照
 BASE_PAYLOAD = {
-    "model_config": {"version_name": PCAP_MODEL_VERSION},
+    "model_config": {"version_name": None},
     "temperature": 0.5,
     "repetition_penalty": 1.1,
     "top_p": 0.75,
@@ -96,7 +94,7 @@ BASE_PAYLOAD = {
     "score": 0.6,
     "piggyback_query": True,
     "threat": "测试",
-    "pcap_judge_prompt_key": PCAP_PROMPT_KEY,
+    "pcap_judge_prompt_key": None,
 }
 
 

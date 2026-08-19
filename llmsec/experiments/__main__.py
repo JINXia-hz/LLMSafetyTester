@@ -49,7 +49,7 @@ def _cmd_trials(name: str) -> int:
     logger.info(f"study '{name}': {len(trials)} 个 trial")
     for t in trials:
         m = t.get("metrics") or {}
-        logger.info(f"  trial#{t.get('trial')} seed={t.get('seed')} {t.get('status')}  "
+        logger.info(f"  trial#{t.get('idx')} seed={t.get('seed')} {t.get('status')}  "
               f"conv_rounds={m.get('conv_rounds')} elo={m.get('defender_elo')}  "
               f"params={t.get('params')}"[:160])
     return 0

@@ -234,17 +234,21 @@ def target_backend(name: str) -> str:
     return os.getenv("TARGET_TYPE", "openai")
 
 
-def resolve_defender_name(target_model: str) -> str:
-    """解析防御方（被攻击模型）名称：pcap 模式用 PCAP_MODEL_VERSION，其它用 target_model。
+def resolve_defender_name(target_model: str, *, target_name: str | None = None) -> str:
+    """解析防御方（被攻击模型）名称：pcap 后端用 PCAP_MODEL_VERSION，其它用 target_model。
 
     替代 evaluator.py / safe_twin.py / runner.py 重复的三元表达式（M-35）。
     R 矩阵的结果列、过敏结果、画像 ASR 都按此名索引——三处必须口径一致，
     否则 pcap 模式下 FPR 与 ASR 会查不同列导致画像错配。
 
+    target_name 给定时（多目标 runner）按该目标自己的 backend 判定
+    （target_backend：TARGET_<N>_TYPE / TARGET_<name>_TYPE，缺省继承全局
+    TARGET_TYPE）；缺省沿用全局 TARGET_TYPE（单目标 CLI 的既有口径）。
     PCAP_MODEL_VERSION 从 llmsec.targets 惰性读取（避免 core.config ↔ targets 循环导入），
     取值与原各模块顶层 `from llmsec.targets import PCAP_MODEL_VERSION` 一致（import 期冻结）。
     """
-    if os.getenv("TARGET_TYPE", "openai") == "pcap_judge":
+    backend = target_backend(target_name) if target_name else os.getenv("TARGET_TYPE", "openai")
+    if backend == "pcap_judge":
         from llmsec.targets.pcap import pcap_model_version
         return pcap_model_version()
     return target_model

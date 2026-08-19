@@ -110,9 +110,12 @@ def strip_reasoning(text: str) -> str:
     if "<think>" not in low and "</think>" not in low:
         return text
     out = THINK_BLOCK_PATTERN.sub("", text)
-    idx = out.rfind("</think>")
-    if idx != -1:
-        out = out[idx + len("</think>"):]
+    # 孤立闭合标记（成对块已被上面 IGNORECASE 正则删除）同样按忽略大小写取
+    # 最后一个——用 finditer 而非 lower()+rfind：个别 Unicode 字符小写化会
+    # 改变长度，导致索引错位截错位置
+    closes = list(re.finditer(r"</think>", out, re.IGNORECASE))
+    if closes:
+        out = out[closes[-1].end():]
     return out.strip()
 
 

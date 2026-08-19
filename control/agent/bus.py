@@ -38,6 +38,7 @@ KIND_PLAN_DONE = "plan_done"              # Plan 全部执行完
 KIND_STEP_START = "step_start"            # 某步即将执行（门下省审查时机）
 KIND_STEP_DONE = "step_done"              # 某步成功
 KIND_STEP_BLOCKED = "step_blocked"        # 某步被封驳
+KIND_STEP_UNBLOCKED = "step_unblocked"    # 封驳令被清除（用户放行 / 随 Plan 驳回撤销）
 KIND_STEP_FAILED = "step_failed"          # 某步执行异常
 # 门下省 → 中书省
 KIND_REVIEW = "review"                    # 门下省审查简报（plan_done 后自动，或主动）
@@ -57,6 +58,7 @@ KIND_ROUTES: dict[str, str] = {
     KIND_STEP_START: MENXIA,      # 请求-应答：门下省同步返回封驳裁决
     KIND_STEP_DONE: ALL,
     KIND_STEP_BLOCKED: ALL,
+    KIND_STEP_UNBLOCKED: ALL,     # 门下省面板据此递减待裁计数（跨标签页/重放配平）
     KIND_STEP_FAILED: ALL,        # 门下省（订阅，异常呈递）
     KIND_REVIEW: ZHONGSHU,        # 门下省 → 中书省面板展示
     KIND_BLOCK: ALL,              # 封驳令归档（票据本体走 block store）

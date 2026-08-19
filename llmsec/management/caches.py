@@ -5,7 +5,7 @@
 类别：
   predictors        output/predictors/*.pkl            删了自动重建（load_or_fit 重训）
   （elo_cache 已表化进 catalog.db 的 elo_cache 表，指纹自动失效，无需清理类别）
-  feature_cluster   output/feature_cache.pkl + cluster_result.pkl + embedding_cache.pkl
+  feature_cluster   output/cluster/ 下的 feature_cache.pkl + cluster_result.pkl + embedding_cache.pkl
                                                        feature/embedding 可重建 / cluster 需重跑
   model_state       output/state/prescreen_model.joblib       可重训
   （probes 已表化进 catalog.db 的 probes 表，无需清理类别）

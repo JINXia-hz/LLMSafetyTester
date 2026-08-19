@@ -34,7 +34,7 @@ async function loadControlSection() {
   } catch { /* 忽略 */ }
   if (!_greeted) {
     _greeted = true;
-    appendChat('assistant', mdSafe('臣中书令见驾，恭请圣安。臣可：**查批次**、**对比 run**、**fork 工作区**、**审查报告**、**合并 R 矩阵**、**清缓存**。'));
+    appendChat('assistant', mdSafe('臣中书令见驾，恭请圣安。臣可：**查批次**、**对比 run**、**fork 工作区**、**审查报告**、**管理数据库**、**清缓存**。'));
   }
   if (!_ctrlBound) bindControl();
   // 初始化尚书省 + 门下省衙署

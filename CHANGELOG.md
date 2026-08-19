@@ -37,6 +37,15 @@
 ### 修复
 
 - 契约缺口：全空格 prompt 此前骗过 min_length=1 校验，现按空白拒收
+- 门下省封驳待裁计数跨页/重放失配：放行（`plan/block/approve`）与 Plan 驳回
+  （`plan/reject`）清封驳令时新增总线广播 `step_unblocked`（信封带 plan_id，
+  payload 带 step_id/reason=approve|reject），门下省面板消费该消息幂等递减
+  待裁计数并把封驳卡按钮翻成已放行印——此前只在"点按钮的那一页"本地递减，
+  他页放行或刷新重放会让徽标恒卡「封驳 N 起 · 待圣裁」、按钮残留可点（404）。
+  同修 menxia.js 两处既有 bug：封驳卡 `data-plan` 误读 `m.payload.plan_id`
+  （plan_id 在消息信封顶层）导致纯 GUI 点「准奏放行」必 404；放行请求 404
+  （令已被他处清除）时按已处理收场而非恢复按钮。新增
+  `list_tickets_for_plan`（storage 契约）供驳回前取令清单逐令广播
 
 ## [1.1.0] - 2026-08-18
 

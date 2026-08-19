@@ -16,8 +16,8 @@ from llmsec.core.logging import get_logger
 logger = get_logger(__name__)
 
 
-def cmd_health(files: list[str] | None, json_mode: bool = False) -> int:
-    """attacks health——包装体检校验器（契约/分布/乱码/重复）。"""
+def cmd_health(files: list[str] | None) -> int:
+    """attacks health——包装体检校验器（契约/分布/乱码/重复；人可读输出）。"""
     from llmsec.attacks.validate import main as validate_main
 
     return validate_main(files)

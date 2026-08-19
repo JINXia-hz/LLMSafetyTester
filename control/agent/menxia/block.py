@@ -24,6 +24,9 @@ from control.core.storage import (
     get_ticket as _get_row,
 )
 from control.core.storage import (
+    list_tickets_for_plan as _list_rows,
+)
+from control.core.storage import (
     reset_tickets as _reset_rows,
 )
 from control.core.storage import (
@@ -74,6 +77,11 @@ def clear_block(plan_id: str, step_id: str) -> bool:
 def clear_all_for_plan(plan_id: str) -> int:
     """清除某 Plan 的所有封驳（plan 驳回/重置时）。"""
     return _clear_rows(plan_id)
+
+
+def list_blocks_for_plan(plan_id: str) -> list[BlockTicket]:
+    """某 Plan 现存全部封驳令（撤销前先取清单，供逐令广播 step_unblocked）。"""
+    return [BlockTicket(**d) for d in _list_rows(plan_id)]
 
 
 def reset_blocks() -> None:

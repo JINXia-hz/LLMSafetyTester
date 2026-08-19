@@ -337,20 +337,17 @@ def test_emit_alert_webhook_channel_mocked(mon, monkeypatch, capsys):
 
 
 def test_post_webhook_non_2xx_only_stderr(mon, monkeypatch, capsys):
-    """_post_webhook：非 2xx / URLError / 其它异常都只写 stderr，不抛（离线，urlopen 全 mock）。"""
-    class _FakeResp:
-        status = 500
+    """_post_webhook：非 2xx / URLError / 其它异常都只写 stderr，不抛（离线，urlopen 全 mock）。
 
-        def __enter__(self):
-            return self
+    非 2xx 的真实形态是 urlopen 抛 HTTPError（URLError 子类）——urlopen 只在
+    2xx（重定向已自动跟随）时返回响应对象，原"返回后查 status>=300"分支不可达已删。
+    """
+    def _raise_http(req, timeout=None):
+        raise mon.urllib.error.HTTPError("http://x/hook", 500, "Server Error", None, None)
 
-        def __exit__(self, *a):
-            return False
-
-    monkeypatch.setattr(mon.urllib.request, "urlopen",
-                        lambda req, timeout=None: _FakeResp())
-    mon._post_webhook("http://x/hook", {"a": 1})  # 非 2xx → stderr
-    assert "webhook" in capsys.readouterr().err, "❌1 非 2xx 应写 stderr"
+    monkeypatch.setattr(mon.urllib.request, "urlopen", _raise_http)
+    mon._post_webhook("http://x/hook", {"a": 1})  # 5xx（HTTPError）→ stderr
+    assert "请求失败" in capsys.readouterr().err, "❌1 非 2xx 应写 stderr"
 
     def _raise_url(req, timeout=None):
         raise mon.urllib.error.URLError("connection refused")

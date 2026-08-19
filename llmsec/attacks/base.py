@@ -1,31 +1,14 @@
 #!/usr/bin/env python3
-"""生成器薄接口 + 输出自检——攻击生成侧的统一出口（Step 2「收编」）。
+"""生成器出口自检——攻击生成侧的统一出口（Step 2「收编」）。
 
-AttackGenerator 是刻意保持极薄的协议：仓内两支生成器（generate.py 的
+ensure_contract 是生成器出口的唯一硬约束：仓内两支生成器（generate.py 的
 L1 生成、harmbench.py 的模板组装）、外部导入通道（management 的
-attacks import）以及 Step 3 的进化算子（obfuscate/LLM 合成）都只承诺
-一件事——**产物能过 AttackRecord 契约校验**。不做更重的抽象：等 Step 3
-的真实需求落地后再长出参数面，避免接口先行于用例。
+attacks import）以及 Step 3 的进化算子都只承诺一件事——**产物能过
+AttackRecord 契约校验**。不做更重的抽象：等 Step 3 的真实需求落地后
+再长出参数面，避免接口先行于用例（原 AttackGenerator Protocol 仅测试
+消费，已删）。
 """
 from __future__ import annotations
-
-from collections.abc import Iterator
-from typing import Protocol, runtime_checkable
-
-
-@runtime_checkable
-class AttackGenerator(Protocol):
-    """攻击生成器契约。
-
-    实现方承诺：
-      - source：产地的稳定标识（schema.SOURCES 之一）
-      - generate(**params)：惰性产出记录 dict 流，逐条须过
-        llmsec.attacks.schema.validate_record（用 ensure_contract 自检）
-    """
-
-    source: str
-
-    def generate(self, **params) -> Iterator[dict]: ...
 
 
 def ensure_contract(entries: list[dict], *, where: str) -> None:

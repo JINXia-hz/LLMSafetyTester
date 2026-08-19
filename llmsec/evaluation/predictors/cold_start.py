@@ -819,8 +819,12 @@ class ColdStartPredictor:
             "predicted_count": len(self.last_predictions),
             "last_fit_gt_count": self.last_fit_gt_count,
             "last_fit_at": self.last_fit_at,
+            # 下次触发完整 K-Fold 的 GT 数：基于 SVD-Ridge 自己的上次完整 K-Fold 计数
+            # （_model_cv_gt_count，_predict_batch_svd_ridge 维护）——last_fit_gt_count
+            # 是最终聚类的落盘计数，与本预告语义错位
             "next_kfold_at_gt_count": (
-                self.last_fit_gt_count + self.ridge_refit_threshold if self.last_fit_gt_count else self.min_cluster_size
+                self._model_cv_gt_count + self.ridge_refit_threshold
+                if self._model_cv_gt_count else self.min_cluster_size
             ),
             "n_clusters": n_clusters,
             "n_noise": n_noise,

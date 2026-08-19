@@ -43,6 +43,7 @@ from llmsec.core.config import (
     RUNS_DIR,
     GeneratorConfig,
     TargetConfig,
+    resolve_defender_name,
 )
 from llmsec.core.io import read_json, read_jsonl, write_json
 from llmsec.core.logging import setup_console
@@ -395,6 +396,11 @@ def main(argv=None, *, deps=None):
             tracker.predictor.artifacts = _feat_tracker.predictor.artifacts
 
         info: dict = {"target": name, "model": declared[name].model}
+        # 防御方身份键（R 列 / Elo / 过敏 / 画像共键）：pcap 后端解析为
+        # PCAP_MODEL_VERSION——与 evaluator/safe_twin 的 resolve_defender_name
+        # 同一口径（M-18/M-35），否则 pcap 目标经两条入口写进不同 R 列；
+        # openai/local_sim 目标 defender == name，行为不变
+        defender = resolve_defender_name(declared[name].model, target_name=name)
 
         # Phase 1：攻击
         # M6：多目标共享全局 CLUSTER_RESULT_FILE，各目标 final_fit 写同一文件会互相覆盖——
@@ -424,7 +430,7 @@ def main(argv=None, *, deps=None):
                     no_early_stop=args.no_early_stop,
                     force_refresh=args.refresh_features,
                     concurrency=concurrency,
-                    defender_name=name,
+                    defender_name=defender,
                     r_snapshot=R_snapshot,
                     units=units,
                 )
@@ -449,11 +455,11 @@ def main(argv=None, *, deps=None):
             tracker.load(str(state_path))
 
         conv = tracker.check_convergence(
-            name, total_methods=len(units) if units else len(catalog),
+            defender, total_methods=len(units) if units else len(catalog),
             tested_count=len(tracker.ground_truth_methods))
-        boundary = tracker.compute_security_boundary(name)
+        boundary = tracker.compute_security_boundary(defender)
         info.update({
-            "defender_elo": round(tracker.get_defender_elo(name), 1),
+            "defender_elo": round(tracker.get_defender_elo(defender), 1),
             "this_run_tested": len(tracker.ground_truth_methods),
             "converged": conv["converged"], "ci_half": conv["ci_half"],
             "drift": conv["drift"], "confidence": boundary.get("confidence", 0),
@@ -486,7 +492,7 @@ def main(argv=None, *, deps=None):
                 allergy_smmry = run_allergy_phase(
                     _allergy_recs, twin_client, judge, tracker,
                     n_window=n_window, allergy_file=allergy_file,
-                    concurrency=concurrency, defender_name=name)
+                    concurrency=concurrency, defender_name=defender)
             except Exception as e:
                 logger.warning(f"  ⚠ {name} 过敏检测失败: {e}")
                 allergy_smmry = {}
@@ -507,7 +513,7 @@ def main(argv=None, *, deps=None):
             _reporter(
                 run_dir=run_dir,
                 tracker=tracker,
-                defender_name=name,
+                defender_name=defender,
                 attack_summary=attack_summary,
                 allergy_summary=allergy_smmry,
                 total_methods=len(units) if units else len(catalog),
@@ -590,8 +596,9 @@ def main(argv=None, *, deps=None):
             tracker = trackers.get(name)
             if tracker is None:
                 continue
+            defender = resolve_defender_name(declared[name].model, target_name=name)
             try:
-                publish_tracker(tracker, name)
+                publish_tracker(tracker, defender)
                 logger.info(f"  {name}: {len(tracker.ground_truth_methods)} 条 → work-dir R")
             except Exception as e:
                 logger.error(f"  ❌ {name} 写入 R 失败: {e}")
@@ -617,8 +624,9 @@ def main(argv=None, *, deps=None):
             tracker = trackers.get(name)
             if tracker is None:
                 continue
+            defender = resolve_defender_name(declared[name].model, target_name=name)
             try:
-                publish_tracker(tracker, name)
+                publish_tracker(tracker, defender)
                 logger.info(f"  {name}: {len(tracker.ground_truth_methods)} 条 → 全局 R")
             except Exception as e:
                 logger.error(f"  ❌ {name} 写入 R 失败: {e}")
@@ -640,7 +648,7 @@ def main(argv=None, *, deps=None):
             logger.info(f"  {name}: ❌ {info['error']}")
         else:
             logger.info(f"  {name:28s} ELO≈{info.get('defender_elo',0):6.0f}  "
-                  f"R累计{R_final.n_for_model(name)}  "
+                  f"R累计{R_final.n_for_model(resolve_defender_name(declared[name].model, target_name=name))}  "
                   f"CI±{info.get('ci_half','?')}  "
                   f"{'✓' if info.get('converged') else '⚠'}"
                   + (f"  FPR={info.get('fpr')}" if info.get("fpr") is not None else ""))

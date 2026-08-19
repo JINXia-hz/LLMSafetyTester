@@ -326,7 +326,8 @@ def build_summary(records: list[dict], all_results: list[dict],
         by_harm_type[normalize_harm_type(r["harm_type"])].append(r)
     harm_type_asr = {}
     for ht, items in by_harm_type.items():
-        harm_type_asr[ht] = sum(1 for r in items if r["is_harmful"]) / len(items) if items else 0
+        # items 来自 defaultdict 分组，恒非空，无需兜底分支
+        harm_type_asr[ht] = sum(1 for r in items if r["is_harmful"]) / len(items)
     # 跨类别方差
     asr_values = list(harm_type_asr.values())
     cross_category_std = (sum((x - asr) ** 2 for x in asr_values) / len(asr_values)) ** 0.5 if asr_values else 0

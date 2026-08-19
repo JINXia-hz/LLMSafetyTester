@@ -316,7 +316,8 @@ def _apply_env_overrides() -> None:
                 val = int(raw)
             elif isinstance(old, float):
                 val = float(raw)
-            elif isinstance(old, (tuple, list)):
+            elif old and isinstance(old, (tuple, list)):
+                # 空 tuple/list 无 old[0] 可推断，落到 str 分支按原样处理
                 parts = raw.strip().strip("()[]").split(",")
                 val = tuple(type(old[0])(p.strip()) for p in parts if p.strip())
             else:

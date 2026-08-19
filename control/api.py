@@ -36,7 +36,12 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from control.agent import menxia
-from control.agent.bus import get_bus
+from control.agent.bus import (
+    KIND_STEP_UNBLOCKED,
+    MENXIA,
+    get_bus,
+    notify_routed,
+)
 from control.agent.llm import is_llm_configured
 from control.agent.shangshu import capabilities as caps_mod
 from control.agent.zhongshu import handle_message as zhongshu_handle
@@ -239,9 +244,16 @@ def api_plan_reject(req: PlanRejectRequest):
     """用户驳回 Plan。"""
     from control.agent.shangshu import reject_plan
     try:
+        # 先取现存封驳令清单再清除——逐令广播 step_unblocked，
+        # 让各标签页的门下省面板同步递减待裁计数（reason=reject：随驳回撤销）
+        cleared = menxia.list_blocks_for_plan(req.plan_id)
         plan = reject_plan(req.plan_id)
         # 清除该 plan 的所有封驳
         menxia.clear_all_for_plan(req.plan_id)
+        for t in cleared:
+            notify_routed(KIND_STEP_UNBLOCKED, from_dept=MENXIA,
+                          plan_id=req.plan_id, step_id=t.step_id,
+                          reason="reject", capability=t.capability)
         return plan.to_dict()
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Plan 不存在: {req.plan_id}")
@@ -299,6 +311,11 @@ def api_block_approve(req: BlockApproveRequest):
             save_plan(plan)
             get_queue().submit(req.plan_id)
             requeued = True
+    # 广播放行（reason=approve）：各标签页门下省面板据此递减待裁计数并翻按钮，
+    # 本端点自身的放行不再只对"点按钮的那一页"生效
+    notify_routed(KIND_STEP_UNBLOCKED, from_dept=MENXIA,
+                  plan_id=req.plan_id, step_id=req.step_id,
+                  reason="approve", requeued=requeued)
     return {"plan_id": req.plan_id, "step_id": req.step_id, "approved": True,
             "requeued": requeued}
 

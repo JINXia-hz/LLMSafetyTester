@@ -205,7 +205,7 @@ def main() -> int:
     if args.group == "attacks":
         from llmsec.management import attacks as attacks_mod
         if args.cmd == "health":
-            return attacks_mod.cmd_health(args.files, json_mode=args.json)
+            return attacks_mod.cmd_health(args.files)
         if args.cmd == "import":
             return attacks_mod.cmd_import(
                 args.file, args.source, yes=args.yes, json_mode=args.json)

@@ -21,12 +21,7 @@ from llmsec.targets.base import TargetClient
 from llmsec.targets.local_sim import LocalSimTargetClient
 from llmsec.targets.openai_backend import OpenAITargetClient
 from llmsec.targets.pcap import (
-    BASE_PAYLOAD,
-    PCAP_JUDGE_URL,
-    PCAP_MODEL_VERSION,
-    PCAP_PROMPT_KEY,
     PcapJudgeTargetClient,
-    build_pcap_log,
     build_pcap_payload,
     pcap_judge_url,
     pcap_model_version,
@@ -45,15 +40,10 @@ __all__ = [
     "available_targets",
     "set_active_target",
     "get_active_target",
-    # pcap 复用件（供 probe_victim 等使用）
-    "BASE_PAYLOAD",
-    "PCAP_JUDGE_URL",
-    "PCAP_MODEL_VERSION",
-    "PCAP_PROMPT_KEY",
+    # pcap 复用件（runner/探测脚本经包根取用；其余消费者直接 import llmsec.targets.pcap）
     "pcap_judge_url",
     "pcap_model_version",
     "pcap_prompt_key",
-    "build_pcap_log",
     "build_pcap_payload",
 ]
 

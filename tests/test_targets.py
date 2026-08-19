@@ -396,7 +396,7 @@ def test_m11_pcap_env_lazy():
 
         assert payload['pcap_judge_prompt_key'] == 'custom:runtime', 'M11: 运行期改 PCAP_PROMPT_KEY 后 build_pcap_payload 生效'
 
-        assert pcap.BASE_PAYLOAD['model_config']['version_name'] == pcap.PCAP_MODEL_VERSION, 'M11: 模块常量 BASE_PAYLOAD 保持 import 期默认（未被污染）'
+        assert pcap.BASE_PAYLOAD['model_config']['version_name'] is None, 'M11: 模板占位保持 None（env 值只经 build_pcap_payload 注入，模板不被运行期污染）'
 
         client2 = pcap.PcapJudgeTargetClient(url='https://explicit.local/judge')
 

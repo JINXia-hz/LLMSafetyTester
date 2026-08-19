@@ -221,7 +221,7 @@ def cmd_trials(study: str | None, *, json_mode: bool = False) -> int:
               str((r.metrics or {}).get("conv_rounds", "-"))] for r in rows],
             headers=["study", "idx", "target", "seed", "status", "conv_rounds"],
         )
-        print(f"\n共 {len(rows)} 个 trial（真相源：trials.jsonl）")
+        print(f"\n共 {len(rows)} 个 trial（真相源：目录库 trials 表）")
     else:
         print("（无 trial 登记——study 运行时由 executor 入册）")
     return 0

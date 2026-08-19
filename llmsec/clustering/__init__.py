@@ -78,7 +78,4 @@ __all__ = [
     "cut_tree", "candidate_ks", "sweep_candidates", "select_knee", "log_growth_k0",
     # 簇 ID 解析
     "parse_cluster_id",
-    # 路径常量
-    "CLUSTER_REPORT_FILE", "CLUSTER_MATRIX_FILE",
-    "FEATURE_CACHE_FILE", "CLUSTER_RESULT_FILE",
 ]

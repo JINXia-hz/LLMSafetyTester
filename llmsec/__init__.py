@@ -11,7 +11,7 @@ import llmsec 即自动加载项目根目录的 .env（幂等）。
 
 from llmsec.core.config import load_env as _load_env
 
-__version__ = "0.1.0"
+__version__ = "1.1.0"  # 与 pyproject.toml [project].version 同步维护
 
 # 保证任何模块 `import llmsec.xxx` 时 .env 已加载
 _load_env()

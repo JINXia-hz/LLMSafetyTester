@@ -25,7 +25,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from control.api import router as control_router
-from llmsec.core import config as _config
 from llmsec.core.config import RUNS_DIR
 from llmsec.core.logging import get_logger
 from llmsec.server import task_manager
@@ -101,18 +100,22 @@ async def ready():
     P9：原先每次探针全量 load_matrix（整矩阵构建 + quick_check）——
     探针只需证明 db 可开可查，COUNT 足矣。
     """
-    if _config.RESULTS_DB.exists():
+    from llmsec.storage import rstore
+
+    # results_db() 调期解析（work-dir 重绑兼容）；P7 统一库后 R 与目录同在
+    # catalog.db——旧常量 RESULTS_DB 已随存储重构删除
+    results_db = rstore.results_db()
+    if results_db.exists():
         try:
-            from llmsec.storage import rstore
             stats = rstore.results_stats()
             return JSONResponse({
                 "status": "ready",
-                "results_db": str(_config.RESULTS_DB),
+                "results_db": str(results_db),
                 "observations": stats["observations"],
             })
         except (OSError, RuntimeError):
             pass
-    return JSONResponse({"status": "not_ready", "results_db": str(_config.RESULTS_DB)}, status_code=503)
+    return JSONResponse({"status": "not_ready", "results_db": str(results_db)}, status_code=503)
 
 
 # ============================================================

@@ -203,6 +203,22 @@ def clear_tickets_for_plan(plan_id: str) -> int:
         return len(rows)
 
 
+def list_tickets_for_plan(plan_id: str) -> list[dict]:
+    """某 Plan 现存全部封驳令（撤销前先取清单，供逐令广播 step_unblocked）。"""
+    with _db.session() as s:
+        rows = s.exec(
+            _select(CtlTicket).where(CtlTicket.plan_id == plan_id)
+        ).all()
+        return [
+            {
+                "token": r.token, "plan_id": r.plan_id, "step_id": r.step_id,
+                "capability": r.capability, "risk_level": r.risk_level,
+                "summary": r.summary, "detail": r.detail, "created": r.created,
+            }
+            for r in rows
+        ]
+
+
 def reset_tickets() -> None:
     with _db.tx() as s:
         for row in s.exec(_select(CtlTicket)).all():

@@ -35,6 +35,24 @@ def test_run_param_validation():
     assert r.status_code == 200, '合法但不存在的 run 不报错（available=False 或空）'
     print('✅ run 参数校验通过')
 
+def test_ready_probe(monkeypatch, tmp_path):
+    """回归：/ready 曾引用已删除的 config.RESULTS_DB（AttributeError→500）。"""
+    import llmsec.core.config as _config
+    # R 库不存在 → 503（而非 500）
+    monkeypatch.setattr(_config, 'CATALOG_DB', tmp_path / 'none' / 'catalog.db')
+    r = client.get('/ready')
+    assert r.status_code == 503, f'R 缺失应 503, got {r.status_code}: {r.text[:200]}'
+    assert r.json()['status'] == 'not_ready'
+    # R 库可读（空文件经引擎建表后 COUNT 为 0）→ 200
+    dbp = tmp_path / 'catalog.db'
+    dbp.write_bytes(b'')
+    monkeypatch.setattr(_config, 'CATALOG_DB', dbp)
+    r = client.get('/ready')
+    assert r.status_code == 200, f'R 可读应 200, got {r.status_code}: {r.text[:200]}'
+    d = r.json()
+    assert d['status'] == 'ready' and d['observations'] == 0
+    print('✅ /ready 探针通过')
+
 def test_model_fallback():
     r = client.get('/api/model')
     d = r.json()

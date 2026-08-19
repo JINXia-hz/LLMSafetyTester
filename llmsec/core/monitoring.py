@@ -106,10 +106,10 @@ def _post_webhook(url: str, payload: dict) -> None:
         req = urllib.request.Request(
             url, data=data, headers={"Content-Type": "application/json"}, method="POST"
         )
-        with urllib.request.urlopen(req, timeout=_WEBHOOK_TIMEOUT) as resp:
-            # 2xx 即成功，不读 body
-            if resp.status >= 300:
-                print(f"[monitoring] webhook 返回非 2xx: {resp.status}", file=sys.stderr)
+        # urlopen 只在 2xx 时返回响应对象（重定向已自动跟随）；4xx/5xx 抛
+        # HTTPError（URLError 子类）走下方分支——这里无需再检查状态码
+        with urllib.request.urlopen(req, timeout=_WEBHOOK_TIMEOUT):
+            pass
     except urllib.error.URLError as e:
         print(f"[monitoring] webhook 请求失败: {e}", file=sys.stderr)
     except Exception as e:

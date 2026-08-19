@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from llmsec.attacks.base import AttackGenerator, ensure_contract
+from llmsec.attacks.base import ensure_contract
 
 
 def _write(path, rows):
@@ -31,17 +31,6 @@ class TestEnsureContract:
                 [{"id": "a", "method": "m", "prompt": ""}, {"id": "b", "method": "m", "prompt": "ok"}],
                 where="generate.py 1.1.1",
             )
-
-    def test_protocol_conformance(self):
-        """实现 source + generate 即满足 AttackGenerator 协议（Step 3 算子的准入形态）。"""
-        class _Gen:
-            source = "l1"
-
-            def generate(self, n=1):
-                for i in range(n):
-                    yield {"id": f"g-{i}", "method": "m", "prompt": "p"}
-
-        assert isinstance(_Gen(), AttackGenerator)
 
 
 # ============================================================

@@ -35,6 +35,7 @@ from llmsec.core import (
     retry_call,
     setup_console,
 )
+from llmsec.core.llm import is_retryable_error
 from llmsec.core.text import inject_math_tax, strip_reasoning
 from llmsec.params import API_DELAY, API_MAX_RETRIES, API_RATE_LIMIT_DELAY, API_RETRY_DELAY
 
@@ -312,6 +313,10 @@ def call_api_two_round(client: OpenAI, method: dict, harm_types: list[str],
             _two_round,
             retries=API_MAX_RETRIES,
             delay=API_RETRY_DELAY,
+            # H-7 对齐（judge/targets 已修，此处补齐生成侧）：4xx 确定性错误
+            # （认证/参数错）不重试——内容类失败（_DraftMismatchError/JSONDecodeError）
+            # 无 status_code 且非 AttributeError/TypeError，仍正常重试
+            retry_on=is_retryable_error,
             on_retry=_on_retry,
         )
     except Exception:
@@ -441,6 +446,10 @@ def main():
     skip_count = 0
     fail_count = 0
 
+    # id→全局索引映射：assign_harm_types 用全局索引保多样性。不用 all_methods.index()——
+    # O(n²) 且按 dict 相等匹配，两条完全相同的方法 dict 会误命中前者
+    global_pos = {id(m): i for i, m in enumerate(all_methods)}
+
     for idx, method in enumerate(methods):
         mid = method["id"]
         name = method["method"]
@@ -452,7 +461,7 @@ def main():
 
         # 分配有害类别
         # method_idx 使用全局索引以确保多样性
-        global_idx = all_methods.index(method)
+        global_idx = global_pos[id(method)]
         harm_types = assign_harm_types(global_idx)
 
         logger.info(f"[{idx+1}/{total}] {mid} {name}")

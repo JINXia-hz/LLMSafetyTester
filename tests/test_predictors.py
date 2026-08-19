@@ -94,7 +94,7 @@ def test_pcap_defender_name():
 
     """PCAP 模式下 DEFENDER_NAME 应为 PCAP_MODEL_VERSION。"""
 
-    from llmsec.targets import PCAP_MODEL_VERSION
+    from llmsec.targets.pcap import pcap_model_version
 
     env = dict(os.environ, TARGET_TYPE='pcap_judge')
 
@@ -107,7 +107,9 @@ def test_pcap_defender_name():
 
     assert not proc.returncode != 0, f'❌ 导入 runner 失败: {proc.stderr[-500:]}'
 
-    assert not got != PCAP_MODEL_VERSION, f'❌ PCAP 模式 DEFENDER_NAME={got!r}, 期望 {PCAP_MODEL_VERSION!r}'
+    expected = pcap_model_version()
+
+    assert not got != expected, f'❌ PCAP 模式 DEFENDER_NAME={got!r}, 期望 {expected!r}'
 
     env2 = dict(os.environ, TARGET_TYPE='openai')
 

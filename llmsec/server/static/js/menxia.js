@@ -2,6 +2,9 @@
  *
  * 轮询总线消息，展示：
  *   - 封驳令（block）+ 准奏按钮（放行该步）
+ *   - 封驳解除（step_unblocked：用户放行 reason=approve / 随 Plan 驳回撤销 reason=reject）
+ *     → 递减待裁计数、按钮翻成已放行印。幂等去重：本地按钮与总线消息双路径
+ *       谁先到谁生效（applyUnblock），跨标签页放行、刷新重放均能配平。
  *   - 审查简报（review）
  *   - 异常呈递（step_failed）
  *   - Plan 完成通知（plan_done）
@@ -13,6 +16,7 @@ let _mxPollTimer = null;
 let _mxLatestTs = 0;
 let _mxEntries = [];        // 门下省日志条目 [{type, ts, html, blockKey?}]
 let _mxPendingBlocks = 0;   // 待圣裁的封驳数
+let _mxUnblocked = new Set();  // 已解除的 blockKey（plan:step）——计数/翻按钮幂等
 
 function loadMenxiaSection() {
   if (!_mxBound) bindMenxia();
@@ -58,19 +62,33 @@ function handleBusMessage(m) {
   if (m.kind === 'block') {
     const t = m.payload.ticket;
     if (!t) return;
-    _mxPendingBlocks++;
-    updateMenxiaStatus();
+    // plan_id 在消息信封顶层（notify_routed 的信封字段），step_id 在 payload
+    const key = `${m.plan_id}:${m.payload.step_id}`;
+    const done = _mxUnblocked.has(key);   // 重放乱序兜底：已解除的不计数
+    if (!done) {
+      _mxPendingBlocks++;
+      updateMenxiaStatus();
+    }
+    const actionHtml = done
+      ? '<span class="mx-unblock-done">已放行</span>'
+      : `<button class="mx-unblock" data-plan="${esc(m.plan_id)}" data-step="${esc(m.payload.step_id)}">准奏放行</button>`;
     _mxEntries.push({
-      type: 'block', ts: m.ts, blockKey: `${m.payload.plan_id}:${m.payload.step_id}`,
+      type: 'block', ts: m.ts, blockKey: key,
       html: `<div class="mx-entry mx-block">
         <div class="mx-title"><span class="seal-mini" style="width:18px;height:18px;font-size:10px;background:var(--c-warn);">驳</span> ${esc(t.summary)}</div>
         <div class="mx-body">${esc(t.detail)}</div>
         <div style="display:flex; gap:6px; align-items:center; margin-top:6px;">
           <span style="font-size:0.68rem; color:var(--c-muted);">步骤 ${esc(m.payload.step_id)} · ${esc(t.capability)} · ${esc(t.risk_level)}级</span>
-          <button class="mx-unblock" data-plan="${esc(m.payload.plan_id)}" data-step="${esc(m.payload.step_id)}">准奏放行</button>
+          ${actionHtml}
         </div>
       </div>`,
     });
+  } else if (m.kind === 'step_unblocked') {
+    // 封驳解除：放行（reason=approve）或随 Plan 驳回撤销（reason=reject）
+    if (m.plan_id && m.payload.step_id) {
+      applyUnblock(m.plan_id, m.payload.step_id,
+        m.payload.reason === 'reject' ? '已随驳回撤销' : '已放行');
+    }
   } else if (m.kind === 'review') {
     const p = m.payload;
     if (p.type === 'failure_report') {
@@ -121,6 +139,24 @@ function renderMenxiaLog() {
   log.scrollTop = log.scrollHeight;
 }
 
+// 幂等解除一个封驳：递减待裁计数 + 卡片按钮翻成已放行印。
+// 双路径调用：① 本页按钮点击成功后（即时反馈）② 总线 step_unblocked 消息
+// （他页放行 / Plan 驳回撤销 / 刷新重放配平）——Set 去重，谁先到谁生效。
+function applyUnblock(planId, stepId, label) {
+  const key = `${planId}:${stepId}`;
+  if (_mxUnblocked.has(key)) return;
+  _mxUnblocked.add(key);
+  _mxPendingBlocks = Math.max(0, _mxPendingBlocks - 1);
+  const e = _mxEntries.find(x => x.blockKey === key);
+  if (e) {
+    e.html = e.html.replace(
+      /<button class="mx-unblock"[^>]*>准奏放行<\/button>/,
+      `<span class="mx-unblock-done">${esc(label)}</span>`);
+  }
+  updateMenxiaStatus();
+  renderMenxiaLog();
+}
+
 async function unblockStep(planId, stepId, btn) {
   btn.disabled = true;
   try {
@@ -129,10 +165,10 @@ async function unblockStep(planId, stepId, btn) {
       body: JSON.stringify({ plan_id: planId, step_id: stepId }),
     });
     if (res.ok) {
-      btn.textContent = '已放行';
-      btn.style.background = 'var(--c-safe)';
-      _mxPendingBlocks = Math.max(0, _mxPendingBlocks - 1);
-      updateMenxiaStatus();
+      applyUnblock(planId, stepId, '已放行');   // 总线消息稍后到达时幂等跳过
+    } else if (res.status === 404) {
+      // 令已被他处清除（他页放行 / Plan 已驳回）——同样按已处理收场
+      applyUnblock(planId, stepId, '已放行（令已失效）');
     } else {
       btn.disabled = false;
     }

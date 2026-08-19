@@ -191,3 +191,98 @@ class TestForkMergeFlow:
     def test_compare_needs_two_runs(self):
         r = _client().post("/api/control/compare", json={"runs": ["only-one"]})
         assert r.status_code == 400
+
+
+# ============================================================
+# 封驳解除广播（step_unblocked）：跨标签页/刷新重放的待裁计数配平
+# ============================================================
+class TestUnblockBusBroadcast:
+    """放行 / 驳回清除封驳令时必须广播 step_unblocked——门下省面板据此
+    递减待裁计数并翻按钮。此前只在"点按钮的那一页"本地递减，他页放行、
+    刷新重放都会让徽标恒卡在「封驳 N 起 · 待圣裁」。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _sandbox_bus_plan(self, monkeypatch, tmp_path):
+        """目录库重定向 tmp + 总线/封驳令/Plan 复位（结束同样复位防泄漏）。"""
+        import llmsec.core.config as cfg
+        state = tmp_path / "state"
+        state.mkdir()
+        monkeypatch.setattr(cfg, "CATALOG_DB", state / "catalog.db")
+
+        from control.agent import bus as bus_mod
+        from control.agent.menxia import block as block_mod
+        from control.agent.menxia import listener
+        from control.agent.shangshu import plan as plan_mod
+        plan_mod.reset_plans()
+        bus_mod.reset_bus()
+        block_mod.reset_blocks()
+        listener.reinit_menxia()
+        yield
+        plan_mod.reset_plans()
+        bus_mod.reset_bus()
+        block_mod.reset_blocks()
+        listener.reinit_menxia()
+
+    def _feed_kinds(self, kind):
+        from control.agent.bus import get_bus
+        return [m for m in get_bus().recent() if m.kind == kind]
+
+    def test_block_approve_emits_step_unblocked(self):
+        """放行封驳 → 总线广播 step_unblocked（信封带 plan_id，payload 带 step_id/reason）。"""
+        from control.agent.menxia import block as block_mod
+        from control.agent.shangshu.plan import Plan, Step, save_plan
+
+        plan = Plan(intent="t", steps=[Step(id="s1", capability="clean_cache", args={})],
+                    status="drafted")
+        save_plan(plan)
+        block_mod.issue_block(plan.id, "s1", "clean_cache", "medium",
+                              {"summary": "即将清理缓存", "detail": "可恢复"})
+
+        r = _client().post("/api/control/plan/block/approve",
+                           json={"plan_id": plan.id, "step_id": "s1"})
+        assert r.status_code == 200
+        d = r.json()
+        assert d["approved"] is True and d["requeued"] is False
+
+        unb = self._feed_kinds("step_unblocked")
+        assert len(unb) == 1
+        assert unb[0].plan_id == plan.id, "信封必须带 plan_id（前端据此配对卡片）"
+        assert unb[0].payload["step_id"] == "s1"
+        assert unb[0].payload["reason"] == "approve"
+        assert block_mod.get_block(plan.id, "s1") is None, "放行后封驳令应已清除"
+
+    def test_plan_reject_emits_step_unblocked_per_ticket(self):
+        """驳回 Plan 清除全部封驳令 → 每张令各广播一条（reason=reject）。"""
+        from control.agent.menxia import block as block_mod
+        from control.agent.shangshu.plan import Plan, Step, save_plan
+
+        plan = Plan(intent="t", steps=[
+            Step(id="s1", capability="clean_cache", args={}),
+            Step(id="s2", capability="delete_runs", args={"names": ["x"]}),
+        ], status="drafted")
+        save_plan(plan)
+        block_mod.issue_block(plan.id, "s1", "clean_cache", "medium",
+                              {"summary": "a", "detail": "d"})
+        block_mod.issue_block(plan.id, "s2", "delete_runs", "high",
+                              {"summary": "b", "detail": "d"})
+
+        r = _client().post("/api/control/plan/reject", json={"plan_id": plan.id})
+        assert r.status_code == 200
+
+        unb = self._feed_kinds("step_unblocked")
+        assert {m.payload["step_id"] for m in unb} == {"s1", "s2"}
+        assert all(m.plan_id == plan.id for m in unb)
+        assert all(m.payload["reason"] == "reject" for m in unb)
+        assert block_mod.list_blocks_for_plan(plan.id) == [], "驳回后封驳令应全部清除"
+
+    def test_block_approve_404_when_ticket_missing(self):
+        """不存在的封驳令 → 404（不广播）。"""
+        from control.agent.shangshu.plan import Plan, Step, save_plan
+        plan = Plan(intent="t", steps=[Step(id="s1", capability="clean_cache", args={})],
+                    status="drafted")
+        save_plan(plan)
+        r = _client().post("/api/control/plan/block/approve",
+                           json={"plan_id": plan.id, "step_id": "s1"})
+        assert r.status_code == 404
+        assert self._feed_kinds("step_unblocked") == []

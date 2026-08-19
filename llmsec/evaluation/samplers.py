@@ -35,7 +35,9 @@ class AttackSampler(ABC):
         # 故意吸收并忽略 kwargs：build_sampler(**kwargs) → 子类 __init__(**kwargs)
         # → super().__init__(**kwargs) 的穿透式参数链需要此 sink 吞掉基类不关心的
         # 采样器特定参数（alpha/beta/gamma 等），否则会抛 TypeError。非死代码。
-        pass
+        # cluster_report 默认空表：绕过 build_sampler 直连构造时
+        # _method_to_cluster 读该属性不再 AttributeError（set_cluster_info 仍会覆盖）
+        self.cluster_report: dict = {}
 
     def set_cluster_info(
         self,
